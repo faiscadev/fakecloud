@@ -34,6 +34,10 @@ struct Cli {
     #[arg(long, default_value = "123456789012", env = "FAKECLOUD_ACCOUNT_ID")]
     account_id: String,
 
+    /// Default ARN for GetCallerIdentity when no IAM user/role is matched
+    #[arg(long, env = "FAKECLOUD_DEFAULT_CALLER_ARN")]
+    default_caller_arn: Option<String>,
+
     /// Log level (trace, debug, info, warn, error)
     #[arg(long, default_value = "info", env = "FAKECLOUD_LOG")]
     log_level: String,
@@ -51,9 +55,9 @@ async fn main() {
         .init();
 
     // Shared state
-    let iam_state = Arc::new(parking_lot::RwLock::new(
-        fakecloud_iam::state::IamState::new(&cli.account_id),
-    ));
+    let mut iam_init = fakecloud_iam::state::IamState::new(&cli.account_id);
+    iam_init.default_caller_arn = cli.default_caller_arn;
+    let iam_state = Arc::new(parking_lot::RwLock::new(iam_init));
     let sqs_state = Arc::new(parking_lot::RwLock::new(
         fakecloud_sqs::state::SqsState::new(&cli.account_id, &cli.region, "http://localhost:4566"),
     ));

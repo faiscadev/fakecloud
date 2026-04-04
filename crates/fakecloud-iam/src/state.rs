@@ -57,6 +57,8 @@ pub struct IamState {
     pub role_policies: HashMap<String, Vec<String>>, // role_name -> policy arns
     /// Maps access key ID to the identity that should be returned by GetCallerIdentity.
     pub credential_identities: HashMap<String, CredentialIdentity>,
+    /// Override ARN for GetCallerIdentity when no user/role matches.
+    pub default_caller_arn: Option<String>,
 }
 
 impl IamState {
@@ -69,6 +71,7 @@ impl IamState {
             policies: HashMap::new(),
             role_policies: HashMap::new(),
             credential_identities: HashMap::new(),
+            default_caller_arn: None,
         }
     }
 

@@ -9,7 +9,7 @@ async fn sts_get_caller_identity() {
 
     let resp = client.get_caller_identity().send().await.unwrap();
     assert_eq!(resp.account().unwrap(), "123456789012");
-    assert!(resp.arn().unwrap().contains("root"));
+    assert!(resp.arn().unwrap().contains(":root"));
 }
 
 #[tokio::test]
