@@ -52,7 +52,7 @@ jobs:
           python -m venv /tmp/moto-venv
           source /tmp/moto-venv/bin/activate
           pip install --quiet --upgrade pip
-          pip install --quiet -e "/tmp/moto[all]" pytest pytest-timeout requests flask
+          pip install --quiet -e "/tmp/moto[all]" pytest pytest-timeout requests flask freezegun
 
       - name: Start FakeCloud
         run: |
@@ -98,15 +98,18 @@ jobs:
           source /tmp/moto-venv/bin/activate
           mkdir -p tests/compat/moto/results
 
-          for dir in /tmp/moto/tests/test_*; do
+          # Only test services FakeCloud implements
+          SERVICES="sqs sns events iam sts ssm"
+
+          for svc in $SERVICES; do
+            dir="/tmp/moto/tests/test_$svc"
             if [ -d "$dir" ]; then
-              svc=$(basename "$dir" | sed 's/^test_//')
               echo "--- Testing $svc ---"
               (cd /tmp/moto/tests && python -m pytest \
                 "test_$svc/" \
                 --timeout=30 \
                 -q \
-                --tb=no \
+                --tb=short \
                 --no-header \
                 --ignore-glob="**/test_server.py" \
                 2>&1) > "tests/compat/moto/results/${svc}.log" || true
