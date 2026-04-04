@@ -381,7 +381,7 @@ async fn iam_ssm_sqs_workflow() {
 
     // Verify identity
     let identity = sts.get_caller_identity().send().await.unwrap();
-    assert_eq!(identity.account().unwrap(), "000000000000");
+    assert_eq!(identity.account().unwrap(), "123456789012");
 
     // Create IAM user
     iam.create_user()

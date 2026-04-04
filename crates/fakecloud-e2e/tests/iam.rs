@@ -8,7 +8,7 @@ async fn sts_get_caller_identity() {
     let client = server.sts_client().await;
 
     let resp = client.get_caller_identity().send().await.unwrap();
-    assert_eq!(resp.account().unwrap(), "000000000000");
+    assert_eq!(resp.account().unwrap(), "123456789012");
     assert!(resp.arn().unwrap().contains("root"));
 }
 
@@ -185,7 +185,7 @@ async fn sts_assume_role_unique_credentials() {
 
     let resp1 = client
         .assume_role()
-        .role_arn("arn:aws:iam::000000000000:role/role-a")
+        .role_arn("arn:aws:iam::123456789012:role/role-a")
         .role_session_name("session-a")
         .send()
         .await
@@ -194,7 +194,7 @@ async fn sts_assume_role_unique_credentials() {
 
     let resp2 = client
         .assume_role()
-        .role_arn("arn:aws:iam::000000000000:role/role-b")
+        .role_arn("arn:aws:iam::123456789012:role/role-b")
         .role_session_name("session-b")
         .send()
         .await
@@ -226,5 +226,5 @@ async fn sts_get_caller_identity_cli() {
         output.stderr_text()
     );
     let json = output.stdout_json();
-    assert_eq!(json["Account"], "000000000000");
+    assert_eq!(json["Account"], "123456789012");
 }

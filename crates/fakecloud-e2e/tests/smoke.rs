@@ -23,5 +23,5 @@ async fn server_responds_to_cli() {
         output.stderr_text()
     );
     let json = output.stdout_json();
-    assert_eq!(json["Account"], "000000000000");
+    assert_eq!(json["Account"], "123456789012");
 }

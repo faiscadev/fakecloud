@@ -62,7 +62,7 @@ async fn sns_subscribe_and_list() {
         .subscribe()
         .topic_arn(&topic_arn)
         .protocol("sqs")
-        .endpoint("arn:aws:sqs:us-east-1:000000000000:my-queue")
+        .endpoint("arn:aws:sqs:us-east-1:123456789012:my-queue")
         .send()
         .await
         .unwrap();
