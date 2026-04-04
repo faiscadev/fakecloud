@@ -434,7 +434,7 @@ impl SqsService {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "InvalidParameterValue",
-                "Can only include alphanumeric characters, hyphens, or underscores. 1 to 80 in length.",
+                "Can only include alphanumeric characters, hyphens, or underscores. 1 to 80 in length",
             ));
         }
 
@@ -741,12 +741,21 @@ impl SqsService {
             attrs.retain(|k, _| names.contains(&k.as_str()));
         }
 
-        Ok(sqs_response(
-            "GetQueueAttributes",
-            json!({ "Attributes": attrs }),
-            &req.request_id,
-            req.is_query_protocol,
-        ))
+        if attrs.is_empty() {
+            Ok(sqs_response(
+                "GetQueueAttributes",
+                json!({}),
+                &req.request_id,
+                req.is_query_protocol,
+            ))
+        } else {
+            Ok(sqs_response(
+                "GetQueueAttributes",
+                json!({ "Attributes": attrs }),
+                &req.request_id,
+                req.is_query_protocol,
+            ))
+        }
     }
 
     fn send_message(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
@@ -771,10 +780,23 @@ impl SqsService {
         validate_message_attributes(&message_attributes)?;
 
         let mut state = self.state.write();
+        let resolved_url = resolve_queue_url(&queue_url, &state).ok_or_else(queue_not_found)?;
         let queue = state
             .queues
-            .get_mut(&queue_url)
+            .get_mut(&resolved_url)
             .ok_or_else(queue_not_found)?;
+
+        // FIFO delay validation - FIFO queues don't support per-message delays
+        if queue.is_fifo {
+            let delay = val_as_i64(&body["DelaySeconds"]).unwrap_or(0);
+            if delay != 0 {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterValue",
+                    format!("Value {} for parameter DelaySeconds is invalid. Reason: The request include parameter that is not valid for this queue type.", delay),
+                ));
+            }
+        }
 
         // FIFO validations
         if queue.is_fifo {
@@ -846,6 +868,17 @@ impl SqsService {
                     max_message_size
                 ),
             ));
+        }
+
+        // Validate delay seconds (max 900 = 15 minutes)
+        if let Some(d) = val_as_i64(&body["DelaySeconds"]) {
+            if d > 900 {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterValue",
+                    format!("Value {d} for parameter DelaySeconds is invalid. Reason: Must be between 0 and 900, if provided."),
+                ));
+            }
         }
 
         let delay: i64 = val_as_i64(&body["DelaySeconds"])
@@ -1209,9 +1242,13 @@ impl SqsService {
             queue
                 .messages
                 .retain(|m| m.receipt_handle.as_deref() != Some(receipt_handle));
-            if queue.messages.len() == before2 {
-                // Receipt handle not found - this is not an error per AWS spec
-                // (delete is idempotent), but we just proceed
+            let deleted2 = queue.messages.len() != before2;
+            if !deleted2 {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ReceiptHandleIsInvalid",
+                    "The input receipt handle is invalid.",
+                ));
             }
         }
 
@@ -1277,9 +1314,7 @@ impl SqsService {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "ReceiptHandleIsInvalid",
-                format!(
-                    "The input receipt handle \"{receipt_handle}\" is not a valid receipt handle."
-                ),
+                "The input receipt handle is invalid.",
             ));
         }
 
@@ -1453,7 +1488,7 @@ impl SqsService {
         if entries.is_empty() {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
-                "EmptyBatchRequest",
+                "AWS.SimpleQueueService.EmptyBatchRequest",
                 "There should be at least one SendMessageBatchRequestEntry in the request.",
             ));
         }
@@ -1465,7 +1500,7 @@ impl SqsService {
                 if !seen_ids.insert(id.to_string()) {
                     return Err(AwsServiceError::aws_error(
                         StatusCode::BAD_REQUEST,
-                        "BatchEntryIdsNotDistinct",
+                        "AWS.SimpleQueueService.BatchEntryIdsNotDistinct",
                         "Two or more batch entries in the operation have the same Id.",
                     ));
                 }
@@ -1538,13 +1573,11 @@ impl SqsService {
             // FIFO validations
             if is_fifo {
                 if message_group_id.is_none() {
-                    failed.push(json!({
-                        "Id": id,
-                        "SenderFault": true,
-                        "Code": "MissingParameter",
-                        "Message": "The request must contain the parameter MessageGroupId.",
-                    }));
-                    continue;
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "MissingParameter",
+                        "The request must contain the parameter MessageGroupId.",
+                    ));
                 }
                 if message_dedup_id.is_none() && !content_based_dedup {
                     return Err(AwsServiceError::aws_error(
@@ -1637,7 +1670,7 @@ impl SqsService {
         if entries.is_empty() {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
-                "EmptyBatchRequest",
+                "AWS.SimpleQueueService.EmptyBatchRequest",
                 "There should be at least one DeleteMessageBatchRequestEntry in the request.",
             ));
         }
@@ -1649,7 +1682,7 @@ impl SqsService {
                 if !seen_ids.insert(id.to_string()) {
                     return Err(AwsServiceError::aws_error(
                         StatusCode::BAD_REQUEST,
-                        "BatchEntryIdsNotDistinct",
+                        "AWS.SimpleQueueService.BatchEntryIdsNotDistinct",
                         "Two or more batch entries in the operation have the same Id.",
                     ));
                 }
@@ -2175,6 +2208,24 @@ fn md5_of_message_attributes_from_refs(attrs: &HashMap<String, &MessageAttribute
         }
     }
     format!("{:032x}", hasher.finalize())
+}
+
+/// Resolve a QueueUrl that might be a queue name, a path, or a full URL
+fn resolve_queue_url(input: &str, state: &crate::state::SqsState) -> Option<String> {
+    // Direct match
+    if state.queues.contains_key(input) {
+        return Some(input.to_string());
+    }
+    // Try as queue name
+    if let Some(url) = state.name_to_url.get(input) {
+        return Some(url.clone());
+    }
+    // Try extracting queue name from URL path (e.g., /123456789012/my-queue)
+    let name = input.rsplit('/').next().unwrap_or("");
+    if let Some(url) = state.name_to_url.get(name) {
+        return Some(url.clone());
+    }
+    None
 }
 
 fn missing_param(name: &str) -> AwsServiceError {
