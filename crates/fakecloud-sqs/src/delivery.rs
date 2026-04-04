@@ -2,9 +2,9 @@ use std::collections::HashMap;
 
 use chrono::Utc;
 
-use fakecloud_core::delivery::SqsDelivery;
+use fakecloud_core::delivery::{SqsDelivery, SqsMessageAttribute};
 
-use crate::state::{SharedSqsState, SqsMessage};
+use crate::state::{MessageAttribute, SharedSqsState, SqsMessage};
 
 /// Implements SqsDelivery so other services can push messages into SQS queues.
 pub struct SqsDeliveryImpl {
@@ -24,6 +24,17 @@ impl SqsDelivery for SqsDeliveryImpl {
         message_body: &str,
         _attributes: &HashMap<String, String>,
     ) {
+        self.deliver_to_queue_with_attrs(queue_arn, message_body, &HashMap::new(), None, None);
+    }
+
+    fn deliver_to_queue_with_attrs(
+        &self,
+        queue_arn: &str,
+        message_body: &str,
+        message_attributes: &HashMap<String, SqsMessageAttribute>,
+        message_group_id: Option<&str>,
+        message_dedup_id: Option<&str>,
+    ) {
         let mut state = self.state.write();
 
         // Find queue by ARN
@@ -31,6 +42,21 @@ impl SqsDelivery for SqsDeliveryImpl {
 
         if let Some(queue) = queue {
             let now = Utc::now();
+
+            // Convert SqsMessageAttribute to the SQS state MessageAttribute
+            let sqs_attrs: HashMap<String, MessageAttribute> = message_attributes
+                .iter()
+                .map(|(k, v)| {
+                    (
+                        k.clone(),
+                        MessageAttribute {
+                            data_type: v.data_type.clone(),
+                            string_value: v.string_value.clone(),
+                        },
+                    )
+                })
+                .collect();
+
             let msg = SqsMessage {
                 message_id: uuid::Uuid::new_v4().to_string(),
                 receipt_handle: None,
@@ -38,11 +64,11 @@ impl SqsDelivery for SqsDeliveryImpl {
                 body: message_body.to_string(),
                 sent_timestamp: now.timestamp_millis(),
                 attributes: HashMap::new(),
-                message_attributes: HashMap::new(),
+                message_attributes: sqs_attrs,
                 visible_at: None,
                 receive_count: 0,
-                message_group_id: None,
-                message_dedup_id: None,
+                message_group_id: message_group_id.map(|s| s.to_string()),
+                message_dedup_id: message_dedup_id.map(|s| s.to_string()),
                 created_at: now,
             };
             queue.messages.push_back(msg);

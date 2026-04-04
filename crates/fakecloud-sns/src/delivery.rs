@@ -36,6 +36,7 @@ impl SnsDelivery for SnsDeliveryImpl {
             subject: subject.map(|s| s.to_string()),
             message_attributes: HashMap::new(),
             message_group_id: None,
+            message_dedup_id: None,
             timestamp: Utc::now(),
         });
 

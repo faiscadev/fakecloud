@@ -13,6 +13,14 @@ pub struct DeliveryBus {
     sns_sender: Option<Arc<dyn SnsDelivery>>,
 }
 
+/// Message attribute for SQS delivery from SNS.
+#[derive(Debug, Clone)]
+pub struct SqsMessageAttribute {
+    pub data_type: String,
+    pub string_value: Option<String>,
+    pub binary_value: Option<String>,
+}
+
 /// Trait for delivering messages to SQS queues.
 pub trait SqsDelivery: Send + Sync {
     fn deliver_to_queue(
@@ -21,6 +29,20 @@ pub trait SqsDelivery: Send + Sync {
         message_body: &str,
         attributes: &HashMap<String, String>,
     );
+
+    /// Deliver with message attributes and FIFO fields
+    fn deliver_to_queue_with_attrs(
+        &self,
+        queue_arn: &str,
+        message_body: &str,
+        message_attributes: &HashMap<String, SqsMessageAttribute>,
+        message_group_id: Option<&str>,
+        message_dedup_id: Option<&str>,
+    ) {
+        // Default implementation: fall back to simple delivery
+        let _ = (message_attributes, message_group_id, message_dedup_id);
+        self.deliver_to_queue(queue_arn, message_body, &HashMap::new());
+    }
 }
 
 /// Trait for publishing messages to SNS topics.
@@ -55,6 +77,26 @@ impl DeliveryBus {
     ) {
         if let Some(ref sender) = self.sqs_sender {
             sender.deliver_to_queue(queue_arn, message_body, attributes);
+        }
+    }
+
+    /// Send a message to an SQS queue with message attributes and FIFO fields.
+    pub fn send_to_sqs_with_attrs(
+        &self,
+        queue_arn: &str,
+        message_body: &str,
+        message_attributes: &HashMap<String, SqsMessageAttribute>,
+        message_group_id: Option<&str>,
+        message_dedup_id: Option<&str>,
+    ) {
+        if let Some(ref sender) = self.sqs_sender {
+            sender.deliver_to_queue_with_attrs(
+                queue_arn,
+                message_body,
+                message_attributes,
+                message_group_id,
+                message_dedup_id,
+            );
         }
     }
 

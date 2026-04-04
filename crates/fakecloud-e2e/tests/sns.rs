@@ -165,10 +165,11 @@ async fn sns_fifo_topic_creation() {
     let server = TestServer::start().await;
     let client = server.sns_client().await;
 
-    // Create a FIFO topic
+    // Create a FIFO topic (must set FifoTopic=true attribute)
     let resp = client
         .create_topic()
         .name("my-topic.fifo")
+        .attributes("FifoTopic", "true")
         .send()
         .await
         .unwrap();
