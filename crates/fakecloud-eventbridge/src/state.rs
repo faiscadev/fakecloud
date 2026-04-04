@@ -7,6 +7,7 @@ use std::sync::Arc;
 pub struct EventBus {
     pub name: String,
     pub arn: String,
+    pub tags: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone)]
@@ -18,6 +19,7 @@ pub struct EventRule {
     pub state: String,
     pub description: Option<String>,
     pub targets: Vec<EventTarget>,
+    pub tags: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone)]
@@ -53,6 +55,7 @@ impl EventBridgeState {
             EventBus {
                 name: "default".to_string(),
                 arn: default_bus_arn,
+                tags: HashMap::new(),
             },
         );
 
