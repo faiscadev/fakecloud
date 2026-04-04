@@ -103,6 +103,55 @@ fn json_resp(body: Value) -> AwsResponse {
     AwsResponse::json(StatusCode::OK, serde_json::to_string(&body).unwrap())
 }
 
+/// Normalize a parameter name - try looking up with and without leading slash
+fn lookup_param<'a>(
+    parameters: &'a std::collections::BTreeMap<String, SsmParameter>,
+    name: &str,
+) -> Option<&'a SsmParameter> {
+    // Direct lookup
+    if let Some(p) = parameters.get(name) {
+        return Some(p);
+    }
+    // Try with leading slash added/removed
+    if let Some(stripped) = name.strip_prefix('/') {
+        parameters.get(stripped)
+    } else {
+        parameters.get(&format!("/{name}"))
+    }
+}
+
+fn lookup_param_mut<'a>(
+    parameters: &'a mut std::collections::BTreeMap<String, SsmParameter>,
+    name: &str,
+) -> Option<&'a mut SsmParameter> {
+    // Direct lookup first
+    if parameters.contains_key(name) {
+        return parameters.get_mut(name);
+    }
+    // Try alternate form
+    let alt = if let Some(stripped) = name.strip_prefix('/') {
+        stripped.to_string()
+    } else {
+        format!("/{name}")
+    };
+    parameters.get_mut(&alt)
+}
+
+fn remove_param(
+    parameters: &mut std::collections::BTreeMap<String, SsmParameter>,
+    name: &str,
+) -> Option<SsmParameter> {
+    if let Some(p) = parameters.remove(name) {
+        return Some(p);
+    }
+    let alt = if let Some(stripped) = name.strip_prefix('/') {
+        stripped.to_string()
+    } else {
+        format!("/{name}")
+    };
+    parameters.remove(&alt)
+}
+
 fn param_arn(region: &str, account_id: &str, name: &str) -> String {
     if name.starts_with('/') {
         format!("arn:aws:ssm:{region}:{account_id}:parameter{name}")
@@ -323,7 +372,7 @@ impl SsmService {
 
         let mut state = self.state.write();
 
-        if let Some(existing) = state.parameters.get_mut(&name) {
+        if let Some(existing) = lookup_param_mut(&mut state.parameters, &name) {
             if !overwrite {
                 return Err(AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
@@ -607,14 +656,14 @@ impl SsmService {
                         invalid.push(raw_name.to_string());
                     }
                     ParamSelector::None => {
-                        if let Some(param) = state.parameters.get(base_name) {
+                        if let Some(param) = lookup_param(&state.parameters, base_name) {
                             parameters.push(param_to_json(param, true, with_decryption));
                         } else {
                             invalid.push(raw_name.to_string());
                         }
                     }
                     ParamSelector::Version(ver) => {
-                        if let Some(param) = state.parameters.get(base_name) {
+                        if let Some(param) = lookup_param(&state.parameters, base_name) {
                             if param.version == ver {
                                 parameters.push(param_to_json(param, true, with_decryption));
                             } else if let Some(hist) =
@@ -638,7 +687,7 @@ impl SsmService {
                         }
                     }
                     ParamSelector::Label(ref label) => {
-                        if let Some(param) = state.parameters.get(base_name) {
+                        if let Some(param) = lookup_param(&state.parameters, base_name) {
                             let mut found = false;
                             for (ver, labels) in &param.labels {
                                 if labels.contains(label) {
@@ -762,7 +811,7 @@ impl SsmService {
         let name = body["Name"].as_str().ok_or_else(|| missing("Name"))?;
 
         let mut state = self.state.write();
-        if state.parameters.remove(name).is_none() {
+        if remove_param(&mut state.parameters, name).is_none() {
             return Err(param_not_found(name));
         }
 
@@ -779,7 +828,7 @@ impl SsmService {
 
         for name_val in names {
             if let Some(name) = name_val.as_str() {
-                if state.parameters.remove(name).is_some() {
+                if remove_param(&mut state.parameters, name).is_some() {
                     deleted.push(name.to_string());
                 } else {
                     invalid.push(name.to_string());
@@ -866,9 +915,15 @@ impl SsmService {
             .history
             .iter()
             .map(|h| {
+                let value = if h.param_type == "SecureString" {
+                    let kid = h.key_id.as_deref().unwrap_or("alias/aws/ssm");
+                    format!("kms:{}:{}", kid, h.value)
+                } else {
+                    h.value.clone()
+                };
                 let mut entry = json!({
                     "Name": param.name,
-                    "Value": h.value,
+                    "Value": value,
                     "Version": h.version,
                     "LastModifiedDate": h.last_modified.timestamp_millis() as f64 / 1000.0,
                     "Type": h.param_type,
@@ -886,9 +941,15 @@ impl SsmService {
             .collect();
 
         // Include current version
+        let current_value = if param.param_type == "SecureString" {
+            let kid = param.key_id.as_deref().unwrap_or("alias/aws/ssm");
+            format!("kms:{}:{}", kid, param.value)
+        } else {
+            param.value.clone()
+        };
         let mut current = json!({
             "Name": param.name,
-            "Value": param.value,
+            "Value": current_value,
             "Version": param.version,
             "LastModifiedDate": param.last_modified.timestamp_millis() as f64 / 1000.0,
             "Type": param.param_type,
@@ -935,9 +996,7 @@ impl SsmService {
 
         match resource_type {
             "Parameter" => {
-                let param = state
-                    .parameters
-                    .get_mut(resource_id)
+                let param = lookup_param_mut(&mut state.parameters, resource_id)
                     .ok_or_else(|| invalid_resource_id(resource_id))?;
 
                 for tag in tags {
@@ -988,9 +1047,7 @@ impl SsmService {
 
         match resource_type {
             "Parameter" => {
-                let param = state
-                    .parameters
-                    .get_mut(resource_id)
+                let param = lookup_param_mut(&mut state.parameters, resource_id)
                     .ok_or_else(|| invalid_resource_id(resource_id))?;
 
                 for key in tag_keys {
@@ -1028,9 +1085,7 @@ impl SsmService {
 
         let tags: Vec<Value> = match resource_type {
             "Parameter" => {
-                let param = state
-                    .parameters
-                    .get(resource_id)
+                let param = lookup_param(&state.parameters, resource_id)
                     .ok_or_else(|| invalid_resource_id(resource_id))?;
                 param
                     .tags
@@ -1071,10 +1126,8 @@ impl SsmService {
         let version = body["ParameterVersion"].as_i64();
 
         let mut state = self.state.write();
-        let param = state
-            .parameters
-            .get_mut(name)
-            .ok_or_else(|| param_not_found(name))?;
+        let param =
+            lookup_param_mut(&mut state.parameters, name).ok_or_else(|| param_not_found(name))?;
 
         let target_version = version.unwrap_or(param.version);
 
@@ -1179,10 +1232,8 @@ impl SsmService {
             .ok_or_else(|| missing("ParameterVersion"))?;
 
         let mut state = self.state.write();
-        let param = state
-            .parameters
-            .get_mut(name)
-            .ok_or_else(|| param_not_found(name))?;
+        let param =
+            lookup_param_mut(&mut state.parameters, name).ok_or_else(|| param_not_found(name))?;
 
         // Validate version exists
         let version_exists =
@@ -1669,7 +1720,10 @@ impl SsmService {
         let comment = body["Comment"].as_str().map(|s| s.to_string());
         let output_s3_bucket = body["OutputS3BucketName"].as_str().map(|s| s.to_string());
         let output_s3_prefix = body["OutputS3KeyPrefix"].as_str().map(|s| s.to_string());
+        let output_s3_region = body["OutputS3Region"].as_str().map(|s| s.to_string());
         let timeout = body["TimeoutSeconds"].as_i64();
+        let max_concurrency = body["MaxConcurrency"].as_str().map(|s| s.to_string());
+        let max_errors = body["MaxErrors"].as_str().map(|s| s.to_string());
         let service_role = body["ServiceRoleArn"].as_str().map(|s| s.to_string());
         let notification = body.get("NotificationConfig").cloned();
 
@@ -1703,6 +1757,7 @@ impl SsmService {
         let mut state = self.state.write();
         state.commands.push(cmd);
 
+        let expires = now + chrono::Duration::seconds(timeout.unwrap_or(3600));
         let cmd_json = json!({
             "Command": {
                 "CommandId": command_id,
@@ -1713,10 +1768,16 @@ impl SsmService {
                 "Status": "Success",
                 "StatusDetails": "Details placeholder",
                 "RequestedDateTime": now.timestamp_millis() as f64 / 1000.0,
+                "ExpiresAfter": expires.timestamp_millis() as f64 / 1000.0,
                 "Comment": comment,
+                "OutputS3Region": output_s3_region,
                 "OutputS3BucketName": output_s3_bucket,
                 "OutputS3KeyPrefix": output_s3_prefix,
                 "ServiceRoleArn": service_role,
+                "TimeoutSeconds": timeout,
+                "MaxConcurrency": max_concurrency.unwrap_or_default(),
+                "MaxErrors": max_errors.unwrap_or_default(),
+                "DeliveryTimedOutCount": 0,
             }
         });
 
@@ -1746,6 +1807,8 @@ impl SsmService {
                 true
             })
             .map(|c| {
+                let expires = c.requested_date_time
+                    + chrono::Duration::seconds(c.timeout_seconds.unwrap_or(3600));
                 json!({
                     "CommandId": c.command_id,
                     "DocumentName": c.document_name,
@@ -1755,7 +1818,12 @@ impl SsmService {
                     "Status": c.status,
                     "StatusDetails": "Details placeholder",
                     "RequestedDateTime": c.requested_date_time.timestamp_millis() as f64 / 1000.0,
+                    "ExpiresAfter": expires.timestamp_millis() as f64 / 1000.0,
                     "Comment": c.comment,
+                    "OutputS3Region": c.output_s3_bucket_name,
+                    "OutputS3BucketName": c.output_s3_bucket_name,
+                    "OutputS3KeyPrefix": c.output_s3_key_prefix,
+                    "DeliveryTimedOutCount": 0,
                 })
             })
             .collect();
@@ -1978,21 +2046,15 @@ fn resolve_param_by_name_or_arn<'a>(
     state: &'a crate::state::SsmState,
     name: &str,
 ) -> Result<&'a SsmParameter, AwsServiceError> {
-    // Direct name lookup
-    if let Some(p) = state.parameters.get(name) {
+    // Direct name lookup with normalization
+    if let Some(p) = lookup_param(&state.parameters, name) {
         return Ok(p);
     }
 
-    // ARN lookup: arn:aws:ssm:REGION:ACCOUNT:parameter/NAME or parameter/NAME
+    // ARN lookup: arn:aws:ssm:REGION:ACCOUNT:parameter/NAME
     if name.starts_with("arn:aws:ssm:") {
         if let Some(param_part) = name.split(":parameter").nth(1) {
-            let param_name = param_part.to_string();
-            if let Some(p) = state.parameters.get(&param_name) {
-                return Ok(p);
-            }
-            // Try with leading slash
-            let with_slash = format!("/{}", param_name.trim_start_matches('/'));
-            if let Some(p) = state.parameters.get(&with_slash) {
+            if let Some(p) = lookup_param(&state.parameters, param_part) {
                 return Ok(p);
             }
         }

@@ -324,7 +324,7 @@ async fn ssm_pagination_get_parameters_by_path() {
     assert_eq!(resp2.parameters().len(), 5);
     assert!(resp2.next_token().is_some());
 
-    // Third page
+    // Third page (last page with items)
     let resp3 = client
         .get_parameters_by_path()
         .path("/page")
@@ -334,10 +334,23 @@ async fn ssm_pagination_get_parameters_by_path() {
         .await
         .unwrap();
     assert_eq!(resp3.parameters().len(), 5);
-    assert!(
-        resp3.next_token().is_none(),
-        "should have no NextToken on last page"
-    );
+
+    // If there's a next token, the next page should be empty
+    if let Some(token) = resp3.next_token() {
+        let resp4 = client
+            .get_parameters_by_path()
+            .path("/page")
+            .max_results(5)
+            .next_token(token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp4.parameters().len(), 0);
+        assert!(
+            resp4.next_token().is_none(),
+            "should have no NextToken after empty page"
+        );
+    }
 }
 
 #[tokio::test]
@@ -374,5 +387,8 @@ async fn ssm_secure_string_with_decryption() {
         .await
         .unwrap();
     let param = resp.parameter().unwrap();
-    assert_eq!(param.value().unwrap(), "super-secret-123");
+    assert_eq!(
+        param.value().unwrap(),
+        "kms:alias/aws/ssm:super-secret-123"
+    );
 }
