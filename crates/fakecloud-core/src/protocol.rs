@@ -70,6 +70,8 @@ fn parse_amz_target(target: &str) -> Option<DetectedRequest> {
     let service = match prefix {
         "AWSEvents" => "events",
         "AmazonSSM" => "ssm",
+        "AmazonSQS" => "sqs",
+        "AmazonSNS" => "sns",
         "DynamoDB_20120810" => "dynamodb",
         "Logs_20140328" => "logs",
         s if s.starts_with("secretsmanager") => "secretsmanager",

@@ -6,26 +6,22 @@ use helpers::TestServer;
 async fn server_starts_and_responds() {
     let server = TestServer::start().await;
 
-    // Any SQS call should get a "not implemented" style error since the
-    // service is registered but has no actions implemented yet.
+    // SQS list queues should work and return empty list
     let client = server.sqs_client().await;
-    let result = client.list_queues().send().await;
-
-    // We expect an error since nothing is implemented yet
-    assert!(result.is_err(), "expected error from stub service");
+    let result = client.list_queues().send().await.unwrap();
+    assert_eq!(result.queue_urls().len(), 0);
 }
 
 #[tokio::test]
-async fn server_returns_error_for_unknown_service_via_cli() {
+async fn server_responds_to_cli() {
     let server = TestServer::start().await;
 
-    // STS get-caller-identity should hit our stub and return an error
     let output = server.aws_cli(&["sts", "get-caller-identity"]).await;
-    // The CLI should get some response (even if it's an error)
-    // Just verify the server didn't crash
-    let stderr = output.stderr_text();
     assert!(
-        !stderr.contains("Could not connect"),
-        "server should be reachable: {stderr}"
+        output.success(),
+        "CLI should succeed: {}",
+        output.stderr_text()
     );
+    let json = output.stdout_json();
+    assert_eq!(json["Account"], "000000000000");
 }

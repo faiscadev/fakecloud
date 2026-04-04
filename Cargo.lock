@@ -1086,6 +1086,7 @@ dependencies = [
  "chrono",
  "fakecloud-aws",
  "fakecloud-core",
+ "http 1.4.0",
  "parking_lot",
  "serde",
  "serde_json",
