@@ -100,6 +100,16 @@ impl AwsServiceError {
             Self::AwsError { code, .. } => code,
         }
     }
+
+    pub fn message(&self) -> String {
+        match self {
+            Self::ServiceNotFound { service } => format!("service not found: {service}"),
+            Self::ActionNotImplemented { service, action } => {
+                format!("action {action} not implemented for service {service}")
+            }
+            Self::AwsError { message, .. } => message.clone(),
+        }
+    }
 }
 
 /// Trait that every AWS service implements.

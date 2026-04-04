@@ -131,13 +131,14 @@ impl Scheduler {
 
         {
             let mut state = self.state.write();
-            let rule_names: Vec<String> = state.rules.keys().cloned().collect();
+            let rule_keys: Vec<crate::state::RuleKey> = state.rules.keys().cloned().collect();
 
-            for name in rule_names {
-                let rule = match state.rules.get(&name) {
+            for key in rule_keys {
+                let rule = match state.rules.get(&key) {
                     Some(r) => r,
                     None => continue,
                 };
+                let name = rule.name.clone();
 
                 if rule.state != "ENABLED" {
                     continue;
@@ -185,7 +186,7 @@ impl Scheduler {
                 if should_fire {
                     let targets = rule.targets.clone();
                     // Update last_fired while we hold the write lock
-                    if let Some(r) = state.rules.get_mut(&name) {
+                    if let Some(r) = state.rules.get_mut(&key) {
                         r.last_fired = Some(now);
                     }
                     to_fire.push((name, targets));

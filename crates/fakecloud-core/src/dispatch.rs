@@ -148,7 +148,7 @@ pub async fn dispatch(
             build_error_response(
                 err.status(),
                 err.code(),
-                &err.to_string(),
+                &err.message(),
                 &request_id,
                 detected.protocol,
             )

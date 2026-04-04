@@ -191,6 +191,10 @@ impl ResetState {
             let mut eb = self.eb.write();
             eb.rules.clear();
             eb.events.clear();
+            eb.archives.clear();
+            eb.connections.clear();
+            eb.api_destinations.clear();
+            eb.replays.clear();
             eb.buses.retain(|name, _| name == "default");
         }
         self.ssm.write().parameters.clear();
