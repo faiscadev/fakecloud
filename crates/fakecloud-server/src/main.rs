@@ -66,7 +66,10 @@ async fn main() {
     registry.register(Arc::new(EventBridgeService::new()));
     registry.register(Arc::new(IamService::new(iam_state.clone())));
     registry.register(Arc::new(StsService::new(iam_state)));
-    registry.register(Arc::new(SsmService::new()));
+    let ssm_state = Arc::new(parking_lot::RwLock::new(
+        fakecloud_ssm::state::SsmState::new(&cli.account_id, &cli.region),
+    ));
+    registry.register(Arc::new(SsmService::new(ssm_state)));
 
     let services: Vec<&str> = registry.service_names();
     tracing::info!(services = ?services, "registered services");
