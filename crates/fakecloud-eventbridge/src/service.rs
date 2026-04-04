@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use http::StatusCode;
 use serde_json::{json, Value};
 
@@ -173,6 +173,7 @@ impl EventBridgeService {
             .unwrap_or("default")
             .to_string();
         let event_pattern = body["EventPattern"].as_str().map(|s| s.to_string());
+        let schedule_expression = body["ScheduleExpression"].as_str().map(|s| s.to_string());
         let description = body["Description"].as_str().map(|s| s.to_string());
         let rule_state = body["State"].as_str().unwrap_or("ENABLED").to_string();
 
@@ -202,6 +203,7 @@ impl EventBridgeService {
             arn: arn.clone(),
             event_bus_name,
             event_pattern,
+            schedule_expression,
             state: rule_state,
             description,
             targets,
@@ -237,6 +239,7 @@ impl EventBridgeService {
                     "State": r.state,
                     "Description": r.description,
                     "EventPattern": r.event_pattern,
+                    "ScheduleExpression": r.schedule_expression,
                 })
             })
             .collect();
@@ -264,6 +267,7 @@ impl EventBridgeService {
             "State": rule.state,
             "Description": rule.description,
             "EventPattern": rule.event_pattern,
+            "ScheduleExpression": rule.schedule_expression,
         })))
     }
 
@@ -365,6 +369,11 @@ impl EventBridgeService {
                 .as_str()
                 .unwrap_or("default")
                 .to_string();
+            let time = entry["Time"]
+                .as_str()
+                .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+                .map(|dt| dt.with_timezone(&Utc))
+                .unwrap_or_else(Utc::now);
 
             let event = PutEvent {
                 event_id: event_id.clone(),
@@ -372,7 +381,7 @@ impl EventBridgeService {
                 detail_type: detail_type.clone(),
                 detail: detail.clone(),
                 event_bus_name: event_bus_name.clone(),
-                time: Utc::now(),
+                time,
             };
             state.events.push(event);
 
@@ -399,6 +408,7 @@ impl EventBridgeService {
                     source,
                     detail_type,
                     detail,
+                    time,
                     matching_targets,
                 ));
             }
@@ -410,14 +420,14 @@ impl EventBridgeService {
         drop(state);
 
         // Deliver to targets
-        for (event_id, source, detail_type, detail, targets) in events_to_deliver {
+        for (event_id, source, detail_type, detail, time, targets) in events_to_deliver {
             let event_json = json!({
                 "version": "0",
                 "id": event_id,
                 "source": source,
                 "detail-type": detail_type,
                 "detail": serde_json::from_str::<Value>(&detail).unwrap_or(json!({})),
-                "time": Utc::now().to_rfc3339(),
+                "time": time.to_rfc3339(),
                 "region": "us-east-1",
             });
             let event_str = event_json.to_string();
@@ -640,12 +650,53 @@ fn matches_single(pattern_elem: &Value, event_value: &Value) -> bool {
                     _ => true,
                 };
             }
+            if let Some(numeric_val) = obj.get("numeric") {
+                return matches_numeric(numeric_val, event_value);
+            }
             // Unknown matcher, no match
             false
         }
         // Plain value: exact match (string, number, bool)
         _ => values_equal(pattern_elem, event_value),
     }
+}
+
+/// Match a numeric pattern array against an event value.
+/// The array contains pairs of (operator, value): e.g. [">", 100] or [">=", 50, "<", 200].
+fn matches_numeric(numeric_arr: &Value, event_value: &Value) -> bool {
+    let arr = match numeric_arr.as_array() {
+        Some(a) => a,
+        None => return false,
+    };
+    let actual = match event_value.as_f64() {
+        Some(n) => n,
+        None => return false,
+    };
+    // Process pairs of (operator, value)
+    let mut i = 0;
+    while i + 1 < arr.len() {
+        let op = match arr[i].as_str() {
+            Some(s) => s,
+            None => return false,
+        };
+        let threshold = match arr[i + 1].as_f64() {
+            Some(n) => n,
+            None => return false,
+        };
+        let ok = match op {
+            ">" => actual > threshold,
+            ">=" => actual >= threshold,
+            "<" => actual < threshold,
+            "<=" => actual <= threshold,
+            "=" => (actual - threshold).abs() < f64::EPSILON,
+            _ => return false,
+        };
+        if !ok {
+            return false;
+        }
+        i += 2;
+    }
+    true
 }
 
 /// Compare two JSON values for equality (used for exact matching).
@@ -886,6 +937,81 @@ mod tests {
             "src",
             "type",
             r#"{"env": "prod"}"#
+        ));
+    }
+
+    #[test]
+    fn numeric_greater_than() {
+        let pattern = r#"{"detail": {"count": [{"numeric": [">", 100]}]}}"#;
+        assert!(matches_pattern(
+            Some(pattern),
+            "src",
+            "type",
+            r#"{"count": 150}"#
+        ));
+        assert!(!matches_pattern(
+            Some(pattern),
+            "src",
+            "type",
+            r#"{"count": 100}"#
+        ));
+        assert!(!matches_pattern(
+            Some(pattern),
+            "src",
+            "type",
+            r#"{"count": 50}"#
+        ));
+    }
+
+    #[test]
+    fn numeric_less_than() {
+        let pattern = r#"{"detail": {"count": [{"numeric": ["<", 10]}]}}"#;
+        assert!(matches_pattern(
+            Some(pattern),
+            "src",
+            "type",
+            r#"{"count": 5}"#
+        ));
+        assert!(!matches_pattern(
+            Some(pattern),
+            "src",
+            "type",
+            r#"{"count": 10}"#
+        ));
+        assert!(!matches_pattern(
+            Some(pattern),
+            "src",
+            "type",
+            r#"{"count": 15}"#
+        ));
+    }
+
+    #[test]
+    fn numeric_range() {
+        let pattern = r#"{"detail": {"count": [{"numeric": [">=", 50, "<", 200]}]}}"#;
+        assert!(matches_pattern(
+            Some(pattern),
+            "src",
+            "type",
+            r#"{"count": 50}"#
+        ));
+        assert!(matches_pattern(
+            Some(pattern),
+            "src",
+            "type",
+            r#"{"count": 100}"#
+        ));
+        assert!(!matches_pattern(
+            Some(pattern),
+            "src",
+            "type",
+            r#"{"count": 200}"#
+        ));
+        assert!(!matches_pattern(
+            Some(pattern),
+            "src",
+            "type",
+            r#"{"count": 49}"#
         ));
     }
 

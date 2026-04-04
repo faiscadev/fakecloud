@@ -16,6 +16,7 @@ pub struct EventRule {
     pub arn: String,
     pub event_bus_name: String,
     pub event_pattern: Option<String>,
+    pub schedule_expression: Option<String>,
     pub state: String,
     pub description: Option<String>,
     pub targets: Vec<EventTarget>,
