@@ -1,0 +1,145 @@
+name: Moto Compatibility
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "0 6 * * 0" # Sunday 6am UTC
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  MOTO_TAG: "latest"
+  FAKECLOUD_PORT: 4566
+
+jobs:
+  moto-full:
+    name: Moto Full (all services)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Build FakeCloud (release)
+        run: cargo build --release
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Get latest Moto release tag
+        id: moto-tag
+        run: |
+          TAG=$(gh api repos/getmoto/moto/releases/latest --jq .tag_name)
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Using moto $TAG"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Clone Moto (${{ steps.moto-tag.outputs.tag }})
+        run: |
+          git clone --depth=1 --branch "${{ steps.moto-tag.outputs.tag }}" \
+            https://github.com/getmoto/moto.git /tmp/moto
+
+      - name: Set up Python venv & install deps
+        run: |
+          python -m venv /tmp/moto-venv
+          source /tmp/moto-venv/bin/activate
+          pip install --quiet --upgrade pip
+          pip install --quiet -e "/tmp/moto[all]" pytest pytest-timeout requests flask
+
+      - name: Start FakeCloud
+        run: |
+          ./target/release/fakecloud-server --log-level warn > /tmp/fakecloud.log 2>&1 &
+          echo "FAKECLOUD_PID=$!" >> "$GITHUB_ENV"
+
+      - name: Wait for FakeCloud health check
+        run: |
+          for i in $(seq 1 30); do
+            if curl -s -o /dev/null "http://localhost:$FAKECLOUD_PORT/"; then
+              echo "FakeCloud is ready"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "FakeCloud failed to start"
+          cat /tmp/fakecloud.log
+          exit 1
+
+      - name: Prepare Moto test conftest
+        run: |
+          MOTO_CONFTEST="/tmp/moto/tests/conftest.py"
+          cp "$MOTO_CONFTEST" "$MOTO_CONFTEST.orig"
+          cat tests/compat/moto/conftest.py > "$MOTO_CONFTEST"
+          echo "" >> "$MOTO_CONFTEST"
+          echo "# --- Original moto conftest below ---" >> "$MOTO_CONFTEST"
+          cat "$MOTO_CONFTEST.orig" >> "$MOTO_CONFTEST"
+
+      - name: Run Moto tests (all services)
+        continue-on-error: true
+        env:
+          TEST_SERVER_MODE: "true"
+          TEST_SERVER_MODE_ENDPOINT: "http://localhost:4566"
+          MOTO_CALL_RESET_API: "false"
+          AWS_DEFAULT_REGION: us-east-1
+          AWS_ACCESS_KEY_ID: testing
+          AWS_SECRET_ACCESS_KEY: testing
+          AWS_SECURITY_TOKEN: testing
+          AWS_SESSION_TOKEN: testing
+          SKIP_REQUIRES_DOCKER: "true"
+          MOTO_DOCKER_NETWORK_MODE: ""
+        run: |
+          source /tmp/moto-venv/bin/activate
+          mkdir -p tests/compat/moto/results
+
+          for dir in /tmp/moto/tests/test_*; do
+            if [ -d "$dir" ]; then
+              svc=$(basename "$dir" | sed 's/^test_//')
+              echo "--- Testing $svc ---"
+              (cd /tmp/moto/tests && python -m pytest \
+                "test_$svc/" \
+                --timeout=30 \
+                -q \
+                --tb=no \
+                --no-header \
+                --ignore-glob="**/test_server.py" \
+                2>&1) > "tests/compat/moto/results/${svc}.log" || true
+            fi
+          done
+
+      - name: Generate report
+        run: |
+          source /tmp/moto-venv/bin/activate
+          python tests/compat/moto/report.py
+
+      - name: Post job summary
+        if: always()
+        run: |
+          if [ -f tests/compat/moto/RESULTS.md ]; then
+            cat tests/compat/moto/RESULTS.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No results generated." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Stop FakeCloud
+        if: always()
+        run: |
+          if [ -n "${FAKECLOUD_PID:-}" ]; then
+            kill "$FAKECLOUD_PID" 2>/dev/null || true
+          fi
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: moto-full-results
+          path: |
+            tests/compat/moto/results/
+            tests/compat/moto/RESULTS.md
+          retention-days: 90
