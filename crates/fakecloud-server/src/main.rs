@@ -85,17 +85,14 @@ async fn main() {
             .with_sns(sns_delivery),
     );
 
-    // Clone state for reset endpoints before moving into services
-    let reset_iam = iam_state.clone();
-    let reset_sqs = sqs_state.clone();
-    let reset_sns = sns_state.clone();
-    let reset_eb = eb_state.clone();
-    let reset_ssm = ssm_state.clone();
-    let reset_iam2 = iam_state.clone();
-    let reset_sqs2 = sqs_state.clone();
-    let reset_sns2 = sns_state.clone();
-    let reset_eb2 = eb_state.clone();
-    let reset_ssm2 = ssm_state.clone();
+    // Clone state for reset endpoint before moving into services
+    let reset_state = ResetState {
+        iam: iam_state.clone(),
+        sqs: sqs_state.clone(),
+        sns: sns_state.clone(),
+        eb: eb_state.clone(),
+        ssm: ssm_state.clone(),
+    };
 
     // Register services
     let mut registry = ServiceRegistry::new();
@@ -141,60 +138,14 @@ async fn main() {
                 }
             }),
         )
-        .route(
-            "/moto-api/reset",
-            axum::routing::post({
-                let iam = reset_iam;
-                let sqs = reset_sqs;
-                let sns = reset_sns;
-                let eb = reset_eb;
-                let ssm = reset_ssm;
-                move || async move {
-                    iam.write().reset();
-                    sqs.write().queues.clear();
-                    sqs.write().name_to_url.clear();
-                    sns.write().topics.clear();
-                    sns.write().subscriptions.clear();
-                    sns.write().published.clear();
-                    {
-                        let mut eb = eb.write();
-                        eb.rules.clear();
-                        eb.events.clear();
-                        eb.buses.retain(|name, _| name == "default");
-                    }
-                    ssm.write().parameters.clear();
-                    tracing::info!("state reset via reset API");
-                    axum::Json(serde_json::json!({"status": "ok"}))
-                }
-            }),
-        )
-        .route(
-            "/_reset",
-            axum::routing::post({
-                let iam = reset_iam2;
-                let sqs = reset_sqs2;
-                let sns = reset_sns2;
-                let eb = reset_eb2;
-                let ssm = reset_ssm2;
-                move || async move {
-                    iam.write().reset();
-                    sqs.write().queues.clear();
-                    sqs.write().name_to_url.clear();
-                    sns.write().topics.clear();
-                    sns.write().subscriptions.clear();
-                    sns.write().published.clear();
-                    {
-                        let mut eb = eb.write();
-                        eb.rules.clear();
-                        eb.events.clear();
-                        eb.buses.retain(|name, _| name == "default");
-                    }
-                    ssm.write().parameters.clear();
-                    tracing::info!("state reset via reset API");
-                    axum::Json(serde_json::json!({"status": "ok"}))
-                }
-            }),
-        )
+        .route("/moto-api/reset", axum::routing::post({
+            let s = reset_state.clone();
+            move || async move { s.reset() }
+        }))
+        .route("/_reset", axum::routing::post({
+            let s = reset_state;
+            move || async move { s.reset() }
+        }))
         .fallback(dispatch::dispatch)
         .layer(Extension(Arc::new(registry)))
         .layer(Extension(Arc::new(config)))
@@ -207,6 +158,35 @@ async fn main() {
         .with_graceful_shutdown(shutdown_signal())
         .await
         .unwrap();
+}
+
+#[derive(Clone)]
+struct ResetState {
+    iam: fakecloud_iam::state::SharedIamState,
+    sqs: fakecloud_sqs::state::SharedSqsState,
+    sns: fakecloud_sns::state::SharedSnsState,
+    eb: fakecloud_eventbridge::state::SharedEventBridgeState,
+    ssm: fakecloud_ssm::state::SharedSsmState,
+}
+
+impl ResetState {
+    fn reset(&self) -> axum::Json<serde_json::Value> {
+        self.iam.write().reset();
+        self.sqs.write().queues.clear();
+        self.sqs.write().name_to_url.clear();
+        self.sns.write().topics.clear();
+        self.sns.write().subscriptions.clear();
+        self.sns.write().published.clear();
+        {
+            let mut eb = self.eb.write();
+            eb.rules.clear();
+            eb.events.clear();
+            eb.buses.retain(|name, _| name == "default");
+        }
+        self.ssm.write().parameters.clear();
+        tracing::info!("state reset via reset API");
+        axum::Json(serde_json::json!({"status": "ok"}))
+    }
 }
 
 async fn shutdown_signal() {
