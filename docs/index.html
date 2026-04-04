@@ -261,7 +261,7 @@
         LocalStack killed their free Community Edition. Developers who just need SQS, SNS, and EventBridge for local testing are now stuck paying or shimming around broken alternatives.
       </p>
       <p style="margin-top: 16px;">
-        <strong>FakeCloud is the fix.</strong> A single Rust binary that emulates the AWS services you actually use in local dev. No login, no license key, no cloud account. Just run it and point your SDK at localhost.
+        <strong>FakeCloud is the fix.</strong> A fast, lightweight emulator for the AWS services you actually use in local dev. No login, no license key, no cloud account. Just run it and point your SDK at localhost.
       </p>
     </div>
   </div>
@@ -275,7 +275,7 @@
       <div class="feature">
         <div class="label">Simple</div>
         <h3>Single binary</h3>
-        <p>Written in Rust. One 15MB binary, one port, one command to run. Also available as a Docker image.</p>
+        <p>One binary, one port, one command to run. Starts in under 100ms. Also available as a Docker image.</p>
       </div>
       <div class="feature">
         <div class="label">Open</div>
@@ -290,7 +290,7 @@
       <div class="feature">
         <div class="label">Tested</div>
         <h3>86 tests</h3>
-        <p>Unit and end-to-end tests using the official aws-sdk-rust crates and AWS CLI. Not a toy.</p>
+        <p>Unit and end-to-end tests using official AWS SDKs and CLI. Not a toy.</p>
       </div>
       <div class="feature">
         <div class="label">Scheduling</div>
@@ -336,7 +336,6 @@
             <th></th>
             <th>FakeCloud</th>
             <th>LocalStack</th>
-            <th>Floci</th>
           </tr>
         </thead>
         <tbody>
@@ -344,55 +343,41 @@
             <td>Free tier</td>
             <td class="check">Yes, fully open source</td>
             <td class="cross">Removed (was Community Ed.)</td>
-            <td class="check">Yes</td>
           </tr>
           <tr>
             <td>SQS</td>
             <td class="check">Yes</td>
             <td class="check">Paid</td>
-            <td class="check">Yes</td>
           </tr>
           <tr>
             <td>SNS</td>
             <td class="check">Yes</td>
             <td class="check">Paid</td>
-            <td class="cross">No</td>
           </tr>
           <tr>
             <td>EventBridge</td>
             <td class="check">Yes, with scheduling</td>
             <td class="check">Paid</td>
-            <td class="cross">No</td>
           </tr>
           <tr>
             <td>SSM Parameters</td>
             <td class="check">Yes</td>
             <td class="check">Paid</td>
-            <td class="cross">No</td>
           </tr>
           <tr>
             <td>Cross-service delivery</td>
             <td class="check">SNS&#8594;SQS, EB&#8594;SQS</td>
             <td class="check">Yes</td>
-            <td class="cross">No</td>
           </tr>
           <tr>
             <td>Auth required</td>
             <td class="check">No</td>
             <td class="partial">Optional</td>
-            <td class="check">No</td>
-          </tr>
-          <tr>
-            <td>Implementation</td>
-            <td>Rust</td>
-            <td>Python</td>
-            <td>Go</td>
           </tr>
           <tr>
             <td>Service count</td>
             <td>5 (focused)</td>
             <td>80+ (paid)</td>
-            <td>1 (SQS only)</td>
           </tr>
         </tbody>
       </table>

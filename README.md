@@ -1,6 +1,6 @@
 <p align="center">
   <strong>FakeCloud</strong><br>
-  <em>Local AWS cloud emulator. Fast, free, single binary.</em>
+  <em>Local AWS cloud emulator. Free forever.</em>
 </p>
 
 <p align="center">
@@ -13,10 +13,9 @@
 
 ---
 
-FakeCloud is an open-source local AWS cloud emulator built in Rust. It runs as a
-single binary on a single port (`4566`), requires no account or auth token, and
-aims to faithfully replicate AWS service behavior for local development and
-testing.
+FakeCloud is an open-source local AWS cloud emulator. It runs on a single port
+(`4566`), requires no account or auth token, and aims to faithfully replicate
+AWS service behavior for local development and testing.
 
 Part of the [faisca project family](https://github.com/faiscadev).
 
@@ -24,26 +23,23 @@ Part of the [faisca project family](https://github.com/faiscadev).
 
 In March 2026, LocalStack dropped its free Community Edition, leaving developers
 without a reliable open-source option for local AWS emulation. FakeCloud was
-built to fill that gap -- with a focus on correctness, performance, and
-simplicity.
+built to fill that gap -- with a focus on correctness and simplicity.
 
 ### Comparison
 
-| Feature | FakeCloud | Floci | MiniStack | Kumo |
-|---|---|---|---|---|
-| Language | Rust | Java | Python | Go |
-| License | AGPL-3.0 | MIT | MIT | Apache-2.0 |
-| Binary size | ~15 MB | ~200 MB (JVM) | N/A (Python) | ~30 MB |
-| Startup time | <100ms | ~3s | ~2s | ~500ms |
-| Auth required | No | No | No | No |
-| Single port | Yes (4566) | Yes | Yes | Yes |
-| SQS | 16 actions | 12 actions | 10 actions | 8 actions |
-| SNS | 16 actions | 8 actions | 6 actions | -- |
-| EventBridge | 15 actions | -- | -- | 5 actions |
-| IAM / STS | 16 actions | 4 actions | -- | -- |
-| SSM Parameter Store | 12 actions | -- | 5 actions | -- |
-| Cross-service delivery | Yes | No | No | No |
-| Scheduled rules fire | Yes | No | No | No |
+| Feature | FakeCloud | LocalStack |
+|---|---|---|
+| License | AGPL-3.0 | Proprietary (was open) |
+| Auth required | No | Yes (since March 2026) |
+| Free tier | Fully open source | Removed (was Community Ed.) |
+| Single port | Yes (4566) | Yes (4566) |
+| SQS | 16 actions | Paid |
+| SNS | 16 actions | Paid |
+| EventBridge | 15 actions | Paid |
+| IAM / STS | 16 actions | Paid |
+| SSM Parameter Store | 12 actions | Paid |
+| Cross-service delivery | Yes | Yes |
+| Scheduled rules fire | Yes | Yes |
 
 ## Quick Start
 
