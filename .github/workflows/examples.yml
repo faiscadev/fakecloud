@@ -24,9 +24,11 @@ jobs:
         run: |
           cargo run --bin fakecloud-server &
           for i in $(seq 1 30); do
-            curl -sf http://localhost:4566/_fakecloud/health && break
+            curl -sf http://localhost:4566/_fakecloud/health && exit 0
             sleep 1
           done
+          echo "FakeCloud failed to start"
+          exit 1
 
       - uses: actions/setup-python@v5
         with:
