@@ -48,3 +48,13 @@ jobs:
 
       - name: Run sample app
         run: python examples/sample-app/app.py
+
+      - uses: hashicorp/setup-terraform@v3
+
+      - name: Run Terraform example
+        working-directory: examples/terraform
+        run: |
+          rm -rf .terraform .terraform.lock.hcl terraform.tfstate*
+          terraform init
+          terraform apply -auto-approve
+          terraform destroy -auto-approve
