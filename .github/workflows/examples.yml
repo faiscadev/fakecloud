@@ -1,0 +1,50 @@
+name: Examples
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  examples:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build server
+        run: cargo build --bin fakecloud-server
+
+      - name: Start FakeCloud
+        run: |
+          cargo run --bin fakecloud-server &
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:4566/_fakecloud/health && break
+            sleep 1
+          done
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Run Python demo
+        run: |
+          pip install boto3
+          python examples/python/demo.py
+
+      - name: Run Node demo
+        run: |
+          npm install @aws-sdk/client-sqs @aws-sdk/client-sns @aws-sdk/client-ssm
+          node examples/node/demo.js
+
+      - name: Run sample app
+        run: python examples/sample-app/app.py
