@@ -172,6 +172,31 @@ impl EventBridgeState {
             name_or_arn.to_string()
         }
     }
+
+    pub fn reset(&mut self) {
+        self.buses.clear();
+        self.rules.clear();
+        self.events.clear();
+        // Re-create default bus
+        let default_bus_arn = format!(
+            "arn:aws:events:{}:{}:event-bus/default",
+            self.region, self.account_id
+        );
+        self.buses.insert(
+            "default".to_string(),
+            EventBus {
+                name: "default".to_string(),
+                arn: default_bus_arn,
+                tags: HashMap::new(),
+                policy: None,
+                description: None,
+                kms_key_identifier: None,
+                dead_letter_config: None,
+                creation_time: Utc::now(),
+                last_modified_time: Utc::now(),
+            },
+        );
+    }
 }
 
 pub type SharedEventBridgeState = Arc<RwLock<EventBridgeState>>;

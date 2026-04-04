@@ -33,8 +33,8 @@ built to fill that gap -- with a focus on correctness and simplicity.
 | Auth required | No | Yes (since March 2026) |
 | Free tier | Fully open source | Removed (was Community Ed.) |
 | Single port | Yes (4566) | Yes (4566) |
-| SQS | 16 actions | Paid |
-| SNS | 35 actions | Paid |
+| SQS | 20 actions | Paid |
+| SNS | 16 actions | Paid |
 | EventBridge | 15 actions | Paid |
 | IAM / STS | 16 actions | Paid |
 | SSM Parameter Store | 12 actions | Paid |
@@ -79,35 +79,28 @@ FakeCloud is now listening at `http://localhost:4566`.
 
 ## Supported Services
 
-### SQS (16 actions)
+### SQS (20 actions)
 
 CreateQueue, DeleteQueue, ListQueues, GetQueueUrl, GetQueueAttributes,
 SetQueueAttributes, SendMessage, SendMessageBatch, ReceiveMessage,
 DeleteMessage, DeleteMessageBatch, PurgeQueue, ChangeMessageVisibility,
-ChangeMessageVisibilityBatch, TagQueue, ListDeadLetterSourceQueues
+ChangeMessageVisibilityBatch, ListQueueTags, TagQueue, UntagQueue,
+AddPermission, RemovePermission, ListDeadLetterSourceQueues
 
 Key features: real MD5 hashing, long polling (WaitTimeSeconds), FIFO queues
-with message group fair scheduling, dead-letter queues, message attributes,
-batch operations.
+with message group ordering and content-based deduplication, dead-letter queues,
+message attributes with MD5 computation, batch operations, system attribute
+filtering.
 
-### SNS (35 actions)
+### SNS (16 actions)
 
 CreateTopic, DeleteTopic, ListTopics, GetTopicAttributes, SetTopicAttributes,
-Subscribe, ConfirmSubscription, Unsubscribe, Publish, PublishBatch,
-ListSubscriptions, ListSubscriptionsByTopic, GetSubscriptionAttributes,
-SetSubscriptionAttributes, TagResource, UntagResource, ListTagsForResource,
-AddPermission, RemovePermission, CreatePlatformApplication,
-DeletePlatformApplication, GetPlatformApplicationAttributes,
-SetPlatformApplicationAttributes, ListPlatformApplications,
-CreatePlatformEndpoint, DeleteEndpoint, GetEndpointAttributes,
-SetEndpointAttributes, ListEndpointsByPlatformApplication,
-SetSMSAttributes, GetSMSAttributes, CheckIfPhoneNumberIsOptedOut,
-ListPhoneNumbersOptedOut, OptInPhoneNumber
+Subscribe, ConfirmSubscription, Unsubscribe, Publish, ListSubscriptions,
+ListSubscriptionsByTopic, GetSubscriptionAttributes, SetSubscriptionAttributes,
+TagResource, UntagResource, ListTagsForResource
 
 Key features: SQS fan-out delivery, HTTP/HTTPS endpoint delivery, subscription
-filter policies (exact match, prefix, suffix, anything-but, numeric, exists,
-equals-ignore-case, $or), message body filtering, MessageStructure=json,
-raw message delivery, FIFO topics, platform applications, SMS operations.
+filter policies (exact match, prefix, anything-but, numeric, exists).
 
 ### EventBridge (15 actions)
 

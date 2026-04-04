@@ -44,6 +44,9 @@ impl AwsService for SqsService {
             "ListQueueTags" => self.list_queue_tags(&req),
             "TagQueue" => self.tag_queue(&req),
             "UntagQueue" => self.untag_queue(&req),
+            "AddPermission" => self.add_permission(&req),
+            "RemovePermission" => self.remove_permission(&req),
+            "ListDeadLetterSourceQueues" => self.list_dead_letter_source_queues(&req),
             _ => Err(AwsServiceError::action_not_implemented("sqs", &req.action)),
         }
     }
@@ -64,6 +67,12 @@ impl AwsService for SqsService {
             "PurgeQueue",
             "ChangeMessageVisibility",
             "ChangeMessageVisibilityBatch",
+            "ListQueueTags",
+            "TagQueue",
+            "UntagQueue",
+            "AddPermission",
+            "RemovePermission",
+            "ListDeadLetterSourceQueues",
         ]
     }
 }
@@ -400,9 +409,73 @@ impl SqsService {
             .ok_or_else(|| missing_param("QueueName"))?
             .to_string();
 
+        let is_fifo = queue_name.ends_with(".fifo");
+
+        // Validate FIFO queue attributes
+        if let Some(attrs) = body["Attributes"].as_object() {
+            if let Some(fifo_val) = attrs.get("FifoQueue").and_then(|v| v.as_str()) {
+                if fifo_val == "true" && !is_fifo {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "InvalidParameterValue",
+                        "The queue name must end with the .fifo suffix for a FIFO queue.",
+                    ));
+                }
+            }
+        }
+
+        // Validate queue name
+        let base_name = if is_fifo {
+            queue_name.trim_end_matches(".fifo")
+        } else {
+            &queue_name
+        };
+        if !is_valid_queue_name(base_name) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterValue",
+                "Can only include alphanumeric characters, hyphens, or underscores. 1 to 80 in length",
+            ));
+        }
+
+        let mut new_attributes = HashMap::new();
+        if let Some(attrs) = body["Attributes"].as_object() {
+            for (k, v) in attrs {
+                if let Some(s) = v.as_str() {
+                    new_attributes.insert(k.clone(), s.to_string());
+                }
+            }
+        }
+
         let mut state = self.state.write();
 
         if let Some(url) = state.name_to_url.get(&queue_name) {
+            // Queue exists - check if attributes match
+            if let Some(existing) = state.queues.get(url) {
+                // If caller passed attributes, check for conflicts
+                if !new_attributes.is_empty() {
+                    for (k, v) in &new_attributes {
+                        if let Some(existing_val) = existing.attributes.get(k.trim()) {
+                            // Normalize JSON values for comparison (e.g. RedrivePolicy)
+                            let val_matches = if let (Ok(a), Ok(b)) = (
+                                serde_json::from_str::<Value>(existing_val),
+                                serde_json::from_str::<Value>(v),
+                            ) {
+                                a == b
+                            } else {
+                                existing_val == v
+                            };
+                            if !val_matches {
+                                return Err(AwsServiceError::aws_error(
+                                    StatusCode::BAD_REQUEST,
+                                    "QueueAlreadyExists",
+                                    "A queue already exists with the same name and a different value for attribute VisibilityTimeout.",
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
             return Ok(sqs_response(
                 "CreateQueue",
                 json!({ "QueueUrl": url }),
@@ -411,21 +484,38 @@ impl SqsService {
             ));
         }
 
-        let is_fifo = queue_name.ends_with(".fifo");
         let queue_url = format!("{}/{}/{}", state.endpoint, state.account_id, queue_name);
 
         let mut attributes = HashMap::new();
+        // Default attributes
         attributes.insert("VisibilityTimeout".to_string(), "30".to_string());
+        attributes.insert("DelaySeconds".to_string(), "0".to_string());
+        attributes.insert("MaximumMessageSize".to_string(), "1048576".to_string());
+        attributes.insert("MessageRetentionPeriod".to_string(), "345600".to_string());
+        attributes.insert("ReceiveMessageWaitTimeSeconds".to_string(), "0".to_string());
         if is_fifo {
             attributes.insert("FifoQueue".to_string(), "true".to_string());
+            attributes.insert("ContentBasedDeduplication".to_string(), "false".to_string());
+            attributes.insert("DeduplicationScope".to_string(), "queue".to_string());
+            attributes.insert("FifoThroughputLimit".to_string(), "perQueue".to_string());
         }
 
-        if let Some(attrs) = body["Attributes"].as_object() {
-            for (k, v) in attrs {
-                if let Some(s) = v.as_str() {
-                    attributes.insert(k.clone(), s.to_string());
+        // Validate MaximumMessageSize before inserting
+        if let Some(mms) = new_attributes.get("MaximumMessageSize") {
+            if let Ok(size) = mms.parse::<u64>() {
+                if !(1024..=1_048_576).contains(&size) {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "InvalidAttributeValue",
+                        "Invalid value for the parameter MaximumMessageSize.",
+                    ));
                 }
             }
+        }
+
+        // Override with provided attributes (trim keys to handle trailing whitespace)
+        for (k, v) in new_attributes {
+            attributes.insert(k.trim().to_string(), v);
         }
 
         let redrive_policy = attributes.get("RedrivePolicy").and_then(|rp_str| {
@@ -441,6 +531,42 @@ impl SqsService {
             })
         });
 
+        // Normalize RedrivePolicy JSON (convert maxReceiveCount to integer)
+        if let Some(ref rp) = redrive_policy {
+            // Format like Python json.dumps: {"key": value, "key": value}
+            attributes.insert(
+                "RedrivePolicy".to_string(),
+                format!(
+                    "{{\"deadLetterTargetArn\": \"{}\", \"maxReceiveCount\": {}}}",
+                    rp.dead_letter_target_arn, rp.max_receive_count
+                ),
+            );
+        }
+
+        // Parse tags
+        let mut tags = HashMap::new();
+        if let Some(tags_obj) = body["tags"].as_object() {
+            for (k, v) in tags_obj {
+                if let Some(s) = v.as_str() {
+                    tags.insert(k.clone(), s.to_string());
+                }
+            }
+        }
+        // Also check Tags (JSON protocol)
+        if let Some(tags_obj) = body["Tags"].as_object() {
+            for (k, v) in tags_obj {
+                if let Some(s) = v.as_str() {
+                    tags.insert(k.clone(), s.to_string());
+                }
+            }
+        }
+
+        let now = Utc::now();
+        let created_ts = now.timestamp();
+
+        attributes.insert("CreatedTimestamp".to_string(), created_ts.to_string());
+        attributes.insert("LastModifiedTimestamp".to_string(), created_ts.to_string());
+
         let queue = SqsQueue {
             arn: format!(
                 "arn:aws:sqs:{}:{}:{}",
@@ -448,14 +574,15 @@ impl SqsService {
             ),
             queue_name: queue_name.clone(),
             queue_url: queue_url.clone(),
-            created_at: Utc::now(),
+            created_at: now,
             messages: VecDeque::new(),
             inflight: Vec::new(),
             attributes,
             is_fifo,
             dedup_cache: HashMap::new(),
             redrive_policy,
-            tags: HashMap::new(),
+            tags,
+            next_sequence_number: 0,
         };
 
         state.name_to_url.insert(queue_name, queue_url.clone());
@@ -540,31 +667,116 @@ impl SqsService {
         let state = self.state.read();
         let queue = state.queues.get(queue_url).ok_or_else(queue_not_found)?;
 
-        let mut attrs = queue.attributes.clone();
-        attrs.insert("QueueArn".to_string(), queue.arn.clone());
-        attrs.insert(
-            "ApproximateNumberOfMessages".to_string(),
-            queue.messages.len().to_string(),
-        );
-        attrs.insert(
-            "ApproximateNumberOfMessagesNotVisible".to_string(),
-            queue.inflight.len().to_string(),
-        );
+        // Check what attributes were requested
+        let requested_names = body["AttributeNames"]
+            .as_array()
+            .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>());
 
-        // Filter by requested AttributeNames if present
-        if let Some(requested) = body["AttributeNames"].as_array() {
-            let names: Vec<&str> = requested.iter().filter_map(|v| v.as_str()).collect();
-            if !names.is_empty() && !names.contains(&"All") {
-                attrs.retain(|k, _| names.contains(&k.as_str()));
+        // If no AttributeNames specified, return empty (per AWS behavior for JSON protocol)
+        if requested_names.is_none() || requested_names.as_ref().map(|n| n.is_empty()) == Some(true)
+        {
+            // For query protocol, some clients don't pass AttributeNames and expect empty
+            return Ok(sqs_response(
+                "GetQueueAttributes",
+                json!({}),
+                &req.request_id,
+                req.is_query_protocol,
+            ));
+        }
+
+        let names = requested_names.unwrap();
+        let want_all = names.contains(&"All");
+
+        // Validate attribute names
+        let valid_attrs = [
+            "All",
+            "Policy",
+            "VisibilityTimeout",
+            "MaximumMessageSize",
+            "MessageRetentionPeriod",
+            "ApproximateNumberOfMessages",
+            "ApproximateNumberOfMessagesNotVisible",
+            "CreatedTimestamp",
+            "LastModifiedTimestamp",
+            "QueueArn",
+            "ApproximateNumberOfMessagesDelayed",
+            "DelaySeconds",
+            "ReceiveMessageWaitTimeSeconds",
+            "RedrivePolicy",
+            "FifoQueue",
+            "ContentBasedDeduplication",
+            "KmsMasterKeyId",
+            "KmsDataKeyReusePeriodSeconds",
+            "DeduplicationScope",
+            "FifoThroughputLimit",
+            "RedriveAllowPolicy",
+            "SqsManagedSseEnabled",
+        ];
+        for name in &names {
+            if !valid_attrs.contains(name) {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidAttributeName",
+                    format!("Unknown Attribute {name}."),
+                ));
             }
         }
 
-        Ok(sqs_response(
-            "GetQueueAttributes",
-            json!({ "Attributes": attrs }),
-            &req.request_id,
-            req.is_query_protocol,
-        ))
+        let now = Utc::now();
+        let mut attrs = queue.attributes.clone();
+        attrs.insert("QueueArn".to_string(), queue.arn.clone());
+
+        // Count visible messages (not delayed)
+        let visible_count = queue
+            .messages
+            .iter()
+            .filter(|m| m.visible_at.map(|v| v <= now).unwrap_or(true))
+            .count();
+        // Count expired inflight as visible
+        let expired_inflight = queue
+            .inflight
+            .iter()
+            .filter(|m| m.visible_at.map(|v| v <= now).unwrap_or(false))
+            .count();
+        let still_inflight = queue.inflight.len() - expired_inflight;
+        attrs.insert(
+            "ApproximateNumberOfMessages".to_string(),
+            (visible_count + expired_inflight).to_string(),
+        );
+        attrs.insert(
+            "ApproximateNumberOfMessagesNotVisible".to_string(),
+            still_inflight.to_string(),
+        );
+        // Count delayed messages
+        let delayed_count = queue
+            .messages
+            .iter()
+            .filter(|m| m.visible_at.map(|v| v > now).unwrap_or(false))
+            .count();
+        attrs.insert(
+            "ApproximateNumberOfMessagesDelayed".to_string(),
+            delayed_count.to_string(),
+        );
+
+        if !want_all {
+            attrs.retain(|k, _| names.contains(&k.as_str()));
+        }
+
+        if attrs.is_empty() {
+            Ok(sqs_response(
+                "GetQueueAttributes",
+                json!({}),
+                &req.request_id,
+                req.is_query_protocol,
+            ))
+        } else {
+            Ok(sqs_response(
+                "GetQueueAttributes",
+                json!({ "Attributes": attrs }),
+                &req.request_id,
+                req.is_query_protocol,
+            ))
+        }
     }
 
     fn send_message(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
@@ -583,11 +795,29 @@ impl SqsService {
             .as_str()
             .map(|s| s.to_string());
 
+        let message_attributes = parse_message_attributes(&body);
+
+        // Validate message attributes
+        validate_message_attributes(&message_attributes)?;
+
         let mut state = self.state.write();
+        let resolved_url = resolve_queue_url(&queue_url, &state).ok_or_else(queue_not_found)?;
         let queue = state
             .queues
-            .get_mut(&queue_url)
+            .get_mut(&resolved_url)
             .ok_or_else(queue_not_found)?;
+
+        // FIFO delay validation - FIFO queues don't support per-message delays
+        if queue.is_fifo {
+            let delay = val_as_i64(&body["DelaySeconds"]).unwrap_or(0);
+            if delay != 0 {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterValue",
+                    format!("Value {} for parameter DelaySeconds is invalid. Reason: The request include parameter that is not valid for this queue type.", delay),
+                ));
+            }
+        }
 
         // FIFO validations
         if queue.is_fifo {
@@ -607,25 +837,51 @@ impl SqsService {
             {
                 return Err(AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
-                    "MissingParameter",
-                    "The request must contain the parameter MessageDeduplicationId.",
+                    "InvalidParameterValue",
+                    "The queue should either have ContentBasedDeduplication enabled or MessageDeduplicationId provided explicitly",
                 ));
             }
         }
 
-        // FIFO dedup
+        // FIFO dedup - use content-based dedup if no explicit ID
+        let effective_dedup_id = if queue.is_fifo {
+            message_dedup_id.clone().or_else(|| {
+                if queue
+                    .attributes
+                    .get("ContentBasedDeduplication")
+                    .map(|v| v.as_str())
+                    == Some("true")
+                {
+                    // Use SHA-256 of message body as dedup ID
+                    Some(md5_hex(&message_body))
+                } else {
+                    None
+                }
+            })
+        } else {
+            None
+        };
+
         if queue.is_fifo {
-            if let Some(ref dedup_id) = message_dedup_id {
+            if let Some(ref dedup_id) = effective_dedup_id {
                 let now = Utc::now();
                 queue.dedup_cache.retain(|_, expiry| *expiry > now);
                 if queue.dedup_cache.contains_key(dedup_id) {
                     let msg_id = uuid::Uuid::new_v4().to_string();
+                    let seq = queue.next_sequence_number;
+                    queue.next_sequence_number += 1;
+                    let mut resp = json!({
+                        "MessageId": msg_id,
+                        "MD5OfMessageBody": md5_hex(&message_body),
+                        "SequenceNumber": seq.to_string(),
+                    });
+                    if !message_attributes.is_empty() {
+                        resp["MD5OfMessageAttributes"] =
+                            json!(md5_of_message_attributes(&message_attributes));
+                    }
                     return Ok(sqs_response(
                         "SendMessage",
-                        json!({
-                            "MessageId": msg_id,
-                            "MD5OfMessageBody": md5_hex(&message_body),
-                        }),
+                        resp,
                         &req.request_id,
                         req.is_query_protocol,
                     ));
@@ -653,6 +909,17 @@ impl SqsService {
             ));
         }
 
+        // Validate delay seconds (max 900 = 15 minutes)
+        if let Some(d) = val_as_i64(&body["DelaySeconds"]) {
+            if d > 900 {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterValue",
+                    format!("Value {d} for parameter DelaySeconds is invalid. Reason: Must be between 0 and 900, if provided."),
+                ));
+            }
+        }
+
         let delay: i64 = val_as_i64(&body["DelaySeconds"])
             .or_else(|| {
                 queue
@@ -668,7 +935,19 @@ impl SqsService {
             None
         };
 
-        let message_attributes = parse_message_attributes(&body);
+        let sequence_number = if queue.is_fifo {
+            let seq = queue.next_sequence_number;
+            queue.next_sequence_number += 1;
+            Some(seq.to_string())
+        } else {
+            None
+        };
+
+        let md5_of_attrs = if message_attributes.is_empty() {
+            None
+        } else {
+            Some(md5_of_message_attributes(&message_attributes))
+        };
 
         let msg = SqsMessage {
             message_id: uuid::Uuid::new_v4().to_string(),
@@ -681,14 +960,21 @@ impl SqsService {
             visible_at,
             receive_count: 0,
             message_group_id,
-            message_dedup_id,
+            message_dedup_id: effective_dedup_id,
             created_at: now,
+            sequence_number: sequence_number.clone(),
         };
 
-        let resp = json!({
+        let mut resp = json!({
             "MessageId": msg.message_id,
             "MD5OfMessageBody": msg.md5_of_body,
         });
+        if let Some(seq) = &sequence_number {
+            resp["SequenceNumber"] = json!(seq);
+        }
+        if let Some(md5) = &md5_of_attrs {
+            resp["MD5OfMessageAttributes"] = json!(md5);
+        }
         queue.messages.push_back(msg);
 
         Ok(sqs_response(
@@ -705,13 +991,56 @@ impl SqsService {
             .as_str()
             .ok_or_else(|| missing_param("QueueUrl"))?
             .to_string();
-        let max_messages = val_as_i64(&body["MaxNumberOfMessages"])
-            .unwrap_or(1)
-            .min(10) as usize;
+
+        let max_messages_raw = val_as_i64(&body["MaxNumberOfMessages"]);
+        if let Some(max) = max_messages_raw {
+            if !(1..=10).contains(&max) {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterValue",
+                    format!("Value {max} for parameter MaxNumberOfMessages is invalid. Reason: Must be between 1 and 10, if provided."),
+                ));
+            }
+        }
+        let max_messages = max_messages_raw.unwrap_or(1).min(10) as usize;
+
         let visibility_timeout = val_as_i64(&body["VisibilityTimeout"]);
-        let wait_time_seconds = val_as_i64(&body["WaitTimeSeconds"])
-            .unwrap_or(0)
-            .clamp(0, 20) as u64;
+
+        let wait_time_raw = val_as_i64(&body["WaitTimeSeconds"]);
+        if let Some(wt) = wait_time_raw {
+            if !(0..=20).contains(&wt) {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterValue",
+                    format!("Value {wt} for parameter WaitTimeSeconds is invalid. Reason: Must be between 0 and 20, if provided."),
+                ));
+            }
+        }
+        let wait_time_seconds = wait_time_raw.unwrap_or(0).clamp(0, 20) as u64;
+
+        // Parse requested system attributes
+        let attribute_names: Option<Vec<String>> = body["AttributeNames"].as_array().map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        });
+        // Also check MessageSystemAttributeNames (newer SDK field)
+        let sys_attr_names: Option<Vec<String>> =
+            body["MessageSystemAttributeNames"].as_array().map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            });
+        let requested_sys_attrs = sys_attr_names.or(attribute_names);
+
+        // Parse requested message attributes filter
+        let msg_attr_names: Option<Vec<String>> =
+            body["MessageAttributeNames"].as_array().map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            });
+
         let request_id = req.request_id.clone();
         let is_query = req.is_query_protocol;
 
@@ -725,12 +1054,24 @@ impl SqsService {
             let result = self.try_receive_messages(&queue_url, max_messages, visibility_timeout)?;
 
             if !result.is_empty() || deadline.is_none() {
-                return Ok(format_receive_response(&result, &request_id, is_query));
+                return Ok(format_receive_response(
+                    &result,
+                    &request_id,
+                    is_query,
+                    requested_sys_attrs.as_deref(),
+                    msg_attr_names.as_deref(),
+                ));
             }
 
             let deadline = deadline.unwrap();
             if tokio::time::Instant::now() >= deadline {
-                return Ok(format_receive_response(&result, &request_id, is_query));
+                return Ok(format_receive_response(
+                    &result,
+                    &request_id,
+                    is_query,
+                    requested_sys_attrs.as_deref(),
+                    msg_attr_names.as_deref(),
+                ));
             }
 
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -797,9 +1138,17 @@ impl SqsService {
         let mut dlq_messages = Vec::new();
 
         if is_fifo {
-            // FIFO: strict per-group ordering, deliver from one group only
-            let mut fifo_group: Option<String> = None;
+            // FIFO: deliver messages in order, respecting group locking.
+            // Groups that already have inflight messages are skipped.
+            // Multiple messages from the same group CAN be delivered in one batch.
             let mut remaining = VecDeque::new();
+
+            // Build set of groups that have pre-existing inflight messages
+            let inflight_groups: std::collections::HashSet<String> = queue
+                .inflight
+                .iter()
+                .filter_map(|m| m.message_group_id.clone())
+                .collect();
 
             while let Some(mut msg) = queue.messages.pop_front() {
                 if let Some(visible_at) = msg.visible_at {
@@ -809,15 +1158,12 @@ impl SqsService {
                     }
                 }
 
-                if let Some(ref group) = msg.message_group_id {
-                    match fifo_group {
-                        None => fifo_group = Some(group.clone()),
-                        Some(ref chosen) if chosen != group => {
-                            remaining.push_back(msg);
-                            continue;
-                        }
-                        _ => {}
-                    }
+                let group = msg.message_group_id.as_deref().unwrap_or("").to_string();
+
+                // Skip groups that already have inflight messages from previous receives
+                if inflight_groups.contains(&group) {
+                    remaining.push_back(msg);
+                    continue;
                 }
 
                 if received.len() < max_messages {
@@ -928,8 +1274,12 @@ impl SqsService {
             .get_mut(queue_url)
             .ok_or_else(queue_not_found)?;
 
+        // Delete is idempotent - silently succeed even if handle not found
         queue
             .inflight
+            .retain(|m| m.receipt_handle.as_deref() != Some(receipt_handle));
+        queue
+            .messages
             .retain(|m| m.receipt_handle.as_deref() != Some(receipt_handle));
 
         Ok(sqs_response(
@@ -981,11 +1331,35 @@ impl SqsService {
             .ok_or_else(queue_not_found)?;
 
         let now = Utc::now();
+        let mut found = false;
+
+        // First check inflight messages
         for msg in &mut queue.inflight {
             if msg.receipt_handle.as_deref() == Some(receipt_handle) {
                 msg.visible_at = Some(now + chrono::Duration::seconds(visibility_timeout));
+                found = true;
                 break;
             }
+        }
+
+        // Also check messages queue (message may have become visible again)
+        if !found {
+            for msg in &mut queue.messages {
+                if msg.receipt_handle.as_deref() == Some(receipt_handle) {
+                    // Move back to inflight with new visibility timeout
+                    msg.visible_at = Some(now + chrono::Duration::seconds(visibility_timeout));
+                    found = true;
+                    break;
+                }
+            }
+        }
+
+        if !found {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ReceiptHandleIsInvalid",
+                "The input receipt handle is invalid.",
+            ));
         }
 
         Ok(sqs_response(
@@ -1097,26 +1471,46 @@ impl SqsService {
         if let Some(attrs) = body["Attributes"].as_object() {
             for (k, v) in attrs {
                 if let Some(s) = v.as_str() {
-                    queue.attributes.insert(k.clone(), s.to_string());
+                    // Setting an empty value for Policy or RedrivePolicy removes it
+                    if s.is_empty()
+                        && (k == "Policy" || k == "RedrivePolicy" || k == "RedriveAllowPolicy")
+                    {
+                        queue.attributes.remove(k);
+                        if k == "RedrivePolicy" {
+                            queue.redrive_policy = None;
+                        }
+                    } else {
+                        queue.attributes.insert(k.clone(), s.to_string());
+                    }
                 }
             }
 
             // Update redrive_policy if set
             if let Some(rp_str) = attrs.get("RedrivePolicy").and_then(|v| v.as_str()) {
-                if let Ok(rp) = serde_json::from_str::<Value>(rp_str) {
-                    let dead_letter_target_arn = rp["deadLetterTargetArn"]
-                        .as_str()
-                        .unwrap_or_default()
-                        .to_string();
-                    let max_receive_count = rp["maxReceiveCount"]
-                        .as_u64()
-                        .or_else(|| rp["maxReceiveCount"].as_str()?.parse().ok())
-                        .unwrap_or(0) as u32;
-                    if !dead_letter_target_arn.is_empty() && max_receive_count > 0 {
-                        queue.redrive_policy = Some(RedrivePolicy {
-                            dead_letter_target_arn,
-                            max_receive_count,
-                        });
+                if !rp_str.is_empty() {
+                    if let Ok(rp) = serde_json::from_str::<Value>(rp_str) {
+                        let dead_letter_target_arn = rp["deadLetterTargetArn"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_string();
+                        let max_receive_count = rp["maxReceiveCount"]
+                            .as_u64()
+                            .or_else(|| rp["maxReceiveCount"].as_str()?.parse().ok())
+                            .unwrap_or(0) as u32;
+                        if !dead_letter_target_arn.is_empty() && max_receive_count > 0 {
+                            queue.redrive_policy = Some(RedrivePolicy {
+                                dead_letter_target_arn: dead_letter_target_arn.clone(),
+                                max_receive_count,
+                            });
+                            // Normalize the stored JSON (Python json.dumps format)
+                            queue.attributes.insert(
+                                "RedrivePolicy".to_string(),
+                                format!(
+                                    "{{\"deadLetterTargetArn\": \"{}\", \"maxReceiveCount\": {}}}",
+                                    dead_letter_target_arn, max_receive_count
+                                ),
+                            );
+                        }
                     }
                 }
             }
@@ -1141,6 +1535,29 @@ impl SqsService {
             .as_array()
             .ok_or_else(|| missing_param("Entries"))?
             .clone();
+
+        // Validate batch is not empty
+        if entries.is_empty() {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "AWS.SimpleQueueService.EmptyBatchRequest",
+                "There should be at least one SendMessageBatchRequestEntry in the request.",
+            ));
+        }
+
+        // Check for duplicate IDs
+        let mut seen_ids = std::collections::HashSet::new();
+        for entry in &entries {
+            if let Some(id) = entry["Id"].as_str() {
+                if !seen_ids.insert(id.to_string()) {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "AWS.SimpleQueueService.BatchEntryIdsNotDistinct",
+                        "Two or more batch entries in the operation have the same Id.",
+                    ));
+                }
+            }
+        }
 
         let mut state = self.state.write();
         let queue = state
@@ -1200,6 +1617,19 @@ impl SqsService {
                 continue;
             }
 
+            // Per-entry delay validation (max 900 seconds)
+            if let Some(d) = val_as_i64(&entry["DelaySeconds"]) {
+                if d > 900 {
+                    failed.push(json!({
+                        "Id": id,
+                        "SenderFault": true,
+                        "Code": "InvalidParameterValue",
+                        "Message": format!("Value {} for parameter DelaySeconds is invalid. Reason: Must be between 0 and 900, if provided.", d),
+                    }));
+                    continue;
+                }
+            }
+
             let message_group_id = entry["MessageGroupId"].as_str().map(|s| s.to_string());
             let message_dedup_id = entry["MessageDeduplicationId"]
                 .as_str()
@@ -1208,22 +1638,18 @@ impl SqsService {
             // FIFO validations
             if is_fifo {
                 if message_group_id.is_none() {
-                    failed.push(json!({
-                        "Id": id,
-                        "SenderFault": true,
-                        "Code": "MissingParameter",
-                        "Message": "The request must contain the parameter MessageGroupId.",
-                    }));
-                    continue;
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "MissingParameter",
+                        "The request must contain the parameter MessageGroupId.",
+                    ));
                 }
                 if message_dedup_id.is_none() && !content_based_dedup {
-                    failed.push(json!({
-                        "Id": id,
-                        "SenderFault": true,
-                        "Code": "MissingParameter",
-                        "Message": "The request must contain the parameter MessageDeduplicationId.",
-                    }));
-                    continue;
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "InvalidParameterValue",
+                        "The queue should either have ContentBasedDeduplication enabled or MessageDeduplicationId provided explicitly",
+                    ));
                 }
             }
 
@@ -1238,6 +1664,20 @@ impl SqsService {
 
             let message_attributes = parse_message_attributes(entry);
 
+            let sequence_number = if is_fifo {
+                let seq = queue.next_sequence_number;
+                queue.next_sequence_number += 1;
+                Some(seq.to_string())
+            } else {
+                None
+            };
+
+            let md5_of_attrs = if message_attributes.is_empty() {
+                None
+            } else {
+                Some(md5_of_message_attributes(&message_attributes))
+            };
+
             let msg = SqsMessage {
                 message_id: uuid::Uuid::new_v4().to_string(),
                 receipt_handle: None,
@@ -1251,13 +1691,21 @@ impl SqsService {
                 message_group_id,
                 message_dedup_id,
                 created_at: now,
+                sequence_number: sequence_number.clone(),
             };
 
-            successful.push(json!({
+            let mut entry_resp = json!({
                 "Id": id,
                 "MessageId": msg.message_id,
                 "MD5OfMessageBody": msg.md5_of_body,
-            }));
+            });
+            if let Some(seq) = &sequence_number {
+                entry_resp["SequenceNumber"] = json!(seq);
+            }
+            if let Some(md5) = &md5_of_attrs {
+                entry_resp["MD5OfMessageAttributes"] = json!(md5);
+            }
+            successful.push(entry_resp);
             queue.messages.push_back(msg);
         }
 
@@ -1282,6 +1730,29 @@ impl SqsService {
             .as_array()
             .ok_or_else(|| missing_param("Entries"))?
             .clone();
+
+        // Validate batch is not empty
+        if entries.is_empty() {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "AWS.SimpleQueueService.EmptyBatchRequest",
+                "There should be at least one DeleteMessageBatchRequestEntry in the request.",
+            ));
+        }
+
+        // Check for duplicate IDs
+        let mut seen_ids = std::collections::HashSet::new();
+        for entry in &entries {
+            if let Some(id) = entry["Id"].as_str() {
+                if !seen_ids.insert(id.to_string()) {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "AWS.SimpleQueueService.BatchEntryIdsNotDistinct",
+                        "Two or more batch entries in the operation have the same Id.",
+                    ));
+                }
+            }
+        }
 
         let mut state = self.state.write();
         let queue = state
@@ -1310,11 +1781,22 @@ impl SqsService {
                 }
             };
 
+            let before = queue.inflight.len();
             queue
                 .inflight
                 .retain(|m| m.receipt_handle.as_deref() != Some(receipt_handle));
+            let deleted = queue.inflight.len() != before;
 
-            successful.push(json!({ "Id": id }));
+            if deleted {
+                successful.push(json!({ "Id": id }));
+            } else {
+                failed.push(json!({
+                    "Id": id,
+                    "SenderFault": true,
+                    "Code": "ReceiptHandleIsInvalid",
+                    "Message": "The input receipt handle is invalid.",
+                }));
+            }
         }
 
         Ok(sqs_response(
@@ -1403,12 +1885,84 @@ impl SqsService {
             req.is_query_protocol,
         ))
     }
+
+    fn add_permission(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let queue_url = body["QueueUrl"]
+            .as_str()
+            .ok_or_else(|| missing_param("QueueUrl"))?;
+
+        let state = self.state.read();
+        let _queue = state.queues.get(queue_url).ok_or_else(queue_not_found)?;
+
+        // Stub: just validate queue exists and return success
+        Ok(sqs_response(
+            "AddPermission",
+            json!({}),
+            &req.request_id,
+            req.is_query_protocol,
+        ))
+    }
+
+    fn remove_permission(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let queue_url = body["QueueUrl"]
+            .as_str()
+            .ok_or_else(|| missing_param("QueueUrl"))?;
+
+        let state = self.state.read();
+        let _queue = state.queues.get(queue_url).ok_or_else(queue_not_found)?;
+
+        // Stub: just validate queue exists and return success
+        Ok(sqs_response(
+            "RemovePermission",
+            json!({}),
+            &req.request_id,
+            req.is_query_protocol,
+        ))
+    }
+
+    fn list_dead_letter_source_queues(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let queue_url = body["QueueUrl"]
+            .as_str()
+            .ok_or_else(|| missing_param("QueueUrl"))?;
+
+        let state = self.state.read();
+        let queue = state.queues.get(queue_url).ok_or_else(queue_not_found)?;
+        let queue_arn = queue.arn.clone();
+
+        // Find all queues whose redrive policy targets this queue
+        let source_urls: Vec<String> = state
+            .queues
+            .values()
+            .filter(|q| {
+                q.redrive_policy
+                    .as_ref()
+                    .map(|rp| rp.dead_letter_target_arn == queue_arn)
+                    .unwrap_or(false)
+            })
+            .map(|q| q.queue_url.clone())
+            .collect();
+
+        Ok(sqs_response(
+            "ListDeadLetterSourceQueues",
+            json!({ "queueUrls": source_urls }),
+            &req.request_id,
+            req.is_query_protocol,
+        ))
+    }
 }
 
 fn format_receive_response(
     received: &[SqsMessage],
     request_id: &str,
     is_query: bool,
+    requested_sys_attrs: Option<&[String]>,
+    msg_attr_names: Option<&[String]>,
 ) -> AwsResponse {
     let now_millis = Utc::now().timestamp_millis();
 
@@ -1420,26 +1974,117 @@ fn format_receive_response(
                 "ReceiptHandle": m.receipt_handle,
                 "MD5OfBody": m.md5_of_body,
                 "Body": m.body,
-                "Attributes": {
-                    "ApproximateReceiveCount": m.receive_count.to_string(),
-                    "SentTimestamp": m.sent_timestamp.to_string(),
-                    "ApproximateFirstReceiveTimestamp": now_millis.to_string(),
-                },
             });
-            if !m.message_attributes.is_empty() {
-                let attrs: serde_json::Map<String, Value> = m
-                    .message_attributes
+
+            // Only include system attributes if requested
+            if let Some(names) = requested_sys_attrs {
+                if !names.is_empty() {
+                    let want_all = names.iter().any(|n| n == "All");
+                    let mut sys_attrs = serde_json::Map::new();
+
+                    if want_all || names.iter().any(|n| n == "ApproximateReceiveCount") {
+                        sys_attrs.insert(
+                            "ApproximateReceiveCount".to_string(),
+                            json!(m.receive_count.to_string()),
+                        );
+                    }
+                    if want_all || names.iter().any(|n| n == "SentTimestamp") {
+                        sys_attrs.insert(
+                            "SentTimestamp".to_string(),
+                            json!(m.sent_timestamp.to_string()),
+                        );
+                    }
+                    if want_all
+                        || names
+                            .iter()
+                            .any(|n| n == "ApproximateFirstReceiveTimestamp")
+                    {
+                        sys_attrs.insert(
+                            "ApproximateFirstReceiveTimestamp".to_string(),
+                            json!(now_millis.to_string()),
+                        );
+                    }
+                    if want_all || names.iter().any(|n| n == "SenderId") {
+                        sys_attrs.insert("SenderId".to_string(), json!("AIDAIT2UOQQY3AUEKVGXU"));
+                    }
+                    if want_all || names.iter().any(|n| n == "MessageGroupId") {
+                        if let Some(ref group_id) = m.message_group_id {
+                            sys_attrs.insert("MessageGroupId".to_string(), json!(group_id));
+                        }
+                    }
+                    if want_all || names.iter().any(|n| n == "MessageDeduplicationId") {
+                        if let Some(ref dedup_id) = m.message_dedup_id {
+                            sys_attrs.insert("MessageDeduplicationId".to_string(), json!(dedup_id));
+                        }
+                    }
+                    if want_all || names.iter().any(|n| n == "SequenceNumber") {
+                        if let Some(ref seq) = m.sequence_number {
+                            sys_attrs.insert("SequenceNumber".to_string(), json!(seq));
+                        }
+                    }
+                    if want_all || names.iter().any(|n| n == "AWSTraceHeader") {
+                        // Include AWSTraceHeader if message has it in system attributes
+                        if let Some(trace) = m.attributes.get("AWSTraceHeader") {
+                            sys_attrs.insert("AWSTraceHeader".to_string(), json!(trace));
+                        }
+                    }
+
+                    if !sys_attrs.is_empty() {
+                        msg_json["Attributes"] = Value::Object(sys_attrs);
+                    }
+                }
+            }
+
+            // Filter message attributes
+            let filtered_attrs: HashMap<String, &MessageAttribute> =
+                if let Some(names) = msg_attr_names {
+                    if names.is_empty() {
+                        HashMap::new()
+                    } else if names.iter().any(|n| n == "All" || n == ".*") {
+                        m.message_attributes
+                            .iter()
+                            .map(|(k, v)| (k.clone(), v))
+                            .collect()
+                    } else {
+                        m.message_attributes
+                            .iter()
+                            .filter(|(k, _)| {
+                                names.iter().any(|n| {
+                                    if n.ends_with(".*") {
+                                        k.starts_with(n.trim_end_matches(".*"))
+                                    } else {
+                                        k.as_str() == n.as_str()
+                                    }
+                                })
+                            })
+                            .map(|(k, v)| (k.clone(), v))
+                            .collect()
+                    }
+                } else {
+                    HashMap::new()
+                };
+
+            if !filtered_attrs.is_empty() {
+                let attrs: serde_json::Map<String, Value> = filtered_attrs
                     .iter()
                     .map(|(k, v)| {
                         let mut attr = json!({ "DataType": v.data_type });
                         if let Some(ref sv) = v.string_value {
                             attr["StringValue"] = json!(sv);
                         }
+                        if let Some(ref bv) = v.binary_value {
+                            use base64::Engine;
+                            attr["BinaryValue"] =
+                                json!(base64::engine::general_purpose::STANDARD.encode(bv));
+                        }
                         (k.clone(), attr)
                     })
                     .collect();
                 msg_json["MessageAttributes"] = Value::Object(attrs);
+                msg_json["MD5OfMessageAttributes"] =
+                    json!(md5_of_message_attributes_from_refs(&filtered_attrs));
             }
+
             msg_json
         })
         .collect();
@@ -1458,16 +2103,194 @@ fn parse_message_attributes(body: &Value) -> HashMap<String, MessageAttribute> {
         for (name, val) in attrs {
             let data_type = val["DataType"].as_str().unwrap_or("String").to_string();
             let string_value = val["StringValue"].as_str().map(|s| s.to_string());
+            let binary_value = val["BinaryValue"].as_str().and_then(|s| {
+                use base64::Engine;
+                base64::engine::general_purpose::STANDARD.decode(s).ok()
+            });
             result.insert(
                 name.clone(),
                 MessageAttribute {
                     data_type,
                     string_value,
+                    binary_value,
                 },
             );
         }
     }
+
+    // Handle Query protocol MessageAttribute.N.Name/Value patterns
+    if let Some(body_obj) = body.as_object() {
+        for i in 1..=20 {
+            let name_key = format!("MessageAttribute.{i}.Name");
+            let type_key = format!("MessageAttribute.{i}.Value.DataType");
+            let str_key = format!("MessageAttribute.{i}.Value.StringValue");
+            let bin_key = format!("MessageAttribute.{i}.Value.BinaryValue");
+
+            if let Some(name) = body_obj.get(&name_key).and_then(|v| v.as_str()) {
+                let data_type = body_obj
+                    .get(&type_key)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("String")
+                    .to_string();
+                let string_value = body_obj
+                    .get(&str_key)
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                let binary_value = body_obj
+                    .get(&bin_key)
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| {
+                        use base64::Engine;
+                        base64::engine::general_purpose::STANDARD.decode(s).ok()
+                    });
+                result.insert(
+                    name.to_string(),
+                    MessageAttribute {
+                        data_type,
+                        string_value,
+                        binary_value,
+                    },
+                );
+            }
+        }
+    }
+
     result
+}
+
+/// Validate message attribute names and data types
+fn validate_message_attributes(
+    attrs: &HashMap<String, MessageAttribute>,
+) -> Result<(), AwsServiceError> {
+    for (name, attr) in attrs {
+        // Validate attribute name
+        if !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
+        {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterValue",
+                format!(
+                    "The message attribute name '{}' is invalid. Attribute name can contain A-Z, a-z, 0-9, underscore (_), hyphen (-), and period (.) characters.",
+                    name
+                ),
+            ));
+        }
+
+        // Validate data type
+        let dt = &attr.data_type;
+        let base_type = dt.split('.').next().unwrap_or(dt);
+        let valid_prefixes = ["String", "Number", "Binary"];
+        if !valid_prefixes.contains(&base_type) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterValue",
+                format!(
+                    "The message attribute '{name}' has an invalid message attribute type, the set of supported type prefixes is Binary, Number, and String."
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn is_valid_queue_name(name: &str) -> bool {
+    if name.is_empty() || name.len() > 80 {
+        return false;
+    }
+    name.chars()
+        .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+}
+
+/// Compute MD5 of message attributes per AWS specification.
+/// AWS sorts attributes by name, then for each: encode name length (4 bytes BE),
+/// name bytes, data type length (4 bytes BE), data type bytes,
+/// then transport type (1=String, 2=Binary) and value length + value bytes.
+fn md5_of_message_attributes(attrs: &HashMap<String, MessageAttribute>) -> String {
+    let mut sorted: Vec<(&String, &MessageAttribute)> = attrs.iter().collect();
+    sorted.sort_by_key(|(k, _)| k.as_str());
+
+    let mut hasher = Md5::new();
+    for (name, attr) in sorted {
+        // Name
+        hasher.update((name.len() as u32).to_be_bytes());
+        hasher.update(name.as_bytes());
+        // Data type
+        hasher.update((attr.data_type.len() as u32).to_be_bytes());
+        hasher.update(attr.data_type.as_bytes());
+
+        // Transport type and value
+        if attr.data_type.starts_with("String") || attr.data_type.starts_with("Number") {
+            hasher.update([1u8]); // STRING transport type
+            if let Some(ref sv) = attr.string_value {
+                hasher.update((sv.len() as u32).to_be_bytes());
+                hasher.update(sv.as_bytes());
+            } else {
+                hasher.update(0u32.to_be_bytes());
+            }
+        } else if attr.data_type.starts_with("Binary") {
+            hasher.update([2u8]); // BINARY transport type
+            if let Some(ref bv) = attr.binary_value {
+                hasher.update((bv.len() as u32).to_be_bytes());
+                hasher.update(bv);
+            } else {
+                hasher.update(0u32.to_be_bytes());
+            }
+        }
+    }
+    format!("{:032x}", hasher.finalize())
+}
+
+/// Same as md5_of_message_attributes but works with borrowed references
+fn md5_of_message_attributes_from_refs(attrs: &HashMap<String, &MessageAttribute>) -> String {
+    let mut sorted: Vec<(&String, &&MessageAttribute)> = attrs.iter().collect();
+    sorted.sort_by_key(|(k, _)| k.as_str());
+
+    let mut hasher = Md5::new();
+    for (name, attr) in sorted {
+        hasher.update((name.len() as u32).to_be_bytes());
+        hasher.update(name.as_bytes());
+        hasher.update((attr.data_type.len() as u32).to_be_bytes());
+        hasher.update(attr.data_type.as_bytes());
+
+        if attr.data_type.starts_with("String") || attr.data_type.starts_with("Number") {
+            hasher.update([1u8]);
+            if let Some(ref sv) = attr.string_value {
+                hasher.update((sv.len() as u32).to_be_bytes());
+                hasher.update(sv.as_bytes());
+            } else {
+                hasher.update(0u32.to_be_bytes());
+            }
+        } else if attr.data_type.starts_with("Binary") {
+            hasher.update([2u8]);
+            if let Some(ref bv) = attr.binary_value {
+                hasher.update((bv.len() as u32).to_be_bytes());
+                hasher.update(bv);
+            } else {
+                hasher.update(0u32.to_be_bytes());
+            }
+        }
+    }
+    format!("{:032x}", hasher.finalize())
+}
+
+/// Resolve a QueueUrl that might be a queue name, a path, or a full URL
+fn resolve_queue_url(input: &str, state: &crate::state::SqsState) -> Option<String> {
+    // Direct match
+    if state.queues.contains_key(input) {
+        return Some(input.to_string());
+    }
+    // Try as queue name
+    if let Some(url) = state.name_to_url.get(input) {
+        return Some(url.clone());
+    }
+    // Try extracting queue name from URL path (e.g., /123456789012/my-queue)
+    let name = input.rsplit('/').next().unwrap_or("");
+    if let Some(url) = state.name_to_url.get(name) {
+        return Some(url.clone());
+    }
+    None
 }
 
 fn missing_param(name: &str) -> AwsServiceError {

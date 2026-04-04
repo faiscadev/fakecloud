@@ -52,6 +52,7 @@ impl SqsDelivery for SqsDeliveryImpl {
                         MessageAttribute {
                             data_type: v.data_type.clone(),
                             string_value: v.string_value.clone(),
+                            binary_value: v.binary_value.as_ref().map(|s| s.as_bytes().to_vec()),
                         },
                     )
                 })
@@ -70,6 +71,7 @@ impl SqsDelivery for SqsDeliveryImpl {
                 message_group_id: message_group_id.map(|s| s.to_string()),
                 message_dedup_id: message_dedup_id.map(|s| s.to_string()),
                 created_at: now,
+                sequence_number: None,
             };
             queue.messages.push_back(msg);
             tracing::debug!(queue_arn, "delivered message to SQS queue");

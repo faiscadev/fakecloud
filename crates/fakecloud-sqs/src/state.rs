@@ -7,6 +7,7 @@ use std::sync::Arc;
 pub struct MessageAttribute {
     pub data_type: String,
     pub string_value: Option<String>,
+    pub binary_value: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone)]
@@ -27,6 +28,8 @@ pub struct SqsMessage {
     pub message_dedup_id: Option<String>,
     /// When the message was created (for retention period expiry)
     pub created_at: DateTime<Utc>,
+    /// FIFO sequence number
+    pub sequence_number: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -51,6 +54,8 @@ pub struct SqsQueue {
     pub redrive_policy: Option<RedrivePolicy>,
     /// Queue tags (key -> value)
     pub tags: HashMap<String, String>,
+    /// FIFO: next sequence number counter
+    pub next_sequence_number: u64,
 }
 
 // TODO: SQS needs ListQueueTags and TagQueue action handlers.
@@ -75,6 +80,13 @@ impl SqsState {
             queues: HashMap::new(),
             name_to_url: HashMap::new(),
         }
+    }
+}
+
+impl SqsState {
+    pub fn reset(&mut self) {
+        self.queues.clear();
+        self.name_to_url.clear();
     }
 }
 

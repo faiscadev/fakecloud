@@ -88,6 +88,12 @@ impl SnsState {
             sms_messages: Vec::new(),
         }
     }
+
+    pub fn reset(&mut self) {
+        self.topics.clear();
+        self.subscriptions.clear();
+        self.published.clear();
+    }
 }
 
 pub type SharedSnsState = Arc<RwLock<SnsState>>;

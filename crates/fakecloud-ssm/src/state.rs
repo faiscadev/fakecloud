@@ -37,6 +37,10 @@ impl SsmState {
             parameters: BTreeMap::new(),
         }
     }
+
+    pub fn reset(&mut self) {
+        self.parameters.clear();
+    }
 }
 
 pub type SharedSsmState = Arc<RwLock<SsmState>>;
