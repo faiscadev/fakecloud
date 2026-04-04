@@ -34,7 +34,7 @@ built to fill that gap -- with a focus on correctness and simplicity.
 | Free tier | Fully open source | Removed (was Community Ed.) |
 | Single port | Yes (4566) | Yes (4566) |
 | SQS | 16 actions | Paid |
-| SNS | 16 actions | Paid |
+| SNS | 35 actions | Paid |
 | EventBridge | 15 actions | Paid |
 | IAM / STS | 16 actions | Paid |
 | SSM Parameter Store | 12 actions | Paid |
@@ -90,15 +90,24 @@ Key features: real MD5 hashing, long polling (WaitTimeSeconds), FIFO queues
 with message group fair scheduling, dead-letter queues, message attributes,
 batch operations.
 
-### SNS (16 actions)
+### SNS (35 actions)
 
 CreateTopic, DeleteTopic, ListTopics, GetTopicAttributes, SetTopicAttributes,
-Subscribe, ConfirmSubscription, Unsubscribe, Publish, ListSubscriptions,
-ListSubscriptionsByTopic, GetSubscriptionAttributes, SetSubscriptionAttributes,
-TagResource, UntagResource, ListTagsForResource
+Subscribe, ConfirmSubscription, Unsubscribe, Publish, PublishBatch,
+ListSubscriptions, ListSubscriptionsByTopic, GetSubscriptionAttributes,
+SetSubscriptionAttributes, TagResource, UntagResource, ListTagsForResource,
+AddPermission, RemovePermission, CreatePlatformApplication,
+DeletePlatformApplication, GetPlatformApplicationAttributes,
+SetPlatformApplicationAttributes, ListPlatformApplications,
+CreatePlatformEndpoint, DeleteEndpoint, GetEndpointAttributes,
+SetEndpointAttributes, ListEndpointsByPlatformApplication,
+SetSMSAttributes, GetSMSAttributes, CheckIfPhoneNumberIsOptedOut,
+ListPhoneNumbersOptedOut, OptInPhoneNumber
 
 Key features: SQS fan-out delivery, HTTP/HTTPS endpoint delivery, subscription
-filter policies (exact match, prefix, anything-but, numeric, exists).
+filter policies (exact match, prefix, suffix, anything-but, numeric, exists,
+equals-ignore-case, $or), message body filtering, MessageStructure=json,
+raw message delivery, FIFO topics, platform applications, SMS operations.
 
 ### EventBridge (15 actions)
 
