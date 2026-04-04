@@ -81,6 +81,15 @@ jobs:
           echo "# --- Original moto conftest below ---" >> "$MOTO_CONFTEST"
           cat "$MOTO_CONFTEST.orig" >> "$MOTO_CONFTEST"
 
+      - name: Apply Moto test patches
+        run: |
+          for patch in tests/compat/moto/patches/*.patch; do
+            [ -f "$patch" ] || continue
+            echo "Applying $(basename "$patch")"
+            (cd /tmp/moto && git apply "$GITHUB_WORKSPACE/$patch") || \
+              echo "WARNING: Failed to apply $(basename "$patch")"
+          done
+
       - name: Run Moto tests (all services)
         continue-on-error: true
         env:
