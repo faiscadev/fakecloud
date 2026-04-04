@@ -1,0 +1,55 @@
+# Example: FakeCloud with a sample worker app.
+#
+# This compose file starts FakeCloud and a sample app that creates
+# an SQS queue, sends a message, and reads it back.
+#
+# Usage:
+#   docker compose -f examples/docker-compose.yml up
+
+services:
+  fakecloud:
+    image: faiscadev/fakecloud
+    ports:
+      - "4566:4566"
+    environment:
+      FAKECLOUD_LOG: info
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4566/_fakecloud/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 2s
+
+  sample-app:
+    image: amazon/aws-cli:latest
+    depends_on:
+      fakecloud:
+        condition: service_healthy
+    environment:
+      AWS_ENDPOINT_URL: http://fakecloud:4566
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_DEFAULT_REGION: us-east-1
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        echo "--- Creating SQS queue ---"
+        aws sqs create-queue --queue-name demo-queue
+
+        echo "--- Sending message ---"
+        aws sqs send-message \
+          --queue-url http://fakecloud:4566/000000000000/demo-queue \
+          --message-body '{"hello": "from docker compose"}'
+
+        echo "--- Receiving message ---"
+        aws sqs receive-message \
+          --queue-url http://fakecloud:4566/000000000000/demo-queue
+
+        echo "--- Storing SSM parameter ---"
+        aws ssm put-parameter --name /demo/greeting --value "hello world" --type String
+
+        echo "--- Reading SSM parameter ---"
+        aws ssm get-parameter --name /demo/greeting
+
+        echo "--- Done ---"
