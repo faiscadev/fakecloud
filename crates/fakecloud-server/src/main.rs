@@ -49,12 +49,17 @@ async fn main() {
         )
         .init();
 
+    // Shared IAM state (used by both IAM and STS services)
+    let iam_state = Arc::new(parking_lot::RwLock::new(
+        fakecloud_iam::state::IamState::new(&cli.account_id),
+    ));
+
     let mut registry = ServiceRegistry::new();
     registry.register(Arc::new(SqsService::new()));
     registry.register(Arc::new(SnsService::new()));
     registry.register(Arc::new(EventBridgeService::new()));
-    registry.register(Arc::new(IamService::new()));
-    registry.register(Arc::new(StsService::new()));
+    registry.register(Arc::new(IamService::new(iam_state.clone())));
+    registry.register(Arc::new(StsService::new(iam_state)));
     registry.register(Arc::new(SsmService::new()));
 
     let services: Vec<&str> = registry.service_names();

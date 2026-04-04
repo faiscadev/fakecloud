@@ -18,6 +18,7 @@ fakecloud-eventbridge = { workspace = true }
 fakecloud-iam = { workspace = true }
 fakecloud-ssm = { workspace = true }
 axum = { workspace = true }
+parking_lot = { workspace = true }
 clap = { workspace = true }
 serde = { workspace = true }
 tokio = { workspace = true }
