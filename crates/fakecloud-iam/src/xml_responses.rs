@@ -2,67 +2,138 @@ use base64::Engine;
 
 use crate::state::{IamAccessKey, IamPolicy, IamRole, IamUser};
 
-pub fn create_user_response(user: &IamUser, request_id: &str) -> String {
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+fn tags_xml(tags: &[crate::state::Tag]) -> String {
+    if tags.is_empty() {
+        return String::new();
+    }
+    tags.iter()
+        .map(|t| {
+            format!(
+                "        <member>\n          <Key>{}</Key>\n          <Value>{}</Value>\n        </member>",
+                xml_escape(&t.key),
+                xml_escape(&t.value)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn user_xml(user: &IamUser) -> String {
+    let tags_section = if user.tags.is_empty() {
+        String::new()
+    } else {
+        let tags_members = tags_xml(&user.tags);
+        format!("\n      <Tags>\n{tags_members}\n      </Tags>")
+    };
+
+    let pb_section = user
+        .permissions_boundary
+        .as_ref()
+        .map(|pb| {
+            format!(
+                "\n      <PermissionsBoundary>\n        <PermissionsBoundaryType>PermissionsBoundaryPolicy</PermissionsBoundaryType>\n        <PermissionsBoundaryArn>{pb}</PermissionsBoundaryArn>\n      </PermissionsBoundary>"
+            )
+        })
+        .unwrap_or_default();
+
     format!(
-        r#"<?xml version="1.0" encoding="UTF-8"?>
-<CreateUserResponse xmlns="https://iam.amazonaws.com/doc/2010-05-08/">
-  <CreateUserResult>
-    <User>
+        r#"    <User>
       <Path>{path}</Path>
       <UserName>{name}</UserName>
       <UserId>{id}</UserId>
       <Arn>{arn}</Arn>
+      <CreateDate>{date}</CreateDate>{tags_section}{pb_section}
+    </User>"#,
+        path = user.path,
+        name = user.user_name,
+        id = user.user_id,
+        arn = user.arn,
+        date = user.created_at.format("%Y-%m-%dT%H:%M:%SZ"),
+    )
+}
+
+fn role_xml(role: &IamRole) -> String {
+    let tags_section = if role.tags.is_empty() {
+        String::new()
+    } else {
+        let tags_members = tags_xml(&role.tags);
+        format!("\n      <Tags>\n{tags_members}\n      </Tags>")
+    };
+
+    let pb_section = role
+        .permissions_boundary
+        .as_ref()
+        .map(|pb| {
+            format!(
+                "\n      <PermissionsBoundary>\n        <PermissionsBoundaryType>PermissionsBoundaryPolicy</PermissionsBoundaryType>\n        <PermissionsBoundaryArn>{pb}</PermissionsBoundaryArn>\n      </PermissionsBoundary>"
+            )
+        })
+        .unwrap_or_default();
+
+    let description_section = if role.description.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n      <Description>{}</Description>",
+            xml_escape(&role.description)
+        )
+    };
+
+    format!(
+        r#"    <Role>
+      <Path>{path}</Path>
+      <RoleName>{name}</RoleName>
+      <RoleId>{id}</RoleId>
+      <Arn>{arn}</Arn>
       <CreateDate>{date}</CreateDate>
-    </User>
+      <AssumeRolePolicyDocument>{policy}</AssumeRolePolicyDocument>{description_section}
+      <MaxSessionDuration>{max_session}</MaxSessionDuration>
+      <RoleLastUsed/>{tags_section}{pb_section}
+    </Role>"#,
+        path = role.path,
+        name = role.role_name,
+        id = role.role_id,
+        arn = role.arn,
+        date = role.created_at.format("%Y-%m-%dT%H:%M:%SZ"),
+        policy = xml_escape(&role.assume_role_policy_document),
+        max_session = role.max_session_duration,
+    )
+}
+
+pub fn create_user_response(user: &IamUser, request_id: &str) -> String {
+    let user_xml = user_xml(user);
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<CreateUserResponse xmlns="https://iam.amazonaws.com/doc/2010-05-08/">
+  <CreateUserResult>
+{user_xml}
   </CreateUserResult>
   <ResponseMetadata>
     <RequestId>{request_id}</RequestId>
   </ResponseMetadata>
 </CreateUserResponse>"#,
-        path = user.path,
-        name = user.user_name,
-        id = user.user_id,
-        arn = user.arn,
-        date = user.created_at.format("%Y-%m-%dT%H:%M:%SZ"),
-        request_id = request_id,
     )
 }
 
 pub fn get_user_response(user: &IamUser, request_id: &str) -> String {
+    let user_xml = user_xml(user);
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <GetUserResponse xmlns="https://iam.amazonaws.com/doc/2010-05-08/">
   <GetUserResult>
-    <User>
-      <Path>{path}</Path>
-      <UserName>{name}</UserName>
-      <UserId>{id}</UserId>
-      <Arn>{arn}</Arn>
-      <CreateDate>{date}</CreateDate>
-    </User>
+{user_xml}
   </GetUserResult>
   <ResponseMetadata>
     <RequestId>{request_id}</RequestId>
   </ResponseMetadata>
 </GetUserResponse>"#,
-        path = user.path,
-        name = user.user_name,
-        id = user.user_id,
-        arn = user.arn,
-        date = user.created_at.format("%Y-%m-%dT%H:%M:%SZ"),
-        request_id = request_id,
-    )
-}
-
-pub fn delete_user_response(request_id: &str) -> String {
-    format!(
-        r#"<?xml version="1.0" encoding="UTF-8"?>
-<DeleteUserResponse xmlns="https://iam.amazonaws.com/doc/2010-05-08/">
-  <ResponseMetadata>
-    <RequestId>{request_id}</RequestId>
-  </ResponseMetadata>
-</DeleteUserResponse>"#,
-        request_id = request_id,
     )
 }
 
@@ -70,13 +141,19 @@ pub fn list_users_response(users: &[IamUser], request_id: &str) -> String {
     let members: String = users
         .iter()
         .map(|u| {
+            let tags_section = if u.tags.is_empty() {
+                String::new()
+            } else {
+                let tags_members = tags_xml(&u.tags);
+                format!("\n        <Tags>\n{tags_members}\n        </Tags>")
+            };
             format!(
                 r#"      <member>
         <Path>{path}</Path>
         <UserName>{name}</UserName>
         <UserId>{id}</UserId>
         <Arn>{arn}</Arn>
-        <CreateDate>{date}</CreateDate>
+        <CreateDate>{date}</CreateDate>{tags_section}
       </member>"#,
                 path = u.path,
                 name = u.user_name,
@@ -101,8 +178,6 @@ pub fn list_users_response(users: &[IamUser], request_id: &str) -> String {
     <RequestId>{request_id}</RequestId>
   </ResponseMetadata>
 </ListUsersResponse>"#,
-        members = members,
-        request_id = request_id,
     )
 }
 
@@ -128,19 +203,6 @@ pub fn create_access_key_response(key: &IamAccessKey, request_id: &str) -> Strin
         status = key.status,
         secret = key.secret_access_key,
         date = key.created_at.format("%Y-%m-%dT%H:%M:%SZ"),
-        request_id = request_id,
-    )
-}
-
-pub fn delete_access_key_response(request_id: &str) -> String {
-    format!(
-        r#"<?xml version="1.0" encoding="UTF-8"?>
-<DeleteAccessKeyResponse xmlns="https://iam.amazonaws.com/doc/2010-05-08/">
-  <ResponseMetadata>
-    <RequestId>{request_id}</RequestId>
-  </ResponseMetadata>
-</DeleteAccessKeyResponse>"#,
-        request_id = request_id,
     )
 }
 
@@ -182,77 +244,36 @@ pub fn list_access_keys_response(
     <RequestId>{request_id}</RequestId>
   </ResponseMetadata>
 </ListAccessKeysResponse>"#,
-        user_name = user_name,
-        members = members,
-        request_id = request_id,
     )
 }
 
 pub fn create_role_response(role: &IamRole, request_id: &str) -> String {
+    let role_xml = role_xml(role);
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <CreateRoleResponse xmlns="https://iam.amazonaws.com/doc/2010-05-08/">
   <CreateRoleResult>
-    <Role>
-      <Path>{path}</Path>
-      <RoleName>{name}</RoleName>
-      <RoleId>{id}</RoleId>
-      <Arn>{arn}</Arn>
-      <CreateDate>{date}</CreateDate>
-      <AssumeRolePolicyDocument>{policy}</AssumeRolePolicyDocument>
-    </Role>
+{role_xml}
   </CreateRoleResult>
   <ResponseMetadata>
     <RequestId>{request_id}</RequestId>
   </ResponseMetadata>
 </CreateRoleResponse>"#,
-        path = role.path,
-        name = role.role_name,
-        id = role.role_id,
-        arn = role.arn,
-        date = role.created_at.format("%Y-%m-%dT%H:%M:%SZ"),
-        policy = xml_escape(&role.assume_role_policy_document),
-        request_id = request_id,
     )
 }
 
 pub fn get_role_response(role: &IamRole, request_id: &str) -> String {
+    let role_xml = role_xml(role);
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <GetRoleResponse xmlns="https://iam.amazonaws.com/doc/2010-05-08/">
   <GetRoleResult>
-    <Role>
-      <Path>{path}</Path>
-      <RoleName>{name}</RoleName>
-      <RoleId>{id}</RoleId>
-      <Arn>{arn}</Arn>
-      <CreateDate>{date}</CreateDate>
-      <AssumeRolePolicyDocument>{policy}</AssumeRolePolicyDocument>
-    </Role>
+{role_xml}
   </GetRoleResult>
   <ResponseMetadata>
     <RequestId>{request_id}</RequestId>
   </ResponseMetadata>
 </GetRoleResponse>"#,
-        path = role.path,
-        name = role.role_name,
-        id = role.role_id,
-        arn = role.arn,
-        date = role.created_at.format("%Y-%m-%dT%H:%M:%SZ"),
-        policy = xml_escape(&role.assume_role_policy_document),
-        request_id = request_id,
-    )
-}
-
-pub fn delete_role_response(request_id: &str) -> String {
-    format!(
-        r#"<?xml version="1.0" encoding="UTF-8"?>
-<DeleteRoleResponse xmlns="https://iam.amazonaws.com/doc/2010-05-08/">
-  <ResponseMetadata>
-    <RequestId>{request_id}</RequestId>
-  </ResponseMetadata>
-</DeleteRoleResponse>"#,
-        request_id = request_id,
     )
 }
 
@@ -260,6 +281,20 @@ pub fn list_roles_response(roles: &[IamRole], request_id: &str) -> String {
     let members: String = roles
         .iter()
         .map(|r| {
+            let tags_section = if r.tags.is_empty() {
+                String::new()
+            } else {
+                let tags_members = tags_xml(&r.tags);
+                format!("\n        <Tags>\n{tags_members}\n        </Tags>")
+            };
+            let description_section = if r.description.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "\n        <Description>{}</Description>",
+                    xml_escape(&r.description)
+                )
+            };
             format!(
                 r#"      <member>
         <Path>{path}</Path>
@@ -267,7 +302,8 @@ pub fn list_roles_response(roles: &[IamRole], request_id: &str) -> String {
         <RoleId>{id}</RoleId>
         <Arn>{arn}</Arn>
         <CreateDate>{date}</CreateDate>
-        <AssumeRolePolicyDocument>{policy}</AssumeRolePolicyDocument>
+        <AssumeRolePolicyDocument>{policy}</AssumeRolePolicyDocument>{description_section}
+        <MaxSessionDuration>{max_session}</MaxSessionDuration>{tags_section}
       </member>"#,
                 path = r.path,
                 name = r.role_name,
@@ -275,6 +311,7 @@ pub fn list_roles_response(roles: &[IamRole], request_id: &str) -> String {
                 arn = r.arn,
                 date = r.created_at.format("%Y-%m-%dT%H:%M:%SZ"),
                 policy = xml_escape(&r.assume_role_policy_document),
+                max_session = r.max_session_duration,
             )
         })
         .collect::<Vec<_>>()
@@ -293,12 +330,17 @@ pub fn list_roles_response(roles: &[IamRole], request_id: &str) -> String {
     <RequestId>{request_id}</RequestId>
   </ResponseMetadata>
 </ListRolesResponse>"#,
-        members = members,
-        request_id = request_id,
     )
 }
 
 pub fn create_policy_response(policy: &IamPolicy, request_id: &str) -> String {
+    let tags_section = if policy.tags.is_empty() {
+        String::new()
+    } else {
+        let tags_members = tags_xml(&policy.tags);
+        format!("\n      <Tags>\n{tags_members}\n      </Tags>")
+    };
+
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <CreatePolicyResponse xmlns="https://iam.amazonaws.com/doc/2010-05-08/">
@@ -308,7 +350,10 @@ pub fn create_policy_response(policy: &IamPolicy, request_id: &str) -> String {
       <PolicyId>{id}</PolicyId>
       <Arn>{arn}</Arn>
       <Path>{path}</Path>
-      <CreateDate>{date}</CreateDate>
+      <DefaultVersionId>{default_version}</DefaultVersionId>
+      <AttachmentCount>{attachment_count}</AttachmentCount>
+      <IsAttachable>true</IsAttachable>
+      <CreateDate>{date}</CreateDate>{tags_section}
     </Policy>
   </CreatePolicyResult>
   <ResponseMetadata>
@@ -319,8 +364,9 @@ pub fn create_policy_response(policy: &IamPolicy, request_id: &str) -> String {
         id = policy.policy_id,
         arn = policy.arn,
         path = policy.path,
+        default_version = policy.default_version_id,
+        attachment_count = policy.attachment_count,
         date = policy.created_at.format("%Y-%m-%dT%H:%M:%SZ"),
-        request_id = request_id,
     )
 }
 
@@ -328,18 +374,29 @@ pub fn list_policies_response(policies: &[IamPolicy], request_id: &str) -> Strin
     let members: String = policies
         .iter()
         .map(|p| {
+            let tags_section = if p.tags.is_empty() {
+                String::new()
+            } else {
+                let tags_members = tags_xml(&p.tags);
+                format!("\n        <Tags>\n{tags_members}\n        </Tags>")
+            };
             format!(
                 r#"      <member>
         <PolicyName>{name}</PolicyName>
         <PolicyId>{id}</PolicyId>
         <Arn>{arn}</Arn>
         <Path>{path}</Path>
-        <CreateDate>{date}</CreateDate>
+        <DefaultVersionId>{default_version}</DefaultVersionId>
+        <AttachmentCount>{attachment_count}</AttachmentCount>
+        <IsAttachable>true</IsAttachable>
+        <CreateDate>{date}</CreateDate>{tags_section}
       </member>"#,
                 name = p.policy_name,
                 id = p.policy_id,
                 arn = p.arn,
                 path = p.path,
+                default_version = p.default_version_id,
+                attachment_count = p.attachment_count,
                 date = p.created_at.format("%Y-%m-%dT%H:%M:%SZ"),
             )
         })
@@ -359,24 +416,17 @@ pub fn list_policies_response(policies: &[IamPolicy], request_id: &str) -> Strin
     <RequestId>{request_id}</RequestId>
   </ResponseMetadata>
 </ListPoliciesResponse>"#,
-        members = members,
-        request_id = request_id,
-    )
-}
-
-pub fn attach_role_policy_response(request_id: &str) -> String {
-    format!(
-        r#"<?xml version="1.0" encoding="UTF-8"?>
-<AttachRolePolicyResponse xmlns="https://iam.amazonaws.com/doc/2010-05-08/">
-  <ResponseMetadata>
-    <RequestId>{request_id}</RequestId>
-  </ResponseMetadata>
-</AttachRolePolicyResponse>"#,
-        request_id = request_id,
     )
 }
 
 pub fn get_policy_response(policy: &IamPolicy, request_id: &str) -> String {
+    let tags_section = if policy.tags.is_empty() {
+        String::new()
+    } else {
+        let tags_members = tags_xml(&policy.tags);
+        format!("\n      <Tags>\n{tags_members}\n      </Tags>")
+    };
+
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <GetPolicyResponse xmlns="https://iam.amazonaws.com/doc/2010-05-08/">
@@ -386,10 +436,11 @@ pub fn get_policy_response(policy: &IamPolicy, request_id: &str) -> String {
       <PolicyId>{id}</PolicyId>
       <Arn>{arn}</Arn>
       <Path>{path}</Path>
-      <CreateDate>{date}</CreateDate>
-      <AttachmentCount>0</AttachmentCount>
+      <DefaultVersionId>{default_version}</DefaultVersionId>
+      <AttachmentCount>{attachment_count}</AttachmentCount>
       <IsAttachable>true</IsAttachable>
-      <DefaultVersionId>v1</DefaultVersionId>
+      <CreateDate>{date}</CreateDate>
+      <Description>{description}</Description>{tags_section}
     </Policy>
   </GetPolicyResult>
   <ResponseMetadata>
@@ -400,20 +451,10 @@ pub fn get_policy_response(policy: &IamPolicy, request_id: &str) -> String {
         id = policy.policy_id,
         arn = policy.arn,
         path = policy.path,
+        default_version = policy.default_version_id,
+        attachment_count = policy.attachment_count,
         date = policy.created_at.format("%Y-%m-%dT%H:%M:%SZ"),
-        request_id = request_id,
-    )
-}
-
-pub fn delete_policy_response(request_id: &str) -> String {
-    format!(
-        r#"<?xml version="1.0" encoding="UTF-8"?>
-<DeletePolicyResponse xmlns="https://iam.amazonaws.com/doc/2010-05-08/">
-  <ResponseMetadata>
-    <RequestId>{request_id}</RequestId>
-  </ResponseMetadata>
-</DeletePolicyResponse>"#,
-        request_id = request_id,
+        description = xml_escape(&policy.description),
     )
 }
 
@@ -437,20 +478,6 @@ pub fn list_role_policies_response(policy_names: &[String], request_id: &str) ->
     <RequestId>{request_id}</RequestId>
   </ResponseMetadata>
 </ListRolePoliciesResponse>"#,
-        members = members,
-        request_id = request_id,
-    )
-}
-
-pub fn detach_role_policy_response(request_id: &str) -> String {
-    format!(
-        r#"<?xml version="1.0" encoding="UTF-8"?>
-<DetachRolePolicyResponse xmlns="https://iam.amazonaws.com/doc/2010-05-08/">
-  <ResponseMetadata>
-    <RequestId>{request_id}</RequestId>
-  </ResponseMetadata>
-</DetachRolePolicyResponse>"#,
-        request_id = request_id,
     )
 }
 
@@ -472,10 +499,6 @@ pub fn get_caller_identity_response(
     <RequestId>{request_id}</RequestId>
   </ResponseMetadata>
 </GetCallerIdentityResponse>"#,
-        arn = arn,
-        user_id = user_id,
-        account_id = account_id,
-        request_id = request_id,
     )
 }
 
@@ -537,7 +560,6 @@ pub fn assume_role_response(
         role_id = role_id,
         assumed_role_arn = assumed_role_arn,
         session = role_session_name,
-        request_id = request_id,
     )
 }
 
@@ -766,11 +788,4 @@ fn generate_alphanum_id(len: usize) -> String {
         .filter(|c| c.is_alphanumeric())
         .take(len)
         .collect()
-}
-
-fn xml_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
 }
