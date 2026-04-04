@@ -274,7 +274,7 @@ impl SnsService {
         let topic_attrs = parse_entries(req, "Attributes");
         let is_fifo_attr = topic_attrs
             .get("FifoTopic")
-            .map(|v| v == "true")
+            .map(|v| v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
         let is_fifo = name.ends_with(".fifo");
 
@@ -303,10 +303,19 @@ impl SnsService {
 
             // Apply topic attributes from the request
             for (k, v) in &topic_attrs {
-                // If FifoTopic=false is explicitly set, remove FIFO-related attrs
-                if k == "FifoTopic" && v == "false" {
-                    attributes.remove("FifoTopic");
-                    attributes.remove("ContentBasedDeduplication");
+                // Normalize boolean-like values for FifoTopic and ContentBasedDeduplication
+                if k == "FifoTopic" || k == "ContentBasedDeduplication" {
+                    let normalized = if v.eq_ignore_ascii_case("true") {
+                        "true"
+                    } else {
+                        "false"
+                    };
+                    if k == "FifoTopic" && normalized == "false" {
+                        attributes.remove("FifoTopic");
+                        attributes.remove("ContentBasedDeduplication");
+                        continue;
+                    }
+                    attributes.insert(k.clone(), normalized.to_string());
                     continue;
                 }
                 attributes.insert(k.clone(), v.clone());
@@ -716,13 +725,16 @@ impl SnsService {
 
         // Handle SMS publish (PhoneNumber)
         if let Some(ref phone) = phone_number {
-            // Validate phone number (basic E.164)
-            if !phone.starts_with('+') || phone.len() < 2 {
+            // Validate phone number (basic E.164: starts with + followed by digits)
+            let is_valid_e164 = phone.starts_with('+')
+                && phone.len() >= 2
+                && phone[1..].chars().all(|c| c.is_ascii_digit());
+            if !is_valid_e164 {
                 return Err(AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
                     "InvalidParameter",
                     format!(
-                        "Invalid parameter: PhoneNumber Reason: {phone} is not valid to publish to"
+                        "Invalid parameter: PhoneNumber Reason: {phone} does not meet the E164 format"
                     ),
                 ));
             }
@@ -781,7 +793,7 @@ impl SnsService {
                 return Err(AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
                     "InvalidParameter",
-                    "Invalid parameter: The MessageGroupId parameter is required for FIFO topics",
+                    "Invalid parameter: The request must contain the parameter MessageGroupId.",
                 ));
             }
             // FIFO topics require deduplication: either ContentBasedDeduplication or explicit ID
@@ -794,11 +806,20 @@ impl SnsService {
                 return Err(AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
                     "InvalidParameter",
-                    "Invalid parameter: The topic should either have ContentBasedDeduplication enabled or the MessageDeduplicationId provided explicitly",
+                    "Invalid parameter: The topic should either have ContentBasedDeduplication enabled or MessageDeduplicationId provided explicitly",
+                ));
+            }
+        } else {
+            // Non-FIFO: MessageGroupId is allowed (forwarded to SQS for fair queuing)
+            // But DeduplicationId is NOT allowed on non-FIFO topics
+            if message_dedup_id.is_some() {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameter",
+                    "Invalid parameter: The request includes MessageDeduplicationId parameter that is not valid for this topic type",
                 ));
             }
         }
-        // Non-FIFO: MessageGroupId and DeduplicationId are allowed (used for SQS fair queuing)
 
         let msg_id = uuid::Uuid::new_v4().to_string();
         state.published.push(PublishedMessage {
@@ -2497,6 +2518,39 @@ fn matches_filter_policy(
 
     // MessageAttributes scope
     for (attr_name, allowed_values) in &filter {
+        // Handle $or operator
+        if attr_name == "$or" {
+            if let Some(or_conditions) = allowed_values.as_array() {
+                let any_match = or_conditions.iter().any(|condition| {
+                    if let Some(cond_obj) = condition.as_object() {
+                        let cond_map: HashMap<String, Value> = cond_obj
+                            .iter()
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect();
+                        // Each condition in $or is a mini filter policy
+                        cond_map.iter().all(|(key, vals)| {
+                            if let Some(arr) = vals.as_array() {
+                                if let Some(msg_attr) = message_attributes.get(key) {
+                                    let val = msg_attr.string_value.as_deref().unwrap_or("");
+                                    check_filter_values(arr, val)
+                                } else {
+                                    false
+                                }
+                            } else {
+                                false
+                            }
+                        })
+                    } else {
+                        false
+                    }
+                });
+                if !any_match {
+                    return false;
+                }
+                continue;
+            }
+        }
+
         let allowed = match allowed_values.as_array() {
             Some(arr) => arr,
             None => continue,
@@ -2585,15 +2639,32 @@ fn matches_filter_policy_nested(filter: &HashMap<String, Value>, body: &Value) -
 
         if let Some(arr) = filter_value.as_array() {
             // This is a leaf filter: check the value
-            let value_str = match body_value {
-                Value::String(s) => s.clone(),
-                Value::Number(n) => n.to_string(),
-                Value::Bool(b) => b.to_string(),
-                Value::Null => "null".to_string(),
-                _ => body_value.to_string(),
-            };
-            if !check_filter_values(arr, &value_str) {
-                return false;
+            // If the body value is an array, check if ANY element matches
+            if let Some(body_arr) = body_value.as_array() {
+                let any_match = body_arr.iter().any(|elem| {
+                    let elem_str = match elem {
+                        Value::String(s) => s.clone(),
+                        Value::Number(n) => n.to_string(),
+                        Value::Bool(b) => b.to_string(),
+                        Value::Null => "null".to_string(),
+                        _ => elem.to_string(),
+                    };
+                    check_filter_values(arr, &elem_str)
+                });
+                if !any_match {
+                    return false;
+                }
+            } else {
+                let value_str = match body_value {
+                    Value::String(s) => s.clone(),
+                    Value::Number(n) => n.to_string(),
+                    Value::Bool(b) => b.to_string(),
+                    Value::Null => "null".to_string(),
+                    _ => body_value.to_string(),
+                };
+                if !check_filter_values(arr, &value_str) {
+                    return false;
+                }
             }
         } else if let Some(nested_filter) = filter_value.as_object() {
             // Nested filter: recurse
