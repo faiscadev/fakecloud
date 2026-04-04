@@ -363,7 +363,7 @@ impl SnsService {
             timestamp: Utc::now(),
         });
 
-        // Fan out to SQS subscribers, checking filter policies
+        // Collect subscribers by protocol, checking filter policies
         let sqs_subscribers: Vec<String> = state
             .subscriptions
             .values()
@@ -371,35 +371,69 @@ impl SnsService {
             .filter(|s| matches_filter_policy(s, &message_attributes))
             .map(|s| s.endpoint.clone())
             .collect();
+        let http_subscribers: Vec<String> = state
+            .subscriptions
+            .values()
+            .filter(|s| {
+                s.topic_arn == topic_arn
+                    && (s.protocol == "http" || s.protocol == "https")
+                    && s.confirmed
+            })
+            .filter(|s| matches_filter_policy(s, &message_attributes))
+            .map(|s| s.endpoint.clone())
+            .collect();
         drop(state);
 
-        if !sqs_subscribers.is_empty() {
-            // Build MessageAttributes for the envelope
-            let mut envelope_attrs = serde_json::Map::new();
-            for (key, attr) in &message_attributes {
-                let mut attr_obj = serde_json::Map::new();
-                attr_obj.insert("Type".to_string(), Value::String(attr.data_type.clone()));
-                if let Some(ref sv) = attr.string_value {
-                    attr_obj.insert("Value".to_string(), Value::String(sv.clone()));
+        // Build SNS notification envelope (matches real AWS format)
+        let mut envelope_attrs = serde_json::Map::new();
+        for (key, attr) in &message_attributes {
+            let mut attr_obj = serde_json::Map::new();
+            attr_obj.insert("Type".to_string(), Value::String(attr.data_type.clone()));
+            if let Some(ref sv) = attr.string_value {
+                attr_obj.insert("Value".to_string(), Value::String(sv.clone()));
+            }
+            envelope_attrs.insert(key.clone(), Value::Object(attr_obj));
+        }
+
+        let sns_envelope = serde_json::json!({
+            "Type": "Notification",
+            "MessageId": msg_id,
+            "TopicArn": topic_arn,
+            "Subject": subject.as_deref().unwrap_or(""),
+            "Message": message,
+            "Timestamp": Utc::now().to_rfc3339(),
+            "SignatureVersion": "1",
+            "Signature": "FAKE_SIGNATURE",
+            "SigningCertURL": "https://sns.us-east-1.amazonaws.com/SimpleNotificationService-0000000000000000000000.pem",
+            "UnsubscribeURL": format!("http://localhost:4566/?Action=Unsubscribe&SubscriptionArn=fake"),
+            "MessageAttributes": envelope_attrs,
+        });
+        let envelope_str = sns_envelope.to_string();
+
+        // Deliver to SQS subscribers
+        for queue_arn in &sqs_subscribers {
+            self.delivery
+                .send_to_sqs(queue_arn, &envelope_str, &HashMap::new());
+        }
+
+        // Deliver to HTTP/HTTPS subscribers (fire-and-forget)
+        for endpoint_url in http_subscribers {
+            let body = envelope_str.clone();
+            let topic = topic_arn.clone();
+            tokio::spawn(async move {
+                let client = reqwest::Client::new();
+                let result = client
+                    .post(&endpoint_url)
+                    .header("Content-Type", "application/json")
+                    .header("x-amz-sns-message-type", "Notification")
+                    .header("x-amz-sns-topic-arn", &topic)
+                    .body(body)
+                    .send()
+                    .await;
+                if let Err(e) = result {
+                    tracing::warn!(endpoint = %endpoint_url, error = %e, "SNS HTTP delivery failed");
                 }
-                envelope_attrs.insert(key.clone(), Value::Object(attr_obj));
-            }
-
-            let sns_envelope = serde_json::json!({
-                "Type": "Notification",
-                "MessageId": msg_id,
-                "TopicArn": topic_arn,
-                "Subject": subject.as_deref().unwrap_or(""),
-                "Message": message,
-                "Timestamp": Utc::now().to_rfc3339(),
-                "MessageAttributes": envelope_attrs,
             });
-            let envelope_str = sns_envelope.to_string();
-
-            for queue_arn in sqs_subscribers {
-                self.delivery
-                    .send_to_sqs(&queue_arn, &envelope_str, &HashMap::new());
-            }
         }
 
         Ok(xml_resp(
@@ -742,13 +776,49 @@ fn matches_filter_policy(
 
         let msg_attr = match message_attributes.get(attr_name) {
             Some(a) => a,
-            None => return false, // attribute missing from message
+            None => {
+                // Check if any allowed value is {"exists": false} — matches when attribute is absent
+                let has_exists_false = allowed.iter().any(|v| {
+                    v.as_object()
+                        .and_then(|o| o.get("exists"))
+                        .and_then(|e| e.as_bool())
+                        == Some(false)
+                });
+                if has_exists_false {
+                    continue;
+                }
+                return false; // attribute missing and no exists:false matcher
+            }
         };
 
         let attr_value = msg_attr.string_value.as_deref().unwrap_or("");
         let matched = allowed.iter().any(|v| match v {
             Value::String(s) => s == attr_value,
             Value::Number(n) => n.to_string() == attr_value,
+            Value::Object(obj) => {
+                // Advanced filter operators
+                if let Some(prefix) = obj.get("prefix").and_then(|v| v.as_str()) {
+                    attr_value.starts_with(prefix)
+                } else if let Some(anything_but) = obj.get("anything-but") {
+                    match anything_but {
+                        Value::String(s) => attr_value != s,
+                        Value::Array(arr) => !arr.iter().any(|v| v.as_str() == Some(attr_value)),
+                        _ => false,
+                    }
+                } else if let Some(numeric_arr) = obj.get("numeric").and_then(|v| v.as_array()) {
+                    // Numeric comparison: {"numeric": [">", 100]} or {"numeric": [">=", 50, "<", 200]}
+                    let attr_num: f64 = match attr_value.parse() {
+                        Ok(n) => n,
+                        Err(_) => return false,
+                    };
+                    matches_numeric_filter(attr_num, numeric_arr)
+                } else {
+                    // {"exists": true/false} — attribute is present (since we got here), so match if true
+                    obj.get("exists")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or_default()
+                }
+            }
             _ => false,
         });
         if !matched {
@@ -756,5 +826,33 @@ fn matches_filter_policy(
         }
     }
 
+    true
+}
+
+/// Evaluate a numeric filter like `[">", 100]` or `[">=", 50, "<", 200]` against a value.
+fn matches_numeric_filter(value: f64, conditions: &[Value]) -> bool {
+    let mut i = 0;
+    while i + 1 < conditions.len() {
+        let op = match conditions[i].as_str() {
+            Some(s) => s,
+            None => return false,
+        };
+        let threshold = match conditions[i + 1].as_f64() {
+            Some(n) => n,
+            None => return false,
+        };
+        let passes = match op {
+            "=" => (value - threshold).abs() < f64::EPSILON,
+            ">" => value > threshold,
+            ">=" => value >= threshold,
+            "<" => value < threshold,
+            "<=" => value <= threshold,
+            _ => return false,
+        };
+        if !passes {
+            return false;
+        }
+        i += 2;
+    }
     true
 }

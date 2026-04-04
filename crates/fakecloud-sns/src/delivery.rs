@@ -50,7 +50,7 @@ impl SnsDelivery for SnsDeliveryImpl {
         // Drop the lock before calling into SQS delivery
         drop(state);
 
-        // Wrap the message in SNS notification envelope
+        // Wrap the message in SNS notification envelope (matches real AWS format)
         let sns_envelope = serde_json::json!({
             "Type": "Notification",
             "MessageId": msg_id,
@@ -58,6 +58,10 @@ impl SnsDelivery for SnsDeliveryImpl {
             "Subject": subject.unwrap_or(""),
             "Message": message,
             "Timestamp": Utc::now().to_rfc3339(),
+            "SignatureVersion": "1",
+            "Signature": "FAKE_SIGNATURE",
+            "SigningCertURL": "https://sns.us-east-1.amazonaws.com/SimpleNotificationService-0000000000000000000000.pem",
+            "UnsubscribeURL": format!("http://localhost:4566/?Action=Unsubscribe&SubscriptionArn=fake"),
         });
         let envelope_str = sns_envelope.to_string();
 
