@@ -324,6 +324,46 @@ pub fn create_policy_response(policy: &IamPolicy, request_id: &str) -> String {
     )
 }
 
+pub fn list_policies_response(policies: &[IamPolicy], request_id: &str) -> String {
+    let members: String = policies
+        .iter()
+        .map(|p| {
+            format!(
+                r#"      <member>
+        <PolicyName>{name}</PolicyName>
+        <PolicyId>{id}</PolicyId>
+        <Arn>{arn}</Arn>
+        <Path>{path}</Path>
+        <CreateDate>{date}</CreateDate>
+      </member>"#,
+                name = p.policy_name,
+                id = p.policy_id,
+                arn = p.arn,
+                path = p.path,
+                date = p.created_at.format("%Y-%m-%dT%H:%M:%SZ"),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<ListPoliciesResponse xmlns="https://iam.amazonaws.com/doc/2010-05-08/">
+  <ListPoliciesResult>
+    <IsTruncated>false</IsTruncated>
+    <Policies>
+{members}
+    </Policies>
+  </ListPoliciesResult>
+  <ResponseMetadata>
+    <RequestId>{request_id}</RequestId>
+  </ResponseMetadata>
+</ListPoliciesResponse>"#,
+        members = members,
+        request_id = request_id,
+    )
+}
+
 pub fn attach_role_policy_response(request_id: &str) -> String {
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>

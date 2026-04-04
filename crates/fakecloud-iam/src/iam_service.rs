@@ -37,6 +37,7 @@ impl AwsService for IamService {
             "DeleteRole" => self.delete_role(&req),
             "ListRoles" => self.list_roles(&req),
             "CreatePolicy" => self.create_policy(&req),
+            "ListPolicies" => self.list_policies(&req),
             "AttachRolePolicy" => self.attach_role_policy(&req),
             _ => Err(AwsServiceError::action_not_implemented("iam", &req.action)),
         }
@@ -56,6 +57,7 @@ impl AwsService for IamService {
             "DeleteRole",
             "ListRoles",
             "CreatePolicy",
+            "ListPolicies",
             "AttachRolePolicy",
         ]
     }
@@ -309,6 +311,13 @@ impl IamService {
         let xml = xml_responses::create_policy_response(&policy, &req.request_id);
         state.policies.insert(policy.arn.clone(), policy);
 
+        Ok(AwsResponse::xml(StatusCode::OK, xml))
+    }
+
+    fn list_policies(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let state = self.state.read();
+        let policies: Vec<IamPolicy> = state.policies.values().cloned().collect();
+        let xml = xml_responses::list_policies_response(&policies, &req.request_id);
         Ok(AwsResponse::xml(StatusCode::OK, xml))
     }
 
