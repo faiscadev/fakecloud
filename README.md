@@ -36,7 +36,7 @@ built to fill that gap -- with a focus on correctness and simplicity.
 | SQS | 20 actions | Paid |
 | SNS | 16 actions | Paid |
 | EventBridge | 15 actions | Paid |
-| IAM / STS | 16 actions | Paid |
+| IAM / STS | 100+ actions | Paid |
 | SSM Parameter Store | 28 actions | Paid |
 | Cross-service delivery | Yes | Yes |
 | Scheduled rules fire | Yes | Yes |
@@ -112,11 +112,53 @@ Key features: pattern-based rules (nested fields, numeric comparisons, prefix,
 exists, anything-but), scheduled rules (rate and cron expressions) that actually
 fire, targets deliver to SNS topics and SQS queues.
 
-### IAM / STS (16 actions)
+### IAM / STS (100+ actions)
 
-**IAM:** CreateUser, GetUser, DeleteUser, ListUsers, CreateAccessKey,
-DeleteAccessKey, ListAccessKeys, CreateRole, GetRole, DeleteRole, ListRoles,
-CreatePolicy, ListPolicies, AttachRolePolicy
+**IAM Users:** CreateUser, GetUser, DeleteUser, ListUsers, UpdateUser, TagUser,
+UntagUser, ListUserTags, CreateAccessKey, DeleteAccessKey, ListAccessKeys,
+UpdateAccessKey, CreateLoginProfile, GetLoginProfile, UpdateLoginProfile,
+DeleteLoginProfile, AttachUserPolicy, DetachUserPolicy, ListAttachedUserPolicies,
+PutUserPolicy, GetUserPolicy, DeleteUserPolicy, ListUserPolicies
+
+**IAM Roles:** CreateRole, GetRole, DeleteRole, ListRoles, UpdateRole,
+UpdateRoleDescription, UpdateAssumeRolePolicy, TagRole, UntagRole, ListRoleTags,
+AttachRolePolicy, DetachRolePolicy, ListAttachedRolePolicies, PutRolePolicy,
+GetRolePolicy, DeleteRolePolicy, ListRolePolicies, CreateServiceLinkedRole,
+DeleteServiceLinkedRole, GetServiceLinkedRoleDeletionStatus
+
+**IAM Groups:** CreateGroup, GetGroup, DeleteGroup, ListGroups, UpdateGroup,
+AddUserToGroup, RemoveUserFromGroup, ListGroupsForUser, PutGroupPolicy,
+GetGroupPolicy, DeleteGroupPolicy, ListGroupPolicies, AttachGroupPolicy,
+DetachGroupPolicy, ListAttachedGroupPolicies
+
+**IAM Policies:** CreatePolicy, GetPolicy, DeletePolicy, ListPolicies, TagPolicy,
+UntagPolicy, ListPolicyTags, CreatePolicyVersion, GetPolicyVersion,
+ListPolicyVersions, DeletePolicyVersion, SetDefaultPolicyVersion,
+ListEntitiesForPolicy
+
+**Instance Profiles:** CreateInstanceProfile, GetInstanceProfile,
+DeleteInstanceProfile, ListInstanceProfiles, AddRoleToInstanceProfile,
+RemoveRoleFromInstanceProfile, ListInstanceProfilesForRole, TagInstanceProfile,
+UntagInstanceProfile, ListInstanceProfileTags
+
+**Identity Providers:** CreateSAMLProvider, GetSAMLProvider, DeleteSAMLProvider,
+ListSAMLProviders, UpdateSAMLProvider, CreateOpenIDConnectProvider,
+GetOpenIDConnectProvider, DeleteOpenIDConnectProvider, ListOpenIDConnectProviders,
+UpdateOpenIDConnectProviderThumbprint, AddClientIDToOpenIDConnectProvider,
+RemoveClientIDFromOpenIDConnectProvider, TagOpenIDConnectProvider,
+UntagOpenIDConnectProvider, ListOpenIDConnectProviderTags
+
+**Certificates:** UploadServerCertificate, GetServerCertificate,
+DeleteServerCertificate, ListServerCertificates, UploadSigningCertificate,
+ListSigningCertificates, UpdateSigningCertificate, DeleteSigningCertificate
+
+**MFA:** CreateVirtualMFADevice, DeleteVirtualMFADevice, ListVirtualMFADevices,
+EnableMFADevice, DeactivateMFADevice, ListMFADevices
+
+**Account:** GetAccountSummary, GetAccountAuthorizationDetails, CreateAccountAlias,
+DeleteAccountAlias, ListAccountAliases, UpdateAccountPasswordPolicy,
+GetAccountPasswordPolicy, DeleteAccountPasswordPolicy, GenerateCredentialReport,
+GetCredentialReport
 
 **STS:** GetCallerIdentity, AssumeRole
 
