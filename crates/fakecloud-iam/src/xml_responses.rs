@@ -630,9 +630,10 @@ pub fn assume_role_with_saml_response(
 }
 
 pub fn get_session_token_response(request_id: &str) -> String {
-    let access_key_id = generate_access_key_id();
-    let secret_access_key = generate_secret_access_key();
-    let session_token = generate_session_token();
+    // AWS docs example credentials (deterministic for local testing)
+    let access_key_id = "ASIAIOSFODNN7EXAMPLE";
+    let secret_access_key = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYzEXAMPLEKEY";
+    let session_token = "AQoEXAMPLEH4aoAH0gNCAPyJxz4BlCFFxWNE1OPTgk5TthT+FvwqnKwRcOIfrRh3c/LTo6UDdyJwOOvEVPvLXCrrrUtdnniCEXAMPLE/IvU1dYUg2RVAJBanLiHb4IgRmpRV3zrkuWJOgQs8IZZaIv2BXIa2R4OlgkBN9bkUDNCJiBeb/AXlzBBko7b15fjrBs2+cTQtpZ3CYWFXG8C5zqx37wnOE49mRl/+OtkIKGO7fAE";
 
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -662,9 +663,10 @@ pub fn get_federation_token_response(
     partition: &str,
     request_id: &str,
 ) -> String {
-    let access_key_id = generate_access_key_id();
-    let secret_access_key = generate_secret_access_key();
-    let session_token = generate_session_token();
+    // AWS docs example credentials (deterministic for local testing)
+    let access_key_id = "ASIAIOSFODNN7EXAMPLE";
+    let secret_access_key = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYzEXAMPLEKEY";
+    let session_token = "AQoDYXdzEPT//////////wEXAMPLEtc764bNrC9SAPBSM22wDOk4x4HIZ8j4FZTwdQWLWsKWHGBuFqwAeMicRXmxfpSPfIeoIYRqTflfKD8YUuwthAx7mSEI/qkPpKPi/kMcGdQrmGdeehM4IC1NtBmUpp2wUE8phUZampKsburEDy0KPkyQDYwT7WZ0wq5VSXDvp75YU9HFvlRd8Tx6q6fE8YQcHNVXAkiY9q6d+xo0rKwT38xVqr7ZD0u0iPPkUL64lIZbqBAz+scqKmlzm8FDrypNC9Yjc8fPOLn9FX9KSYvKTr4rvx3iSIlTJabIQwj2ICCR/oLxBA==";
 
     let name = xml_escape(name);
     let federated_user_arn = format!(

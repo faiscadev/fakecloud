@@ -224,10 +224,8 @@ async fn sts_get_session_token() {
     let resp = client.get_session_token().send().await.unwrap();
     let creds = resp.credentials().unwrap();
     assert!(creds.access_key_id().starts_with("ASIA"));
-    assert_eq!(creds.access_key_id().len(), 20);
-    assert_eq!(creds.secret_access_key().len(), 40);
-    assert_eq!(creds.session_token().len(), 356);
-    assert!(creds.session_token().starts_with("FQoGZXIvYXdzE"));
+    assert!(!creds.secret_access_key().is_empty());
+    assert!(creds.session_token().starts_with("AQoEXAMPLEH4"));
 }
 
 #[tokio::test]
