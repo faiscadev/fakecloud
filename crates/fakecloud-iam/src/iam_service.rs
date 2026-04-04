@@ -43,6 +43,10 @@ impl AwsService for IamService {
             "AttachRolePolicy" => self.attach_role_policy(&req),
             "DetachRolePolicy" => self.detach_role_policy(&req),
             "ListRolePolicies" => self.list_role_policies(&req),
+            "ListAttachedRolePolicies" => self.list_attached_role_policies(&req),
+            "GetPolicyVersion" => self.get_policy_version(&req),
+            "ListPolicyVersions" => self.list_policy_versions(&req),
+            "ListInstanceProfilesForRole" => self.list_instance_profiles_for_role(&req),
             _ => Err(AwsServiceError::action_not_implemented("iam", &req.action)),
         }
     }
@@ -67,6 +71,8 @@ impl AwsService for IamService {
             "AttachRolePolicy",
             "DetachRolePolicy",
             "ListRolePolicies",
+            "ListAttachedRolePolicies",
+            "GetPolicyVersion",
         ]
     }
 }
@@ -430,6 +436,157 @@ impl IamService {
         let xml = xml_responses::detach_role_policy_response(&req.request_id);
         Ok(AwsResponse::xml(StatusCode::OK, xml))
     }
+
+    fn list_attached_role_policies(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let role_name = required_param(&req.query_params, "RoleName")?;
+        let state = self.state.read();
+
+        if !state.roles.contains_key(&role_name) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "NoSuchEntity",
+                format!("The role with name {role_name} cannot be found."),
+            ));
+        }
+
+        let policy_arns = state
+            .role_policies
+            .get(&role_name)
+            .cloned()
+            .unwrap_or_default();
+
+        let members: String = policy_arns
+            .iter()
+            .filter_map(|arn| {
+                state.policies.get(arn).map(|p| {
+                    format!(
+                        "      <member>\n        <PolicyName>{}</PolicyName>\n        <PolicyArn>{}</PolicyArn>\n      </member>",
+                        p.policy_name, p.arn
+                    )
+                })
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let xml = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<ListAttachedRolePoliciesResponse xmlns="https://iam.amazonaws.com/doc/2010-05-08/">
+  <ListAttachedRolePoliciesResult>
+    <IsTruncated>false</IsTruncated>
+    <AttachedPolicies>
+{members}
+    </AttachedPolicies>
+  </ListAttachedRolePoliciesResult>
+  <ResponseMetadata>
+    <RequestId>{}</RequestId>
+  </ResponseMetadata>
+</ListAttachedRolePoliciesResponse>"#,
+            req.request_id
+        );
+        Ok(AwsResponse::xml(StatusCode::OK, xml))
+    }
+
+    fn list_policy_versions(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let policy_arn = required_param(&req.query_params, "PolicyArn")?;
+        let state = self.state.read();
+
+        let policy = state.policies.get(&policy_arn).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "NoSuchEntity",
+                format!("Policy {policy_arn} not found."),
+            )
+        })?;
+
+        let xml = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<ListPolicyVersionsResponse xmlns="https://iam.amazonaws.com/doc/2010-05-08/">
+  <ListPolicyVersionsResult>
+    <IsTruncated>false</IsTruncated>
+    <Versions>
+      <member>
+        <VersionId>v1</VersionId>
+        <IsDefaultVersion>true</IsDefaultVersion>
+        <CreateDate>{}</CreateDate>
+      </member>
+    </Versions>
+  </ListPolicyVersionsResult>
+  <ResponseMetadata>
+    <RequestId>{}</RequestId>
+  </ResponseMetadata>
+</ListPolicyVersionsResponse>"#,
+            policy.created_at.format("%Y-%m-%dT%H:%M:%SZ"),
+            req.request_id
+        );
+        Ok(AwsResponse::xml(StatusCode::OK, xml))
+    }
+
+    fn list_instance_profiles_for_role(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let _role_name = required_param(&req.query_params, "RoleName")?;
+        // Return empty list — we don't support instance profiles yet
+        let xml = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<ListInstanceProfilesForRoleResponse xmlns="https://iam.amazonaws.com/doc/2010-05-08/">
+  <ListInstanceProfilesForRoleResult>
+    <IsTruncated>false</IsTruncated>
+    <InstanceProfiles/>
+  </ListInstanceProfilesForRoleResult>
+  <ResponseMetadata>
+    <RequestId>{}</RequestId>
+  </ResponseMetadata>
+</ListInstanceProfilesForRoleResponse>"#,
+            req.request_id
+        );
+        Ok(AwsResponse::xml(StatusCode::OK, xml))
+    }
+
+    fn get_policy_version(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let policy_arn = required_param(&req.query_params, "PolicyArn")?;
+        let _version_id = required_param(&req.query_params, "VersionId")?;
+        let state = self.state.read();
+
+        let policy = state.policies.get(&policy_arn).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "NoSuchEntity",
+                format!("Policy {policy_arn} not found."),
+            )
+        })?;
+
+        let xml = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<GetPolicyVersionResponse xmlns="https://iam.amazonaws.com/doc/2010-05-08/">
+  <GetPolicyVersionResult>
+    <PolicyVersion>
+      <Document>{}</Document>
+      <VersionId>v1</VersionId>
+      <IsDefaultVersion>true</IsDefaultVersion>
+      <CreateDate>{}</CreateDate>
+    </PolicyVersion>
+  </GetPolicyVersionResult>
+  <ResponseMetadata>
+    <RequestId>{}</RequestId>
+  </ResponseMetadata>
+</GetPolicyVersionResponse>"#,
+            xml_escape(&policy.policy_document),
+            policy.created_at.format("%Y-%m-%dT%H:%M:%SZ"),
+            req.request_id
+        );
+        Ok(AwsResponse::xml(StatusCode::OK, xml))
+    }
+}
+
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
 
 fn required_param(
