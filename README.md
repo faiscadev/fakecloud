@@ -37,7 +37,7 @@ built to fill that gap -- with a focus on correctness and simplicity.
 | SNS | 16 actions | Paid |
 | EventBridge | 15 actions | Paid |
 | IAM / STS | 16 actions | Paid |
-| SSM Parameter Store | 12 actions | Paid |
+| SSM Parameter Store | 28 actions | Paid |
 | Cross-service delivery | Yes | Yes |
 | Scheduled rules fire | Yes | Yes |
 
@@ -120,16 +120,25 @@ CreatePolicy, ListPolicies, AttachRolePolicy
 
 **STS:** GetCallerIdentity, AssumeRole
 
-### SSM Parameter Store (12 actions)
+### SSM Parameter Store (28 actions)
 
-PutParameter, GetParameter, GetParameters, GetParametersByPath,
+**Parameters**: PutParameter, GetParameter, GetParameters, GetParametersByPath,
 DeleteParameter, DeleteParameters, DescribeParameters, GetParameterHistory,
-AddTagsToResource, RemoveTagsFromResource, ListTagsForResource,
-LabelParameterVersion
+LabelParameterVersion, UnlabelParameterVersion
+
+**Tags**: AddTagsToResource, RemoveTagsFromResource, ListTagsForResource
+
+**Documents**: CreateDocument, GetDocument, DeleteDocument, UpdateDocument,
+DescribeDocument, UpdateDocumentDefaultVersion, ListDocuments,
+DescribeDocumentPermission, ModifyDocumentPermission
+
+**Commands**: SendCommand, ListCommands, GetCommandInvocation,
+ListCommandInvocations, CancelCommand
 
 Key features: String / StringList / SecureString types, automatic versioning,
 parameter history, hierarchical path queries with recursive option, pagination
-with NextToken, labels.
+with NextToken, labels, version limits, parameter name normalization (leading
+slash optional), tag-based filtering.
 
 ### Cross-Service Delivery
 
