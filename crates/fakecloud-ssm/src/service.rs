@@ -117,7 +117,7 @@ fn param_to_json(p: &SsmParameter, with_value: bool, with_decryption: bool) -> V
         "Type": p.param_type,
         "Version": p.version,
         "ARN": p.arn,
-        "LastModifiedDate": p.last_modified.timestamp() as f64,
+        "LastModifiedDate": p.last_modified.timestamp_millis() as f64 / 1000.0,
         "DataType": p.data_type,
     });
     if with_value {
@@ -136,7 +136,8 @@ fn param_to_describe_json(p: &SsmParameter) -> Value {
         "Type": p.param_type,
         "Version": p.version,
         "ARN": p.arn,
-        "LastModifiedDate": p.last_modified.timestamp() as f64,
+        "LastModifiedDate": p.last_modified.timestamp_millis() as f64 / 1000.0,
+        "LastModifiedUser": "N/A",
         "DataType": p.data_type,
         "Tier": p.tier,
     });
@@ -401,6 +402,10 @@ impl SsmService {
             if key_id.is_some() {
                 existing.key_id = key_id;
             }
+            // Always update data_type if explicitly provided
+            if body["DataType"].as_str().is_some() {
+                existing.data_type = data_type;
+            }
 
             let resp_tier = existing.tier.clone();
             return Ok(json_resp(json!({
@@ -461,14 +466,22 @@ impl SsmService {
         let raw_name = body["Name"].as_str().ok_or_else(|| missing("Name"))?;
         let with_decryption = body["WithDecryption"].as_bool().unwrap_or(false);
 
+        let state = self.state.read();
+
+        // Handle ARN-style names directly (they contain many colons)
+        if raw_name.starts_with("arn:aws:ssm:") {
+            let param = resolve_param_by_name_or_arn(&state, raw_name)?;
+            return Ok(json_resp(json!({
+                "Parameter": param_to_json(param, true, with_decryption),
+            })));
+        }
+
         let (base_name, selector) = parse_param_selector(raw_name);
 
         // Check for invalid selectors (too many colons)
         if let ParamSelector::Invalid(n) = selector {
             return Err(param_not_found(&n));
         }
-
-        let state = self.state.read();
 
         // Try looking up by name or by ARN
         let param = resolve_param_by_name_or_arn(&state, base_name)?;
@@ -490,7 +503,7 @@ impl SsmService {
                         "Type": hist.param_type,
                         "Version": hist.version,
                         "ARN": param.arn,
-                        "LastModifiedDate": hist.last_modified.timestamp() as f64,
+                        "LastModifiedDate": hist.last_modified.timestamp_millis() as f64 / 1000.0,
                         "DataType": param.data_type,
                     });
                     if param.param_type == "SecureString" && !with_decryption {
@@ -525,7 +538,7 @@ impl SsmService {
                                 "Type": hist.param_type,
                                 "Version": hist.version,
                                 "ARN": param.arn,
-                                "LastModifiedDate": hist.last_modified.timestamp() as f64,
+                                "LastModifiedDate": hist.last_modified.timestamp_millis() as f64 / 1000.0,
                                 "DataType": param.data_type,
                             });
                             if param.param_type == "SecureString" && !with_decryption {
@@ -608,7 +621,7 @@ impl SsmService {
                                     "Type": hist.param_type,
                                     "Version": hist.version,
                                     "ARN": param.arn,
-                                    "LastModifiedDate": hist.last_modified.timestamp() as f64,
+                                    "LastModifiedDate": hist.last_modified.timestamp_millis() as f64 / 1000.0,
                                     "DataType": param.data_type,
                                 });
                                 v["Value"] = json!(hist.value);
@@ -639,7 +652,7 @@ impl SsmService {
                                             "Type": hist.param_type,
                                             "Version": hist.version,
                                             "ARN": param.arn,
-                                            "LastModifiedDate": hist.last_modified.timestamp() as f64,
+                                            "LastModifiedDate": hist.last_modified.timestamp_millis() as f64 / 1000.0,
                                             "DataType": param.data_type,
                                         });
                                         v["Value"] = json!(hist.value);
@@ -853,7 +866,7 @@ impl SsmService {
                     "Name": param.name,
                     "Value": h.value,
                     "Version": h.version,
-                    "LastModifiedDate": h.last_modified.timestamp() as f64,
+                    "LastModifiedDate": h.last_modified.timestamp_millis() as f64 / 1000.0,
                     "Type": h.param_type,
                 });
                 if let Some(desc) = &h.description {
@@ -875,7 +888,7 @@ impl SsmService {
             "Name": param.name,
             "Value": param.value,
             "Version": param.version,
-            "LastModifiedDate": param.last_modified.timestamp() as f64,
+            "LastModifiedDate": param.last_modified.timestamp_millis() as f64 / 1000.0,
             "Type": param.param_type,
         });
         if let Some(desc) = &param.description {
@@ -1297,7 +1310,7 @@ impl SsmService {
                 "LatestVersion": "1",
                 "DefaultVersion": "1",
                 "Status": "Active",
-                "CreatedDate": now.timestamp() as f64,
+                "CreatedDate": now.timestamp_millis() as f64 / 1000.0,
                 "Owner": state.account_id,
                 "SchemaVersion": "2.2",
                 "PlatformTypes": ["Linux", "MacOS", "Windows"],
@@ -1333,7 +1346,7 @@ impl SsmService {
             "DocumentVersion": ver.document_version,
             "VersionName": ver.version_name,
             "Status": ver.status,
-            "CreatedDate": ver.created_date.timestamp() as f64,
+            "CreatedDate": ver.created_date.timestamp_millis() as f64 / 1000.0,
         })))
     }
 
@@ -1391,7 +1404,7 @@ impl SsmService {
                 "LatestVersion": doc.latest_version,
                 "DefaultVersion": doc.default_version,
                 "Status": "Active",
-                "CreatedDate": doc.created_date.timestamp() as f64,
+                "CreatedDate": doc.created_date.timestamp_millis() as f64 / 1000.0,
                 "Owner": doc.owner,
                 "SchemaVersion": "2.2",
             }
@@ -1418,7 +1431,7 @@ impl SsmService {
                 "LatestVersion": doc.latest_version,
                 "DefaultVersion": doc.default_version,
                 "Status": doc.status,
-                "CreatedDate": doc.created_date.timestamp() as f64,
+                "CreatedDate": doc.created_date.timestamp_millis() as f64 / 1000.0,
                 "Owner": doc.owner,
                 "SchemaVersion": "2.2",
                 "PlatformTypes": ["Linux", "MacOS", "Windows"],
@@ -1695,7 +1708,7 @@ impl SsmService {
                 "Parameters": parameters,
                 "Status": "Success",
                 "StatusDetails": "Details placeholder",
-                "RequestedDateTime": now.timestamp() as f64,
+                "RequestedDateTime": now.timestamp_millis() as f64 / 1000.0,
                 "Comment": comment,
                 "OutputS3BucketName": output_s3_bucket,
                 "OutputS3KeyPrefix": output_s3_prefix,
@@ -1737,7 +1750,7 @@ impl SsmService {
                     "Parameters": c.parameters,
                     "Status": c.status,
                     "StatusDetails": "Details placeholder",
-                    "RequestedDateTime": c.requested_date_time.timestamp() as f64,
+                    "RequestedDateTime": c.requested_date_time.timestamp_millis() as f64 / 1000.0,
                     "Comment": c.comment,
                 })
             })
@@ -1805,7 +1818,7 @@ impl SsmService {
                         "DocumentName": c.document_name,
                         "Status": "Success",
                         "StatusDetails": "Success",
-                        "RequestedDateTime": c.requested_date_time.timestamp() as f64,
+                        "RequestedDateTime": c.requested_date_time.timestamp_millis() as f64 / 1000.0,
                         "Comment": c.comment,
                     })
                 })
