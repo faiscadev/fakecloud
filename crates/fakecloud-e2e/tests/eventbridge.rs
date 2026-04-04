@@ -73,7 +73,7 @@ async fn eb_put_rule_with_targets() {
         .targets(
             Target::builder()
                 .id("target-1")
-                .arn("arn:aws:sqs:us-east-1:000000000000:my-queue")
+                .arn("arn:aws:sqs:us-east-1:123456789012:my-queue")
                 .build()
                 .unwrap(),
         )
@@ -191,7 +191,7 @@ async fn eb_schedule_fires_to_sqs() {
         .targets(
             Target::builder()
                 .id("sqs-target")
-                .arn("arn:aws:sqs:us-east-1:000000000000:schedule-target")
+                .arn("arn:aws:sqs:us-east-1:123456789012:schedule-target")
                 .build()
                 .unwrap(),
         )

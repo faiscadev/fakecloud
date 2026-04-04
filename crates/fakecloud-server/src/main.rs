@@ -31,7 +31,7 @@ struct Cli {
     region: String,
 
     /// AWS account ID to use
-    #[arg(long, default_value = "000000000000", env = "FAKECLOUD_ACCOUNT_ID")]
+    #[arg(long, default_value = "123456789012", env = "FAKECLOUD_ACCOUNT_ID")]
     account_id: String,
 
     /// Log level (trace, debug, info, warn, error)
