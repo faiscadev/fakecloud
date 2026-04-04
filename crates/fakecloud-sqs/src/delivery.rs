@@ -52,6 +52,7 @@ impl SqsDelivery for SqsDeliveryImpl {
                         MessageAttribute {
                             data_type: v.data_type.clone(),
                             string_value: v.string_value.clone(),
+                            binary_value: v.binary_value.as_ref().map(|s| s.as_bytes().to_vec()),
                         },
                     )
                 })

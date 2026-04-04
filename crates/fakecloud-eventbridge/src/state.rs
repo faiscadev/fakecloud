@@ -188,6 +188,12 @@ impl EventBridgeState {
                 name: "default".to_string(),
                 arn: default_bus_arn,
                 tags: HashMap::new(),
+                policy: None,
+                description: None,
+                kms_key_identifier: None,
+                dead_letter_config: None,
+                creation_time: Utc::now(),
+                last_modified_time: Utc::now(),
             },
         );
     }
