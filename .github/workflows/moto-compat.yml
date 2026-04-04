@@ -52,7 +52,7 @@ jobs:
           python -m venv /tmp/moto-venv
           source /tmp/moto-venv/bin/activate
           pip install --quiet --upgrade pip
-          pip install --quiet -e "/tmp/moto[all]" pytest pytest-timeout requests flask
+          pip install --quiet -e "/tmp/moto[all]" pytest pytest-timeout requests flask freezegun
 
       - name: Start FakeCloud
         run: |
@@ -106,7 +106,7 @@ jobs:
                 "test_$svc/" \
                 --timeout=30 \
                 -q \
-                --tb=no \
+                --tb=short \
                 --no-header \
                 --ignore-glob="**/test_server.py" \
                 2>&1) > "tests/compat/moto/results/${svc}.log" || true
