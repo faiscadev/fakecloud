@@ -55,7 +55,7 @@ async fn main() {
         fakecloud_iam::state::IamState::new(&cli.account_id),
     ));
     let sqs_state = Arc::new(parking_lot::RwLock::new(
-        fakecloud_sqs::state::SqsState::new(&cli.account_id, &cli.region),
+        fakecloud_sqs::state::SqsState::new(&cli.account_id, &cli.region, "http://localhost:4566"),
     ));
     let sns_state = Arc::new(parking_lot::RwLock::new(
         fakecloud_sns::state::SnsState::new(&cli.account_id, &cli.region),
@@ -102,7 +102,26 @@ async fn main() {
         account_id: cli.account_id,
     };
 
+    let service_names: Vec<String> = registry
+        .service_names()
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+
     let app = Router::new()
+        .route(
+            "/_fakecloud/health",
+            axum::routing::get({
+                let services = service_names.clone();
+                move || async move {
+                    axum::Json(serde_json::json!({
+                        "status": "ok",
+                        "version": env!("CARGO_PKG_VERSION"),
+                        "services": services,
+                    }))
+                }
+            }),
+        )
         .fallback(dispatch::dispatch)
         .layer(Extension(Arc::new(registry)))
         .layer(Extension(Arc::new(config)))

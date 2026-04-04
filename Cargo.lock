@@ -1057,6 +1057,7 @@ dependencies = [
  "fakecloud-ssm",
  "parking_lot",
  "serde",
+ "serde_json",
  "tokio",
  "toml",
  "tower-http",
