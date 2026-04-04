@@ -36,6 +36,7 @@ impl AwsService for SnsService {
             "GetTopicAttributes" => self.get_topic_attributes(&req),
             "SetTopicAttributes" => self.set_topic_attributes(&req),
             "Subscribe" => self.subscribe(&req),
+            "ConfirmSubscription" => self.confirm_subscription(&req),
             "Unsubscribe" => self.unsubscribe(&req),
             "Publish" => self.publish(&req),
             "ListSubscriptions" => self.list_subscriptions(&req),
@@ -57,6 +58,7 @@ impl AwsService for SnsService {
             "GetTopicAttributes",
             "SetTopicAttributes",
             "Subscribe",
+            "ConfirmSubscription",
             "Unsubscribe",
             "Publish",
             "ListSubscriptions",
@@ -305,6 +307,36 @@ impl SnsService {
     <RequestId>{}</RequestId>
   </ResponseMetadata>
 </SubscribeResponse>"#,
+                req.request_id
+            ),
+            &req.request_id,
+        ))
+    }
+
+    fn confirm_subscription(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let topic_arn = required(req, "TopicArn")?;
+        let _token = required(req, "Token")?;
+
+        // In a local emulator, subscriptions are auto-confirmed.
+        // Find the most recent unconfirmed subscription for this topic, or just accept it.
+        let state = self.state.read();
+        let sub_arn = state
+            .subscriptions
+            .values()
+            .find(|s| s.topic_arn == topic_arn)
+            .map(|s| s.subscription_arn.clone())
+            .unwrap_or_else(|| format!("{}:{}", topic_arn, uuid::Uuid::new_v4()));
+
+        Ok(xml_resp(
+            &format!(
+                r#"<ConfirmSubscriptionResponse xmlns="http://sns.amazonaws.com/doc/2010-03-31/">
+  <ConfirmSubscriptionResult>
+    <SubscriptionArn>{sub_arn}</SubscriptionArn>
+  </ConfirmSubscriptionResult>
+  <ResponseMetadata>
+    <RequestId>{}</RequestId>
+  </ResponseMetadata>
+</ConfirmSubscriptionResponse>"#,
                 req.request_id
             ),
             &req.request_id,
