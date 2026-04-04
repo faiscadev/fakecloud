@@ -1,0 +1,19 @@
+services:
+  fakecloud:
+    image: faiscadev/fakecloud
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "4566:4566"
+    environment:
+      FAKECLOUD_ADDR: "0.0.0.0:4566"
+      FAKECLOUD_REGION: "us-east-1"
+      FAKECLOUD_ACCOUNT_ID: "000000000000"
+      FAKECLOUD_LOG: "info"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4566/_fakecloud/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+      start_period: 2s
