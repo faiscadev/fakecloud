@@ -445,6 +445,80 @@ fn tags_xml(tags: &[Tag]) -> String {
         .join("\n")
 }
 
+fn validate_tags(tags: &[Tag], existing_count: usize) -> Result<(), AwsServiceError> {
+    // Check total tag count
+    if tags.len() + existing_count > 50 {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidInput",
+            "1 validation error detected: Value at 'tags' failed to satisfy constraint: Member must have length less than or equal to 50".to_string(),
+        ));
+    }
+
+    // Check for duplicate keys
+    let mut seen_keys = std::collections::HashSet::new();
+    for tag in tags {
+        let lower = tag.key.to_lowercase();
+        if !seen_keys.insert(lower) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidInput",
+                "Duplicate tag keys found. Please note that Tag keys are case insensitive."
+                    .to_string(),
+            ));
+        }
+
+        // Key length
+        if tag.key.len() > 128 {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidInput",
+                format!(
+                    "1 validation error detected: Value at 'tags.{}.member.key' failed to satisfy constraint: Member must have length less than or equal to 128",
+                    seen_keys.len()
+                ),
+            ));
+        }
+
+        // Value length
+        if tag.value.len() > 256 {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidInput",
+                format!(
+                    "1 validation error detected: Value at 'tags.{}.member.value' failed to satisfy constraint: Member must have length less than or equal to 256",
+                    seen_keys.len()
+                ),
+            ));
+        }
+
+        // Invalid characters in key
+        if !tag.key.chars().all(|c| {
+            c.is_alphanumeric()
+                || c == ' '
+                || c == '+'
+                || c == '-'
+                || c == '='
+                || c == '.'
+                || c == '_'
+                || c == ':'
+                || c == '/'
+                || c == '@'
+        }) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidInput",
+                format!(
+                    "1 validation error detected: Value at 'tags.{}.member.key' failed to satisfy constraint: Member must satisfy regular expression pattern: [\\p{{L}}\\p{{Z}}\\p{{N}}_.:/=+\\-@]+",
+                    seen_keys.len()
+                ),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 fn empty_response(action: &str, request_id: &str) -> String {
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -518,8 +592,25 @@ impl IamService {
     }
 
     fn get_user(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        let user_name = required_param(&req.query_params, "UserName")?;
         let state = self.state.read();
+
+        // If no UserName specified, return current/default user
+        let user_name = match req.query_params.get("UserName") {
+            Some(name) => name.clone(),
+            None => {
+                let default_user = IamUser {
+                    user_id: format!("AIDA{}", generate_id()),
+                    arn: format!("arn:aws:iam::{}:user/default_user", state.account_id),
+                    user_name: "default_user".to_string(),
+                    path: "/".to_string(),
+                    created_at: Utc::now(),
+                    tags: Vec::new(),
+                    permissions_boundary: None,
+                };
+                let xml = xml_responses::get_user_response(&default_user, &req.request_id);
+                return Ok(AwsResponse::xml(StatusCode::OK, xml));
+            }
+        };
 
         let user = state.users.get(&user_name).ok_or_else(|| {
             AwsServiceError::aws_error(
@@ -739,7 +830,7 @@ impl IamService {
 
         let key = IamAccessKey {
             access_key_id: format!("FKIA{}", generate_id()),
-            secret_access_key: format!("fake{}", generate_id()),
+            secret_access_key: format!("fake{}{}fake", generate_id(), generate_id()),
             user_name: user_name.clone(),
             status: "Active".to_string(),
             created_at: Utc::now(),
@@ -924,6 +1015,20 @@ impl IamService {
                 StatusCode::CONFLICT,
                 "DeleteConflict",
                 "Cannot delete entity, must remove roles from instance profile first.".to_string(),
+            ));
+        }
+
+        // Check if role has attached managed policies
+        if state
+            .role_policies
+            .get(&role_name)
+            .map(|p| !p.is_empty())
+            .unwrap_or(false)
+        {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::CONFLICT,
+                "DeleteConflict",
+                "Cannot delete entity, must detach all policies first.".to_string(),
             ));
         }
 
@@ -1132,6 +1237,7 @@ impl IamService {
             .cloned()
             .unwrap_or_default();
         let tags = parse_tags(&req.query_params);
+        validate_tags(&tags, 0)?;
 
         let mut state = self.state.write();
 
@@ -1252,6 +1358,8 @@ impl IamService {
                 format!("Policy {policy_arn} does not exist."),
             )
         })?;
+
+        validate_tags(&new_tags, policy.tags.len())?;
 
         for new_tag in new_tags {
             if let Some(existing) = policy.tags.iter_mut().find(|t| t.key == new_tag.key) {
