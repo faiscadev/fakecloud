@@ -1,0 +1,829 @@
+[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31m                          [100%][0m
+=================================== FAILURES ===================================
+[31m[1m______________________ test_create_and_get_vector_bucket _______________________[0m
+[1m[31mtest_s3vectors/__init__.py[0m:68: in pagination_wrapper
+    [0m[94mreturn[39;49;00m create_bucket_and_test()[90m[39;49;00m
+[1m[31mtest_s3vectors/__init__.py[0m:37: in create_bucket_and_test
+    [0mclient.create_vector_bucket([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateVectorBucket operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>d5c5ab13-4303-41df-964b-75d017398e16</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_____________________ test_create_and_list_vector_buckets ______________________[0m
+[1m[31mtest_s3vectors/__init__.py[0m:68: in pagination_wrapper
+    [0m[94mreturn[39;49;00m create_bucket_and_test()[90m[39;49;00m
+[1m[31mtest_s3vectors/__init__.py[0m:37: in create_bucket_and_test
+    [0mclient.create_vector_bucket([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateVectorBucket operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>2e55c78a-0ef3-4db4-bcfb-5356e170ab45</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______________________ test_list_vector_buckets_by_prefix ______________________[0m
+[1m[31mtest_s3vectors/test_s3vector_buckets.py[0m:65: in test_list_vector_buckets_by_prefix
+    [0mclient.create_vector_bucket(vectorBucketName=bucket_name)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateVectorBucket operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>e97bbec0-b0a2-4971-8bc9-97c88f54a711</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m________________________ test_get_unknown_vector_bucket ________________________[0m
+[1m[31mtest_s3vectors/test_s3vector_buckets.py[0m:90: in test_get_unknown_vector_bucket
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mNotFoundException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'NotFoundException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- NotFoundException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m______________ test_create_vector_bucket_with_invalid_length[sh] _______________[0m
+[1m[31mtest_s3vectors/test_s3vector_buckets.py[0m:111: in test_create_vector_bucket_with_invalid_length
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mValidationException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'ValidationException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ValidationException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m_ test_create_vector_bucket_with_invalid_length[xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx] _[0m
+[1m[31mtest_s3vectors/test_s3vector_buckets.py[0m:111: in test_create_vector_bucket_with_invalid_length
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mValidationException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'ValidationException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ValidationException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m________ test_create_vector_bucket_with_invalid_chars[with_under_score] ________[0m
+[1m[31mtest_s3vectors/test_s3vector_buckets.py[0m:133: in test_create_vector_bucket_with_invalid_chars
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mValidationException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'ValidationException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ValidationException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m__________ test_create_vector_bucket_with_invalid_chars[special&char] __________[0m
+[1m[31mtest_s3vectors/test_s3vector_buckets.py[0m:133: in test_create_vector_bucket_with_invalid_chars
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mValidationException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'ValidationException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ValidationException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m_______________________ test_create_vector_bucket_twice ________________________[0m
+[1m[31mtest_s3vectors/__init__.py[0m:68: in pagination_wrapper
+    [0m[94mreturn[39;49;00m create_bucket_and_test()[90m[39;49;00m
+[1m[31mtest_s3vectors/__init__.py[0m:37: in create_bucket_and_test
+    [0mclient.create_vector_bucket([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateVectorBucket operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>bf80651e-8fe2-4218-bd10-282d8a925665</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______________________ test_delete_unknown_vector_bucket _______________________[0m
+[1m[31mtest_s3vectors/test_s3vector_buckets.py[0m:159: in test_delete_unknown_vector_bucket
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mNotFoundException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'NotFoundException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- NotFoundException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m______________________ test_create_and_get_index_by_name _______________________[0m
+[1m[31mtest_s3vectors/__init__.py[0m:68: in pagination_wrapper
+    [0m[94mreturn[39;49;00m create_bucket_and_test()[90m[39;49;00m
+[1m[31mtest_s3vectors/__init__.py[0m:37: in create_bucket_and_test
+    [0mclient.create_vector_bucket([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateVectorBucket operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>04f4ec1e-334a-48aa-99bd-cbd0c90d5710</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________________ test_create_and_get_index_by_arn _______________________[0m
+[1m[31mtest_s3vectors/__init__.py[0m:68: in pagination_wrapper
+    [0m[94mreturn[39;49;00m create_bucket_and_test()[90m[39;49;00m
+[1m[31mtest_s3vectors/__init__.py[0m:37: in create_bucket_and_test
+    [0mclient.create_vector_bucket([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateVectorBucket operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>8eb8439b-d057-4e67-aa24-167268278754</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________________ test_create_index_with_unknown_data_type ___________________[0m
+[1m[31mtest_s3vectors/__init__.py[0m:68: in pagination_wrapper
+    [0m[94mreturn[39;49;00m create_bucket_and_test()[90m[39;49;00m
+[1m[31mtest_s3vectors/__init__.py[0m:37: in create_bucket_and_test
+    [0mclient.create_vector_bucket([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateVectorBucket operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>5572e32d-33fa-4038-928d-07b24c10c3c9</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________________ test_create_index_with_unknown_dimension ___________________[0m
+[1m[31mtest_s3vectors/__init__.py[0m:68: in pagination_wrapper
+    [0m[94mreturn[39;49;00m create_bucket_and_test()[90m[39;49;00m
+[1m[31mtest_s3vectors/__init__.py[0m:37: in create_bucket_and_test
+    [0mclient.create_vector_bucket([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateVectorBucket operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>7f862498-4f49-429c-8049-1f175a6e384e</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m________________ test_create_index_with_unknown_distance_metric ________________[0m
+[1m[31mtest_s3vectors/__init__.py[0m:68: in pagination_wrapper
+    [0m[94mreturn[39;49;00m create_bucket_and_test()[90m[39;49;00m
+[1m[31mtest_s3vectors/__init__.py[0m:37: in create_bucket_and_test
+    [0mclient.create_vector_bucket([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateVectorBucket operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>bc9efec6-dffa-46b5-8b85-b2a191b75042</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m__________________ test_create_and_get_index_by_name_and_arn ___________________[0m
+[1m[31mtest_s3vectors/__init__.py[0m:68: in pagination_wrapper
+    [0m[94mreturn[39;49;00m create_bucket_and_test()[90m[39;49;00m
+[1m[31mtest_s3vectors/__init__.py[0m:37: in create_bucket_and_test
+    [0mclient.create_vector_bucket([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateVectorBucket operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>1039d255-0826-4970-9cc2-23f51f2aac15</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________________ test_get_index_by_unknown_bucket _______________________[0m
+[1m[31mtest_s3vectors/test_s3vector_indexes.py[0m:166: in test_get_index_by_unknown_bucket
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mNotFoundException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'NotFoundException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- NotFoundException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m________________________ test_get_index_by_unknown_name ________________________[0m
+[1m[31mtest_s3vectors/test_s3vector_indexes.py[0m:176: in test_get_index_by_unknown_name
+    [0mclient.create_vector_bucket(vectorBucketName=bucket_name)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateVectorBucket operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>da826c9d-4ff2-4e3d-9877-7c5fcd965f92</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m________________________ test_get_index_by_unknown_arn _________________________[0m
+[1m[31mtest_s3vectors/__init__.py[0m:68: in pagination_wrapper
+    [0m[94mreturn[39;49;00m create_bucket_and_test()[90m[39;49;00m
+[1m[31mtest_s3vectors/__init__.py[0m:37: in create_bucket_and_test
+    [0mclient.create_vector_bucket([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateVectorBucket operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>1453528b-aebc-4d80-9f83-6115f63cc8b4</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_________________________ test_create_and_list_indexes _________________________[0m
+[1m[31mtest_s3vectors/__init__.py[0m:68: in pagination_wrapper
+    [0m[94mreturn[39;49;00m create_bucket_and_test()[90m[39;49;00m
+[1m[31mtest_s3vectors/__init__.py[0m:37: in create_bucket_and_test
+    [0mclient.create_vector_bucket([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateVectorBucket operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>ee394edd-fdf0-4f18-8ada-2f10a5d6a246</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________________ test_list_indexes_by_unknown_bucket_name ___________________[0m
+[1m[31mtest_s3vectors/test_s3vector_indexes.py[0m:254: in test_list_indexes_by_unknown_bucket_name
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mNotFoundException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'NotFoundException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- NotFoundException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m______________________ test_list_indexes_by_name_and_arn _______________________[0m
+[1m[31mtest_s3vectors/test_s3vector_indexes.py[0m:268: in test_list_indexes_by_name_and_arn
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mValidationException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'ValidationException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ValidationException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m___________________ test_delete_bucket_fails_if_index_exists ___________________[0m
+[1m[31mtest_s3vectors/__init__.py[0m:68: in pagination_wrapper
+    [0m[94mreturn[39;49;00m create_bucket_and_test()[90m[39;49;00m
+[1m[31mtest_s3vectors/__init__.py[0m:37: in create_bucket_and_test
+    [0mclient.create_vector_bucket([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateVectorBucket operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>15824f1f-d036-4d34-bbf4-50b1f1a78fa4</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m____________________ test_put_vector_bucket_policy_by_name _____________________[0m
+[1m[31mtest_s3vectors/__init__.py[0m:68: in pagination_wrapper
+    [0m[94mreturn[39;49;00m create_bucket_and_test()[90m[39;49;00m
+[1m[31mtest_s3vectors/__init__.py[0m:37: in create_bucket_and_test
+    [0mclient.create_vector_bucket([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateVectorBucket operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>d7e79f07-a232-4855-8944-d24b932aef74</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_____________________ test_put_vector_bucket_policy_by_arn _____________________[0m
+[1m[31mtest_s3vectors/__init__.py[0m:68: in pagination_wrapper
+    [0m[94mreturn[39;49;00m create_bucket_and_test()[90m[39;49;00m
+[1m[31mtest_s3vectors/__init__.py[0m:37: in create_bucket_and_test
+    [0mclient.create_vector_bucket([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateVectorBucket operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>43e31253-6b55-4afa-8bbc-cf1418954fc8</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m____________________ test_get_default_vector_bucket_policy _____________________[0m
+[1m[31mtest_s3vectors/__init__.py[0m:68: in pagination_wrapper
+    [0m[94mreturn[39;49;00m create_bucket_and_test()[90m[39;49;00m
+[1m[31mtest_s3vectors/__init__.py[0m:37: in create_bucket_and_test
+    [0mclient.create_vector_bucket([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateVectorBucket operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>74234a81-af76-408c-929a-8f642ef6aaa3</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________ test_get_vector_bucket_policy_for_unknown_bucket _______________[0m
+[1m[31mtest_s3vectors/test_s3vector_policies.py[0m:68: in test_get_vector_bucket_policy_for_unknown_bucket
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mNotFoundException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'NotFoundException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- NotFoundException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m___________________ test_delete_vector_bucket_policy_by_arn ____________________[0m
+[1m[31mtest_s3vectors/__init__.py[0m:68: in pagination_wrapper
+    [0m[94mreturn[39;49;00m create_bucket_and_test()[90m[39;49;00m
+[1m[31mtest_s3vectors/__init__.py[0m:37: in create_bucket_and_test
+    [0mclient.create_vector_bucket([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateVectorBucket operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>50b69519-bb40-4cc4-a74d-f4ebcd628cdc</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________________ test_delete_vector_bucket_policy_by_name ___________________[0m
+[1m[31mtest_s3vectors/__init__.py[0m:68: in pagination_wrapper
+    [0m[94mreturn[39;49;00m create_bucket_and_test()[90m[39;49;00m
+[1m[31mtest_s3vectors/__init__.py[0m:37: in create_bucket_and_test
+    [0mclient.create_vector_bucket([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateVectorBucket operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>821dd759-f3f2-446a-97c0-2c98682499e9</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________________________ test_put_vectors_by_name ___________________________[0m
+[1m[31mtest_s3vectors/__init__.py[0m:68: in pagination_wrapper
+    [0m[94mreturn[39;49;00m create_bucket_and_test()[90m[39;49;00m
+[1m[31mtest_s3vectors/__init__.py[0m:37: in create_bucket_and_test
+    [0mclient.create_vector_bucket([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateVectorBucket operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>f041dc55-6d14-48de-9cf0-f52a8ceafa97</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________________________ test_put_vectors_by_arn ____________________________[0m
+[1m[31mtest_s3vectors/__init__.py[0m:68: in pagination_wrapper
+    [0m[94mreturn[39;49;00m create_bucket_and_test()[90m[39;49;00m
+[1m[31mtest_s3vectors/__init__.py[0m:37: in create_bucket_and_test
+    [0mclient.create_vector_bucket([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateVectorBucket operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>7964ab19-becb-4309-86a3-9f52a5e41afa</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______________________ test_put_vectors_twice_on_same_key ______________________[0m
+[1m[31mtest_s3vectors/__init__.py[0m:68: in pagination_wrapper
+    [0m[94mreturn[39;49;00m create_bucket_and_test()[90m[39;49;00m
+[1m[31mtest_s3vectors/__init__.py[0m:37: in create_bucket_and_test
+    [0mclient.create_vector_bucket([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateVectorBucket operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>cb533e01-e12d-4f02-9556-b6058af48664</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m____________________ test_put_vectors_with_large_dimension _____________________[0m
+[1m[31mtest_s3vectors/__init__.py[0m:68: in pagination_wrapper
+    [0m[94mreturn[39;49;00m create_bucket_and_test()[90m[39;49;00m
+[1m[31mtest_s3vectors/__init__.py[0m:37: in create_bucket_and_test
+    [0mclient.create_vector_bucket([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateVectorBucket operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>315f0fdc-1a9b-49a7-8c20-93e9f87e8172</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m____________________ test_put_vectors_with_wrong_dimension _____________________[0m
+[1m[31mtest_s3vectors/__init__.py[0m:68: in pagination_wrapper
+    [0m[94mreturn[39;49;00m create_bucket_and_test()[90m[39;49;00m
+[1m[31mtest_s3vectors/__init__.py[0m:37: in create_bucket_and_test
+    [0mclient.create_vector_bucket([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateVectorBucket operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>2031376b-2a7e-4f25-8a36-2a6cb66fae95</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________________ test_get_vectors_by_name_and_arn _______________________[0m
+[1m[31mtest_s3vectors/__init__.py[0m:68: in pagination_wrapper
+    [0m[94mreturn[39;49;00m create_bucket_and_test()[90m[39;49;00m
+[1m[31mtest_s3vectors/__init__.py[0m:37: in create_bucket_and_test
+    [0mclient.create_vector_bucket([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateVectorBucket operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>7b800aec-df3f-49d4-afc6-bcc0ac34d1f6</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_____________________ test_get_vectors_from_unknown_index ______________________[0m
+[1m[31mtest_s3vectors/__init__.py[0m:68: in pagination_wrapper
+    [0m[94mreturn[39;49;00m create_bucket_and_test()[90m[39;49;00m
+[1m[31mtest_s3vectors/__init__.py[0m:37: in create_bucket_and_test
+    [0mclient.create_vector_bucket([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateVectorBucket operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>705a2c1b-ed83-4c4c-89f2-c2914de4f2e6</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________________ test_get_vectors_from_unknown_index_arn ____________________[0m
+[1m[31mtest_s3vectors/__init__.py[0m:68: in pagination_wrapper
+    [0m[94mreturn[39;49;00m create_bucket_and_test()[90m[39;49;00m
+[1m[31mtest_s3vectors/__init__.py[0m:37: in create_bucket_and_test
+    [0mclient.create_vector_bucket([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateVectorBucket operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>bc09c8cc-94f5-4781-b2e9-46f462666d3b</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________________ test_put_vectors_by_name_and_arn _______________________[0m
+[1m[31mtest_s3vectors/__init__.py[0m:68: in pagination_wrapper
+    [0m[94mreturn[39;49;00m create_bucket_and_test()[90m[39;49;00m
+[1m[31mtest_s3vectors/__init__.py[0m:37: in create_bucket_and_test
+    [0mclient.create_vector_bucket([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateVectorBucket operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>bc9bcc49-00d2-4352-9785-3747ea290f85</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________________ test_put_vectors_by_unknown_name _______________________[0m
+[1m[31mtest_s3vectors/__init__.py[0m:68: in pagination_wrapper
+    [0m[94mreturn[39;49;00m create_bucket_and_test()[90m[39;49;00m
+[1m[31mtest_s3vectors/__init__.py[0m:37: in create_bucket_and_test
+    [0mclient.create_vector_bucket([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateVectorBucket operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>75b0c800-91b5-4fde-a75a-5c76cc5d32a2</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________________ test_put_vectors_by_unknown_arn ________________________[0m
+[1m[31mtest_s3vectors/__init__.py[0m:68: in pagination_wrapper
+    [0m[94mreturn[39;49;00m create_bucket_and_test()[90m[39;49;00m
+[1m[31mtest_s3vectors/__init__.py[0m:37: in create_bucket_and_test
+    [0mclient.create_vector_bucket([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateVectorBucket operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>04da9ec2-7001-4985-a28e-4edd3445f070</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_________________________ test_list_vectors_using_name _________________________[0m
+[1m[31mtest_s3vectors/__init__.py[0m:68: in pagination_wrapper
+    [0m[94mreturn[39;49;00m create_bucket_and_test()[90m[39;49;00m
+[1m[31mtest_s3vectors/__init__.py[0m:37: in create_bucket_and_test
+    [0mclient.create_vector_bucket([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateVectorBucket operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>6af4e0af-0880-4e49-975b-32015a4a00b4</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_________________________ test_list_vectors_using_arn __________________________[0m
+[1m[31mtest_s3vectors/__init__.py[0m:68: in pagination_wrapper
+    [0m[94mreturn[39;49;00m create_bucket_and_test()[90m[39;49;00m
+[1m[31mtest_s3vectors/__init__.py[0m:37: in create_bucket_and_test
+    [0mclient.create_vector_bucket([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateVectorBucket operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>28bfb51a-d267-45d1-87a3-1fb432527168</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_____________________ test_list_vectors_using_name_and_arn _____________________[0m
+[1m[31mtest_s3vectors/__init__.py[0m:68: in pagination_wrapper
+    [0m[94mreturn[39;49;00m create_bucket_and_test()[90m[39;49;00m
+[1m[31mtest_s3vectors/__init__.py[0m:37: in create_bucket_and_test
+    [0mclient.create_vector_bucket([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateVectorBucket operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>a889cb2f-9b62-4a03-8633-4923d85b172f</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_________________________ test_delete_vectors_by_name __________________________[0m
+[1m[31mtest_s3vectors/__init__.py[0m:68: in pagination_wrapper
+    [0m[94mreturn[39;49;00m create_bucket_and_test()[90m[39;49;00m
+[1m[31mtest_s3vectors/__init__.py[0m:37: in create_bucket_and_test
+    [0mclient.create_vector_bucket([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateVectorBucket operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>c03dd762-00bb-4ed2-a794-f21c42723d43</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m__________________________ test_delete_vectors_by_arn __________________________[0m
+[1m[31mtest_s3vectors/__init__.py[0m:68: in pagination_wrapper
+    [0m[94mreturn[39;49;00m create_bucket_and_test()[90m[39;49;00m
+[1m[31mtest_s3vectors/__init__.py[0m:37: in create_bucket_and_test
+    [0mclient.create_vector_bucket([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateVectorBucket operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>ea3d63c1-e768-4184-ac91-4d70425ce0c6</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_____________________ test_delete_vectors_by_name_and_arn ______________________[0m
+[1m[31mtest_s3vectors/__init__.py[0m:68: in pagination_wrapper
+    [0m[94mreturn[39;49;00m create_bucket_and_test()[90m[39;49;00m
+[1m[31mtest_s3vectors/__init__.py[0m:37: in create_bucket_and_test
+    [0mclient.create_vector_bucket([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateVectorBucket operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>f1116c65-82cb-4be1-915b-d48fd5c9c5ac</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________________ test_delete_vectors__unknown_key _______________________[0m
+[1m[31mtest_s3vectors/__init__.py[0m:68: in pagination_wrapper
+    [0m[94mreturn[39;49;00m create_bucket_and_test()[90m[39;49;00m
+[1m[31mtest_s3vectors/__init__.py[0m:37: in create_bucket_and_test
+    [0mclient.create_vector_bucket([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateVectorBucket operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>98af7b73-1a6d-4b85-a5e7-ee08a8d47766</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[33m=============================== warnings summary ===============================[0m
+tests/test_s3vectors/test_s3vector_buckets.py: 10 warnings
+tests/test_s3vectors/test_s3vector_indexes.py: 13 warnings
+tests/test_s3vectors/test_s3vector_policies.py: 6 warnings
+tests/test_s3vectors/test_s3vector_vectors.py: 18 warnings
+  /Users/lucas/.cache/fakecloud/moto/.venv/lib/python3.9/site-packages/boto3/compat.py:89: PythonDeprecationWarning: Boto3 will no longer support Python 3.9 starting April 29, 2026. To continue receiving service updates, bug fixes, and security updates please upgrade to Python 3.10 or later. More information can be found here: https://aws.amazon.com/blogs/developer/python-support-policy-updates-for-aws-sdks-and-tools/
+    warnings.warn(warning, PythonDeprecationWarning)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+[36m[1m=========================== short test summary info ============================[0m
+[31mFAILED[0m test_s3vectors/test_s3vector_buckets.py::[1mtest_create_and_get_vector_bucket[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_s3vectors/test_s3vector_buckets.py::[1mtest_create_and_list_vector_buckets[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_s3vectors/test_s3vector_buckets.py::[1mtest_list_vector_buckets_by_prefix[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_s3vectors/test_s3vector_buckets.py::[1mtest_get_unknown_vector_bucket[0m - AssertionError: assert '400' == 'NotFoundException'
+[31mFAILED[0m test_s3vectors/test_s3vector_buckets.py::[1mtest_create_vector_bucket_with_invalid_length[sh][0m - AssertionError: assert '400' == 'ValidationException'
+[31mFAILED[0m test_s3vectors/test_s3vector_buckets.py::[1mtest_create_vector_bucket_with_invalid_length[xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx][0m - AssertionError: assert '400' == 'ValidationException'
+[31mFAILED[0m test_s3vectors/test_s3vector_buckets.py::[1mtest_create_vector_bucket_with_invalid_chars[with_under_score][0m - AssertionError: assert '400' == 'ValidationException'
+[31mFAILED[0m test_s3vectors/test_s3vector_buckets.py::[1mtest_create_vector_bucket_with_invalid_chars[special&char][0m - AssertionError: assert '400' == 'ValidationException'
+[31mFAILED[0m test_s3vectors/test_s3vector_buckets.py::[1mtest_create_vector_bucket_twice[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_s3vectors/test_s3vector_buckets.py::[1mtest_delete_unknown_vector_bucket[0m - AssertionError: assert '400' == 'NotFoundException'
+[31mFAILED[0m test_s3vectors/test_s3vector_indexes.py::[1mtest_create_and_get_index_by_name[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_s3vectors/test_s3vector_indexes.py::[1mtest_create_and_get_index_by_arn[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_s3vectors/test_s3vector_indexes.py::[1mtest_create_index_with_unknown_data_type[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_s3vectors/test_s3vector_indexes.py::[1mtest_create_index_with_unknown_dimension[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_s3vectors/test_s3vector_indexes.py::[1mtest_create_index_with_unknown_distance_metric[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_s3vectors/test_s3vector_indexes.py::[1mtest_create_and_get_index_by_name_and_arn[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_s3vectors/test_s3vector_indexes.py::[1mtest_get_index_by_unknown_bucket[0m - AssertionError: assert '400' == 'NotFoundException'
+[31mFAILED[0m test_s3vectors/test_s3vector_indexes.py::[1mtest_get_index_by_unknown_name[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_s3vectors/test_s3vector_indexes.py::[1mtest_get_index_by_unknown_arn[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_s3vectors/test_s3vector_indexes.py::[1mtest_create_and_list_indexes[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_s3vectors/test_s3vector_indexes.py::[1mtest_list_indexes_by_unknown_bucket_name[0m - AssertionError: assert '400' == 'NotFoundException'
+[31mFAILED[0m test_s3vectors/test_s3vector_indexes.py::[1mtest_list_indexes_by_name_and_arn[0m - AssertionError: assert '400' == 'ValidationException'
+[31mFAILED[0m test_s3vectors/test_s3vector_indexes.py::[1mtest_delete_bucket_fails_if_index_exists[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_s3vectors/test_s3vector_policies.py::[1mtest_put_vector_bucket_policy_by_name[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_s3vectors/test_s3vector_policies.py::[1mtest_put_vector_bucket_policy_by_arn[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_s3vectors/test_s3vector_policies.py::[1mtest_get_default_vector_bucket_policy[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_s3vectors/test_s3vector_policies.py::[1mtest_get_vector_bucket_policy_for_unknown_bucket[0m - AssertionError: assert '400' == 'NotFoundException'
+[31mFAILED[0m test_s3vectors/test_s3vector_policies.py::[1mtest_delete_vector_bucket_policy_by_arn[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_s3vectors/test_s3vector_policies.py::[1mtest_delete_vector_bucket_policy_by_name[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_s3vectors/test_s3vector_vectors.py::[1mtest_put_vectors_by_name[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_s3vectors/test_s3vector_vectors.py::[1mtest_put_vectors_by_arn[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_s3vectors/test_s3vector_vectors.py::[1mtest_put_vectors_twice_on_same_key[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_s3vectors/test_s3vector_vectors.py::[1mtest_put_vectors_with_large_dimension[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_s3vectors/test_s3vector_vectors.py::[1mtest_put_vectors_with_wrong_dimension[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_s3vectors/test_s3vector_vectors.py::[1mtest_get_vectors_by_name_and_arn[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_s3vectors/test_s3vector_vectors.py::[1mtest_get_vectors_from_unknown_index[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_s3vectors/test_s3vector_vectors.py::[1mtest_get_vectors_from_unknown_index_arn[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_s3vectors/test_s3vector_vectors.py::[1mtest_put_vectors_by_name_and_arn[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_s3vectors/test_s3vector_vectors.py::[1mtest_put_vectors_by_unknown_name[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_s3vectors/test_s3vector_vectors.py::[1mtest_put_vectors_by_unknown_arn[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_s3vectors/test_s3vector_vectors.py::[1mtest_list_vectors_using_name[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_s3vectors/test_s3vector_vectors.py::[1mtest_list_vectors_using_arn[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_s3vectors/test_s3vector_vectors.py::[1mtest_list_vectors_using_name_and_arn[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_s3vectors/test_s3vector_vectors.py::[1mtest_delete_vectors_by_name[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_s3vectors/test_s3vector_vectors.py::[1mtest_delete_vectors_by_arn[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_s3vectors/test_s3vector_vectors.py::[1mtest_delete_vectors_by_name_and_arn[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_s3vectors/test_s3vector_vectors.py::[1mtest_delete_vectors__unknown_key[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31m[31m[1m47 failed[0m, [33m47 warnings[0m[31m in 1.32s[0m[0m

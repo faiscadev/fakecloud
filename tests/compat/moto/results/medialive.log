@@ -1,0 +1,226 @@
+[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31m                                                             [100%][0m
+=================================== FAILURES ===================================
+[31m[1m_________________________ test_create_channel_succeeds _________________________[0m
+[1m[31mtest_medialive/test_medialive.py[0m:113: in test_create_channel_succeeds
+    [0mresponse = client.create_channel(**channel_config)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateChannel operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>cad9073c-370d-49a1-a79a-9809cd839317</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_________________________ test_list_channels_succeeds __________________________[0m
+[1m[31mtest_medialive/test_medialive.py[0m:136: in test_list_channels_succeeds
+    [0mclient.create_channel(**config)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateChannel operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>1729ab02-d3cc-4762-ae6a-2d52039a0b75</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______________ test_delete_channel_moves_channel_in_deleted_state ______________[0m
+[1m[31mtest_medialive/test_medialive.py[0m:171: in test_delete_channel_moves_channel_in_deleted_state
+    [0mchannel_id = client.create_channel(**channel_config)[[33m"[39;49;00m[33mChannel[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mId[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateChannel operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>0096549d-b4ab-444a-88ac-d3f327a21066</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m________________________ test_describe_channel_succeeds ________________________[0m
+[1m[31mtest_medialive/test_medialive.py[0m:184: in test_describe_channel_succeeds
+    [0mchannel_id = client.create_channel(**channel_config)[[33m"[39;49;00m[33mChannel[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mId[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateChannel operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>a0acf2f2-53ee-4d90-aef1-4df6820c323d</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_________________________ test_start_channel_succeeds __________________________[0m
+[1m[31mtest_medialive/test_medialive.py[0m:202: in test_start_channel_succeeds
+    [0mchannel_id = client.create_channel(**channel_config)[[33m"[39;49;00m[33mChannel[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mId[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateChannel operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>49d24c51-01ec-4272-ad9c-62662eff6450</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m__________________________ test_stop_channel_succeeds __________________________[0m
+[1m[31mtest_medialive/test_medialive.py[0m:216: in test_stop_channel_succeeds
+    [0mchannel_id = client.create_channel(**channel_config)[[33m"[39;49;00m[33mChannel[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mId[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateChannel operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>154cee2c-74c4-4cde-8415-50ae1d0b0ee6</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_________________________ test_update_channel_succeeds _________________________[0m
+[1m[31mtest_medialive/test_medialive.py[0m:232: in test_update_channel_succeeds
+    [0mchannel_id = client.create_channel(**channel_config)[[33m"[39;49;00m[33mChannel[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mId[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateChannel operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>719933c3-e4bf-48e1-b3e9-ce70a944f55b</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m__________________________ test_create_input_succeeds __________________________[0m
+[1m[31mtest_medialive/test_medialive.py[0m:251: in test_create_input_succeeds
+    [0mcreate_response = client.create_input(**input_config)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateInput operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>96f4caa4-0736-4a7e-9bdf-58e90dee15ff</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_________________________ test_describe_input_succeeds _________________________[0m
+[1m[31mtest_medialive/test_medialive.py[0m:278: in test_describe_input_succeeds
+    [0mcreate_response = client.create_input(**input_config)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateInput operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>b80912d2-7edc-4072-8279-3e80707c7477</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m__________________________ test_list_inputs_succeeds ___________________________[0m
+[1m[31mtest_medialive/test_medialive.py[0m:294: in test_list_inputs_succeeds
+    [0mclient.create_input(**config)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateInput operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>57addf7a-7041-47e2-b95d-145964acb345</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m________________ test_delete_input_moves_input_in_deleted_state ________________[0m
+[1m[31mtest_medialive/test_medialive.py[0m:321: in test_delete_input_moves_input_in_deleted_state
+    [0minput_id = client.create_input(**input_config)[[33m"[39;49;00m[33mInput[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mId[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateInput operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>3be00125-34d5-45db-8562-e9169b143573</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m__________________________ test_update_input_succeeds __________________________[0m
+[1m[31mtest_medialive/test_medialive.py[0m:336: in test_update_input_succeeds
+    [0minput_id = client.create_input(**input_config)[[33m"[39;49;00m[33mInput[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mId[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateInput operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>2f1b55b8-82ec-4e5f-8669-49c3722729ac</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[33m=============================== warnings summary ===============================[0m
+tests/test_medialive/test_medialive.py: 12 warnings
+  /Users/lucas/.cache/fakecloud/moto/.venv/lib/python3.9/site-packages/boto3/compat.py:89: PythonDeprecationWarning: Boto3 will no longer support Python 3.9 starting April 29, 2026. To continue receiving service updates, bug fixes, and security updates please upgrade to Python 3.10 or later. More information can be found here: https://aws.amazon.com/blogs/developer/python-support-policy-updates-for-aws-sdks-and-tools/
+    warnings.warn(warning, PythonDeprecationWarning)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+[36m[1m=========================== short test summary info ============================[0m
+[31mFAILED[0m test_medialive/test_medialive.py::[1mtest_create_channel_succeeds[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_medialive/test_medialive.py::[1mtest_list_channels_succeeds[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_medialive/test_medialive.py::[1mtest_delete_channel_moves_channel_in_deleted_state[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_medialive/test_medialive.py::[1mtest_describe_channel_succeeds[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_medialive/test_medialive.py::[1mtest_start_channel_succeeds[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_medialive/test_medialive.py::[1mtest_stop_channel_succeeds[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_medialive/test_medialive.py::[1mtest_update_channel_succeeds[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_medialive/test_medialive.py::[1mtest_create_input_succeeds[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_medialive/test_medialive.py::[1mtest_describe_input_succeeds[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_medialive/test_medialive.py::[1mtest_list_inputs_succeeds[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_medialive/test_medialive.py::[1mtest_delete_input_moves_input_in_deleted_state[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_medialive/test_medialive.py::[1mtest_update_input_succeeds[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31m[31m[1m12 failed[0m, [33m12 warnings[0m[31m in 0.53s[0m[0m

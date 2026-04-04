@@ -1,0 +1,1424 @@
+[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[33ms[0m[31mF[0m[33ms[0m[33ms[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31m [ 86%]
+[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31m                                                              [100%][0m
+=================================== FAILURES ===================================
+[31m[1m________________________ test_stream_creation_on_demand ________________________[0m
+[1m[31mtest_kinesis/test_kinesis.py[0m:16: in test_stream_creation_on_demand
+    [0mclient.create_stream([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateStream operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>3968c42f-15da-4ef3-9d16-ee8b583a37b6</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________________________ test_update_stream_mode ____________________________[0m
+[1m[31mtest_kinesis/test_kinesis.py[0m:42: in test_update_stream_mode
+    [0mclient.create_stream([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateStream operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>9550de84-749f-4159-9fa0-7eff78c450bb</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______________________ test_describe_non_existent_stream _______________________[0m
+[1m[31mtest_kinesis/test_kinesis.py[0m:64: in test_describe_non_existent_stream
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mResourceNotFoundException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'ResourceNotFoundException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ResourceNotFoundException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m_________________________ test_list_and_delete_stream __________________________[0m
+[1m[31mtest_kinesis/test_kinesis.py[0m:71: in test_list_and_delete_stream
+    [0m[94massert[39;49;00m [96mlen[39;49;00m(client.list_streams()[[33m"[39;49;00m[33mStreamNames[39;49;00m[33m"[39;49;00m]) == [94m0[39;49;00m[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the ListStreams operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>4c5d4e95-33a9-4c42-a745-be1d14845bfe</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m__________________________ test_delete_unknown_stream __________________________[0m
+[1m[31mtest_kinesis/test_kinesis.py[0m:91: in test_delete_unknown_stream
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mResourceNotFoundException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'ResourceNotFoundException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ResourceNotFoundException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m____________________________ test_list_many_streams ____________________________[0m
+[1m[31mtest_kinesis/test_kinesis.py[0m:100: in test_list_many_streams
+    [0mconn.create_stream(StreamName=[33mf[39;49;00m[33m"[39;49;00m[33mstream[39;49;00m[33m{[39;49;00mi[33m}[39;49;00m[33m"[39;49;00m, ShardCount=[94m1[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateStream operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>fb50774f-64fa-44d0-aabe-50bb10349e5c</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_________________________ test_describe_stream_summary _________________________[0m
+[1m[31mtest_kinesis/test_kinesis.py[0m:119: in test_describe_stream_summary
+    [0mconn.create_stream(StreamName=stream_name, ShardCount=shard_count)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateStream operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>fa4a84ed-acfe-48df-9aed-1d85c4817ac0</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_____________________ test_list_streams_stream_discription _____________________[0m
+[1m[31mtest_kinesis/test_kinesis.py[0m:144: in test_list_streams_stream_discription
+    [0mconn.create_stream(StreamName=[33mf[39;49;00m[33m"[39;49;00m[33mstream[39;49;00m[33m{[39;49;00mi[33m}[39;49;00m[33m"[39;49;00m, ShardCount=i + [94m1[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateStream operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>c221e570-92d2-4521-99fb-1557cb79eaaf</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m__________________________ test_basic_shard_iterator ___________________________[0m
+[1m[31mtest_kinesis/test_kinesis.py[0m:164: in test_basic_shard_iterator
+    [0mclient.create_stream(StreamName=stream_name, ShardCount=[94m1[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateStream operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>ade58c98-1691-4502-956c-809846bd1752</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________________ test_basic_shard_iterator_by_stream_arn ____________________[0m
+[1m[31mtest_kinesis/test_kinesis.py[0m:183: in test_basic_shard_iterator_by_stream_arn
+    [0mclient.create_stream(StreamName=stream_name, ShardCount=[94m1[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateStream operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>27302900-6032-40d2-91a9-6d788a54d762</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________________ test_get_invalid_shard_iterator ________________________[0m
+[1m[31mtest_kinesis/test_kinesis.py[0m:206: in test_get_invalid_shard_iterator
+    [0mclient.create_stream(StreamName=stream_name, ShardCount=[94m1[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateStream operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>0230ebd4-9172-4703-9ab4-a339556016f3</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________________________ test_put_records _______________________________[0m
+[1m[31mtest_kinesis/test_kinesis.py[0m:227: in test_put_records
+    [0mclient.create_stream(StreamName=stream_name, ShardCount=[94m1[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateStream operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>5a3d9b26-330f-488f-90e4-8b2e9068088d</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m____________________________ test_get_records_limit ____________________________[0m
+[1m[31mtest_kinesis/test_kinesis.py[0m:259: in test_get_records_limit
+    [0mclient.create_stream(StreamName=stream_name, ShardCount=[94m1[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateStream operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>018ad3af-0ec7-4be2-a367-c3014fea9de9</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_____________________ test_get_records_at_sequence_number ______________________[0m
+[1m[31mtest_kinesis/test_kinesis.py[0m:288: in test_get_records_at_sequence_number
+    [0mclient.create_stream(StreamName=stream_name, ShardCount=[94m1[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateStream operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>e2e4ac6d-f94b-4193-92d8-d220af4b31cb</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m____________________ test_get_records_after_sequence_number ____________________[0m
+[1m[31mtest_kinesis/test_kinesis.py[0m:327: in test_get_records_after_sequence_number
+    [0mclient.create_stream(StreamName=stream_name, ShardCount=[94m1[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateStream operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>eed6e41e-1e43-42ce-ac0f-86ad5a6b2947</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________________________ test_get_records_latest ____________________________[0m
+[1m[31mtest_kinesis/test_kinesis.py[0m:367: in test_get_records_latest
+    [0mclient.create_stream(StreamName=stream_name, ShardCount=[94m1[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateStream operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>4cd46759-0bd1-4df2-9eb5-b6bb9cc7126d</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m____________________ test_get_records_at_very_old_timestamp ____________________[0m
+[1m[31mtest_kinesis/test_kinesis.py[0m:456: in test_get_records_at_very_old_timestamp
+    [0mconn.create_stream(StreamName=stream_name, ShardCount=[94m1[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateStream operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>d9f0d797-8307-45ae-b651-8600808999fb</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m____________________ test_get_records_at_very_new_timestamp ____________________[0m
+[1m[31mtest_kinesis/test_kinesis.py[0m:545: in test_get_records_at_very_new_timestamp
+    [0mconn.create_stream(StreamName=stream_name, ShardCount=[94m1[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateStream operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>a5ab0178-d050-4b1e-85f1-034f15d20691</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________ test_get_records_from_empty_stream_at_timestamp ________________[0m
+[1m[31mtest_kinesis/test_kinesis.py[0m:575: in test_get_records_from_empty_stream_at_timestamp
+    [0mconn.create_stream(StreamName=stream_name, ShardCount=[94m1[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateStream operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>0c045c49-1edb-444f-9d89-bce3b546ee0a</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_____________________ test_get_records_at_exact_timestamp ______________________[0m
+[1m[31mtest_kinesis/test_kinesis.py[0m:601: in test_get_records_at_exact_timestamp
+    [0mconn.create_stream(StreamName=stream_name, ShardCount=[94m1[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateStream operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>a3f75869-b2a5-4c84-a137-8931ae1301fd</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_________________ test_valid_increase_stream_retention_period __________________[0m
+[1m[31mtest_kinesis/test_kinesis.py[0m:627: in test_valid_increase_stream_retention_period
+    [0mconn.create_stream(StreamName=stream_name, ShardCount=[94m1[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateStream operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>19973c85-d722-4202-ad9e-6883628ded38</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m________________ test_invalid_increase_stream_retention_period _________________[0m
+[1m[31mtest_kinesis/test_kinesis.py[0m:641: in test_invalid_increase_stream_retention_period
+    [0mconn.create_stream(StreamName=stream_name, ShardCount=[94m1[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateStream operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>80d9e1e1-3f9c-46f3-89a9-4a210a3db41d</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m________________ test_invalid_increase_stream_retention_too_low ________________[0m
+[1m[31mtest_kinesis/test_kinesis.py[0m:661: in test_invalid_increase_stream_retention_too_low
+    [0mconn.create_stream(StreamName=stream_name, ShardCount=[94m1[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateStream operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>2424c756-f851-4147-b912-e0bc2b648319</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________ test_invalid_increase_stream_retention_too_high ________________[0m
+[1m[31mtest_kinesis/test_kinesis.py[0m:679: in test_invalid_increase_stream_retention_too_high
+    [0mconn.create_stream(StreamName=stream_name, ShardCount=[94m1[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateStream operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>d9b38328-d265-42c4-9adb-3d8cc80cd4ea</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_________________ test_valid_decrease_stream_retention_period __________________[0m
+[1m[31mtest_kinesis/test_kinesis.py[0m:697: in test_valid_decrease_stream_retention_period
+    [0mconn.create_stream(StreamName=stream_name, ShardCount=[94m1[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateStream operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>cb77b13e-13a1-4788-91d1-5dbd4ee7fb2f</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m________________ test_decrease_stream_retention_period_upwards _________________[0m
+[1m[31mtest_kinesis/test_kinesis.py[0m:721: in test_decrease_stream_retention_period_upwards
+    [0mconn.create_stream(StreamName=stream_name, ShardCount=[94m1[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateStream operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>b85c7fcc-7f76-4359-b814-3e6baff13994</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m________________ test_decrease_stream_retention_period_too_low _________________[0m
+[1m[31mtest_kinesis/test_kinesis.py[0m:739: in test_decrease_stream_retention_period_too_low
+    [0mconn.create_stream(StreamName=stream_name, ShardCount=[94m1[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateStream operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>bc5d4b5e-5c47-43a8-98b9-663f77e9adf1</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m________________ test_decrease_stream_retention_period_too_high ________________[0m
+[1m[31mtest_kinesis/test_kinesis.py[0m:757: in test_decrease_stream_retention_period_too_high
+    [0mconn.create_stream(StreamName=stream_name, ShardCount=[94m1[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateStream operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>9f820045-36f3-4f5f-84cd-e37cea4da12f</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________________ test_invalid_shard_iterator_type _______________________[0m
+[1m[31mtest_kinesis/test_kinesis.py[0m:775: in test_invalid_shard_iterator_type
+    [0mclient.create_stream(StreamName=stream_name, ShardCount=[94m1[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateStream operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>28befe33-3d2f-4391-883d-681a4bc5da6b</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m__________________________ test_add_list_remove_tags ___________________________[0m
+[1m[31mtest_kinesis/test_kinesis.py[0m:792: in test_add_list_remove_tags
+    [0mclient.create_stream(StreamName=stream_name, ShardCount=[94m1[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateStream operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>3b3bfa51-6bc4-4b06-947f-72f46c03c080</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______________________________ test_merge_shards _______________________________[0m
+[1m[31mtest_kinesis/test_kinesis.py[0m:832: in test_merge_shards
+    [0mclient.create_stream(StreamName=stream_name, ShardCount=[94m4[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateStream operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>cbf300ad-f40a-4b16-9b69-65a164d58b29</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m________________________ test_merge_shards_invalid_arg _________________________[0m
+[1m[31mtest_kinesis/test_kinesis.py[0m:907: in test_merge_shards_invalid_arg
+    [0mclient.create_stream(StreamName=stream_name, ShardCount=[94m4[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateStream operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>3ccad0db-f669-400b-bc32-45a139146ca2</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_____________________ test_describe_stream_limit_parameter _____________________[0m
+[1m[31mtest_kinesis/test_kinesis_boto3.py[0m:16: in test_describe_stream_limit_parameter
+    [0mclient.create_stream(StreamName=stream_name, ShardCount=[94m5[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateStream operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>cdb3cacb-109e-4378-a59f-9adc1a951831</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________________________ test_list_shards _______________________________[0m
+[1m[31mtest_kinesis/test_kinesis_boto3.py[0m:46: in test_list_shards
+    [0mconn.create_stream(StreamName=stream_name, ShardCount=[94m2[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateStream operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>cca92b85-7504-4b00-97e8-49ff44d7b063</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________________________ test_list_shards_paging ____________________________[0m
+[1m[31mtest_kinesis/test_kinesis_boto3.py[0m:79: in test_list_shards_paging
+    [0mclient.create_stream(StreamName=stream_name, ShardCount=[94m10[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateStream operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>d0fcef15-290b-47a1-9566-2982d9d273ae</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______________________________ test_create_shard _______________________________[0m
+[1m[31mtest_kinesis/test_kinesis_boto3.py[0m:125: in test_create_shard
+    [0mclient.create_stream(StreamName=[33m"[39;49;00m[33mmy-stream[39;49;00m[33m"[39;49;00m, ShardCount=[94m2[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateStream operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>3b0661b2-fbbe-4c35-85c9-4f743f6d5338</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______________________ test_split_shard_with_invalid_name ______________________[0m
+[1m[31mtest_kinesis/test_kinesis_boto3.py[0m:154: in test_split_shard_with_invalid_name
+    [0mclient.create_stream(StreamName=[33m"[39;49;00m[33mmy-stream[39;49;00m[33m"[39;49;00m, ShardCount=[94m2[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateStream operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>87015c2f-f45d-489d-ab10-731f1a46dba6</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______________________ test_split_shard_with_unknown_name ______________________[0m
+[1m[31mtest_kinesis/test_kinesis_boto3.py[0m:173: in test_split_shard_with_unknown_name
+    [0mclient.create_stream(StreamName=[33m"[39;49;00m[33mmy-stream[39;49;00m[33m"[39;49;00m, ShardCount=[94m2[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateStream operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>4c8ff47b-704f-4003-ac60-230a6dd29254</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________________ test_split_shard_invalid_hashkey _______________________[0m
+[1m[31mtest_kinesis/test_kinesis_boto3.py[0m:192: in test_split_shard_invalid_hashkey
+    [0mclient.create_stream(StreamName=[33m"[39;49;00m[33mmy-stream[39;49;00m[33m"[39;49;00m, ShardCount=[94m2[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateStream operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>cab47ced-c52b-494c-9ced-dc81a9307161</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m____________________ test_split_shard_hashkey_out_of_bounds ____________________[0m
+[1m[31mtest_kinesis/test_kinesis_boto3.py[0m:211: in test_split_shard_hashkey_out_of_bounds
+    [0mclient.create_stream(StreamName=[33m"[39;49;00m[33mmy-stream[39;49;00m[33m"[39;49;00m, ShardCount=[94m2[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateStream operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>893b12b2-968a-417a-a7ab-b938e23f842b</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________________________ test_split_shard _______________________________[0m
+[1m[31mtest_kinesis/test_kinesis_boto3.py[0m:231: in test_split_shard
+    [0mclient.create_stream(StreamName=stream_name, ShardCount=[94m2[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateStream operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>a1362cb0-44ee-4335-988c-2a541886c454</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m____________________ test_split_shard_that_was_split_before ____________________[0m
+[1m[31mtest_kinesis/test_kinesis_boto3.py[0m:285: in test_split_shard_that_was_split_before
+    [0mclient.create_stream(StreamName=[33m"[39;49;00m[33mmy-stream[39;49;00m[33m"[39;49;00m, ShardCount=[94m2[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateStream operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>8628da54-4549-427d-8a9c-288864689eab</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m________________________ test_update_shard_count[2-4-6] ________________________[0m
+[1m[31mtest_kinesis/test_kinesis_boto3.py[0m:323: in test_update_shard_count
+    [0mclient.create_stream(StreamName=[33m"[39;49;00m[33mmy-stream[39;49;00m[33m"[39;49;00m, ShardCount=initial)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateStream operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>682a3552-8c9c-4c9b-ba24-6dfff7e66979</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________________ test_update_shard_count[4-5-15] ________________________[0m
+[1m[31mtest_kinesis/test_kinesis_boto3.py[0m:323: in test_update_shard_count
+    [0mclient.create_stream(StreamName=[33m"[39;49;00m[33mmy-stream[39;49;00m[33m"[39;49;00m, ShardCount=initial)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateStream operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>f39ea469-f945-4742-acf3-e9626d97b934</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______________________ test_update_shard_count[10-13-37] _______________________[0m
+[1m[31mtest_kinesis/test_kinesis_boto3.py[0m:323: in test_update_shard_count
+    [0mclient.create_stream(StreamName=[33m"[39;49;00m[33mmy-stream[39;49;00m[33m"[39;49;00m, ShardCount=initial)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateStream operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>44a4623b-1975-4267-bf56-8d417f86d9c8</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m________________________ test_update_shard_count[4-2-6] ________________________[0m
+[1m[31mtest_kinesis/test_kinesis_boto3.py[0m:323: in test_update_shard_count
+    [0mclient.create_stream(StreamName=[33m"[39;49;00m[33mmy-stream[39;49;00m[33m"[39;49;00m, ShardCount=initial)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateStream operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>e7a2f37c-73f9-4fb8-af53-a9ba22ab48eb</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m________________________ test_update_shard_count[5-3-7] ________________________[0m
+[1m[31mtest_kinesis/test_kinesis_boto3.py[0m:323: in test_update_shard_count
+    [0mclient.create_stream(StreamName=[33m"[39;49;00m[33mmy-stream[39;49;00m[33m"[39;49;00m, ShardCount=initial)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateStream operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>abdf984b-3cbf-45be-a0d1-d27c8066d228</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________________ test_update_shard_count[10-3-17] _______________________[0m
+[1m[31mtest_kinesis/test_kinesis_boto3.py[0m:323: in test_update_shard_count
+    [0mclient.create_stream(StreamName=[33m"[39;49;00m[33mmy-stream[39;49;00m[33m"[39;49;00m, ShardCount=initial)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateStream operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>f8d22680-f3e4-4c1a-adb1-661c43af7cd1</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_____________________________ test_describe_limits _____________________________[0m
+[1m[31mtest_kinesis/test_kinesis_boto3.py[0m:354: in test_describe_limits
+    [0mresp = client.describe_limits()[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the DescribeLimits operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>8e6958cc-af6f-45fc-9b25-993010a50b0f</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m__________________ test_kinesis_cloudformation_create_stream ___________________[0m
+[1m[31mtest_kinesis/test_kinesis_cloudformation.py[0m:14: in test_kinesis_cloudformation_create_stream
+    [0mcf_conn.create_stack(StackName=stack_name, TemplateBody=template)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateStack operation: Service 'cloudformation' is not available[0m
+[31m[1m_____________________ test_kinesis_cloudformation_get_attr _____________________[0m
+[1m[31mtest_kinesis/test_kinesis_cloudformation.py[0m:40: in test_kinesis_cloudformation_get_attr
+    [0mcf_conn.create_stack(StackName=stack_name, TemplateBody=template)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateStack operation: Service 'cloudformation' is not available[0m
+[31m[1m______________________ test_kinesis_cloudformation_update ______________________[0m
+[1m[31mtest_kinesis/test_kinesis_cloudformation.py[0m:81: in test_kinesis_cloudformation_update
+    [0mcf_conn.create_stack(StackName=stack_name, TemplateBody=template)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateStack operation: Service 'cloudformation' is not available[0m
+[31m[1m______________________ test_kinesis_cloudformation_delete ______________________[0m
+[1m[31mtest_kinesis/test_kinesis_cloudformation.py[0m:157: in test_kinesis_cloudformation_delete
+    [0mcf_conn.create_stack(StackName=stack_name, TemplateBody=template)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateStack operation: Service 'cloudformation' is not available[0m
+[31m[1m____________________________ test_enable_encryption ____________________________[0m
+[1m[31mtest_kinesis/test_kinesis_encryption.py[0m:11: in test_enable_encryption
+    [0mclient.create_stream(StreamName=[33m"[39;49;00m[33mmy-stream[39;49;00m[33m"[39;49;00m, ShardCount=[94m2[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateStream operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>ac6249f3-c136-46cb-a5a9-e03338f71de7</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________________________ test_disable_encryption ____________________________[0m
+[1m[31mtest_kinesis/test_kinesis_encryption.py[0m:31: in test_disable_encryption
+    [0mclient.create_stream(StreamName=[33m"[39;49;00m[33mmy-stream[39;49;00m[33m"[39;49;00m, ShardCount=[94m2[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateStream operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>011667eb-8344-42e9-b59c-8111fcb7aeac</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_____________________ test_disable_encryption__using_arns ______________________[0m
+[1m[31mtest_kinesis/test_kinesis_encryption.py[0m:54: in test_disable_encryption__using_arns
+    [0mclient.create_stream(StreamName=[33m"[39;49;00m[33mmy-stream[39;49;00m[33m"[39;49;00m, ShardCount=[94m2[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateStream operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>4c75eab1-b433-4a28-bb36-a7df550681bf</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_____________________ test_enable_enhanced_monitoring_all ______________________[0m
+[1m[31mtest_kinesis/test_kinesis_monitoring.py[0m:13: in test_enable_enhanced_monitoring_all
+    [0mclient.create_stream(StreamName=stream_name, ShardCount=[94m4[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateStream operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>44823df9-75da-4d5d-9d15-0005f10fd231</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_________________ test_enable_enhanced_monitoring_is_persisted _________________[0m
+[1m[31mtest_kinesis/test_kinesis_monitoring.py[0m:32: in test_enable_enhanced_monitoring_is_persisted
+    [0mclient.create_stream(StreamName=stream_name, ShardCount=[94m4[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateStream operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>a3ce9b29-09a3-4376-bbce-634b93760c19</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________________ test_enable_enhanced_monitoring_in_steps ___________________[0m
+[1m[31mtest_kinesis/test_kinesis_monitoring.py[0m:47: in test_enable_enhanced_monitoring_in_steps
+    [0mclient.create_stream(StreamName=stream_name, ShardCount=[94m4[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateStream operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>abacbb77-469c-4bf5-bf4b-8aa9356a4220</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________________ test_disable_enhanced_monitoring _______________________[0m
+[1m[31mtest_kinesis/test_kinesis_monitoring.py[0m:77: in test_disable_enhanced_monitoring
+    [0mclient.create_stream(StreamName=stream_name, ShardCount=[94m4[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateStream operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>d1dcf5f0-7b2f-4f06-8940-df1314084805</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_____________________ test_disable_enhanced_monitoring_all _____________________[0m
+[1m[31mtest_kinesis/test_kinesis_monitoring.py[0m:125: in test_disable_enhanced_monitoring_all
+    [0mclient.create_stream(StreamName=stream_name, ShardCount=[94m4[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateStream operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>af1ec28e-e1eb-49e1-8569-979e0eaa10af</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________________________ test_put_resource_policy ___________________________[0m
+[1m[31mtest_kinesis/test_kinesis_resource_policy.py[0m:31: in test_put_resource_policy
+    [0mclient.create_stream(StreamName=[33m"[39;49;00m[33mmy-stream[39;49;00m[33m"[39;49;00m, ShardCount=[94m2[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateStream operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>662e7bc9-1a12-4ea2-9870-1106acd2651d</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_________________________ test_delete_resource_policy __________________________[0m
+[1m[31mtest_kinesis/test_kinesis_resource_policy.py[0m:47: in test_delete_resource_policy
+    [0mclient.create_stream(StreamName=[33m"[39;49;00m[33mmy-stream[39;49;00m[33m"[39;49;00m, ShardCount=[94m2[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateStream operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>bc9f3ef7-dfa6-48b8-a522-f579cdf9a89a</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m________________ test_get_resource_policy_from_unknown_resource ________________[0m
+[1m[31mtest_kinesis/test_kinesis_resource_policy.py[0m:65: in test_get_resource_policy_from_unknown_resource
+    [0mclient.create_stream(StreamName=[33m"[39;49;00m[33mmy-stream[39;49;00m[33m"[39;49;00m, ShardCount=[94m2[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateStream operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>97094a73-170f-49f5-88ef-b006bc1ecb8b</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______________ test_delete_resource_policy_from_unknown_resource _______________[0m
+[1m[31mtest_kinesis/test_kinesis_resource_policy.py[0m:83: in test_delete_resource_policy_from_unknown_resource
+    [0mclient.create_stream(StreamName=[33m"[39;49;00m[33mmy-stream[39;49;00m[33m"[39;49;00m, ShardCount=[94m2[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateStream operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>337493c6-e121-4295-95a0-61523070c7f4</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________ test_delete_resource_policy_from_resource_without_policy ___________[0m
+[1m[31mtest_kinesis/test_kinesis_resource_policy.py[0m:101: in test_delete_resource_policy_from_resource_without_policy
+    [0mclient.create_stream(StreamName=[33m"[39;49;00m[33mmy-stream[39;49;00m[33m"[39;49;00m, ShardCount=[94m2[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateStream operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>69a03126-c3e7-47c2-b476-0df719d85395</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m__________________________ test_list_stream_consumers __________________________[0m
+[1m[31mtest_kinesis/test_kinesis_stream_consumers.py[0m:19: in test_list_stream_consumers
+    [0mstream_arn = create_stream(client)[90m[39;49;00m
+[1m[31mtest_kinesis/test_kinesis_stream_consumers.py[0m:11: in create_stream
+    [0mclient.create_stream(StreamName=stream_name, ShardCount=[94m4[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateStream operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>7e1771b6-dac6-4cd1-b8b6-429d341153ac</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m________________________ test_register_stream_consumer _________________________[0m
+[1m[31mtest_kinesis/test_kinesis_stream_consumers.py[0m:29: in test_register_stream_consumer
+    [0mstream_arn = create_stream(client)[90m[39;49;00m
+[1m[31mtest_kinesis/test_kinesis_stream_consumers.py[0m:11: in create_stream
+    [0mclient.create_stream(StreamName=stream_name, ShardCount=[94m4[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateStream operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>4948cf51-3f7d-44fa-aafb-672b417464ed</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m____________________ test_describe_stream_consumer_by_name _____________________[0m
+[1m[31mtest_kinesis/test_kinesis_stream_consumers.py[0m:62: in test_describe_stream_consumer_by_name
+    [0mstream_arn = create_stream(client)[90m[39;49;00m
+[1m[31mtest_kinesis/test_kinesis_stream_consumers.py[0m:11: in create_stream
+    [0mclient.create_stream(StreamName=stream_name, ShardCount=[94m4[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateStream operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>14a05e8a-9c1d-47f0-ac34-c6afdb4d4686</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_____________________ test_describe_stream_consumer_by_arn _____________________[0m
+[1m[31mtest_kinesis/test_kinesis_stream_consumers.py[0m:81: in test_describe_stream_consumer_by_arn
+    [0mstream_arn = create_stream(client)[90m[39;49;00m
+[1m[31mtest_kinesis/test_kinesis_stream_consumers.py[0m:11: in create_stream
+    [0mclient.create_stream(StreamName=stream_name, ShardCount=[94m4[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateStream operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>63a4e93e-0d9d-4e32-bc7d-f39b49f4dc10</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m____________________ test_describe_stream_consumer_unknown _____________________[0m
+[1m[31mtest_kinesis/test_kinesis_stream_consumers.py[0m:101: in test_describe_stream_consumer_unknown
+    [0mcreate_stream(client)[90m[39;49;00m
+[1m[31mtest_kinesis/test_kinesis_stream_consumers.py[0m:11: in create_stream
+    [0mclient.create_stream(StreamName=stream_name, ShardCount=[94m4[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateStream operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>2c3ed2a8-123a-45c6-920b-3bf9e283c60f</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________________ test_deregister_stream_consumer_by_name ____________________[0m
+[1m[31mtest_kinesis/test_kinesis_stream_consumers.py[0m:114: in test_deregister_stream_consumer_by_name
+    [0mstream_arn = create_stream(client)[90m[39;49;00m
+[1m[31mtest_kinesis/test_kinesis_stream_consumers.py[0m:11: in create_stream
+    [0mclient.create_stream(StreamName=stream_name, ShardCount=[94m4[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateStream operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>90ee35be-eb9b-451f-9903-9ec284be0135</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m____________________ test_deregister_stream_consumer_by_arn ____________________[0m
+[1m[31mtest_kinesis/test_kinesis_stream_consumers.py[0m:129: in test_deregister_stream_consumer_by_arn
+    [0mstream_arn = create_stream(client)[90m[39;49;00m
+[1m[31mtest_kinesis/test_kinesis_stream_consumers.py[0m:11: in create_stream
+    [0mclient.create_stream(StreamName=stream_name, ShardCount=[94m4[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateStream operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>89f5322d-d452-4f9c-b5e1-41745bf95691</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_________________________ test_record_data_exceeds_1mb _________________________[0m
+[1m[31mtest_kinesis/test_kinesis_stream_limits.py[0m:13: in test_record_data_exceeds_1mb
+    [0mclient.create_stream(StreamName=[33m"[39;49;00m[33mmy_stream[39;49;00m[33m"[39;49;00m, ShardCount=[94m1[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateStream operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>fd2416ab-82af-4bf5-9282-bcbbf864d88e</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m________________ test_record_data_and_partition_key_exceeds_1mb ________________[0m
+[1m[31mtest_kinesis/test_kinesis_stream_limits.py[0m:30: in test_record_data_and_partition_key_exceeds_1mb
+    [0mclient.create_stream(StreamName=[33m"[39;49;00m[33mmy_stream[39;49;00m[33m"[39;49;00m, ShardCount=[94m1[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateStream operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>bfdfc98c-1262-45e0-98ac-6821688376e7</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m________________ test_record_data_and_partition_key_exactly_1mb ________________[0m
+[1m[31mtest_kinesis/test_kinesis_stream_limits.py[0m:51: in test_record_data_and_partition_key_exactly_1mb
+    [0mclient.create_stream(StreamName=[33m"[39;49;00m[33mmy_stream[39;49;00m[33m"[39;49;00m, ShardCount=[94m1[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateStream operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>bc5c9d7d-a6f3-4d34-83a9-d36e7d6c1c67</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_____________ test_record_data_and_partition_key_smaller_than_1mb ______________[0m
+[1m[31mtest_kinesis/test_kinesis_stream_limits.py[0m:66: in test_record_data_and_partition_key_smaller_than_1mb
+    [0mclient.create_stream(StreamName=[33m"[39;49;00m[33mmy_stream[39;49;00m[33m"[39;49;00m, ShardCount=[94m1[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateStream operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>dcb1981f-7200-4ae8-80cd-61748089f21f</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______________________ test_total_record_data_exceeds_5mb ______________________[0m
+[1m[31mtest_kinesis/test_kinesis_stream_limits.py[0m:80: in test_total_record_data_exceeds_5mb
+    [0mclient.create_stream(StreamName=[33m"[39;49;00m[33mmy_stream[39;49;00m[33m"[39;49;00m, ShardCount=[94m1[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateStream operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>e305b453-60f3-42f7-a74e-06d88ae7014d</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________________ test_total_record_data_exact_5mb _______________________[0m
+[1m[31mtest_kinesis/test_kinesis_stream_limits.py[0m:94: in test_total_record_data_exact_5mb
+    [0mclient.create_stream(StreamName=[33m"[39;49;00m[33mmy_stream[39;49;00m[33m"[39;49;00m, ShardCount=[94m1[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateStream operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>f119a3b1-94d1-4e73-86d0-c20394f19677</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m____________________________ test_too_many_records _____________________________[0m
+[1m[31mtest_kinesis/test_kinesis_stream_limits.py[0m:107: in test_too_many_records
+    [0mclient.create_stream(StreamName=[33m"[39;49;00m[33mmy_stream[39;49;00m[33m"[39;49;00m, ShardCount=[94m1[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateStream operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>f428be28-583c-477b-a63e-35da7252378d</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[33m=============================== warnings summary ===============================[0m
+tests/test_kinesis/test_kinesis.py: 32 warnings
+tests/test_kinesis/test_kinesis_boto3.py: 17 warnings
+tests/test_kinesis/test_kinesis_cloudformation.py: 4 warnings
+tests/test_kinesis/test_kinesis_encryption.py: 3 warnings
+tests/test_kinesis/test_kinesis_monitoring.py: 5 warnings
+tests/test_kinesis/test_kinesis_resource_policy.py: 5 warnings
+tests/test_kinesis/test_kinesis_stream_consumers.py: 7 warnings
+tests/test_kinesis/test_kinesis_stream_limits.py: 7 warnings
+  /Users/lucas/.cache/fakecloud/moto/.venv/lib/python3.9/site-packages/boto3/compat.py:89: PythonDeprecationWarning: Boto3 will no longer support Python 3.9 starting April 29, 2026. To continue receiving service updates, bug fixes, and security updates please upgrade to Python 3.10 or later. More information can be found here: https://aws.amazon.com/blogs/developer/python-support-policy-updates-for-aws-sdks-and-tools/
+    warnings.warn(warning, PythonDeprecationWarning)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+[36m[1m=========================== short test summary info ============================[0m
+[31mFAILED[0m test_kinesis/test_kinesis.py::[1mtest_stream_creation_on_demand[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_kinesis/test_kinesis.py::[1mtest_update_stream_mode[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_kinesis/test_kinesis.py::[1mtest_describe_non_existent_stream[0m - AssertionError: assert '400' == 'ResourceNotFoundException'
+[31mFAILED[0m test_kinesis/test_kinesis.py::[1mtest_list_and_delete_stream[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the L...
+[31mFAILED[0m test_kinesis/test_kinesis.py::[1mtest_delete_unknown_stream[0m - AssertionError: assert '400' == 'ResourceNotFoundException'
+[31mFAILED[0m test_kinesis/test_kinesis.py::[1mtest_list_many_streams[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_kinesis/test_kinesis.py::[1mtest_describe_stream_summary[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_kinesis/test_kinesis.py::[1mtest_list_streams_stream_discription[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_kinesis/test_kinesis.py::[1mtest_basic_shard_iterator[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_kinesis/test_kinesis.py::[1mtest_basic_shard_iterator_by_stream_arn[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_kinesis/test_kinesis.py::[1mtest_get_invalid_shard_iterator[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_kinesis/test_kinesis.py::[1mtest_put_records[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_kinesis/test_kinesis.py::[1mtest_get_records_limit[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_kinesis/test_kinesis.py::[1mtest_get_records_at_sequence_number[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_kinesis/test_kinesis.py::[1mtest_get_records_after_sequence_number[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_kinesis/test_kinesis.py::[1mtest_get_records_latest[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_kinesis/test_kinesis.py::[1mtest_get_records_at_very_old_timestamp[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_kinesis/test_kinesis.py::[1mtest_get_records_at_very_new_timestamp[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_kinesis/test_kinesis.py::[1mtest_get_records_from_empty_stream_at_timestamp[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_kinesis/test_kinesis.py::[1mtest_get_records_at_exact_timestamp[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_kinesis/test_kinesis.py::[1mtest_valid_increase_stream_retention_period[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_kinesis/test_kinesis.py::[1mtest_invalid_increase_stream_retention_period[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_kinesis/test_kinesis.py::[1mtest_invalid_increase_stream_retention_too_low[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_kinesis/test_kinesis.py::[1mtest_invalid_increase_stream_retention_too_high[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_kinesis/test_kinesis.py::[1mtest_valid_decrease_stream_retention_period[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_kinesis/test_kinesis.py::[1mtest_decrease_stream_retention_period_upwards[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_kinesis/test_kinesis.py::[1mtest_decrease_stream_retention_period_too_low[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_kinesis/test_kinesis.py::[1mtest_decrease_stream_retention_period_too_high[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_kinesis/test_kinesis.py::[1mtest_invalid_shard_iterator_type[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_kinesis/test_kinesis.py::[1mtest_add_list_remove_tags[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_kinesis/test_kinesis.py::[1mtest_merge_shards[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_kinesis/test_kinesis.py::[1mtest_merge_shards_invalid_arg[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_kinesis/test_kinesis_boto3.py::[1mtest_describe_stream_limit_parameter[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_kinesis/test_kinesis_boto3.py::[1mtest_list_shards[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_kinesis/test_kinesis_boto3.py::[1mtest_list_shards_paging[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_kinesis/test_kinesis_boto3.py::[1mtest_create_shard[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_kinesis/test_kinesis_boto3.py::[1mtest_split_shard_with_invalid_name[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_kinesis/test_kinesis_boto3.py::[1mtest_split_shard_with_unknown_name[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_kinesis/test_kinesis_boto3.py::[1mtest_split_shard_invalid_hashkey[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_kinesis/test_kinesis_boto3.py::[1mtest_split_shard_hashkey_out_of_bounds[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_kinesis/test_kinesis_boto3.py::[1mtest_split_shard[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_kinesis/test_kinesis_boto3.py::[1mtest_split_shard_that_was_split_before[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_kinesis/test_kinesis_boto3.py::[1mtest_update_shard_count[2-4-6][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_kinesis/test_kinesis_boto3.py::[1mtest_update_shard_count[4-5-15][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_kinesis/test_kinesis_boto3.py::[1mtest_update_shard_count[10-13-37][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_kinesis/test_kinesis_boto3.py::[1mtest_update_shard_count[4-2-6][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_kinesis/test_kinesis_boto3.py::[1mtest_update_shard_count[5-3-7][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_kinesis/test_kinesis_boto3.py::[1mtest_update_shard_count[10-3-17][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_kinesis/test_kinesis_boto3.py::[1mtest_describe_limits[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the D...
+[31mFAILED[0m test_kinesis/test_kinesis_cloudformation.py::[1mtest_kinesis_cloudformation_create_stream[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_kinesis/test_kinesis_cloudformation.py::[1mtest_kinesis_cloudformation_get_attr[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_kinesis/test_kinesis_cloudformation.py::[1mtest_kinesis_cloudformation_update[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_kinesis/test_kinesis_cloudformation.py::[1mtest_kinesis_cloudformation_delete[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_kinesis/test_kinesis_encryption.py::[1mtest_enable_encryption[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_kinesis/test_kinesis_encryption.py::[1mtest_disable_encryption[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_kinesis/test_kinesis_encryption.py::[1mtest_disable_encryption__using_arns[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_kinesis/test_kinesis_monitoring.py::[1mtest_enable_enhanced_monitoring_all[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_kinesis/test_kinesis_monitoring.py::[1mtest_enable_enhanced_monitoring_is_persisted[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_kinesis/test_kinesis_monitoring.py::[1mtest_enable_enhanced_monitoring_in_steps[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_kinesis/test_kinesis_monitoring.py::[1mtest_disable_enhanced_monitoring[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_kinesis/test_kinesis_monitoring.py::[1mtest_disable_enhanced_monitoring_all[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_kinesis/test_kinesis_resource_policy.py::[1mtest_put_resource_policy[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_kinesis/test_kinesis_resource_policy.py::[1mtest_delete_resource_policy[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_kinesis/test_kinesis_resource_policy.py::[1mtest_get_resource_policy_from_unknown_resource[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_kinesis/test_kinesis_resource_policy.py::[1mtest_delete_resource_policy_from_unknown_resource[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_kinesis/test_kinesis_resource_policy.py::[1mtest_delete_resource_policy_from_resource_without_policy[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_kinesis/test_kinesis_stream_consumers.py::[1mtest_list_stream_consumers[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_kinesis/test_kinesis_stream_consumers.py::[1mtest_register_stream_consumer[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_kinesis/test_kinesis_stream_consumers.py::[1mtest_describe_stream_consumer_by_name[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_kinesis/test_kinesis_stream_consumers.py::[1mtest_describe_stream_consumer_by_arn[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_kinesis/test_kinesis_stream_consumers.py::[1mtest_describe_stream_consumer_unknown[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_kinesis/test_kinesis_stream_consumers.py::[1mtest_deregister_stream_consumer_by_name[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_kinesis/test_kinesis_stream_consumers.py::[1mtest_deregister_stream_consumer_by_arn[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_kinesis/test_kinesis_stream_limits.py::[1mtest_record_data_exceeds_1mb[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_kinesis/test_kinesis_stream_limits.py::[1mtest_record_data_and_partition_key_exceeds_1mb[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_kinesis/test_kinesis_stream_limits.py::[1mtest_record_data_and_partition_key_exactly_1mb[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_kinesis/test_kinesis_stream_limits.py::[1mtest_record_data_and_partition_key_smaller_than_1mb[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_kinesis/test_kinesis_stream_limits.py::[1mtest_total_record_data_exceeds_5mb[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_kinesis/test_kinesis_stream_limits.py::[1mtest_total_record_data_exact_5mb[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_kinesis/test_kinesis_stream_limits.py::[1mtest_too_many_records[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31m[31m[1m80 failed[0m, [33m3 skipped[0m, [33m80 warnings[0m[31m in 2.52s[0m[0m

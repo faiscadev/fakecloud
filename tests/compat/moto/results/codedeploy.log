@@ -1,0 +1,408 @@
+[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31m                                               [100%][0m
+=================================== FAILURES ===================================
+[31m[1m___________________________ test_create_application ____________________________[0m
+[1m[31mtest_codedeploy/test_codedeploy.py[0m:18: in test_create_application
+    [0mresponse = client.create_application([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateApplication operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>58e5eb01-7c50-4572-8c0e-6c42a6e83c4b</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________________ test_create_application_existing _______________________[0m
+[1m[31mtest_codedeploy/test_codedeploy.py[0m:37: in test_create_application_existing
+    [0mresponse = client.create_application([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateApplication operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>86e8d681-25a8-4bc2-a7b1-ea1bdfcea0d6</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m____________________ test_create_deployment_group_required _____________________[0m
+[1m[31mtest_codedeploy/test_codedeploy.py[0m:53: in test_create_deployment_group_required
+    [0mclient.create_application([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateApplication operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>5c60fcf8-b009-4793-9913-c52f827d492b</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______________________ test_create_deployment_revision_s3 ______________________[0m
+[1m[31mtest_codedeploy/test_codedeploy.py[0m:73: in test_create_deployment_revision_s3
+    [0mclient.create_application([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateApplication operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>5b5e270c-8c7d-45a9-adfc-e6a2201e7eb4</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m____________________ test_create_deployment_revision_github ____________________[0m
+[1m[31mtest_codedeploy/test_codedeploy.py[0m:128: in test_create_deployment_revision_github
+    [0mclient.create_application([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateApplication operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>fa811821-0015-4695-8d71-485b83b4aeed</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m____________________ test_create_deployment_nonexistent_app ____________________[0m
+[1m[31mtest_codedeploy/test_codedeploy.py[0m:173: in test_create_deployment_nonexistent_app
+    [0m[94massert[39;49;00m exc.value.response[[33m"[39;49;00m[33mError[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mApplicationDoesNotExistException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'ApplicationD...xistException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ApplicationDoesNotExistException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m___________________ test_create_deployment_nonexistent_group ___________________[0m
+[1m[31mtest_codedeploy/test_codedeploy.py[0m:181: in test_create_deployment_nonexistent_group
+    [0mclient.create_application([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateApplication operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>a2e2d3f2-af05-4f88-bb62-1cf232ec19f5</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_________________________ test_create_deployment_group _________________________[0m
+[1m[31mtest_codedeploy/test_codedeploy.py[0m:210: in test_create_deployment_group
+    [0mclient.create_application([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateApplication operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>9c3c3a49-9ffe-4e06-8810-d0f8627d32b5</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_________________ test_create_deployment_group_app_nonexistent _________________[0m
+[1m[31mtest_codedeploy/test_codedeploy.py[0m:235: in test_create_deployment_group_app_nonexistent
+    [0m[94massert[39;49;00m exc.value.response[[33m"[39;49;00m[33mError[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mApplicationDoesNotExistException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'ApplicationD...xistException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ApplicationDoesNotExistException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m____________________ test_create_deployment_group_existing _____________________[0m
+[1m[31mtest_codedeploy/test_codedeploy.py[0m:245: in test_create_deployment_group_existing
+    [0mclient.create_application([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateApplication operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>dd143a96-e109-40ea-aeda-f857aac3fadd</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_____________________________ test_get_deployment ______________________________[0m
+[1m[31mtest_codedeploy/test_codedeploy.py[0m:273: in test_get_deployment
+    [0mclient.create_application([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateApplication operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>48be3ae4-d54d-4d24-882f-585481ce0d35</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m__________________ test_get_deployment_nonexistent_deployment __________________[0m
+[1m[31mtest_codedeploy/test_codedeploy.py[0m:316: in test_get_deployment_nonexistent_deployment
+    [0m[94massert[39;49;00m exc.value.response[[33m"[39;49;00m[33mError[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mDeploymentDoesNotExistException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'DeploymentDo...xistException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- DeploymentDoesNotExistException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m__________________________ test_get_deployment_group ___________________________[0m
+[1m[31mtest_codedeploy/test_codedeploy.py[0m:326: in test_get_deployment_group
+    [0mclient.create_application([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateApplication operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>4ad61d74-dbfb-4dac-aff6-569d54fbf8fe</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m__________________ test_get_deployment_group_nonexistent_app ___________________[0m
+[1m[31mtest_codedeploy/test_codedeploy.py[0m:362: in test_get_deployment_group_nonexistent_app
+    [0m[94massert[39;49;00m exc.value.response[[33m"[39;49;00m[33mError[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mApplicationDoesNotExistException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'ApplicationD...xistException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ApplicationDoesNotExistException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m_________________ test_get_deployment_group_nonexistent_group __________________[0m
+[1m[31mtest_codedeploy/test_codedeploy.py[0m:370: in test_get_deployment_group_nonexistent_group
+    [0mclient.create_application([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateApplication operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>b4e1d2d1-21e5-483a-958f-ff88da3232c0</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________________ test_batch_get_applications_invalid_name ___________________[0m
+[1m[31mtest_codedeploy/test_codedeploy.py[0m:387: in test_batch_get_applications_invalid_name
+    [0m[94massert[39;49;00m exc.value.response[[33m"[39;49;00m[33mError[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mApplicationDoesNotExistException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'ApplicationD...xistException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ApplicationDoesNotExistException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m_________________________ test_batch_get_applications __________________________[0m
+[1m[31mtest_codedeploy/test_codedeploy.py[0m:393: in test_batch_get_applications
+    [0mclient.create_application(applicationName=[33m"[39;49;00m[33msample_app1[39;49;00m[33m"[39;49;00m, computePlatform=[33m"[39;49;00m[33mLambda[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateApplication operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>a8ab36a1-8f91-4148-a81a-7a37f962e87e</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m__________________________ test_batch_get_deployments __________________________[0m
+[1m[31mtest_codedeploy/test_codedeploy.py[0m:414: in test_batch_get_deployments
+    [0mclient.create_application([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateApplication operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>451a696f-6eab-472b-abc5-8f276a280078</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m____________________________ test_list_applications ____________________________[0m
+[1m[31mtest_codedeploy/test_codedeploy.py[0m:447: in test_list_applications
+    [0mresp = client.list_applications()[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the ListApplications operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>72fe0bab-f1c2-46fb-af86-a88d5a67ad5d</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m____________________________ test_list_deployments _____________________________[0m
+[1m[31mtest_codedeploy/test_codedeploy.py[0m:464: in test_list_deployments
+    [0mresp = client.list_deployments()[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the ListDeployments operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>a7ef6419-d1ac-432b-8df0-f1796b55b1ce</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_____________________ test_list_deployments_group_required _____________________[0m
+[1m[31mtest_codedeploy/test_codedeploy.py[0m:520: in test_list_deployments_group_required
+    [0m[94massert[39;49;00m exc.value.response[[33m"[39;49;00m[33mError[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mDeploymentGroupNameRequiredException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'DeploymentGr...iredException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- DeploymentGroupNameRequiredException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m______________________ test_list_deployments_app_required ______________________[0m
+[1m[31mtest_codedeploy/test_codedeploy.py[0m:528: in test_list_deployments_app_required
+    [0m[94massert[39;49;00m exc.value.response[[33m"[39;49;00m[33mError[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mApplicationNameRequiredException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'ApplicationN...iredException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ApplicationNameRequiredException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m_________________________ test_list_deployment_groups __________________________[0m
+[1m[31mtest_codedeploy/test_codedeploy.py[0m:540: in test_list_deployment_groups
+    [0mresp = client.list_deployment_groups(applicationName=application_name)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the ListDeploymentGroups operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>2beed2b7-0353-4fcc-aa0a-8b10e5ca3174</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________________________ test_application_tagging ___________________________[0m
+[1m[31mtest_codedeploy/test_codedeploy.py[0m:573: in test_application_tagging
+    [0mresponse = client.create_application([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateApplication operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>1bc380d8-2d92-4a1b-854a-0777bd3bd8e8</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m________________________ test_deployment_group_tagging _________________________[0m
+[1m[31mtest_codedeploy/test_codedeploy.py[0m:593: in test_deployment_group_tagging
+    [0mclient.create_application(applicationName=app_name, computePlatform=[33m"[39;49;00m[33mServer[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateApplication operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>be5f3537-f754-4f75-b1da-4fa5f6468df3</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m________________________ test_deployment_inherits_tags _________________________[0m
+[1m[31mtest_codedeploy/test_codedeploy.py[0m:620: in test_deployment_inherits_tags
+    [0mclient.create_application(applicationName=app_name, computePlatform=[33m"[39;49;00m[33mServer[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateApplication operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>0dc2f646-f9fe-490d-9fdb-a1d08beff88e</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[33m=============================== warnings summary ===============================[0m
+tests/test_codedeploy/test_codedeploy.py: 26 warnings
+  /Users/lucas/.cache/fakecloud/moto/.venv/lib/python3.9/site-packages/boto3/compat.py:89: PythonDeprecationWarning: Boto3 will no longer support Python 3.9 starting April 29, 2026. To continue receiving service updates, bug fixes, and security updates please upgrade to Python 3.10 or later. More information can be found here: https://aws.amazon.com/blogs/developer/python-support-policy-updates-for-aws-sdks-and-tools/
+    warnings.warn(warning, PythonDeprecationWarning)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+[36m[1m=========================== short test summary info ============================[0m
+[31mFAILED[0m test_codedeploy/test_codedeploy.py::[1mtest_create_application[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_codedeploy/test_codedeploy.py::[1mtest_create_application_existing[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_codedeploy/test_codedeploy.py::[1mtest_create_deployment_group_required[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_codedeploy/test_codedeploy.py::[1mtest_create_deployment_revision_s3[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_codedeploy/test_codedeploy.py::[1mtest_create_deployment_revision_github[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_codedeploy/test_codedeploy.py::[1mtest_create_deployment_nonexistent_app[0m - AssertionError: assert '400' == 'ApplicationD...xistException'
+[31mFAILED[0m test_codedeploy/test_codedeploy.py::[1mtest_create_deployment_nonexistent_group[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_codedeploy/test_codedeploy.py::[1mtest_create_deployment_group[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_codedeploy/test_codedeploy.py::[1mtest_create_deployment_group_app_nonexistent[0m - AssertionError: assert '400' == 'ApplicationD...xistException'
+[31mFAILED[0m test_codedeploy/test_codedeploy.py::[1mtest_create_deployment_group_existing[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_codedeploy/test_codedeploy.py::[1mtest_get_deployment[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_codedeploy/test_codedeploy.py::[1mtest_get_deployment_nonexistent_deployment[0m - AssertionError: assert '400' == 'DeploymentDo...xistException'
+[31mFAILED[0m test_codedeploy/test_codedeploy.py::[1mtest_get_deployment_group[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_codedeploy/test_codedeploy.py::[1mtest_get_deployment_group_nonexistent_app[0m - AssertionError: assert '400' == 'ApplicationD...xistException'
+[31mFAILED[0m test_codedeploy/test_codedeploy.py::[1mtest_get_deployment_group_nonexistent_group[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_codedeploy/test_codedeploy.py::[1mtest_batch_get_applications_invalid_name[0m - AssertionError: assert '400' == 'ApplicationD...xistException'
+[31mFAILED[0m test_codedeploy/test_codedeploy.py::[1mtest_batch_get_applications[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_codedeploy/test_codedeploy.py::[1mtest_batch_get_deployments[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_codedeploy/test_codedeploy.py::[1mtest_list_applications[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the L...
+[31mFAILED[0m test_codedeploy/test_codedeploy.py::[1mtest_list_deployments[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the L...
+[31mFAILED[0m test_codedeploy/test_codedeploy.py::[1mtest_list_deployments_group_required[0m - AssertionError: assert '400' == 'DeploymentGr...iredException'
+[31mFAILED[0m test_codedeploy/test_codedeploy.py::[1mtest_list_deployments_app_required[0m - AssertionError: assert '400' == 'ApplicationN...iredException'
+[31mFAILED[0m test_codedeploy/test_codedeploy.py::[1mtest_list_deployment_groups[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the L...
+[31mFAILED[0m test_codedeploy/test_codedeploy.py::[1mtest_application_tagging[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_codedeploy/test_codedeploy.py::[1mtest_deployment_group_tagging[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_codedeploy/test_codedeploy.py::[1mtest_deployment_inherits_tags[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31m[31m[1m26 failed[0m, [33m26 warnings[0m[31m in 0.79s[0m[0m

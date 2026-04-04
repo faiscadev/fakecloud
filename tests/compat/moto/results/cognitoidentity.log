@@ -1,0 +1,352 @@
+[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[32m.[0m[31mF[0m[33ms[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31m                                                  [100%][0m
+=================================== FAILURES ===================================
+[31m[1m______________ test_create_identity_pool_invalid_name[pool#name] _______________[0m
+[1m[31mtest_cognitoidentity/test_cognitoidentity.py[0m:26: in test_create_identity_pool_invalid_name
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mValidationException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'ValidationException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ValidationException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m______________ test_create_identity_pool_invalid_name[with!excl] _______________[0m
+[1m[31mtest_cognitoidentity/test_cognitoidentity.py[0m:26: in test_create_identity_pool_invalid_name
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mValidationException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'ValidationException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ValidationException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m______________ test_create_identity_pool_invalid_name[with?quest] ______________[0m
+[1m[31mtest_cognitoidentity/test_cognitoidentity.py[0m:26: in test_create_identity_pool_invalid_name
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mValidationException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'ValidationException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ValidationException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m___________________ test_create_identity_pool_valid_name[x] ____________________[0m
+[1m[31mtest_cognitoidentity/test_cognitoidentity.py[0m:38: in test_create_identity_pool_valid_name
+    [0mconn.create_identity_pool([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateIdentityPool operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>89f92055-b029-447b-9246-441e8b139ab1</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_________________ test_create_identity_pool_valid_name[pool-] __________________[0m
+[1m[31mtest_cognitoidentity/test_cognitoidentity.py[0m:38: in test_create_identity_pool_valid_name
+    [0mconn.create_identity_pool([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateIdentityPool operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>bced756c-0eab-4e6c-9745-acaac3c4595a</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________ test_create_identity_pool_valid_name[pool_name] ________________[0m
+[1m[31mtest_cognitoidentity/test_cognitoidentity.py[0m:38: in test_create_identity_pool_valid_name
+    [0mconn.create_identity_pool([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateIdentityPool operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>00ebe615-a6f0-4a49-94c1-5902a52cde8c</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________ test_create_identity_pool_valid_name[with space] _______________[0m
+[1m[31mtest_cognitoidentity/test_cognitoidentity.py[0m:38: in test_create_identity_pool_valid_name
+    [0mconn.create_identity_pool([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateIdentityPool operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>8b3fbf0e-c3e3-4e43-b77e-f2b3fc03accc</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m__________________________ test_create_identity_pool ___________________________[0m
+[1m[31mtest_cognitoidentity/test_cognitoidentity.py[0m:47: in test_create_identity_pool
+    [0mresult = conn.create_identity_pool([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateIdentityPool operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>6cb1817f-ca0d-443b-ae03-3a3c1bf8cdaf</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_________________________ test_describe_identity_pool __________________________[0m
+[1m[31mtest_cognitoidentity/test_cognitoidentity.py[0m:69: in test_describe_identity_pool
+    [0mres = conn.create_identity_pool([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateIdentityPool operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>607ed134-2dec-4ba9-b87b-e9db2a594367</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_ test_update_identity_pool[SupportedLoginProviders-initial_value0-updated_value0] _[0m
+[1m[31mtest_cognitoidentity/test_cognitoidentity.py[0m:115: in test_update_identity_pool
+    [0mres = conn.create_identity_pool([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateIdentityPool operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>935c2bb0-a04e-44e5-a836-042786fe697c</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_ test_update_identity_pool[SupportedLoginProviders-initial_value1-updated_value1] _[0m
+[1m[31mtest_cognitoidentity/test_cognitoidentity.py[0m:115: in test_update_identity_pool
+    [0mres = conn.create_identity_pool([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateIdentityPool operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>b74761d8-844d-4c02-8a37-977d04edf395</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m__________ test_update_identity_pool[DeveloperProviderName-dev1-dev2] __________[0m
+[1m[31mtest_cognitoidentity/test_cognitoidentity.py[0m:115: in test_update_identity_pool
+    [0mres = conn.create_identity_pool([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateIdentityPool operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>0de2a1d2-1a75-452b-9002-9cfd3d49132c</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________ test_describe_identity_pool_with_invalid_id_raises_error ___________[0m
+[1m[31mtest_cognitoidentity/test_cognitoidentity.py[0m:143: in test_describe_identity_pool_with_invalid_id_raises_error
+    [0m[94massert[39;49;00m cm.value.response[[33m"[39;49;00m[33mError[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mResourceNotFoundException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'ResourceNotFoundException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ResourceNotFoundException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m_________________________________ test_get_id __________________________________[0m
+[1m[31m../.venv/lib/python3.9/site-packages/requests/models.py[0m:976: in json
+    [0m[94mreturn[39;49;00m complexjson.loads([96mself[39;49;00m.text, **kwargs)[90m[39;49;00m
+[1m[31m../../../../.pyenv/versions/3.9.19/lib/python3.9/json/__init__.py[0m:346: in loads
+    [0m[94mreturn[39;49;00m _default_decoder.decode(s)[90m[39;49;00m
+[1m[31m../../../../.pyenv/versions/3.9.19/lib/python3.9/json/decoder.py[0m:337: in decode
+    [0mobj, end = [96mself[39;49;00m.raw_decode(s, idx=_w(s, [94m0[39;49;00m).end())[90m[39;49;00m
+[1m[31m../../../../.pyenv/versions/3.9.19/lib/python3.9/json/decoder.py[0m:355: in raw_decode
+    [0m[94mraise[39;49;00m JSONDecodeError([33m"[39;49;00m[33mExpecting value[39;49;00m[33m"[39;49;00m, s, err.value) [94mfrom[39;49;00m[90m [39;49;00m[94mNone[39;49;00m[90m[39;49;00m
+[1m[31mE   json.decoder.JSONDecodeError: Expecting value: line 1 column 1 (char 0)[0m
+
+[33mDuring handling of the above exception, another exception occurred:[0m
+[1m[31m../moto/core/models.py[0m:120: in wrapper
+    [0mresult = func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../moto/core/authorization.py[0m:96: in wrapper
+    [0moriginal_initial_no_auth_action_count = response.json()[[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/requests/models.py[0m:980: in json
+    [0m[94mraise[39;49;00m RequestsJSONDecodeError(e.msg, e.doc, e.pos)[90m[39;49;00m
+[1m[31mE   requests.exceptions.JSONDecodeError: Expecting value: line 1 column 1 (char 0)[0m
+[31m[1m______________________ test_get_credentials_for_identity _______________________[0m
+[1m[31mtest_cognitoidentity/test_cognitoidentity.py[0m:193: in test_get_credentials_for_identity
+    [0mresult = conn.get_credentials_for_identity(IdentityId=[33m"[39;49;00m[33m12345[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the GetCredentialsForIdentity operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>f303c88b-4a21-47fc-9c97-9d068aca1a23</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m________________ test_get_open_id_token_for_developer_identity _________________[0m
+[1m[31mtest_cognitoidentity/test_cognitoidentity.py[0m:202: in test_get_open_id_token_for_developer_identity
+    [0mresult = conn.get_open_id_token_for_developer_identity([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the GetOpenIdTokenForDeveloperIdentity operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>99efa117-72c8-40b8-8659-c9e061d65392</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m__ test_get_open_id_token_for_developer_identity_when_no_explicit_identity_id __[0m
+[1m[31mtest_cognitoidentity/test_cognitoidentity.py[0m:215: in test_get_open_id_token_for_developer_identity_when_no_explicit_identity_id
+    [0mresult = conn.get_open_id_token_for_developer_identity([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the GetOpenIdTokenForDeveloperIdentity operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>792fdd7d-8daf-47e5-ac66-06c5e7ae6050</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m____________________________ test_get_open_id_token ____________________________[0m
+[1m[31m../.venv/lib/python3.9/site-packages/requests/models.py[0m:976: in json
+    [0m[94mreturn[39;49;00m complexjson.loads([96mself[39;49;00m.text, **kwargs)[90m[39;49;00m
+[1m[31m../../../../.pyenv/versions/3.9.19/lib/python3.9/json/__init__.py[0m:346: in loads
+    [0m[94mreturn[39;49;00m _default_decoder.decode(s)[90m[39;49;00m
+[1m[31m../../../../.pyenv/versions/3.9.19/lib/python3.9/json/decoder.py[0m:337: in decode
+    [0mobj, end = [96mself[39;49;00m.raw_decode(s, idx=_w(s, [94m0[39;49;00m).end())[90m[39;49;00m
+[1m[31m../../../../.pyenv/versions/3.9.19/lib/python3.9/json/decoder.py[0m:355: in raw_decode
+    [0m[94mraise[39;49;00m JSONDecodeError([33m"[39;49;00m[33mExpecting value[39;49;00m[33m"[39;49;00m, s, err.value) [94mfrom[39;49;00m[90m [39;49;00m[94mNone[39;49;00m[90m[39;49;00m
+[1m[31mE   json.decoder.JSONDecodeError: Expecting value: line 1 column 1 (char 0)[0m
+
+[33mDuring handling of the above exception, another exception occurred:[0m
+[1m[31m../moto/core/models.py[0m:120: in wrapper
+    [0mresult = func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../moto/core/authorization.py[0m:96: in wrapper
+    [0moriginal_initial_no_auth_action_count = response.json()[[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/requests/models.py[0m:980: in json
+    [0m[94mraise[39;49;00m RequestsJSONDecodeError(e.msg, e.doc, e.pos)[90m[39;49;00m
+[1m[31mE   requests.exceptions.JSONDecodeError: Expecting value: line 1 column 1 (char 0)[0m
+[31m[1m_____________________________ test_list_identities _____________________________[0m
+[1m[31mtest_cognitoidentity/test_cognitoidentity.py[0m:234: in test_list_identities
+    [0midentity_pool_data = conn.create_identity_pool([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateIdentityPool operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>223380d6-9f6e-4110-a6ab-add055e25a3d</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________________________ test_list_identity_pools ___________________________[0m
+[1m[31mtest_cognitoidentity/test_cognitoidentity.py[0m:252: in test_list_identity_pools
+    [0midentity_pool_data = conn.create_identity_pool([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateIdentityPool operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>1486d781-c38f-47b9-8d50-6dbda3d8111e</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m__________________________ test_delete_identity_pool ___________________________[0m
+[1m[31mtest_cognitoidentity/test_cognitoidentity.py[0m:264: in test_delete_identity_pool
+    [0midentity_pool_id = conn.create_identity_pool([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateIdentityPool operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>d3583ad0-8422-434a-8409-b58e5f6543e6</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[33m=============================== warnings summary ===============================[0m
+tests/test_cognitoidentity/test_cognitoidentity.py: 19 warnings
+  /Users/lucas/.cache/fakecloud/moto/.venv/lib/python3.9/site-packages/boto3/compat.py:89: PythonDeprecationWarning: Boto3 will no longer support Python 3.9 starting April 29, 2026. To continue receiving service updates, bug fixes, and security updates please upgrade to Python 3.10 or later. More information can be found here: https://aws.amazon.com/blogs/developer/python-support-policy-updates-for-aws-sdks-and-tools/
+    warnings.warn(warning, PythonDeprecationWarning)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+[36m[1m=========================== short test summary info ============================[0m
+[31mFAILED[0m test_cognitoidentity/test_cognitoidentity.py::[1mtest_create_identity_pool_invalid_name[pool#name][0m - AssertionError: assert '400' == 'ValidationException'
+[31mFAILED[0m test_cognitoidentity/test_cognitoidentity.py::[1mtest_create_identity_pool_invalid_name[with!excl][0m - AssertionError: assert '400' == 'ValidationException'
+[31mFAILED[0m test_cognitoidentity/test_cognitoidentity.py::[1mtest_create_identity_pool_invalid_name[with?quest][0m - AssertionError: assert '400' == 'ValidationException'
+[31mFAILED[0m test_cognitoidentity/test_cognitoidentity.py::[1mtest_create_identity_pool_valid_name[x][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_cognitoidentity/test_cognitoidentity.py::[1mtest_create_identity_pool_valid_name[pool-][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_cognitoidentity/test_cognitoidentity.py::[1mtest_create_identity_pool_valid_name[pool_name][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_cognitoidentity/test_cognitoidentity.py::[1mtest_create_identity_pool_valid_name[with space][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_cognitoidentity/test_cognitoidentity.py::[1mtest_create_identity_pool[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_cognitoidentity/test_cognitoidentity.py::[1mtest_describe_identity_pool[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_cognitoidentity/test_cognitoidentity.py::[1mtest_update_identity_pool[SupportedLoginProviders-initial_value0-updated_value0][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_cognitoidentity/test_cognitoidentity.py::[1mtest_update_identity_pool[SupportedLoginProviders-initial_value1-updated_value1][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_cognitoidentity/test_cognitoidentity.py::[1mtest_update_identity_pool[DeveloperProviderName-dev1-dev2][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_cognitoidentity/test_cognitoidentity.py::[1mtest_describe_identity_pool_with_invalid_id_raises_error[0m - AssertionError: assert '400' == 'ResourceNotFoundException'
+[31mFAILED[0m test_cognitoidentity/test_cognitoidentity.py::[1mtest_get_id[0m - requests.exceptions.JSONDecodeError: Expecting value: line 1 column 1 (char 0)
+[31mFAILED[0m test_cognitoidentity/test_cognitoidentity.py::[1mtest_get_credentials_for_identity[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the G...
+[31mFAILED[0m test_cognitoidentity/test_cognitoidentity.py::[1mtest_get_open_id_token_for_developer_identity[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the G...
+[31mFAILED[0m test_cognitoidentity/test_cognitoidentity.py::[1mtest_get_open_id_token_for_developer_identity_when_no_explicit_identity_id[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the G...
+[31mFAILED[0m test_cognitoidentity/test_cognitoidentity.py::[1mtest_get_open_id_token[0m - requests.exceptions.JSONDecodeError: Expecting value: line 1 column 1 (char 0)
+[31mFAILED[0m test_cognitoidentity/test_cognitoidentity.py::[1mtest_list_identities[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_cognitoidentity/test_cognitoidentity.py::[1mtest_list_identity_pools[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_cognitoidentity/test_cognitoidentity.py::[1mtest_delete_identity_pool[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31m[31m[1m21 failed[0m, [32m1 passed[0m, [33m1 skipped[0m, [33m19 warnings[0m[31m in 0.65s[0m[0m

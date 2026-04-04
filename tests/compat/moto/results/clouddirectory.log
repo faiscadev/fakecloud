@@ -1,0 +1,335 @@
+[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31m                                                       [100%][0m
+=================================== FAILURES ===================================
+[31m[1m____________________________ test_create_directory _____________________________[0m
+[1m[31mtest_clouddirectory/test_clouddirectory.py[0m:14: in test_create_directory
+    [0mschema = client.create_schema(Name=[33m"[39;49;00m[33mtest-schema[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateSchema operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>a551740d-53d9-43ab-8443-319e668a0a3c</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______________________________ test_create_schema ______________________________[0m
+[1m[31mtest_clouddirectory/test_clouddirectory.py[0m:30: in test_create_schema
+    [0mresp = client.create_schema(Name=[33m"[39;49;00m[33mtest-schema[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateSchema operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>c44c3d92-0a1a-4bdb-a28f-919682161fd9</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______________________________ test_apply_schema _______________________________[0m
+[1m[31mtest_clouddirectory/test_clouddirectory.py[0m:41: in test_apply_schema
+    [0mschema = client.create_schema(Name=[33m"[39;49;00m[33mtest-schema[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateSchema operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>b674f6f4-2122-4116-ada9-1dfc4b7afa12</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_____________________________ test_publish_schema ______________________________[0m
+[1m[31mtest_clouddirectory/test_clouddirectory.py[0m:63: in test_publish_schema
+    [0mschema = client.create_schema(Name=[33m"[39;49;00m[33mtest-schema[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateSchema operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>a20664bf-4016-4b7e-912d-d617b639d272</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______________________ test_list_development_schema_arns _______________________[0m
+[1m[31mtest_clouddirectory/test_clouddirectory.py[0m:81: in test_list_development_schema_arns
+    [0mschema_arn1 = client.create_schema(Name=[33m"[39;49;00m[33mtest-schema1[39;49;00m[33m"[39;49;00m)[[33m"[39;49;00m[33mSchemaArn[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateSchema operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>fdc6125e-b44a-4149-8498-2820fea459dd</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________________ test_list_published_schema_arns ________________________[0m
+[1m[31mtest_clouddirectory/test_clouddirectory.py[0m:94: in test_list_published_schema_arns
+    [0mschema_arn1 = client.create_schema(Name=[33m"[39;49;00m[33mtest-schema1[39;49;00m[33m"[39;49;00m)[[33m"[39;49;00m[33mSchemaArn[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateSchema operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>af3837c8-1528-4982-9efc-3249c6041a04</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______________________________ test_delete_schema ______________________________[0m
+[1m[31mtest_clouddirectory/test_clouddirectory.py[0m:121: in test_delete_schema
+    [0mschema_arn = client.create_schema(Name=[33m"[39;49;00m[33mtest-schema[39;49;00m[33m"[39;49;00m)[[33m"[39;49;00m[33mSchemaArn[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateSchema operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>db1de061-713d-4469-9659-4f637fe26bac</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m____________________________ test_list_directories _____________________________[0m
+[1m[31mtest_clouddirectory/test_clouddirectory.py[0m:136: in test_list_directories
+    [0mclient.create_directory(SchemaArn=schema_arn, Name=[33mf[39;49;00m[33m"[39;49;00m[33mtest-directory-[39;49;00m[33m{[39;49;00mi[33m}[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateDirectory operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>8fba4ed9-ba24-4633-bcce-b03288e1efbc</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______________________________ test_tag_resource _______________________________[0m
+[1m[31mtest_clouddirectory/test_clouddirectory.py[0m:167: in test_tag_resource
+    [0mdirectory_arn = client.create_directory([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateDirectory operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>652b12a5-3d9b-45c8-bc5e-b887aff8ba85</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_____________________________ test_untag_resource ______________________________[0m
+[1m[31mtest_clouddirectory/test_clouddirectory.py[0m:188: in test_untag_resource
+    [0mdirectory_arn = client.create_directory([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateDirectory operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>c95a628a-a78a-463f-b1a7-08f743628cd0</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m____________________________ test_delete_directory _____________________________[0m
+[1m[31mtest_clouddirectory/test_clouddirectory.py[0m:218: in test_delete_directory
+    [0mresp = client.create_directory(SchemaArn=schema_arn, Name=[33mf[39;49;00m[33m"[39;49;00m[33mtest-directory-[39;49;00m[33m{[39;49;00mi[33m}[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateDirectory operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>ebd03e9f-cdff-44d8-9084-8f3e2aee4da1</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______________________________ test_get_directory ______________________________[0m
+[1m[31mtest_clouddirectory/test_clouddirectory.py[0m:242: in test_get_directory
+    [0mresp = client.create_directory(SchemaArn=schema_arn, Name=[33mf[39;49;00m[33m"[39;49;00m[33mtest-directory-[39;49;00m[33m{[39;49;00mi[33m}[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateDirectory operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>f30fb706-e101-4221-8ca1-a70f3533d842</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m__________________ test_apply_schema_with_nonexistent_schema ___________________[0m
+[1m[31mtest_clouddirectory/test_clouddirectory.py[0m:257: in test_apply_schema_with_nonexistent_schema
+    [0mschema = client.create_schema(Name=[33m"[39;49;00m[33mtest-schema[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateSchema operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>a2824248-e556-463a-924a-0a7928281c9c</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m__________________ test_apply_schema_updates_directory_schema __________________[0m
+[1m[31mtest_clouddirectory/test_clouddirectory.py[0m:284: in test_apply_schema_updates_directory_schema
+    [0mschema1 = client.create_schema(Name=[33m"[39;49;00m[33mtest-schema1[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateSchema operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>2caa8bf6-bf69-4199-afc4-830bd1e064a6</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________________ test_publish_nonexistent_schema ________________________[0m
+[1m[31mtest_clouddirectory/test_clouddirectory.py[0m:326: in test_publish_nonexistent_schema
+    [0mclient.publish_schema([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the PublishSchema operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>fac48b45-b029-49d5-8485-d7755c2dccf6</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_____________________ test_publish_schema_state_transition _____________________[0m
+[1m[31mtest_clouddirectory/test_clouddirectory.py[0m:339: in test_publish_schema_state_transition
+    [0mdev_schema = client.create_schema(Name=[33m"[39;49;00m[33mtest-schema[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateSchema operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>583a8a40-a9a1-473b-8792-611fa39eaa09</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m____________________ test_publish_already_published_schema _____________________[0m
+[1m[31mtest_clouddirectory/test_clouddirectory.py[0m:369: in test_publish_already_published_schema
+    [0mschema = client.create_schema(Name=[33m"[39;49;00m[33mtest-schema[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateSchema operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>34e205cf-9bd6-46ac-869a-22834376f588</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m____________ test_get_directory_tags_using_resourcegroupstaggingapi ____________[0m
+[1m[31mtest_clouddirectory/test_clouddirectory_integration.py[0m:11: in test_get_directory_tags_using_resourcegroupstaggingapi
+    [0mdirectory_arn = client.create_directory([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateDirectory operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>72beed7f-fd8f-463a-ba51-775423ce1edf</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[33m=============================== warnings summary ===============================[0m
+tests/test_clouddirectory/test_clouddirectory.py: 17 warnings
+tests/test_clouddirectory/test_clouddirectory_integration.py: 1 warning
+  /Users/lucas/.cache/fakecloud/moto/.venv/lib/python3.9/site-packages/boto3/compat.py:89: PythonDeprecationWarning: Boto3 will no longer support Python 3.9 starting April 29, 2026. To continue receiving service updates, bug fixes, and security updates please upgrade to Python 3.10 or later. More information can be found here: https://aws.amazon.com/blogs/developer/python-support-policy-updates-for-aws-sdks-and-tools/
+    warnings.warn(warning, PythonDeprecationWarning)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+[36m[1m=========================== short test summary info ============================[0m
+[31mFAILED[0m test_clouddirectory/test_clouddirectory.py::[1mtest_create_directory[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_clouddirectory/test_clouddirectory.py::[1mtest_create_schema[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_clouddirectory/test_clouddirectory.py::[1mtest_apply_schema[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_clouddirectory/test_clouddirectory.py::[1mtest_publish_schema[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_clouddirectory/test_clouddirectory.py::[1mtest_list_development_schema_arns[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_clouddirectory/test_clouddirectory.py::[1mtest_list_published_schema_arns[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_clouddirectory/test_clouddirectory.py::[1mtest_delete_schema[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_clouddirectory/test_clouddirectory.py::[1mtest_list_directories[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_clouddirectory/test_clouddirectory.py::[1mtest_tag_resource[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_clouddirectory/test_clouddirectory.py::[1mtest_untag_resource[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_clouddirectory/test_clouddirectory.py::[1mtest_delete_directory[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_clouddirectory/test_clouddirectory.py::[1mtest_get_directory[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_clouddirectory/test_clouddirectory.py::[1mtest_apply_schema_with_nonexistent_schema[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_clouddirectory/test_clouddirectory.py::[1mtest_apply_schema_updates_directory_schema[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_clouddirectory/test_clouddirectory.py::[1mtest_publish_nonexistent_schema[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the P...
+[31mFAILED[0m test_clouddirectory/test_clouddirectory.py::[1mtest_publish_schema_state_transition[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_clouddirectory/test_clouddirectory.py::[1mtest_publish_already_published_schema[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_clouddirectory/test_clouddirectory_integration.py::[1mtest_get_directory_tags_using_resourcegroupstaggingapi[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31m[31m[1m18 failed[0m, [33m18 warnings[0m[31m in 0.63s[0m[0m

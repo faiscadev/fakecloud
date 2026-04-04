@@ -1,0 +1,408 @@
+[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31m                                                     [100%][0m
+=================================== FAILURES ===================================
+[31m[1m______________________________ test_create_group _______________________________[0m
+[1m[31mtest_resourcegroups/test_resourcegroups.py[0m:34: in test_create_group
+    [0mresponse = create_group(client=resource_groups)[90m[39;49;00m
+[1m[31mtest_resourcegroups/test_resourcegroups.py[0m:12: in create_group
+    [0m[94mreturn[39;49;00m client.create_group([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateGroup operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>da296a58-dc3b-478c-b08a-70ebb578f728</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______________________________ test_delete_group _______________________________[0m
+[1m[31mtest_resourcegroups/test_resourcegroups.py[0m:44: in test_delete_group
+    [0mcreate_group(client=resource_groups)[90m[39;49;00m
+[1m[31mtest_resourcegroups/test_resourcegroups.py[0m:12: in create_group
+    [0m[94mreturn[39;49;00m client.create_group([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateGroup operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>5f9c249a-6cfc-49d5-8157-aaa7657ded00</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________________________ test_delete_group_by_arn ___________________________[0m
+[1m[31mtest_resourcegroups/test_resourcegroups.py[0m:58: in test_delete_group_by_arn
+    [0mresponse = create_group(client=resource_groups)[90m[39;49;00m
+[1m[31mtest_resourcegroups/test_resourcegroups.py[0m:12: in create_group
+    [0m[94mreturn[39;49;00m client.create_group([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateGroup operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>8164703a-a1fb-41ae-a9c7-249e3389847a</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m________________________________ test_get_group ________________________________[0m
+[1m[31mtest_resourcegroups/test_resourcegroups.py[0m:74: in test_get_group
+    [0mresponse = create_group(client=resource_groups)[90m[39;49;00m
+[1m[31mtest_resourcegroups/test_resourcegroups.py[0m:12: in create_group
+    [0m[94mreturn[39;49;00m client.create_group([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateGroup operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>598e6b22-2bed-4492-b488-5eb6872aa5d7</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_____________________________ test_get_group_query _____________________________[0m
+[1m[31mtest_resourcegroups/test_resourcegroups.py[0m:89: in test_get_group_query
+    [0mgroup_arn = create_group(resource_groups)[[33m"[39;49;00m[33mGroup[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mGroupArn[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31mtest_resourcegroups/test_resourcegroups.py[0m:12: in create_group
+    [0m[94mreturn[39;49;00m client.create_group([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateGroup operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>79587f20-263b-45d5-9fa2-18d65f76af67</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m________________________________ test_get_tags _________________________________[0m
+[1m[31mtest_resourcegroups/test_resourcegroups.py[0m:102: in test_get_tags
+    [0mgroup_arn = create_group(resource_groups)[[33m"[39;49;00m[33mGroup[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mGroupArn[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31mtest_resourcegroups/test_resourcegroups.py[0m:12: in create_group
+    [0m[94mreturn[39;49;00m client.create_group([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateGroup operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>1af7a521-1de3-4a26-8d1b-8df439f6c959</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________________________ test_list_groups _______________________________[0m
+[1m[31mtest_resourcegroups/test_resourcegroups.py[0m:113: in test_list_groups
+    [0mcreate_group(resource_groups)[90m[39;49;00m
+[1m[31mtest_resourcegroups/test_resourcegroups.py[0m:12: in create_group
+    [0m[94mreturn[39;49;00m client.create_group([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateGroup operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>89ca1835-dc1c-48bf-b6f4-e41b49c8d623</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________________________________ test_tag ___________________________________[0m
+[1m[31mtest_resourcegroups/test_resourcegroups.py[0m:124: in test_tag
+    [0mgroup_arn = create_group(resource_groups)[[33m"[39;49;00m[33mGroup[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mGroupArn[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31mtest_resourcegroups/test_resourcegroups.py[0m:12: in create_group
+    [0m[94mreturn[39;49;00m client.create_group([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateGroup operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>f617a9fc-a727-445f-9c86-0f9a1f745d04</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m__________________________________ test_untag __________________________________[0m
+[1m[31mtest_resourcegroups/test_resourcegroups.py[0m:141: in test_untag
+    [0mgroup_arn = create_group(resource_groups)[[33m"[39;49;00m[33mGroup[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mGroupArn[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31mtest_resourcegroups/test_resourcegroups.py[0m:12: in create_group
+    [0m[94mreturn[39;49;00m client.create_group([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateGroup operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>c75bb1d0-5e0a-4287-a1b6-312938b6311f</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______________________________ test_update_group _______________________________[0m
+[1m[31mtest_resourcegroups/test_resourcegroups.py[0m:154: in test_update_group
+    [0mcreate_group(client=resource_groups)[90m[39;49;00m
+[1m[31mtest_resourcegroups/test_resourcegroups.py[0m:12: in create_group
+    [0m[94mreturn[39;49;00m client.create_group([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateGroup operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>38e29c6c-3978-4236-bdc8-9aaa170ad7ce</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_________________________ test_get_group_configuration _________________________[0m
+[1m[31mtest_resourcegroups/test_resourcegroups.py[0m:169: in test_get_group_configuration
+    [0mgroup = create_group(client=resource_groups)[90m[39;49;00m
+[1m[31mtest_resourcegroups/test_resourcegroups.py[0m:12: in create_group
+    [0m[94mreturn[39;49;00m client.create_group([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateGroup operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>80511222-29fb-4b8b-a036-1912ec3266cd</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_____________________ test_create_group_with_configuration _____________________[0m
+[1m[31mtest_resourcegroups/test_resourcegroups.py[0m:208: in test_create_group_with_configuration
+    [0mresponse = resource_groups.create_group([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateGroup operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>dbec6bc0-21f3-48bb-a0c1-eb95aae900ba</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________________________ test_update_group_query ____________________________[0m
+[1m[31mtest_resourcegroups/test_resourcegroups.py[0m:236: in test_update_group_query
+    [0mgroup_arn = create_group(resource_groups)[[33m"[39;49;00m[33mGroup[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mGroupArn[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31mtest_resourcegroups/test_resourcegroups.py[0m:12: in create_group
+    [0m[94mreturn[39;49;00m client.create_group([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateGroup operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>2162ac4d-1df3-4c05-87f7-01f379417462</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________________________ test_start_tag_sync_task ___________________________[0m
+[1m[31mtest_resourcegroups/test_resourcegroups.py[0m:282: in test_start_tag_sync_task
+    [0mresource_group = create_group(client)[[33m"[39;49;00m[33mGroup[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mGroupArn[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31mtest_resourcegroups/test_resourcegroups.py[0m:12: in create_group
+    [0m[94mreturn[39;49;00m client.create_group([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateGroup operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>1e01d702-7342-463f-87fe-8f60e9a38f19</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______________________ test_start_tag_sync_task_with_name ______________________[0m
+[1m[31mtest_resourcegroups/test_resourcegroups.py[0m:308: in test_start_tag_sync_task_with_name
+    [0mresource_group = create_group(client)[[33m"[39;49;00m[33mGroup[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mName[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31mtest_resourcegroups/test_resourcegroups.py[0m:12: in create_group
+    [0m[94mreturn[39;49;00m client.create_group([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateGroup operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>61dad365-f5b2-48a6-a045-f390f20ff4e9</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_____________________ test_start_tag_sync_task_with_query ______________________[0m
+[1m[31mtest_resourcegroups/test_resourcegroups.py[0m:335: in test_start_tag_sync_task_with_query
+    [0mresource_group = create_group(client)[[33m"[39;49;00m[33mGroup[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mName[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31mtest_resourcegroups/test_resourcegroups.py[0m:12: in create_group
+    [0m[94mreturn[39;49;00m client.create_group([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateGroup operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>b3a921bf-65d9-410f-9aef-ad0eec6db4f6</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______________ test_start_tag_sync_task_with_with_query_and_tags _______________[0m
+[1m[31mtest_resourcegroups/test_resourcegroups.py[0m:360: in test_start_tag_sync_task_with_with_query_and_tags
+    [0mresource_group = create_group(client)[[33m"[39;49;00m[33mGroup[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mName[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31mtest_resourcegroups/test_resourcegroups.py[0m:12: in create_group
+    [0m[94mreturn[39;49;00m client.create_group([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateGroup operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>4c1317f0-ea32-4f7d-988b-7e4bd9a98f03</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________________________ test_list_tag_sync_tasks ___________________________[0m
+[1m[31mtest_resourcegroups/test_resourcegroups.py[0m:386: in test_list_tag_sync_tasks
+    [0mresource_group = create_group(client)[[33m"[39;49;00m[33mGroup[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mGroupArn[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31mtest_resourcegroups/test_resourcegroups.py[0m:12: in create_group
+    [0m[94mreturn[39;49;00m client.create_group([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateGroup operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>6da1c238-4d77-4d4e-92e9-20fea7f24c0c</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m__________________________ test_cancel_tag_sync_task ___________________________[0m
+[1m[31mtest_resourcegroups/test_resourcegroups.py[0m:423: in test_cancel_tag_sync_task
+    [0mresource_group = create_group(client)[[33m"[39;49;00m[33mGroup[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mGroupArn[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31mtest_resourcegroups/test_resourcegroups.py[0m:12: in create_group
+    [0m[94mreturn[39;49;00m client.create_group([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateGroup operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>4d18902b-321c-4d4d-bfec-413fbb9530d2</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m____________________________ test_get_tag_sync_task ____________________________[0m
+[1m[31mtest_resourcegroups/test_resourcegroups.py[0m:441: in test_get_tag_sync_task
+    [0mresource_group = create_group(client)[[33m"[39;49;00m[33mGroup[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mGroupArn[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31mtest_resourcegroups/test_resourcegroups.py[0m:12: in create_group
+    [0m[94mreturn[39;49;00m client.create_group([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateGroup operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>b32c886e-3fa5-42c2-be00-b0666e4799db</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[33m=============================== warnings summary ===============================[0m
+tests/test_resourcegroups/test_resourcegroups.py: 20 warnings
+  /Users/lucas/.cache/fakecloud/moto/.venv/lib/python3.9/site-packages/boto3/compat.py:89: PythonDeprecationWarning: Boto3 will no longer support Python 3.9 starting April 29, 2026. To continue receiving service updates, bug fixes, and security updates please upgrade to Python 3.10 or later. More information can be found here: https://aws.amazon.com/blogs/developer/python-support-policy-updates-for-aws-sdks-and-tools/
+    warnings.warn(warning, PythonDeprecationWarning)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+[36m[1m=========================== short test summary info ============================[0m
+[31mFAILED[0m test_resourcegroups/test_resourcegroups.py::[1mtest_create_group[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_resourcegroups/test_resourcegroups.py::[1mtest_delete_group[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_resourcegroups/test_resourcegroups.py::[1mtest_delete_group_by_arn[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_resourcegroups/test_resourcegroups.py::[1mtest_get_group[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_resourcegroups/test_resourcegroups.py::[1mtest_get_group_query[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_resourcegroups/test_resourcegroups.py::[1mtest_get_tags[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_resourcegroups/test_resourcegroups.py::[1mtest_list_groups[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_resourcegroups/test_resourcegroups.py::[1mtest_tag[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_resourcegroups/test_resourcegroups.py::[1mtest_untag[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_resourcegroups/test_resourcegroups.py::[1mtest_update_group[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_resourcegroups/test_resourcegroups.py::[1mtest_get_group_configuration[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_resourcegroups/test_resourcegroups.py::[1mtest_create_group_with_configuration[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_resourcegroups/test_resourcegroups.py::[1mtest_update_group_query[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_resourcegroups/test_resourcegroups.py::[1mtest_start_tag_sync_task[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_resourcegroups/test_resourcegroups.py::[1mtest_start_tag_sync_task_with_name[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_resourcegroups/test_resourcegroups.py::[1mtest_start_tag_sync_task_with_query[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_resourcegroups/test_resourcegroups.py::[1mtest_start_tag_sync_task_with_with_query_and_tags[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_resourcegroups/test_resourcegroups.py::[1mtest_list_tag_sync_tasks[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_resourcegroups/test_resourcegroups.py::[1mtest_cancel_tag_sync_task[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_resourcegroups/test_resourcegroups.py::[1mtest_get_tag_sync_task[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31m[31m[1m20 failed[0m, [33m20 warnings[0m[31m in 0.77s[0m[0m

@@ -1,0 +1,374 @@
+[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31m                                                  [100%][0m
+=================================== FAILURES ===================================
+[31m[1m_________________________ test_create_security_policy __________________________[0m
+[1m[31mtest_opensearchserverless/test_opensearchserverless.py[0m:72: in test_create_security_policy
+    [0mresp = client.create_security_policy([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateSecurityPolicy operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>d1181fbf-694c-47b9-8308-327e28fdf3e7</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________________ test_create_security_policy_invalid_type ___________________[0m
+[1m[31mtest_opensearchserverless/test_opensearchserverless.py[0m:95: in test_create_security_policy_invalid_type
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mValidationException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'ValidationException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ValidationException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m________________ test_create_security_policy_same_name_and_type ________________[0m
+[1m[31mtest_opensearchserverless/test_opensearchserverless.py[0m:101: in test_create_security_policy_same_name_and_type
+    [0mclient.create_security_policy([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateSecurityPolicy operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>26fc1909-9247-42cf-8825-4cc7d5ef7006</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________________________ test_get_security_policy ___________________________[0m
+[1m[31mtest_opensearchserverless/test_opensearchserverless.py[0m:115: in test_get_security_policy
+    [0mclient.create_security_policy([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateSecurityPolicy operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>c88e32e5-7b11-48c5-abda-78e62a58228b</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m____________________ test_get_security_policy_invalid_name _____________________[0m
+[1m[31mtest_opensearchserverless/test_opensearchserverless.py[0m:136: in test_get_security_policy_invalid_name
+    [0mclient.create_security_policy([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateSecurityPolicy operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>bff5a78a-3a5b-4eab-b858-cbbe37d10014</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_________________________ test_list_security_policies __________________________[0m
+[1m[31mtest_opensearchserverless/test_opensearchserverless.py[0m:164: in test_list_security_policies
+    [0mclient.create_security_policy([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateSecurityPolicy operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>b56dd66c-6bed-40cd-9b22-8940ebed43ef</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m__________________ test_list_security_policies_with_resource ___________________[0m
+[1m[31mtest_opensearchserverless/test_opensearchserverless.py[0m:193: in test_list_security_policies_with_resource
+    [0mclient.create_security_policy([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateSecurityPolicy operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>8c4dbd31-4534-4562-ab2c-0d8e20016c9c</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_________________________ test_update_security_policy __________________________[0m
+[1m[31mtest_opensearchserverless/test_opensearchserverless.py[0m:210: in test_update_security_policy
+    [0mclient.create_security_policy([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateSecurityPolicy operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>a1b59ca4-4015-4898-bea6-5da4e8f494bf</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______________ test_update_security_policy_invalid_policy_version ______________[0m
+[1m[31mtest_opensearchserverless/test_opensearchserverless.py[0m:251: in test_update_security_policy_invalid_policy_version
+    [0mclient.create_security_policy([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateSecurityPolicy operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>c905ddb2-a16c-47b5-885d-3c9663b8cfc3</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________________ test_update_security_policy_invalid_name ___________________[0m
+[1m[31mtest_opensearchserverless/test_opensearchserverless.py[0m:276: in test_update_security_policy_invalid_name
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mResourceNotFoundException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'ResourceNotFoundException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ResourceNotFoundException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m____________________________ test_create_collection ____________________________[0m
+[1m[31mtest_opensearchserverless/test_opensearchserverless.py[0m:282: in test_create_collection
+    [0mclient.create_security_policy([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateSecurityPolicy operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>12e29345-7221-4cc3-a30f-8c6ce639cbd2</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m____________________ test_create_collection_with_no_policy _____________________[0m
+[1m[31mtest_opensearchserverless/test_opensearchserverless.py[0m:314: in test_create_collection_with_no_policy
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mValidationException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'ValidationException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ValidationException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m____________________________ test_list_collections _____________________________[0m
+[1m[31mtest_opensearchserverless/test_opensearchserverless.py[0m:320: in test_list_collections
+    [0mclient.create_security_policy([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateSecurityPolicy operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>22824ceb-64a7-44b1-afbe-0f40c59cdf61</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________________ test_list_collections_with_name ________________________[0m
+[1m[31mtest_opensearchserverless/test_opensearchserverless.py[0m:337: in test_list_collections_with_name
+    [0mclient.create_security_policy([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateSecurityPolicy operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>cbaa7645-20fb-49f2-b15f-5534f3748481</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________________________ test_create_vpc_endpoint ___________________________[0m
+[1m[31mtest_opensearchserverless/test_opensearchserverless.py[0m:352: in test_create_vpc_endpoint
+    [0mresp = client.create_vpc_endpoint([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateVpcEndpoint operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>f3bc0a06-52de-45ae-a779-0dd7d436a495</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_________________ test_create_vpc_endpoint_vpce_already_exists _________________[0m
+[1m[31mtest_opensearchserverless/test_opensearchserverless.py[0m:370: in test_create_vpc_endpoint_vpce_already_exists
+    [0mclient.create_vpc_endpoint([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateVpcEndpoint operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>1498c5a5-e498-424d-8058-a396cff0466f</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m____________________________ test_delete_collection ____________________________[0m
+[1m[31mtest_opensearchserverless/test_opensearchserverless.py[0m:384: in test_delete_collection
+    [0mclient.create_security_policy([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateSecurityPolicy operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>6fe99d3e-4f34-43af-b364-006eceef221b</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______________________ test_delete_collection_invalid_id _______________________[0m
+[1m[31mtest_opensearchserverless/test_opensearchserverless.py[0m:404: in test_delete_collection_invalid_id
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mResourceNotFoundException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'ResourceNotFoundException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ResourceNotFoundException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m______________________________ test_tag_resource _______________________________[0m
+[1m[31mtest_opensearchserverless/test_opensearchserverless.py[0m:410: in test_tag_resource
+    [0mclient.create_security_policy([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateSecurityPolicy operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>90d617ae-03f4-4642-89d5-483121e1e238</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_____________________________ test_untag_resource ______________________________[0m
+[1m[31mtest_opensearchserverless/test_opensearchserverless.py[0m:434: in test_untag_resource
+    [0mclient.create_security_policy([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateSecurityPolicy operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>a1a15367-e619-4da7-9b04-4a48b8ad3e70</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______________________ test_batch_get_collection_with_id _______________________[0m
+[1m[31mtest_opensearchserverless/test_opensearchserverless.py[0m:460: in test_batch_get_collection_with_id
+    [0mclient.create_security_policy([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateSecurityPolicy operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>e746dce2-c0dc-48df-9a55-f1dea6e0cb89</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_____________________ test_batch_get_collection_with_name ______________________[0m
+[1m[31mtest_opensearchserverless/test_opensearchserverless.py[0m:474: in test_batch_get_collection_with_name
+    [0mclient.create_security_policy([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateSecurityPolicy operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>51296a18-cf06-4030-836a-d017fe16de5d</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________ test_batch_get_collection_with_both_id_and_name ________________[0m
+[1m[31mtest_opensearchserverless/test_opensearchserverless.py[0m:490: in test_batch_get_collection_with_both_id_and_name
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mValidationException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'ValidationException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ValidationException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[33m=============================== warnings summary ===============================[0m
+tests/test_opensearchserverless/test_opensearchserverless.py: 23 warnings
+  /Users/lucas/.cache/fakecloud/moto/.venv/lib/python3.9/site-packages/boto3/compat.py:89: PythonDeprecationWarning: Boto3 will no longer support Python 3.9 starting April 29, 2026. To continue receiving service updates, bug fixes, and security updates please upgrade to Python 3.10 or later. More information can be found here: https://aws.amazon.com/blogs/developer/python-support-policy-updates-for-aws-sdks-and-tools/
+    warnings.warn(warning, PythonDeprecationWarning)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+[36m[1m=========================== short test summary info ============================[0m
+[31mFAILED[0m test_opensearchserverless/test_opensearchserverless.py::[1mtest_create_security_policy[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_opensearchserverless/test_opensearchserverless.py::[1mtest_create_security_policy_invalid_type[0m - AssertionError: assert '400' == 'ValidationException'
+[31mFAILED[0m test_opensearchserverless/test_opensearchserverless.py::[1mtest_create_security_policy_same_name_and_type[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_opensearchserverless/test_opensearchserverless.py::[1mtest_get_security_policy[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_opensearchserverless/test_opensearchserverless.py::[1mtest_get_security_policy_invalid_name[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_opensearchserverless/test_opensearchserverless.py::[1mtest_list_security_policies[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_opensearchserverless/test_opensearchserverless.py::[1mtest_list_security_policies_with_resource[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_opensearchserverless/test_opensearchserverless.py::[1mtest_update_security_policy[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_opensearchserverless/test_opensearchserverless.py::[1mtest_update_security_policy_invalid_policy_version[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_opensearchserverless/test_opensearchserverless.py::[1mtest_update_security_policy_invalid_name[0m - AssertionError: assert '400' == 'ResourceNotFoundException'
+[31mFAILED[0m test_opensearchserverless/test_opensearchserverless.py::[1mtest_create_collection[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_opensearchserverless/test_opensearchserverless.py::[1mtest_create_collection_with_no_policy[0m - AssertionError: assert '400' == 'ValidationException'
+[31mFAILED[0m test_opensearchserverless/test_opensearchserverless.py::[1mtest_list_collections[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_opensearchserverless/test_opensearchserverless.py::[1mtest_list_collections_with_name[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_opensearchserverless/test_opensearchserverless.py::[1mtest_create_vpc_endpoint[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_opensearchserverless/test_opensearchserverless.py::[1mtest_create_vpc_endpoint_vpce_already_exists[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_opensearchserverless/test_opensearchserverless.py::[1mtest_delete_collection[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_opensearchserverless/test_opensearchserverless.py::[1mtest_delete_collection_invalid_id[0m - AssertionError: assert '400' == 'ResourceNotFoundException'
+[31mFAILED[0m test_opensearchserverless/test_opensearchserverless.py::[1mtest_tag_resource[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_opensearchserverless/test_opensearchserverless.py::[1mtest_untag_resource[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_opensearchserverless/test_opensearchserverless.py::[1mtest_batch_get_collection_with_id[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_opensearchserverless/test_opensearchserverless.py::[1mtest_batch_get_collection_with_name[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_opensearchserverless/test_opensearchserverless.py::[1mtest_batch_get_collection_with_both_id_and_name[0m - AssertionError: assert '400' == 'ValidationException'
+[31m[31m[1m23 failed[0m, [33m23 warnings[0m[31m in 0.70s[0m[0m

@@ -1,0 +1,428 @@
+[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31m                                                    [100%][0m
+=================================== FAILURES ===================================
+[31m[1m__________________________ test_create_global_network __________________________[0m
+[1m[31mtest_networkmanager/test_networkmanager.py[0m:24: in test_create_global_network
+    [0mresp = client.create_global_network([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateGlobalNetwork operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>9b884dfa-c38e-419a-b7ce-99cfdfcbf68d</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________________________ test_create_core_network ___________________________[0m
+[1m[31mtest_networkmanager/test_networkmanager.py[0m:49: in test_create_core_network
+    [0mglobal_network_id = client.create_global_network([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateGlobalNetwork operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>20524e85-6052-4836-b5ca-a474407cd3f9</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________________________ test_delete_core_network ___________________________[0m
+[1m[31mtest_networkmanager/test_networkmanager.py[0m:79: in test_delete_core_network
+    [0mgn_id = create_global_network(client)[90m[39;49;00m
+[1m[31m../moto/core/models.py[0m:120: in wrapper
+    [0mresult = func(*args, **kwargs)[90m[39;49;00m
+[1m[31mtest_networkmanager/test_networkmanager.py[0m:16: in create_global_network
+    [0m[94mreturn[39;49;00m client.create_global_network([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateGlobalNetwork operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>1fea4602-3594-4404-b06c-385a8da65c75</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______________________________ test_tag_resource _______________________________[0m
+[1m[31mtest_networkmanager/test_networkmanager.py[0m:96: in test_tag_resource
+    [0mgn_id = create_global_network(client)[90m[39;49;00m
+[1m[31m../moto/core/models.py[0m:120: in wrapper
+    [0mresult = func(*args, **kwargs)[90m[39;49;00m
+[1m[31mtest_networkmanager/test_networkmanager.py[0m:16: in create_global_network
+    [0m[94mreturn[39;49;00m client.create_global_network([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateGlobalNetwork operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>80ab3278-7455-45b6-9e6a-b628e8ad4084</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_____________________________ test_untag_resource ______________________________[0m
+[1m[31mtest_networkmanager/test_networkmanager.py[0m:140: in test_untag_resource
+    [0mgn_id = create_global_network(client)[90m[39;49;00m
+[1m[31m../moto/core/models.py[0m:120: in wrapper
+    [0mresult = func(*args, **kwargs)[90m[39;49;00m
+[1m[31mtest_networkmanager/test_networkmanager.py[0m:16: in create_global_network
+    [0m[94mreturn[39;49;00m client.create_global_network([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateGlobalNetwork operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>d77fca0e-bb1d-4cfb-a9ca-5e46b40bc0ed</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________________________ test_list_core_networks ____________________________[0m
+[1m[31mtest_networkmanager/test_networkmanager.py[0m:164: in test_list_core_networks
+    [0mgn_id = create_global_network(client)[90m[39;49;00m
+[1m[31m../moto/core/models.py[0m:120: in wrapper
+    [0mresult = func(*args, **kwargs)[90m[39;49;00m
+[1m[31mtest_networkmanager/test_networkmanager.py[0m:16: in create_global_network
+    [0m[94mreturn[39;49;00m client.create_global_network([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateGlobalNetwork operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>a751ae23-ea3e-41af-85ed-fce9504bc4a2</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m____________________________ test_get_core_network _____________________________[0m
+[1m[31mtest_networkmanager/test_networkmanager.py[0m:186: in test_get_core_network
+    [0mgn_id = create_global_network(client)[90m[39;49;00m
+[1m[31m../moto/core/models.py[0m:120: in wrapper
+    [0mresult = func(*args, **kwargs)[90m[39;49;00m
+[1m[31mtest_networkmanager/test_networkmanager.py[0m:16: in create_global_network
+    [0m[94mreturn[39;49;00m client.create_global_network([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateGlobalNetwork operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>9a1e410e-1b1f-40db-858c-efe308fb445b</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m________________________ test_describe_global_networks _________________________[0m
+[1m[31mtest_networkmanager/test_networkmanager.py[0m:209: in test_describe_global_networks
+    [0mglobal_id = client.create_global_network([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateGlobalNetwork operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>a0698e20-3e86-4fdf-af82-ba933697a4ad</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________________________ test_create_site _______________________________[0m
+[1m[31mtest_networkmanager/test_networkmanager.py[0m:230: in test_create_site
+    [0mgn_id = create_global_network(client)[90m[39;49;00m
+[1m[31m../moto/core/models.py[0m:120: in wrapper
+    [0mresult = func(*args, **kwargs)[90m[39;49;00m
+[1m[31mtest_networkmanager/test_networkmanager.py[0m:16: in create_global_network
+    [0m[94mreturn[39;49;00m client.create_global_network([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateGlobalNetwork operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>eff779da-1272-47a7-806b-2b39c99aec55</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________________________ test_delete_site _______________________________[0m
+[1m[31mtest_networkmanager/test_networkmanager.py[0m:251: in test_delete_site
+    [0mgn_id = create_global_network(client)[90m[39;49;00m
+[1m[31m../moto/core/models.py[0m:120: in wrapper
+    [0mresult = func(*args, **kwargs)[90m[39;49;00m
+[1m[31mtest_networkmanager/test_networkmanager.py[0m:16: in create_global_network
+    [0m[94mreturn[39;49;00m client.create_global_network([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateGlobalNetwork operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>bcdf040b-580d-479e-ab9b-1c24ae77c634</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m________________________________ test_get_sites ________________________________[0m
+[1m[31mtest_networkmanager/test_networkmanager.py[0m:265: in test_get_sites
+    [0mgn_id = create_global_network(client)[90m[39;49;00m
+[1m[31m../moto/core/models.py[0m:120: in wrapper
+    [0mresult = func(*args, **kwargs)[90m[39;49;00m
+[1m[31mtest_networkmanager/test_networkmanager.py[0m:16: in create_global_network
+    [0m[94mreturn[39;49;00m client.create_global_network([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateGlobalNetwork operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>6512cbd5-1d55-4c9d-879d-b06afc93c3ae</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________________________ test_create_link _______________________________[0m
+[1m[31mtest_networkmanager/test_networkmanager.py[0m:294: in test_create_link
+    [0mgn_id = create_global_network(client)[90m[39;49;00m
+[1m[31m../moto/core/models.py[0m:120: in wrapper
+    [0mresult = func(*args, **kwargs)[90m[39;49;00m
+[1m[31mtest_networkmanager/test_networkmanager.py[0m:16: in create_global_network
+    [0m[94mreturn[39;49;00m client.create_global_network([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateGlobalNetwork operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>8354a843-a143-4517-a1fd-c2d6ea9add92</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m________________________________ test_get_links ________________________________[0m
+[1m[31mtest_networkmanager/test_networkmanager.py[0m:319: in test_get_links
+    [0mgn_id = create_global_network(client)[90m[39;49;00m
+[1m[31m../moto/core/models.py[0m:120: in wrapper
+    [0mresult = func(*args, **kwargs)[90m[39;49;00m
+[1m[31mtest_networkmanager/test_networkmanager.py[0m:16: in create_global_network
+    [0m[94mreturn[39;49;00m client.create_global_network([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateGlobalNetwork operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>8ee41ea1-f14d-4dfb-bd25-79c52706b01a</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________________________ test_delete_link _______________________________[0m
+[1m[31mtest_networkmanager/test_networkmanager.py[0m:345: in test_delete_link
+    [0mgn_id = create_global_network(client)[90m[39;49;00m
+[1m[31m../moto/core/models.py[0m:120: in wrapper
+    [0mresult = func(*args, **kwargs)[90m[39;49;00m
+[1m[31mtest_networkmanager/test_networkmanager.py[0m:16: in create_global_network
+    [0m[94mreturn[39;49;00m client.create_global_network([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateGlobalNetwork operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>b232a271-7ed3-41bf-8c0d-b00ac90df7ef</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______________________________ test_create_device ______________________________[0m
+[1m[31mtest_networkmanager/test_networkmanager.py[0m:361: in test_create_device
+    [0mgn_id = create_global_network(client)[90m[39;49;00m
+[1m[31m../moto/core/models.py[0m:120: in wrapper
+    [0mresult = func(*args, **kwargs)[90m[39;49;00m
+[1m[31mtest_networkmanager/test_networkmanager.py[0m:16: in create_global_network
+    [0m[94mreturn[39;49;00m client.create_global_network([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateGlobalNetwork operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>0e68bf5e-c4e9-44df-afc3-acab052f939d</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________________________ test_get_devices _______________________________[0m
+[1m[31mtest_networkmanager/test_networkmanager.py[0m:378: in test_get_devices
+    [0mgn_id = create_global_network(client)[90m[39;49;00m
+[1m[31m../moto/core/models.py[0m:120: in wrapper
+    [0mresult = func(*args, **kwargs)[90m[39;49;00m
+[1m[31mtest_networkmanager/test_networkmanager.py[0m:16: in create_global_network
+    [0m[94mreturn[39;49;00m client.create_global_network([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateGlobalNetwork operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>ea800225-7bcf-43db-8c64-b68f50c60054</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______________________________ test_delete_device ______________________________[0m
+[1m[31mtest_networkmanager/test_networkmanager.py[0m:408: in test_delete_device
+    [0mgn_id = create_global_network(client)[90m[39;49;00m
+[1m[31m../moto/core/models.py[0m:120: in wrapper
+    [0mresult = func(*args, **kwargs)[90m[39;49;00m
+[1m[31mtest_networkmanager/test_networkmanager.py[0m:16: in create_global_network
+    [0m[94mreturn[39;49;00m client.create_global_network([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateGlobalNetwork operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>ff71eed9-c1ec-49f7-802f-7bb6cb4d9fb8</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_________________________ test_list_tags_for_resource __________________________[0m
+[1m[31mtest_networkmanager/test_networkmanager.py[0m:435: in test_list_tags_for_resource
+    [0mg_network = client.create_global_network([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateGlobalNetwork operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>3af95bf1-70ef-49bf-b38b-c0e8c67c86ea</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m____________________________ test_device_exceptions ____________________________[0m
+[1m[31mtest_networkmanager/test_networkmanager.py[0m:488: in test_device_exceptions
+    [0mgn_id = create_global_network(client)[90m[39;49;00m
+[1m[31m../moto/core/models.py[0m:120: in wrapper
+    [0mresult = func(*args, **kwargs)[90m[39;49;00m
+[1m[31mtest_networkmanager/test_networkmanager.py[0m:16: in create_global_network
+    [0m[94mreturn[39;49;00m client.create_global_network([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateGlobalNetwork operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>c4fb0d23-255e-496c-ae53-3636c822458e</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_____________________________ test_site_exceptions _____________________________[0m
+[1m[31mtest_networkmanager/test_networkmanager.py[0m:530: in test_site_exceptions
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mNotFoundException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'NotFoundException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- NotFoundException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m_____________________________ test_link_exceptions _____________________________[0m
+[1m[31mtest_networkmanager/test_networkmanager.py[0m:554: in test_link_exceptions
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mNotFoundException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'NotFoundException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- NotFoundException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[33m=============================== warnings summary ===============================[0m
+tests/test_networkmanager/test_networkmanager.py: 21 warnings
+  /Users/lucas/.cache/fakecloud/moto/.venv/lib/python3.9/site-packages/boto3/compat.py:89: PythonDeprecationWarning: Boto3 will no longer support Python 3.9 starting April 29, 2026. To continue receiving service updates, bug fixes, and security updates please upgrade to Python 3.10 or later. More information can be found here: https://aws.amazon.com/blogs/developer/python-support-policy-updates-for-aws-sdks-and-tools/
+    warnings.warn(warning, PythonDeprecationWarning)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+[36m[1m=========================== short test summary info ============================[0m
+[31mFAILED[0m test_networkmanager/test_networkmanager.py::[1mtest_create_global_network[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_networkmanager/test_networkmanager.py::[1mtest_create_core_network[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_networkmanager/test_networkmanager.py::[1mtest_delete_core_network[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_networkmanager/test_networkmanager.py::[1mtest_tag_resource[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_networkmanager/test_networkmanager.py::[1mtest_untag_resource[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_networkmanager/test_networkmanager.py::[1mtest_list_core_networks[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_networkmanager/test_networkmanager.py::[1mtest_get_core_network[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_networkmanager/test_networkmanager.py::[1mtest_describe_global_networks[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_networkmanager/test_networkmanager.py::[1mtest_create_site[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_networkmanager/test_networkmanager.py::[1mtest_delete_site[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_networkmanager/test_networkmanager.py::[1mtest_get_sites[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_networkmanager/test_networkmanager.py::[1mtest_create_link[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_networkmanager/test_networkmanager.py::[1mtest_get_links[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_networkmanager/test_networkmanager.py::[1mtest_delete_link[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_networkmanager/test_networkmanager.py::[1mtest_create_device[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_networkmanager/test_networkmanager.py::[1mtest_get_devices[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_networkmanager/test_networkmanager.py::[1mtest_delete_device[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_networkmanager/test_networkmanager.py::[1mtest_list_tags_for_resource[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_networkmanager/test_networkmanager.py::[1mtest_device_exceptions[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_networkmanager/test_networkmanager.py::[1mtest_site_exceptions[0m - AssertionError: assert '400' == 'NotFoundException'
+[31mFAILED[0m test_networkmanager/test_networkmanager.py::[1mtest_link_exceptions[0m - AssertionError: assert '400' == 'NotFoundException'
+[31m[31m[1m21 failed[0m, [33m21 warnings[0m[31m in 0.84s[0m[0m

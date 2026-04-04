@@ -1,0 +1,282 @@
+[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31m                                                         [100%][0m
+=================================== FAILURES ===================================
+[31m[1m_____________________________ test_create_pipeline _____________________________[0m
+[1m[31mtest_codepipeline/test_codepipeline.py[0m:67: in test_create_pipeline
+    [0mresponse = create_basic_codepipeline(client, [33m"[39;49;00m[33mtest-pipeline[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31mtest_codepipeline/test_codepipeline.py[0m:633: in create_basic_codepipeline
+    [0m[94mreturn[39;49;00m client.create_pipeline([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreatePipeline operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>77e30dc1-6059-4e7f-9ca0-e03405b944cc</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_________________________ test_create_pipeline_errors __________________________[0m
+[1m[31mtest_codepipeline/test_codepipeline.py[0m:77: in test_create_pipeline_errors
+    [0mcreate_basic_codepipeline(client, [33m"[39;49;00m[33mtest-pipeline[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31mtest_codepipeline/test_codepipeline.py[0m:633: in create_basic_codepipeline
+    [0m[94mreturn[39;49;00m client.create_pipeline([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreatePipeline operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>a27af8c0-82d2-4b0b-b043-c116b1053f04</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______________________________ test_get_pipeline _______________________________[0m
+[1m[31mtest_codepipeline/test_codepipeline.py[0m:221: in test_get_pipeline
+    [0mcreate_basic_codepipeline(client, [33m"[39;49;00m[33mtest-pipeline[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31mtest_codepipeline/test_codepipeline.py[0m:633: in create_basic_codepipeline
+    [0m[94mreturn[39;49;00m client.create_pipeline([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreatePipeline operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>dc84bd50-0be6-437b-996a-5a8bb2b561e5</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________________________ test_get_pipeline_errors ___________________________[0m
+[1m[31mtest_codepipeline/test_codepipeline.py[0m:243: in test_get_pipeline_errors
+    [0m[94massert[39;49;00m ex.response[[33m"[39;49;00m[33mError[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mPipelineNotFoundException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'PipelineNotFoundException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- PipelineNotFoundException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m_____________________________ test_update_pipeline _____________________________[0m
+[1m[31mtest_codepipeline/test_codepipeline.py[0m:253: in test_update_pipeline
+    [0mcreate_basic_codepipeline(client, [33m"[39;49;00m[33mtest-pipeline[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31mtest_codepipeline/test_codepipeline.py[0m:633: in create_basic_codepipeline
+    [0m[94mreturn[39;49;00m client.create_pipeline([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreatePipeline operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>b239ea8c-2852-497d-9603-3a40b353398a</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_________________________ test_update_pipeline_errors __________________________[0m
+[1m[31mtest_codepipeline/test_codepipeline.py[0m:414: in test_update_pipeline_errors
+    [0m[94massert[39;49;00m ex.response[[33m"[39;49;00m[33mError[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mResourceNotFoundException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'ResourceNotFoundException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ResourceNotFoundException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m_____________________________ test_list_pipelines ______________________________[0m
+[1m[31mtest_codepipeline/test_codepipeline.py[0m:425: in test_list_pipelines
+    [0mcreate_basic_codepipeline(client, name_1)[90m[39;49;00m
+[1m[31mtest_codepipeline/test_codepipeline.py[0m:633: in create_basic_codepipeline
+    [0m[94mreturn[39;49;00m client.create_pipeline([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreatePipeline operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>d8801bc6-4e5d-4c1a-bd5b-122a3732afc1</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_____________________________ test_delete_pipeline _____________________________[0m
+[1m[31mtest_codepipeline/test_codepipeline.py[0m:446: in test_delete_pipeline
+    [0mcreate_basic_codepipeline(client, name)[90m[39;49;00m
+[1m[31mtest_codepipeline/test_codepipeline.py[0m:633: in create_basic_codepipeline
+    [0m[94mreturn[39;49;00m client.create_pipeline([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreatePipeline operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>5846be09-fa99-4886-bed1-6e6e3ac12402</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_________________________ test_list_tags_for_resource __________________________[0m
+[1m[31mtest_codepipeline/test_codepipeline.py[0m:461: in test_list_tags_for_resource
+    [0mcreate_basic_codepipeline(client, name)[90m[39;49;00m
+[1m[31mtest_codepipeline/test_codepipeline.py[0m:633: in create_basic_codepipeline
+    [0m[94mreturn[39;49;00m client.create_pipeline([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreatePipeline operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>1a46111a-6fb4-4299-8d32-9a5bc673ecd5</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______________________ test_list_tags_for_resource_errors ______________________[0m
+[1m[31mtest_codepipeline/test_codepipeline.py[0m:480: in test_list_tags_for_resource_errors
+    [0m[94massert[39;49;00m ex.response[[33m"[39;49;00m[33mError[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mResourceNotFoundException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'ResourceNotFoundException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ResourceNotFoundException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m______________________________ test_tag_resource _______________________________[0m
+[1m[31mtest_codepipeline/test_codepipeline.py[0m:491: in test_tag_resource
+    [0mcreate_basic_codepipeline(client, name)[90m[39;49;00m
+[1m[31mtest_codepipeline/test_codepipeline.py[0m:633: in create_basic_codepipeline
+    [0m[94mreturn[39;49;00m client.create_pipeline([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreatePipeline operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>3cfc2b32-e3b0-4e72-a72a-3338f5f1f37a</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________________________ test_tag_resource_errors ___________________________[0m
+[1m[31mtest_codepipeline/test_codepipeline.py[0m:511: in test_tag_resource_errors
+    [0mcreate_basic_codepipeline(client, name)[90m[39;49;00m
+[1m[31mtest_codepipeline/test_codepipeline.py[0m:633: in create_basic_codepipeline
+    [0m[94mreturn[39;49;00m client.create_pipeline([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreatePipeline operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>f540efbf-f016-4407-a4b3-3dc13662c232</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_____________________________ test_untag_resource ______________________________[0m
+[1m[31mtest_codepipeline/test_codepipeline.py[0m:560: in test_untag_resource
+    [0mcreate_basic_codepipeline(client, name)[90m[39;49;00m
+[1m[31mtest_codepipeline/test_codepipeline.py[0m:633: in create_basic_codepipeline
+    [0m[94mreturn[39;49;00m client.create_pipeline([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreatePipeline operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>6ad9902a-8822-465b-aaa4-5315899950bb</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m__________________________ test_untag_resource_errors __________________________[0m
+[1m[31mtest_codepipeline/test_codepipeline.py[0m:596: in test_untag_resource_errors
+    [0m[94massert[39;49;00m ex.response[[33m"[39;49;00m[33mError[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mResourceNotFoundException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'ResourceNotFoundException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ResourceNotFoundException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m_______________ test_create_pipeline_with_extended_trust_policy ________________[0m
+[1m[31mtest_codepipeline/test_codepipeline.py[0m:705: in test_create_pipeline_with_extended_trust_policy
+    [0mresponse = create_basic_codepipeline(client, [33m"[39;49;00m[33mtest-pipeline[39;49;00m[33m"[39;49;00m, role_arn=role_arn)[90m[39;49;00m
+[1m[31mtest_codepipeline/test_codepipeline.py[0m:633: in create_basic_codepipeline
+    [0m[94mreturn[39;49;00m client.create_pipeline([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreatePipeline operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>817703a2-ad32-4208-8c67-8a4945a633a0</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______________________ test_create_pipeline_without_tags _______________________[0m
+[1m[31mtest_codepipeline/test_codepipeline.py[0m:718: in test_create_pipeline_without_tags
+    [0mresponse = create_basic_codepipeline(client, [33m"[39;49;00m[33mtest-pipeline[39;49;00m[33m"[39;49;00m, tags=[])[90m[39;49;00m
+[1m[31mtest_codepipeline/test_codepipeline.py[0m:633: in create_basic_codepipeline
+    [0m[94mreturn[39;49;00m client.create_pipeline([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreatePipeline operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>c704732f-4b13-4f5b-96b1-caa178c6f59f</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[33m=============================== warnings summary ===============================[0m
+tests/test_codepipeline/test_codepipeline.py: 16 warnings
+  /Users/lucas/.cache/fakecloud/moto/.venv/lib/python3.9/site-packages/boto3/compat.py:89: PythonDeprecationWarning: Boto3 will no longer support Python 3.9 starting April 29, 2026. To continue receiving service updates, bug fixes, and security updates please upgrade to Python 3.10 or later. More information can be found here: https://aws.amazon.com/blogs/developer/python-support-policy-updates-for-aws-sdks-and-tools/
+    warnings.warn(warning, PythonDeprecationWarning)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+[36m[1m=========================== short test summary info ============================[0m
+[31mFAILED[0m test_codepipeline/test_codepipeline.py::[1mtest_create_pipeline[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_codepipeline/test_codepipeline.py::[1mtest_create_pipeline_errors[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_codepipeline/test_codepipeline.py::[1mtest_get_pipeline[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_codepipeline/test_codepipeline.py::[1mtest_get_pipeline_errors[0m - AssertionError: assert '400' == 'PipelineNotFoundException'
+[31mFAILED[0m test_codepipeline/test_codepipeline.py::[1mtest_update_pipeline[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_codepipeline/test_codepipeline.py::[1mtest_update_pipeline_errors[0m - AssertionError: assert '400' == 'ResourceNotFoundException'
+[31mFAILED[0m test_codepipeline/test_codepipeline.py::[1mtest_list_pipelines[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_codepipeline/test_codepipeline.py::[1mtest_delete_pipeline[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_codepipeline/test_codepipeline.py::[1mtest_list_tags_for_resource[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_codepipeline/test_codepipeline.py::[1mtest_list_tags_for_resource_errors[0m - AssertionError: assert '400' == 'ResourceNotFoundException'
+[31mFAILED[0m test_codepipeline/test_codepipeline.py::[1mtest_tag_resource[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_codepipeline/test_codepipeline.py::[1mtest_tag_resource_errors[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_codepipeline/test_codepipeline.py::[1mtest_untag_resource[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_codepipeline/test_codepipeline.py::[1mtest_untag_resource_errors[0m - AssertionError: assert '400' == 'ResourceNotFoundException'
+[31mFAILED[0m test_codepipeline/test_codepipeline.py::[1mtest_create_pipeline_with_extended_trust_policy[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_codepipeline/test_codepipeline.py::[1mtest_create_pipeline_without_tags[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31m[31m[1m16 failed[0m, [33m16 warnings[0m[31m in 0.69s[0m[0m

@@ -1,0 +1,264 @@
+[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31m                                               [100%][0m
+=================================== FAILURES ===================================
+[31m[1m______________________ test_put_attributes_unknown_domain ______________________[0m
+[1m[31mtest_sdb/test_sdb_attributes.py[0m:16: in test_put_attributes_unknown_domain
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mNoSuchDomain[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'MissingAction' == 'NoSuchDomain'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- NoSuchDomain[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ MissingAction[39;49;00m[90m[39;49;00m[0m
+[31m[1m______________________ test_put_attributes_invalid_domain ______________________[0m
+[1m[31mtest_sdb/test_sdb_attributes.py[0m:29: in test_put_attributes_invalid_domain
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mInvalidParameterValue[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'MissingAction' == 'InvalidParameterValue'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- InvalidParameterValue[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ MissingAction[39;49;00m[90m[39;49;00m[0m
+[31m[1m______________________ test_get_attributes_unknown_domain ______________________[0m
+[1m[31mtest_sdb/test_sdb_attributes.py[0m:40: in test_get_attributes_unknown_domain
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mNoSuchDomain[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'MissingAction' == 'NoSuchDomain'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- NoSuchDomain[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ MissingAction[39;49;00m[90m[39;49;00m[0m
+[31m[1m______________________ test_get_attributes_invalid_domain ______________________[0m
+[1m[31mtest_sdb/test_sdb_attributes.py[0m:51: in test_get_attributes_invalid_domain
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mInvalidParameterValue[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'MissingAction' == 'InvalidParameterValue'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- InvalidParameterValue[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ MissingAction[39;49;00m[90m[39;49;00m[0m
+[31m[1m_________________________ test_put_and_get_attributes __________________________[0m
+[1m[31mtest_sdb/test_sdb_attributes.py[0m:60: in test_put_and_get_attributes
+    [0msdb.create_domain(DomainName=name)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateDomain operation: Could not determine target service or action from request[0m
+[31m[1m_____________________ test_put_multiple_and_get_attributes _____________________[0m
+[1m[31mtest_sdb/test_sdb_attributes.py[0m:74: in test_put_multiple_and_get_attributes
+    [0msdb.create_domain(DomainName=name)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateDomain operation: Could not determine target service or action from request[0m
+[31m[1m_____________________ test_put_replace_and_get_attributes ______________________[0m
+[1m[31mtest_sdb/test_sdb_attributes.py[0m:104: in test_put_replace_and_get_attributes
+    [0msdb.create_domain(DomainName=name)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateDomain operation: Could not determine target service or action from request[0m
+[31m[1m_____________________ test_put_and_get_multiple_attributes _____________________[0m
+[1m[31mtest_sdb/test_sdb_attributes.py[0m:135: in test_put_and_get_multiple_attributes
+    [0msdb.create_domain(DomainName=name)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateDomain operation: Could not determine target service or action from request[0m
+[31m[1m_________________________ test_get_attributes_by_name __________________________[0m
+[1m[31mtest_sdb/test_sdb_attributes.py[0m:151: in test_get_attributes_by_name
+    [0msdb.create_domain(DomainName=name)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateDomain operation: Could not determine target service or action from request[0m
+[31m[1m_________________________ test_create_domain_invalid[] _________________________[0m
+[1m[31mtest_sdb/test_sdb_domains.py[0m:16: in test_create_domain_invalid
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mInvalidParameterValue[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'MissingAction' == 'InvalidParameterValue'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- InvalidParameterValue[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ MissingAction[39;49;00m[90m[39;49;00m[0m
+[31m[1m________________________ test_create_domain_invalid[a] _________________________[0m
+[1m[31mtest_sdb/test_sdb_domains.py[0m:16: in test_create_domain_invalid
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mInvalidParameterValue[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'MissingAction' == 'InvalidParameterValue'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- InvalidParameterValue[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ MissingAction[39;49;00m[90m[39;49;00m[0m
+[31m[1m________________________ test_create_domain_invalid[a#] ________________________[0m
+[1m[31mtest_sdb/test_sdb_domains.py[0m:16: in test_create_domain_invalid
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mInvalidParameterValue[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'MissingAction' == 'InvalidParameterValue'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- InvalidParameterValue[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ MissingAction[39;49;00m[90m[39;49;00m[0m
+[31m[1m_______________________ test_create_domain_invalid[aaa#] _______________________[0m
+[1m[31mtest_sdb/test_sdb_domains.py[0m:16: in test_create_domain_invalid
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mInvalidParameterValue[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'MissingAction' == 'InvalidParameterValue'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- InvalidParameterValue[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ MissingAction[39;49;00m[90m[39;49;00m[0m
+[31m[1m_____________________ test_create_domain_invalid[as@asdff] _____________________[0m
+[1m[31mtest_sdb/test_sdb_domains.py[0m:16: in test_create_domain_invalid
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mInvalidParameterValue[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'MissingAction' == 'InvalidParameterValue'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- InvalidParameterValue[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ MissingAction[39;49;00m[90m[39;49;00m[0m
+[31m[1m_____________________ test_create_domain_invalid[asf'qwer] _____________________[0m
+[1m[31mtest_sdb/test_sdb_domains.py[0m:16: in test_create_domain_invalid
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mInvalidParameterValue[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'MissingAction' == 'InvalidParameterValue'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- InvalidParameterValue[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ MissingAction[39;49;00m[90m[39;49;00m[0m
+[31m[1m________________________ test_create_domain_valid[abc] _________________________[0m
+[1m[31mtest_sdb/test_sdb_domains.py[0m:28: in test_create_domain_valid
+    [0msdb.create_domain(DomainName=name)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateDomain operation: Could not determine target service or action from request[0m
+[31m[1m________________________ test_create_domain_valid[ABc] _________________________[0m
+[1m[31mtest_sdb/test_sdb_domains.py[0m:28: in test_create_domain_valid
+    [0msdb.create_domain(DomainName=name)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateDomain operation: Could not determine target service or action from request[0m
+[31m[1m________________________ test_create_domain_valid[a00] _________________________[0m
+[1m[31mtest_sdb/test_sdb_domains.py[0m:28: in test_create_domain_valid
+    [0msdb.create_domain(DomainName=name)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateDomain operation: Could not determine target service or action from request[0m
+[31m[1m_______________________ test_create_domain_valid[as-df] ________________________[0m
+[1m[31mtest_sdb/test_sdb_domains.py[0m:28: in test_create_domain_valid
+    [0msdb.create_domain(DomainName=name)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateDomain operation: Could not determine target service or action from request[0m
+[31m[1m_______________________ test_create_domain_valid[jk_kl] ________________________[0m
+[1m[31mtest_sdb/test_sdb_domains.py[0m:28: in test_create_domain_valid
+    [0msdb.create_domain(DomainName=name)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateDomain operation: Could not determine target service or action from request[0m
+[31m[1m_______________________ test_create_domain_valid[qw.rt] ________________________[0m
+[1m[31mtest_sdb/test_sdb_domains.py[0m:28: in test_create_domain_valid
+    [0msdb.create_domain(DomainName=name)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateDomain operation: Could not determine target service or action from request[0m
+[31m[1m__________________ test_create_domain_valid[asfljaejadslfsl] ___________________[0m
+[1m[31mtest_sdb/test_sdb_domains.py[0m:28: in test_create_domain_valid
+    [0msdb.create_domain(DomainName=name)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateDomain operation: Could not determine target service or action from request[0m
+[31m[1m_________________________ test_create_domain_and_list __________________________[0m
+[1m[31mtest_sdb/test_sdb_domains.py[0m:34: in test_create_domain_and_list
+    [0msdb.create_domain(DomainName=[33m"[39;49;00m[33mmydomain[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateDomain operation: Could not determine target service or action from request[0m
+[31m[1m______________________________ test_delete_domain ______________________________[0m
+[1m[31mtest_sdb/test_sdb_domains.py[0m:43: in test_delete_domain
+    [0msdb.create_domain(DomainName=[33m"[39;49;00m[33mmydomain[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateDomain operation: Could not determine target service or action from request[0m
+[31m[1m__________________________ test_delete_domain_unknown __________________________[0m
+[1m[31mtest_sdb/test_sdb_domains.py[0m:53: in test_delete_domain_unknown
+    [0msdb.delete_domain(DomainName=[33m"[39;49;00m[33munknown[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the DeleteDomain operation: Could not determine target service or action from request[0m
+[31m[1m__________________________ test_delete_domain_invalid __________________________[0m
+[1m[31mtest_sdb/test_sdb_domains.py[0m:65: in test_delete_domain_invalid
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mInvalidParameterValue[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'MissingAction' == 'InvalidParameterValue'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- InvalidParameterValue[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ MissingAction[39;49;00m[90m[39;49;00m[0m
+[33m=============================== warnings summary ===============================[0m
+tests/test_sdb/test_sdb_attributes.py: 9 warnings
+tests/test_sdb/test_sdb_domains.py: 17 warnings
+  /Users/lucas/.cache/fakecloud/moto/.venv/lib/python3.9/site-packages/boto3/compat.py:89: PythonDeprecationWarning: Boto3 will no longer support Python 3.9 starting April 29, 2026. To continue receiving service updates, bug fixes, and security updates please upgrade to Python 3.10 or later. More information can be found here: https://aws.amazon.com/blogs/developer/python-support-policy-updates-for-aws-sdks-and-tools/
+    warnings.warn(warning, PythonDeprecationWarning)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+[36m[1m=========================== short test summary info ============================[0m
+[31mFAILED[0m test_sdb/test_sdb_attributes.py::[1mtest_put_attributes_unknown_domain[0m - AssertionError: assert 'MissingAction' == 'NoSuchDomain'
+[31mFAILED[0m test_sdb/test_sdb_attributes.py::[1mtest_put_attributes_invalid_domain[0m - AssertionError: assert 'MissingAction' == 'InvalidParameterValue'
+[31mFAILED[0m test_sdb/test_sdb_attributes.py::[1mtest_get_attributes_unknown_domain[0m - AssertionError: assert 'MissingAction' == 'NoSuchDomain'
+[31mFAILED[0m test_sdb/test_sdb_attributes.py::[1mtest_get_attributes_invalid_domain[0m - AssertionError: assert 'MissingAction' == 'InvalidParameterValue'
+[31mFAILED[0m test_sdb/test_sdb_attributes.py::[1mtest_put_and_get_attributes[0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_sdb/test_sdb_attributes.py::[1mtest_put_multiple_and_get_attributes[0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_sdb/test_sdb_attributes.py::[1mtest_put_replace_and_get_attributes[0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_sdb/test_sdb_attributes.py::[1mtest_put_and_get_multiple_attributes[0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_sdb/test_sdb_attributes.py::[1mtest_get_attributes_by_name[0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_sdb/test_sdb_domains.py::[1mtest_create_domain_invalid[][0m - AssertionError: assert 'MissingAction' == 'InvalidParameterValue'
+[31mFAILED[0m test_sdb/test_sdb_domains.py::[1mtest_create_domain_invalid[a][0m - AssertionError: assert 'MissingAction' == 'InvalidParameterValue'
+[31mFAILED[0m test_sdb/test_sdb_domains.py::[1mtest_create_domain_invalid[a#][0m - AssertionError: assert 'MissingAction' == 'InvalidParameterValue'
+[31mFAILED[0m test_sdb/test_sdb_domains.py::[1mtest_create_domain_invalid[aaa#][0m - AssertionError: assert 'MissingAction' == 'InvalidParameterValue'
+[31mFAILED[0m test_sdb/test_sdb_domains.py::[1mtest_create_domain_invalid[as@asdff][0m - AssertionError: assert 'MissingAction' == 'InvalidParameterValue'
+[31mFAILED[0m test_sdb/test_sdb_domains.py::[1mtest_create_domain_invalid[asf'qwer][0m - AssertionError: assert 'MissingAction' == 'InvalidParameterValue'
+[31mFAILED[0m test_sdb/test_sdb_domains.py::[1mtest_create_domain_valid[abc][0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_sdb/test_sdb_domains.py::[1mtest_create_domain_valid[ABc][0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_sdb/test_sdb_domains.py::[1mtest_create_domain_valid[a00][0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_sdb/test_sdb_domains.py::[1mtest_create_domain_valid[as-df][0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_sdb/test_sdb_domains.py::[1mtest_create_domain_valid[jk_kl][0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_sdb/test_sdb_domains.py::[1mtest_create_domain_valid[qw.rt][0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_sdb/test_sdb_domains.py::[1mtest_create_domain_valid[asfljaejadslfsl][0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_sdb/test_sdb_domains.py::[1mtest_create_domain_and_list[0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_sdb/test_sdb_domains.py::[1mtest_delete_domain[0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_sdb/test_sdb_domains.py::[1mtest_delete_domain_unknown[0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_sdb/test_sdb_domains.py::[1mtest_delete_domain_invalid[0m - AssertionError: assert 'MissingAction' == 'InvalidParameterValue'
+[31m[31m[1m26 failed[0m, [33m26 warnings[0m[31m in 0.59s[0m[0m

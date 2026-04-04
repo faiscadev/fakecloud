@@ -1,0 +1,176 @@
+[31mE[0m[31mE[0m[31mE[0m[31mE[0m[31mE[0m[31mE[0m[31mE[0m[31mE[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31m                                                          [100%][0m
+==================================== ERRORS ====================================
+[31m[1m________________ ERROR at setup of TestCore.test_verify_stream _________________[0m
+[1m[31mtest_dynamodbstreams/test_dynamodbstreams.py[0m:18: in setup_method
+    [0mresp = conn.create_table([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateTable operation: Service 'dynamodb' is not available[0m
+[31m[1m_______________ ERROR at setup of TestCore.test_describe_stream ________________[0m
+[1m[31mtest_dynamodbstreams/test_dynamodbstreams.py[0m:18: in setup_method
+    [0mresp = conn.create_table([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateTable operation: Service 'dynamodb' is not available[0m
+[31m[1m_________________ ERROR at setup of TestCore.test_list_streams _________________[0m
+[1m[31mtest_dynamodbstreams/test_dynamodbstreams.py[0m:18: in setup_method
+    [0mresp = conn.create_table([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateTable operation: Service 'dynamodb' is not available[0m
+[31m[1m______________ ERROR at setup of TestCore.test_get_shard_iterator ______________[0m
+[1m[31mtest_dynamodbstreams/test_dynamodbstreams.py[0m:18: in setup_method
+    [0mresp = conn.create_table([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateTable operation: Service 'dynamodb' is not available[0m
+[31m[1m____ ERROR at setup of TestCore.test_get_shard_iterator_at_sequence_number _____[0m
+[1m[31mtest_dynamodbstreams/test_dynamodbstreams.py[0m:18: in setup_method
+    [0mresp = conn.create_table([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateTable operation: Service 'dynamodb' is not available[0m
+[31m[1m___ ERROR at setup of TestCore.test_get_shard_iterator_after_sequence_number ___[0m
+[1m[31mtest_dynamodbstreams/test_dynamodbstreams.py[0m:18: in setup_method
+    [0mresp = conn.create_table([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateTable operation: Service 'dynamodb' is not available[0m
+[31m[1m______________ ERROR at setup of TestCore.test_get_records_empty _______________[0m
+[1m[31mtest_dynamodbstreams/test_dynamodbstreams.py[0m:18: in setup_method
+    [0mresp = conn.create_table([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateTable operation: Service 'dynamodb' is not available[0m
+[31m[1m_______________ ERROR at setup of TestCore.test_get_records_seq ________________[0m
+[1m[31mtest_dynamodbstreams/test_dynamodbstreams.py[0m:18: in setup_method
+    [0mresp = conn.create_table([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateTable operation: Service 'dynamodb' is not available[0m
+=================================== FAILURES ===================================
+[31m[1m____________________ TestEdges.test_enable_stream_on_table _____________________[0m
+[1m[31mtest_dynamodbstreams/test_dynamodbstreams.py[0m:204: in test_enable_stream_on_table
+    [0mresp = conn.create_table([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateTable operation: Service 'dynamodb' is not available[0m
+[31m[1m_____________________ TestEdges.test_stream_with_range_key _____________________[0m
+[1m[31mtest_dynamodbstreams/test_dynamodbstreams.py[0m:236: in test_stream_with_range_key
+    [0mresp = dyn.create_table([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateTable operation: Service 'dynamodb' is not available[0m
+[31m[1m____ TestStreamRecordImages.test_new_and_old_images_insert_has_no_old_image ____[0m
+[1m[31mtest_dynamodbstreams/test_dynamodbstreams.py[0m:303: in test_new_and_old_images_insert_has_no_old_image
+    [0mresp = client.create_table([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateTable operation: Service 'dynamodb' is not available[0m
+[31m[1m________ TestStreamRecordImages.test_new_and_old_images_modify_has_both ________[0m
+[1m[31mtest_dynamodbstreams/test_dynamodbstreams.py[0m:332: in test_new_and_old_images_modify_has_both
+    [0mresp = client.create_table([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateTable operation: Service 'dynamodb' is not available[0m
+[31m[1m____ TestStreamRecordImages.test_new_and_old_images_remove_has_no_new_image ____[0m
+[1m[31mtest_dynamodbstreams/test_dynamodbstreams.py[0m:365: in test_new_and_old_images_remove_has_no_new_image
+    [0mresp = client.create_table([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateTable operation: Service 'dynamodb' is not available[0m
+[31m[1m______ TestStreamRecordImages.test_new_image_only_remove_has_no_new_image ______[0m
+[1m[31mtest_dynamodbstreams/test_dynamodbstreams.py[0m:394: in test_new_image_only_remove_has_no_new_image
+    [0mresp = client.create_table([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateTable operation: Service 'dynamodb' is not available[0m
+[31m[1m______ TestStreamRecordImages.test_old_image_only_insert_has_no_old_image ______[0m
+[1m[31mtest_dynamodbstreams/test_dynamodbstreams.py[0m:422: in test_old_image_only_insert_has_no_old_image
+    [0mresp = client.create_table([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateTable operation: Service 'dynamodb' is not available[0m
+[33m=============================== warnings summary ===============================[0m
+tests/test_dynamodbstreams/test_dynamodbstreams.py: 15 warnings
+  /Users/lucas/.cache/fakecloud/moto/.venv/lib/python3.9/site-packages/boto3/compat.py:89: PythonDeprecationWarning: Boto3 will no longer support Python 3.9 starting April 29, 2026. To continue receiving service updates, bug fixes, and security updates please upgrade to Python 3.10 or later. More information can be found here: https://aws.amazon.com/blogs/developer/python-support-policy-updates-for-aws-sdks-and-tools/
+    warnings.warn(warning, PythonDeprecationWarning)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+[36m[1m=========================== short test summary info ============================[0m
+[31mFAILED[0m test_dynamodbstreams/test_dynamodbstreams.py::[1mTestEdges::test_enable_stream_on_table[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_dynamodbstreams/test_dynamodbstreams.py::[1mTestEdges::test_stream_with_range_key[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_dynamodbstreams/test_dynamodbstreams.py::[1mTestStreamRecordImages::test_new_and_old_images_insert_has_no_old_image[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_dynamodbstreams/test_dynamodbstreams.py::[1mTestStreamRecordImages::test_new_and_old_images_modify_has_both[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_dynamodbstreams/test_dynamodbstreams.py::[1mTestStreamRecordImages::test_new_and_old_images_remove_has_no_new_image[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_dynamodbstreams/test_dynamodbstreams.py::[1mTestStreamRecordImages::test_new_image_only_remove_has_no_new_image[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_dynamodbstreams/test_dynamodbstreams.py::[1mTestStreamRecordImages::test_old_image_only_insert_has_no_old_image[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mERROR[0m test_dynamodbstreams/test_dynamodbstreams.py::[1mTestCore::test_verify_stream[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mERROR[0m test_dynamodbstreams/test_dynamodbstreams.py::[1mTestCore::test_describe_stream[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mERROR[0m test_dynamodbstreams/test_dynamodbstreams.py::[1mTestCore::test_list_streams[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mERROR[0m test_dynamodbstreams/test_dynamodbstreams.py::[1mTestCore::test_get_shard_iterator[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mERROR[0m test_dynamodbstreams/test_dynamodbstreams.py::[1mTestCore::test_get_shard_iterator_at_sequence_number[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mERROR[0m test_dynamodbstreams/test_dynamodbstreams.py::[1mTestCore::test_get_shard_iterator_after_sequence_number[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mERROR[0m test_dynamodbstreams/test_dynamodbstreams.py::[1mTestCore::test_get_records_empty[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mERROR[0m test_dynamodbstreams/test_dynamodbstreams.py::[1mTestCore::test_get_records_seq[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31m[31m[1m7 failed[0m, [33m15 warnings[0m, [31m[1m8 errors[0m[31m in 0.60s[0m[0m

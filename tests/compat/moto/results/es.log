@@ -1,0 +1,407 @@
+[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31m                                                [100%][0m
+=================================== FAILURES ===================================
+[31m[1m___________________________ test_create_without_tags ___________________________[0m
+[1m[31mtest_es/test_domain_tags.py[0m:9: in test_create_without_tags
+    [0marn = client.create_elasticsearch_domain(DomainName=[33m"[39;49;00m[33mtestdn[39;49;00m[33m"[39;49;00m)[[33m"[39;49;00m[33mDomainStatus[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mARN[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateElasticsearchDomain operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>7407b552-ac0d-4efd-8310-da03f0441d57</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m____________________________ test_create_with_tags _____________________________[0m
+[1m[31mtest_es/test_domain_tags.py[0m:17: in test_create_with_tags
+    [0mdomain = client.create_elasticsearch_domain([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateElasticsearchDomain operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>45a9d9a8-afd0-4048-8b48-23475894229e</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m________________________________ test_add_tags _________________________________[0m
+[1m[31mtest_es/test_domain_tags.py[0m:28: in test_add_tags
+    [0mdomain = client.create_elasticsearch_domain(DomainName=[33m"[39;49;00m[33mtestdn[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateElasticsearchDomain operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>4770dd74-2e2b-46ff-884f-8e6922d54e1d</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________________________ test_update_tag ________________________________[0m
+[1m[31mtest_es/test_domain_tags.py[0m:45: in test_update_tag
+    [0mdomain = client.create_elasticsearch_domain([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateElasticsearchDomain operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>89096969-22c1-4c94-8551-f5426780f71d</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________________________ test_remove_tags _______________________________[0m
+[1m[31mtest_es/test_domain_tags.py[0m:63: in test_remove_tags
+    [0mdomain = client.create_elasticsearch_domain([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateElasticsearchDomain operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>e9656d19-d427-465f-a268-25c49fb201f0</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_________________ test_create_domain_invalid_name[getmoto.org] _________________[0m
+[1m[31mtest_es/test_es.py[0m:23: in test_create_domain_invalid_name
+    [0m[94massert[39;49;00m ([90m[39;49;00m
+[1m[31mE   assert '<?xml versio...rrorResponse>' == '1 validation...][a-z0-9\\-]+'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- 1 validation error detected: Value 'getmoto.org' at 'domainName' failed to satisfy constraint: Member must satisfy regular expression pattern: [a-z][a-z0-9\-]+[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+   <Error>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Type>Sender</Type>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Code>MissingAction</Code>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Message>Could not determine target service or action from request</Message>[39;49;00m[90m[39;49;00m...[0m
+[1m[31mE     [0m
+[1m[31mE     ...Full output truncated (3 lines hidden), use '-vv' to show[0m
+[31m[1m________________ test_create_domain_invalid_name[search-is-$$$] ________________[0m
+[1m[31mtest_es/test_es.py[0m:23: in test_create_domain_invalid_name
+    [0m[94massert[39;49;00m ([90m[39;49;00m
+[1m[31mE   assert '<?xml versio...rrorResponse>' == '1 validation...][a-z0-9\\-]+'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- 1 validation error detected: Value 'search-is-$$$' at 'domainName' failed to satisfy constraint: Member must satisfy regular expression pattern: [a-z][a-z0-9\-]+[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+   <Error>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Type>Sender</Type>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Code>MissingAction</Code>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Message>Could not determine target service or action from request</Message>[39;49;00m[90m[39;49;00m...[0m
+[1m[31mE     [0m
+[1m[31mE     ...Full output truncated (3 lines hidden), use '-vv' to show[0m
+[31m[1m_________________ test_create_domain_invalid_name[dev_or_test] _________________[0m
+[1m[31mtest_es/test_es.py[0m:23: in test_create_domain_invalid_name
+    [0m[94massert[39;49;00m ([90m[39;49;00m
+[1m[31mE   assert '<?xml versio...rrorResponse>' == '1 validation...][a-z0-9\\-]+'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- 1 validation error detected: Value 'dev_or_test' at 'domainName' failed to satisfy constraint: Member must satisfy regular expression pattern: [a-z][a-z0-9\-]+[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+   <Error>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Type>Sender</Type>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Code>MissingAction</Code>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Message>Could not determine target service or action from request</Message>[39;49;00m[90m[39;49;00m...[0m
+[1m[31mE     [0m
+[1m[31mE     ...Full output truncated (3 lines hidden), use '-vv' to show[0m
+[31m[1m__________________ test_create_domain_invalid_name[dev/test] ___________________[0m
+[1m[31mtest_es/test_es.py[0m:23: in test_create_domain_invalid_name
+    [0m[94massert[39;49;00m ([90m[39;49;00m
+[1m[31mE   assert '<?xml versio...rrorResponse>' == '1 validation...][a-z0-9\\-]+'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- 1 validation error detected: Value 'dev/test' at 'domainName' failed to satisfy constraint: Member must satisfy regular expression pattern: [a-z][a-z0-9\-]+[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+   <Error>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Type>Sender</Type>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Code>MissingAction</Code>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Message>Could not determine target service or action from request</Message>[39;49;00m[90m[39;49;00m...[0m
+[1m[31mE     [0m
+[1m[31mE     ...Full output truncated (3 lines hidden), use '-vv' to show[0m
+[31m[1m____________________ test_create_domain_invalid_name[1love] ____________________[0m
+[1m[31mtest_es/test_es.py[0m:23: in test_create_domain_invalid_name
+    [0m[94massert[39;49;00m ([90m[39;49;00m
+[1m[31mE   assert '<?xml versio...rrorResponse>' == '1 validation...][a-z0-9\\-]+'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- 1 validation error detected: Value '1love' at 'domainName' failed to satisfy constraint: Member must satisfy regular expression pattern: [a-z][a-z0-9\-]+[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+   <Error>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Type>Sender</Type>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Code>MissingAction</Code>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Message>Could not determine target service or action from request</Message>[39;49;00m[90m[39;49;00m...[0m
+[1m[31mE     [0m
+[1m[31mE     ...Full output truncated (3 lines hidden), use '-vv' to show[0m
+[31m[1m_____________________ test_create_domain_invalid_name[DEV] _____________________[0m
+[1m[31mtest_es/test_es.py[0m:23: in test_create_domain_invalid_name
+    [0m[94massert[39;49;00m ([90m[39;49;00m
+[1m[31mE   assert '<?xml versio...rrorResponse>' == '1 validation...][a-z0-9\\-]+'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- 1 validation error detected: Value 'DEV' at 'domainName' failed to satisfy constraint: Member must satisfy regular expression pattern: [a-z][a-z0-9\-]+[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+   <Error>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Type>Sender</Type>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Code>MissingAction</Code>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Message>Could not determine target service or action from request</Message>[39;49;00m[90m[39;49;00m...[0m
+[1m[31mE     [0m
+[1m[31mE     ...Full output truncated (3 lines hidden), use '-vv' to show[0m
+[31m[1m___________________ test_create_elasticsearch_domain_minimal ___________________[0m
+[1m[31mtest_es/test_es.py[0m:33: in test_create_elasticsearch_domain_minimal
+    [0mresp = client.create_elasticsearch_domain(DomainName=[33m"[39;49;00m[33mmotosearch[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateElasticsearchDomain operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>73936dad-4cb8-4e23-90a6-223a8974f9c9</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________________ test_create_elasticsearch_domain _______________________[0m
+[1m[31mtest_es/test_es.py[0m:51: in test_create_elasticsearch_domain
+    [0mresp = client.create_elasticsearch_domain([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateElasticsearchDomain operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>61ad9b65-ea42-4029-af17-77e0b3c3ec8b</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________________ test_delete_elasticsearch_domain _______________________[0m
+[1m[31mtest_es/test_es.py[0m:138: in test_delete_elasticsearch_domain
+    [0mclient.create_elasticsearch_domain(DomainName=[33m"[39;49;00m[33mmotosearch[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateElasticsearchDomain operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>331767bc-1a55-44ec-bdab-91535000ac58</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________________ test_missing_delete_elasticsearch_domain ___________________[0m
+[1m[31mtest_es/test_es.py[0m:151: in test_missing_delete_elasticsearch_domain
+    [0m[94massert[39;49;00m meta[[33m"[39;49;00m[33mHTTPStatusCode[39;49;00m[33m"[39;49;00m] == [94m409[39;49;00m[90m[39;49;00m
+[1m[31mE   assert 400 == 409[0m
+[31m[1m_________________________ test_describe_invalid_domain _________________________[0m
+[1m[31mtest_es/test_es.py[0m:166: in test_describe_invalid_domain
+    [0m[94massert[39;49;00m ([90m[39;49;00m
+[1m[31mE   assert '<?xml versio...rrorResponse>' == '1 validation...][a-z0-9\\-]+'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- 1 validation error detected: Value 'moto.org' at 'domainName' failed to satisfy constraint: Member must satisfy regular expression pattern: [a-z][a-z0-9\-]+[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+   <Error>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Type>Sender</Type>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Code>MissingAction</Code>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Message>Could not determine target service or action from request</Message>[39;49;00m[90m[39;49;00m...[0m
+[1m[31mE     [0m
+[1m[31mE     ...Full output truncated (3 lines hidden), use '-vv' to show[0m
+[31m[1m_________________________ test_describe_unknown_domain _________________________[0m
+[1m[31mtest_es/test_es.py[0m:180: in test_describe_unknown_domain
+    [0m[94massert[39;49;00m meta[[33m"[39;49;00m[33mHTTPStatusCode[39;49;00m[33m"[39;49;00m] == [94m409[39;49;00m[90m[39;49;00m
+[1m[31mE   assert 400 == 409[0m
+[31m[1m______________________ test_describe_elasticsearch_domain ______________________[0m
+[1m[31mtest_es/test_es.py[0m:190: in test_describe_elasticsearch_domain
+    [0mclient.create_elasticsearch_domain(DomainName=[33m"[39;49;00m[33mmotosearch[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateElasticsearchDomain operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>c7ed82ab-80d8-4a9a-898d-4ed86eebcf04</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m__________________ test_describe_elasticsearch_domain_config ___________________[0m
+[1m[31mtest_es/test_es.py[0m:209: in test_describe_elasticsearch_domain_config
+    [0mclient.create_elasticsearch_domain(DomainName=[33m"[39;49;00m[33mmotosearch[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateElasticsearchDomain operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>a7fcb545-0aca-4dd1-97fa-cc61f44ea807</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m________________________ test_list_domain_names_initial ________________________[0m
+[1m[31mtest_es/test_es.py[0m:219: in test_list_domain_names_initial
+    [0mresp = client.list_domain_names()[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the ListDomainNames operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>a0943709-5ac0-4578-9e73-6000560f8ebf</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______________________ test_list_domain_names_enginetype _______________________[0m
+[1m[31mtest_es/test_es.py[0m:227: in test_list_domain_names_enginetype
+    [0mclient.create_elasticsearch_domain(DomainName=[33m"[39;49;00m[33melasticsearch-domain[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateElasticsearchDomain operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>d4805e0c-91b1-4cfb-bc73-9500e7a6d7d6</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_________________ test_list_domain_names_with_multiple_domains _________________[0m
+[1m[31mtest_es/test_es.py[0m:241: in test_list_domain_names_with_multiple_domains
+    [0mclient.create_elasticsearch_domain(DomainName=name)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateElasticsearchDomain operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>91fb7ff1-1594-499d-bf81-d25b16fa6cbe</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_____________________ test_describe_elasticsearch_domains ______________________[0m
+[1m[31mtest_es/test_es.py[0m:256: in test_describe_elasticsearch_domains
+    [0mclient.create_elasticsearch_domain([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateElasticsearchDomain operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>0c8cc22c-2c99-4cfb-89eb-7d2512610cb9</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______________________ test_list_domain_names_opensearch _______________________[0m
+[1m[31mtest_es/test_es.py[0m:279: in test_list_domain_names_opensearch
+    [0mstatus = opensearch_client.create_domain(DomainName=[33m"[39;49;00m[33mmoto-opensearch[39;49;00m[33m"[39;49;00m)[[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateDomain operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>a1df0a73-f1a2-4dc1-b07d-05d9864ab417</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m__________________ test_list_domain_names_opensearch_deleted ___________________[0m
+[1m[31mtest_es/test_es.py[0m:298: in test_list_domain_names_opensearch_deleted
+    [0mopensearch_client.create_domain(DomainName=[33m"[39;49;00m[33mmoto-opensearch[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateDomain operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>76bb5a09-9328-441e-89ba-99c8c495cd69</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[33m=============================== warnings summary ===============================[0m
+tests/test_es/test_domain_tags.py: 5 warnings
+tests/test_es/test_es.py: 20 warnings
+  /Users/lucas/.cache/fakecloud/moto/.venv/lib/python3.9/site-packages/boto3/compat.py:89: PythonDeprecationWarning: Boto3 will no longer support Python 3.9 starting April 29, 2026. To continue receiving service updates, bug fixes, and security updates please upgrade to Python 3.10 or later. More information can be found here: https://aws.amazon.com/blogs/developer/python-support-policy-updates-for-aws-sdks-and-tools/
+    warnings.warn(warning, PythonDeprecationWarning)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+[36m[1m=========================== short test summary info ============================[0m
+[31mFAILED[0m test_es/test_domain_tags.py::[1mtest_create_without_tags[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_es/test_domain_tags.py::[1mtest_create_with_tags[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_es/test_domain_tags.py::[1mtest_add_tags[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_es/test_domain_tags.py::[1mtest_update_tag[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_es/test_domain_tags.py::[1mtest_remove_tags[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_es/test_es.py::[1mtest_create_domain_invalid_name[getmoto.org][0m - assert '<?xml versio...rrorResponse>' == '1 validation...][a-z0-9\\-]+'
+[31mFAILED[0m test_es/test_es.py::[1mtest_create_domain_invalid_name[search-is-$$$][0m - assert '<?xml versio...rrorResponse>' == '1 validation...][a-z0-9\\-]+'
+[31mFAILED[0m test_es/test_es.py::[1mtest_create_domain_invalid_name[dev_or_test][0m - assert '<?xml versio...rrorResponse>' == '1 validation...][a-z0-9\\-]+'
+[31mFAILED[0m test_es/test_es.py::[1mtest_create_domain_invalid_name[dev/test][0m - assert '<?xml versio...rrorResponse>' == '1 validation...][a-z0-9\\-]+'
+[31mFAILED[0m test_es/test_es.py::[1mtest_create_domain_invalid_name[1love][0m - assert '<?xml versio...rrorResponse>' == '1 validation...][a-z0-9\\-]+'
+[31mFAILED[0m test_es/test_es.py::[1mtest_create_domain_invalid_name[DEV][0m - assert '<?xml versio...rrorResponse>' == '1 validation...][a-z0-9\\-]+'
+[31mFAILED[0m test_es/test_es.py::[1mtest_create_elasticsearch_domain_minimal[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_es/test_es.py::[1mtest_create_elasticsearch_domain[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_es/test_es.py::[1mtest_delete_elasticsearch_domain[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_es/test_es.py::[1mtest_missing_delete_elasticsearch_domain[0m - assert 400 == 409
+[31mFAILED[0m test_es/test_es.py::[1mtest_describe_invalid_domain[0m - assert '<?xml versio...rrorResponse>' == '1 validation...][a-z0-9\\-]+'
+[31mFAILED[0m test_es/test_es.py::[1mtest_describe_unknown_domain[0m - assert 400 == 409
+[31mFAILED[0m test_es/test_es.py::[1mtest_describe_elasticsearch_domain[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_es/test_es.py::[1mtest_describe_elasticsearch_domain_config[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_es/test_es.py::[1mtest_list_domain_names_initial[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the L...
+[31mFAILED[0m test_es/test_es.py::[1mtest_list_domain_names_enginetype[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_es/test_es.py::[1mtest_list_domain_names_with_multiple_domains[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_es/test_es.py::[1mtest_describe_elasticsearch_domains[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_es/test_es.py::[1mtest_list_domain_names_opensearch[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_es/test_es.py::[1mtest_list_domain_names_opensearch_deleted[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31m[31m[1m25 failed[0m, [33m25 warnings[0m[31m in 0.68s[0m[0m

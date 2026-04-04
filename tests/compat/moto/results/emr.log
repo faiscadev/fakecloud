@@ -1,0 +1,708 @@
+[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[33ms[0m[33ms[0m[33ms[0m[33ms[0m[33ms[0m[32m.[0m[32m.[0m[31m                       [100%][0m
+=================================== FAILURES ===================================
+[31m[1m______________ test_put_and_get_block_public_access_configuration ______________[0m
+[1m[31mtest_emr/test_emr.py[0m:22: in test_put_and_get_block_public_access_configuration
+    [0mclient.put_block_public_access_configuration([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the PutBlockPublicAccessConfiguration operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>e31cc262-0cd9-44ee-9fdd-47cdbd75778e</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m____________________________ test_describe_cluster _____________________________[0m
+[1m[31mtest_emr/test_emr_boto3.py[0m:124: in test_describe_cluster
+    [0mcluster_id = client.run_job_flow(**args)[[33m"[39;49;00m[33mJobFlowId[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the RunJobFlow operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>068a4cff-4ce8-47a0-b3b3-e2106f24da85</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________________ test_describe_cluster_master_public_dns ____________________[0m
+[1m[31mtest_emr/test_emr_boto3.py[0m:206: in test_describe_cluster_master_public_dns
+    [0mcluster_id = client.run_job_flow(**args)[[33m"[39;49;00m[33mJobFlowId[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the RunJobFlow operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>300d77c3-6558-4ce0-8297-16504195faa5</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________________ test_describe_cluster_ebs_volume_fields ____________________[0m
+[1m[31mtest_emr/test_emr_boto3.py[0m:222: in test_describe_cluster_ebs_volume_fields
+    [0mcluster_id = client.run_job_flow(**args)[[33m"[39;49;00m[33mJobFlowId[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the RunJobFlow operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>afbb7632-b657-499f-b02a-23068e06c23c</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________________ test_describe_cluster_not_found ________________________[0m
+[1m[31mtest_emr/test_emr_boto3.py[0m:249: in test_describe_cluster_not_found
+    [0m[94massert[39;49;00m resp[[33m"[39;49;00m[33mError[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mInvalidRequestException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'InvalidRequestException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- InvalidRequestException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m___________________________ test_describe_job_flows ____________________________[0m
+[1m[31mtest_emr/test_emr_boto3.py[0m:262: in test_describe_job_flows
+    [0mcluster_id = client.run_job_flow(**args)[[33m"[39;49;00m[33mJobFlowId[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the RunJobFlow operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>f6e5b7da-dec2-4fe2-b827-6e8423cb07c5</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m____________________________ test_describe_job_flow ____________________________[0m
+[1m[31mtest_emr/test_emr_boto3.py[0m:321: in test_describe_job_flow
+    [0mcluster_id = client.run_job_flow(**args)[[33m"[39;49;00m[33mJobFlowId[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the RunJobFlow operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>3f80b9c6-4668-4755-94e1-ed57a7097428</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______________________________ test_list_clusters ______________________________[0m
+[1m[31mtest_emr/test_emr_boto3.py[0m:384: in test_list_clusters
+    [0mcluster_id = client.run_job_flow(**args)[[33m"[39;49;00m[33mJobFlowId[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the RunJobFlow operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>8c7a3b3b-b3e3-4a09-91eb-717aec8bc940</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______________________________ test_run_job_flow _______________________________[0m
+[1m[31mtest_emr/test_emr_boto3.py[0m:448: in test_run_job_flow
+    [0mresp = client.run_job_flow(**args)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the RunJobFlow operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>c39eb759-8f2d-4c1c-97e8-04524d2e4822</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m____________________ test_run_job_flow_with_invalid_params _____________________[0m
+[1m[31mtest_emr/test_emr_boto3.py[0m:479: in test_run_job_flow_with_invalid_params
+    [0m[94massert[39;49;00m ex.value.response[[33m"[39;49;00m[33mError[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mValidationException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'ValidationException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ValidationException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m____________________ test_run_job_flow_in_multiple_regions _____________________[0m
+[1m[31mtest_emr/test_emr_boto3.py[0m:489: in test_run_job_flow_in_multiple_regions
+    [0mcluster_id = client.run_job_flow(**args)[[33m"[39;49;00m[33mJobFlowId[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the RunJobFlow operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>50f79be8-7a47-4af0-917a-72c5fd2dbffe</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______________________ test_run_job_flow_with_new_params _______________________[0m
+[1m[31mtest_emr/test_emr_boto3.py[0m:501: in test_run_job_flow_with_new_params
+    [0mresp = client.run_job_flow(**run_job_flow_args)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the RunJobFlow operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>bee35108-0e6f-4633-843a-80bc37363e3c</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_________________ test_run_job_flow_with_visible_to_all_users __________________[0m
+[1m[31mtest_emr/test_emr_boto3.py[0m:511: in test_run_job_flow_with_visible_to_all_users
+    [0mresp = client.run_job_flow(**args)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the RunJobFlow operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>0f0c9df3-14b2-469e-b544-c5465e79b3c8</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m____________________ test_run_job_flow_with_instance_groups ____________________[0m
+[1m[31mtest_emr/test_emr_boto3.py[0m:538: in test_run_job_flow_with_instance_groups
+    [0mcluster_id = client.run_job_flow(**args)[[33m"[39;49;00m[33mJobFlowId[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the RunJobFlow operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>7ca67be1-2edc-48c2-96c2-0e07ee62f085</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________ test_run_job_flow_with_instance_groups_with_autoscaling ____________[0m
+[1m[31mtest_emr/test_emr_boto3.py[0m:595: in test_run_job_flow_with_instance_groups_with_autoscaling
+    [0mcluster_id = client.run_job_flow(**args)[[33m"[39;49;00m[33mJobFlowId[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the RunJobFlow operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>3dea3eb1-bac6-4161-b428-ebee68020dc1</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_____________________ test_put_remove_auto_scaling_policy ______________________[0m
+[1m[31mtest_emr/test_emr_boto3.py[0m:617: in test_put_remove_auto_scaling_policy
+    [0mcluster_id = client.run_job_flow(**args)[[33m"[39;49;00m[33mJobFlowId[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the RunJobFlow operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>b17ec0cb-192a-48c9-a278-7763d8fa3cef</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______________________ test_run_job_flow_with_custom_ami _______________________[0m
+[1m[31mtest_emr/test_emr_boto3.py[0m:682: in test_run_job_flow_with_custom_ami
+    [0m[94massert[39;49;00m ex.value.response[[33m"[39;49;00m[33mError[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mValidationException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'ValidationException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ValidationException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m___________________ test_run_job_flow_with_step_concurrency ____________________[0m
+[1m[31mtest_emr/test_emr_boto3.py[0m:718: in test_run_job_flow_with_step_concurrency
+    [0mcluster_id = client.run_job_flow(**args)[[33m"[39;49;00m[33mJobFlowId[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the RunJobFlow operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>6c0603c5-aa2e-4c32-8a4d-6b12258939f9</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_____________________________ test_modify_cluster ______________________________[0m
+[1m[31mtest_emr/test_emr_boto3.py[0m:730: in test_modify_cluster
+    [0mcluster_id = client.run_job_flow(**args)[[33m"[39;49;00m[33mJobFlowId[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the RunJobFlow operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>e95386a4-2862-4855-9a5a-35b16aa65a8b</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________________ test_set_termination_protection ________________________[0m
+[1m[31mtest_emr/test_emr_boto3.py[0m:748: in test_set_termination_protection
+    [0mresp = client.run_job_flow(**args)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the RunJobFlow operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>2bd60dde-6c8f-4f68-a46e-abba8f7ea511</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m________________ test_terminate_protected_job_flow_raises_error ________________[0m
+[1m[31mtest_emr/test_emr_boto3.py[0m:764: in test_terminate_protected_job_flow_raises_error
+    [0mresp = client.run_job_flow(**run_job_flow_args)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the RunJobFlow operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>9a342173-4a8c-4dc6-ae45-d0fa50cd62ff</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m________________________ test_set_visible_to_all_users _________________________[0m
+[1m[31mtest_emr/test_emr_boto3.py[0m:784: in test_set_visible_to_all_users
+    [0mresp = client.run_job_flow(**args)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the RunJobFlow operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>6ca8aa19-f7a5-4de3-9ef2-45d0b166da21</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________________________ test_terminate_job_flows ___________________________[0m
+[1m[31mtest_emr/test_emr_boto3.py[0m:801: in test_terminate_job_flows
+    [0mresp = client.run_job_flow(**run_job_flow_args)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the RunJobFlow operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>24d16145-f6a9-4aa3-b9e8-3cabb6731410</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m____________________________ test_bootstrap_actions ____________________________[0m
+[1m[31mtest_emr/test_emr_boto3.py[0m:833: in test_bootstrap_actions
+    [0mcluster_id = client.run_job_flow(**args)[[33m"[39;49;00m[33mJobFlowId[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the RunJobFlow operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>41cf649e-871c-42ab-986e-72cdea85c95f</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m________________________________ test_instances ________________________________[0m
+[1m[31mtest_emr/test_emr_boto3.py[0m:853: in test_instances
+    [0mcluster_id = client.run_job_flow(**args)[[33m"[39;49;00m[33mJobFlowId[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the RunJobFlow operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>ebfeec93-3af3-40c6-805a-2b24da420af5</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_____________________________ test_instance_groups _____________________________[0m
+[1m[31mtest_emr/test_emr_boto3.py[0m:897: in test_instance_groups
+    [0mcluster_id = client.run_job_flow(**args)[[33m"[39;49;00m[33mJobFlowId[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the RunJobFlow operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>8adf3d75-6f60-4cac-a3a3-bd10befe1a1c</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m__________________________________ test_steps __________________________________[0m
+[1m[31mtest_emr/test_emr_boto3.py[0m:1034: in test_steps
+    [0mcluster_id = client.run_job_flow(**args)[[33m"[39;49;00m[33mJobFlowId[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the RunJobFlow operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>225a4b26-d99a-417e-a1c7-a43b2bb80862</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m__________________________________ test_tags ___________________________________[0m
+[1m[31mtest_emr/test_emr_boto3.py[0m:1128: in test_tags
+    [0mcluster_id = client.run_job_flow(**run_job_flow_args)[[33m"[39;49;00m[33mJobFlowId[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the RunJobFlow operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>8ac425e0-1e0c-46ab-b579-1d69a0819de3</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_________________________ test_security_configurations _________________________[0m
+[1m[31mtest_emr/test_emr_boto3.py[0m:1162: in test_security_configurations
+    [0mresp = client.create_security_configuration([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateSecurityConfiguration operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>6e888043-72ae-41ab-a189-0bf1d9c3e27c</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______ test_run_job_flow_with_invalid_number_of_master_nodes_raises_error ______[0m
+[1m[31mtest_emr/test_emr_boto3.py[0m:1217: in test_run_job_flow_with_invalid_number_of_master_nodes_raises_error
+    [0m[94massert[39;49;00m error[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mValidationException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'ValidationException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ValidationException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m_________________ test_run_job_flow_with_multiple_master_nodes _________________[0m
+[1m[31mtest_emr/test_emr_boto3.py[0m:1243: in test_run_job_flow_with_multiple_master_nodes
+    [0mcluster_id = client.run_job_flow(**params)[[33m"[39;49;00m[33mJobFlowId[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the RunJobFlow operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>bc5462bc-e2e7-45ee-9243-138e91fcce3e</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________ test_create_simple_cluster__using_cloudformation _______________[0m
+[1m[31mtest_emr/test_emr_cloudformation.py[0m:45: in test_create_simple_cluster__using_cloudformation
+    [0mcf.create_stack(StackName=[33m"[39;49;00m[33mteststack[39;49;00m[33m"[39;49;00m, TemplateBody=template)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateStack operation: Service 'cloudformation' is not available[0m
+[31m[1m_____________________ test_create_simple_cluster_with_tags _____________________[0m
+[1m[31mtest_emr/test_emr_cloudformation.py[0m:99: in test_create_simple_cluster_with_tags
+    [0mcf.create_stack(StackName=[33m"[39;49;00m[33mteststack[39;49;00m[33m"[39;49;00m, TemplateBody=json.dumps(template_with_tags))[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateStack operation: Service 'cloudformation' is not available[0m
+[31m[1m_____________________ test_create_cluster_with_custom_ami ______________________[0m
+[1m[31mtest_emr/test_emr_cloudformation.py[0m:215: in test_create_cluster_with_custom_ami
+    [0mvpc = ec2.create_vpc(CidrBlock=[33m"[39;49;00m[33m10.0.0.0/16[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/boto3/resources/factory.py[0m:581: in do_action
+    [0mresponse = action([96mself[39;49;00m, *args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/boto3/resources/action.py[0m:88: in __call__
+    [0mresponse = [96mgetattr[39;49;00m(parent.meta.client, operation_name)(*args, **params)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m_____________________ test_create_cluster_with_root_volume _____________________[0m
+[1m[31mtest_emr/test_emr_cloudformation.py[0m:363: in test_create_cluster_with_root_volume
+    [0mvpc = ec2.create_vpc(CidrBlock=[33m"[39;49;00m[33m10.0.0.0/16[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/boto3/resources/factory.py[0m:581: in do_action
+    [0mresponse = action([96mself[39;49;00m, *args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/boto3/resources/action.py[0m:88: in __call__
+    [0mresponse = [96mgetattr[39;49;00m(parent.meta.client, operation_name)(*args, **params)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m___________________ test_create_cluster_with_kerberos_attrs ____________________[0m
+[1m[31mtest_emr/test_emr_cloudformation.py[0m:576: in test_create_cluster_with_kerberos_attrs
+    [0mvpc = ec2.create_vpc(CidrBlock=[33m"[39;49;00m[33m10.0.0.0/16[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/boto3/resources/factory.py[0m:581: in do_action
+    [0mresponse = action([96mself[39;49;00m, *args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/boto3/resources/action.py[0m:88: in __call__
+    [0mresponse = [96mgetattr[39;49;00m(parent.meta.client, operation_name)(*args, **params)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m______________________ test_create_simple_instance_group _______________________[0m
+[1m[31mtest_emr/test_emr_cloudformation.py[0m:677: in test_create_simple_instance_group
+    [0mcf.create_stack([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateStack operation: Service 'cloudformation' is not available[0m
+[31m[1m_____________________ test_create_advanced_instance_group ______________________[0m
+[1m[31mtest_emr/test_emr_cloudformation.py[0m:806: in test_create_advanced_instance_group
+    [0mcf.create_stack([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateStack operation: Service 'cloudformation' is not available[0m
+[31m[1m___________________________ test_list_release_labels ___________________________[0m
+[1m[31mtest_emr/test_emr_instance_types.py[0m:11: in test_list_release_labels
+    [0mrelease_labels = client.list_release_labels()[[33m"[39;49;00m[33mReleaseLabels[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the ListReleaseLabels operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>8af30ca4-2778-451e-a5d0-d3c48882d052</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m________________ test_list_supported_instance_types[us-east-1] _________________[0m
+[1m[31mtest_emr/test_emr_instance_types.py[0m:24: in test_list_supported_instance_types
+    [0mrelease_label = client.list_release_labels()[[33m"[39;49;00m[33mReleaseLabels[39;49;00m[33m"[39;49;00m][[94m0[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the ListReleaseLabels operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>ba78fc47-a9e2-4c63-b45b-e600f7b99bff</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m________________ test_list_supported_instance_types[us-east-2] _________________[0m
+[1m[31mtest_emr/test_emr_instance_types.py[0m:24: in test_list_supported_instance_types
+    [0mrelease_label = client.list_release_labels()[[33m"[39;49;00m[33mReleaseLabels[39;49;00m[33m"[39;49;00m][[94m0[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the ListReleaseLabels operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>18511d28-c574-4a20-aa4e-f7dcabd1b29c</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________ test_list_supported_instance_types[eu-central-1] _______________[0m
+[1m[31mtest_emr/test_emr_instance_types.py[0m:24: in test_list_supported_instance_types
+    [0mrelease_label = client.list_release_labels()[[33m"[39;49;00m[33mReleaseLabels[39;49;00m[33m"[39;49;00m][[94m0[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the ListReleaseLabels operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>46e71915-50fa-4ae0-94b2-6a94476c1cc6</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m________ test_default_emr_security_groups_get_created_on_first_job_flow ________[0m
+[1m[31mtest_emr/test_emr_integration.py[0m:17: in test_default_emr_security_groups_get_created_on_first_job_flow
+    [0mvpc = ec2.create_vpc(CidrBlock=[33m"[39;49;00m[33m10.0.0.0/16[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/boto3/resources/factory.py[0m:581: in do_action
+    [0mresponse = action([96mself[39;49;00m, *args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/boto3/resources/action.py[0m:88: in __call__
+    [0mresponse = [96mgetattr[39;49;00m(parent.meta.client, operation_name)(*args, **params)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[33m=============================== warnings summary ===============================[0m
+tests/test_emr/test_emr.py: 1 warning
+tests/test_emr/test_emr_boto3.py: 28 warnings
+tests/test_emr/test_emr_cloudformation.py: 7 warnings
+tests/test_emr/test_emr_instance_types.py: 4 warnings
+tests/test_emr/test_emr_integration.py: 1 warning
+  /Users/lucas/.cache/fakecloud/moto/.venv/lib/python3.9/site-packages/boto3/compat.py:89: PythonDeprecationWarning: Boto3 will no longer support Python 3.9 starting April 29, 2026. To continue receiving service updates, bug fixes, and security updates please upgrade to Python 3.10 or later. More information can be found here: https://aws.amazon.com/blogs/developer/python-support-policy-updates-for-aws-sdks-and-tools/
+    warnings.warn(warning, PythonDeprecationWarning)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+[36m[1m=========================== short test summary info ============================[0m
+[31mFAILED[0m test_emr/test_emr.py::[1mtest_put_and_get_block_public_access_configuration[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the P...
+[31mFAILED[0m test_emr/test_emr_boto3.py::[1mtest_describe_cluster[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the R...
+[31mFAILED[0m test_emr/test_emr_boto3.py::[1mtest_describe_cluster_master_public_dns[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the R...
+[31mFAILED[0m test_emr/test_emr_boto3.py::[1mtest_describe_cluster_ebs_volume_fields[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the R...
+[31mFAILED[0m test_emr/test_emr_boto3.py::[1mtest_describe_cluster_not_found[0m - AssertionError: assert '400' == 'InvalidRequestException'
+[31mFAILED[0m test_emr/test_emr_boto3.py::[1mtest_describe_job_flows[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the R...
+[31mFAILED[0m test_emr/test_emr_boto3.py::[1mtest_describe_job_flow[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the R...
+[31mFAILED[0m test_emr/test_emr_boto3.py::[1mtest_list_clusters[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the R...
+[31mFAILED[0m test_emr/test_emr_boto3.py::[1mtest_run_job_flow[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the R...
+[31mFAILED[0m test_emr/test_emr_boto3.py::[1mtest_run_job_flow_with_invalid_params[0m - AssertionError: assert '400' == 'ValidationException'
+[31mFAILED[0m test_emr/test_emr_boto3.py::[1mtest_run_job_flow_in_multiple_regions[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the R...
+[31mFAILED[0m test_emr/test_emr_boto3.py::[1mtest_run_job_flow_with_new_params[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the R...
+[31mFAILED[0m test_emr/test_emr_boto3.py::[1mtest_run_job_flow_with_visible_to_all_users[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the R...
+[31mFAILED[0m test_emr/test_emr_boto3.py::[1mtest_run_job_flow_with_instance_groups[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the R...
+[31mFAILED[0m test_emr/test_emr_boto3.py::[1mtest_run_job_flow_with_instance_groups_with_autoscaling[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the R...
+[31mFAILED[0m test_emr/test_emr_boto3.py::[1mtest_put_remove_auto_scaling_policy[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the R...
+[31mFAILED[0m test_emr/test_emr_boto3.py::[1mtest_run_job_flow_with_custom_ami[0m - AssertionError: assert '400' == 'ValidationException'
+[31mFAILED[0m test_emr/test_emr_boto3.py::[1mtest_run_job_flow_with_step_concurrency[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the R...
+[31mFAILED[0m test_emr/test_emr_boto3.py::[1mtest_modify_cluster[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the R...
+[31mFAILED[0m test_emr/test_emr_boto3.py::[1mtest_set_termination_protection[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the R...
+[31mFAILED[0m test_emr/test_emr_boto3.py::[1mtest_terminate_protected_job_flow_raises_error[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the R...
+[31mFAILED[0m test_emr/test_emr_boto3.py::[1mtest_set_visible_to_all_users[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the R...
+[31mFAILED[0m test_emr/test_emr_boto3.py::[1mtest_terminate_job_flows[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the R...
+[31mFAILED[0m test_emr/test_emr_boto3.py::[1mtest_bootstrap_actions[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the R...
+[31mFAILED[0m test_emr/test_emr_boto3.py::[1mtest_instances[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the R...
+[31mFAILED[0m test_emr/test_emr_boto3.py::[1mtest_instance_groups[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the R...
+[31mFAILED[0m test_emr/test_emr_boto3.py::[1mtest_steps[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the R...
+[31mFAILED[0m test_emr/test_emr_boto3.py::[1mtest_tags[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the R...
+[31mFAILED[0m test_emr/test_emr_boto3.py::[1mtest_security_configurations[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_emr/test_emr_boto3.py::[1mtest_run_job_flow_with_invalid_number_of_master_nodes_raises_error[0m - AssertionError: assert '400' == 'ValidationException'
+[31mFAILED[0m test_emr/test_emr_boto3.py::[1mtest_run_job_flow_with_multiple_master_nodes[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the R...
+[31mFAILED[0m test_emr/test_emr_cloudformation.py::[1mtest_create_simple_cluster__using_cloudformation[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_emr/test_emr_cloudformation.py::[1mtest_create_simple_cluster_with_tags[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_emr/test_emr_cloudformation.py::[1mtest_create_cluster_with_custom_ami[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_emr/test_emr_cloudformation.py::[1mtest_create_cluster_with_root_volume[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_emr/test_emr_cloudformation.py::[1mtest_create_cluster_with_kerberos_attrs[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_emr/test_emr_cloudformation.py::[1mtest_create_simple_instance_group[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_emr/test_emr_cloudformation.py::[1mtest_create_advanced_instance_group[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_emr/test_emr_instance_types.py::[1mtest_list_release_labels[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the L...
+[31mFAILED[0m test_emr/test_emr_instance_types.py::[1mtest_list_supported_instance_types[us-east-1][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the L...
+[31mFAILED[0m test_emr/test_emr_instance_types.py::[1mtest_list_supported_instance_types[us-east-2][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the L...
+[31mFAILED[0m test_emr/test_emr_instance_types.py::[1mtest_list_supported_instance_types[eu-central-1][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the L...
+[31mFAILED[0m test_emr/test_emr_integration.py::[1mtest_default_emr_security_groups_get_created_on_first_job_flow[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31m[31m[1m43 failed[0m, [32m2 passed[0m, [33m5 skipped[0m, [33m41 warnings[0m[31m in 2.46s[0m[0m

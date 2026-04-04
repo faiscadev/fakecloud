@@ -1,0 +1,420 @@
+[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31m                                      [100%][0m
+=================================== FAILURES ===================================
+[31m[1m_________________________ test_create_cluster_minimal __________________________[0m
+[1m[31mtest_dax/test_dax.py[0m:18: in test_create_cluster_minimal
+    [0mcreated_cluster = client.create_cluster([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateCluster operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>84df5e1c-f7cb-4161-bee2-98a7e50bb037</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________________ test_create_cluster_description ________________________[0m
+[1m[31mtest_dax/test_dax.py[0m:52: in test_create_cluster_description
+    [0mcreated_cluster = client.create_cluster([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateCluster operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>aeba2e3c-efc0-4fd8-a142-8178776df8ed</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_____________________ test_create_cluster_with_sse_enabled _____________________[0m
+[1m[31mtest_dax/test_dax.py[0m:72: in test_create_cluster_with_sse_enabled
+    [0mcreated_cluster = client.create_cluster([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateCluster operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>278b017c-00d2-4edb-b996-51489272c222</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m____ test_create_cluster_invalid_arn[n/a-ARNs must start with 'arn:': n/a] _____[0m
+[1m[31mtest_dax/test_dax.py[0m:118: in test_create_cluster_invalid_arn
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mInvalidParameterValueException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'InvalidParam...alueException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- InvalidParameterValueException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m_ test_create_cluster_invalid_arn[arn:sth-Second colon partition not found: arn:sth] _[0m
+[1m[31mtest_dax/test_dax.py[0m:118: in test_create_cluster_invalid_arn
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mInvalidParameterValueException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'InvalidParam...alueException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- InvalidParameterValueException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m_ test_create_cluster_invalid_arn[arn:sth:aws-Third colon vendor not found: arn:sth:aws] _[0m
+[1m[31mtest_dax/test_dax.py[0m:118: in test_create_cluster_invalid_arn
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mInvalidParameterValueException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'InvalidParam...alueException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- InvalidParameterValueException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m_ test_create_cluster_invalid_arn[arn:sth:aws:else-Fourth colon (region/namespace delimiter) not found: arn:sth:aws:else] _[0m
+[1m[31mtest_dax/test_dax.py[0m:118: in test_create_cluster_invalid_arn
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mInvalidParameterValueException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'InvalidParam...alueException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- InvalidParameterValueException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m_ test_create_cluster_invalid_arn[arn:sth:aws:else:eu-west-1-Fifth colon (namespace/relative-id delimiter) not found: arn:sth:aws:else:eu-west-1] _[0m
+[1m[31mtest_dax/test_dax.py[0m:118: in test_create_cluster_invalid_arn
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mInvalidParameterValueException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'InvalidParam...alueException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- InvalidParameterValueException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m__________________ test_create_cluster_invalid_name[1invalid] __________________[0m
+[1m[31mtest_dax/test_dax.py[0m:137: in test_create_cluster_invalid_name
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mInvalidParameterValueException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'InvalidParam...alueException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- InvalidParameterValueException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m________________ test_create_cluster_invalid_name[i\u0418valid] ________________[0m
+[1m[31mtest_dax/test_dax.py[0m:137: in test_create_cluster_invalid_name
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mInvalidParameterValueException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'InvalidParam...alueException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- InvalidParameterValueException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m__________________ test_create_cluster_invalid_name[in_valid] __________________[0m
+[1m[31mtest_dax/test_dax.py[0m:137: in test_create_cluster_invalid_name
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mInvalidParameterValueException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'InvalidParam...alueException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- InvalidParameterValueException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m__________________ test_create_cluster_invalid_name[invalid-] __________________[0m
+[1m[31mtest_dax/test_dax.py[0m:137: in test_create_cluster_invalid_name
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mInvalidParameterValueException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'InvalidParam...alueException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- InvalidParameterValueException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m_________________ test_create_cluster_invalid_name[in--valid] __________________[0m
+[1m[31mtest_dax/test_dax.py[0m:137: in test_create_cluster_invalid_name
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mInvalidParameterValueException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'InvalidParam...alueException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- InvalidParameterValueException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m________________ test_describe_clusters_invalid_name[1invalid] _________________[0m
+[1m[31mtest_dax/test_dax.py[0m:152: in test_describe_clusters_invalid_name
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mInvalidParameterValueException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'InvalidParam...alueException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- InvalidParameterValueException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m______________ test_describe_clusters_invalid_name[i\u0418valid] _______________[0m
+[1m[31mtest_dax/test_dax.py[0m:152: in test_describe_clusters_invalid_name
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mInvalidParameterValueException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'InvalidParam...alueException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- InvalidParameterValueException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m________________ test_describe_clusters_invalid_name[in_valid] _________________[0m
+[1m[31mtest_dax/test_dax.py[0m:152: in test_describe_clusters_invalid_name
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mInvalidParameterValueException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'InvalidParam...alueException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- InvalidParameterValueException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m________________ test_describe_clusters_invalid_name[invalid-] _________________[0m
+[1m[31mtest_dax/test_dax.py[0m:152: in test_describe_clusters_invalid_name
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mInvalidParameterValueException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'InvalidParam...alueException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- InvalidParameterValueException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m________________ test_describe_clusters_invalid_name[in--valid] ________________[0m
+[1m[31mtest_dax/test_dax.py[0m:152: in test_describe_clusters_invalid_name
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mInvalidParameterValueException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'InvalidParam...alueException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- InvalidParameterValueException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m_________________________ test_delete_cluster_unknown __________________________[0m
+[1m[31mtest_dax/test_dax.py[0m:166: in test_delete_cluster_unknown
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mClusterNotFoundFault[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'ClusterNotFoundFault'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ClusterNotFoundFault[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m_____________________________ test_delete_cluster ______________________________[0m
+[1m[31mtest_dax/test_dax.py[0m:174: in test_delete_cluster
+    [0mclient.create_cluster([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateCluster operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>768934e4-35fb-4dda-835d-41524d20b1f4</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m________________________ test_describe_cluster_unknown _________________________[0m
+[1m[31mtest_dax/test_dax.py[0m:205: in test_describe_cluster_unknown
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mClusterNotFoundFault[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'ClusterNotFoundFault'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ClusterNotFoundFault[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m______________________ test_describe_clusters_returns_all ______________________[0m
+[1m[31mtest_dax/test_dax.py[0m:214: in test_describe_clusters_returns_all
+    [0mclient.create_cluster([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateCluster operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>3359936b-4370-4c82-b86e-4b2e0b9d0d25</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________________ test_describe_clusters_paginates _______________________[0m
+[1m[31mtest_dax/test_dax.py[0m:229: in test_describe_clusters_paginates
+    [0mclient.create_cluster([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateCluster operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>1cfe4047-53da-4fd5-8623-eab4dc092341</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_____________ test_describe_clusters_returns_nodes_after_some_time _____________[0m
+[1m[31mtest_dax/test_dax.py[0m:253: in test_describe_clusters_returns_nodes_after_some_time
+    [0mclient.create_cluster([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateCluster operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>ee22f411-c668-405e-9b75-260fe196ddd1</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m____________________________ test_list_tags_unknown ____________________________[0m
+[1m[31mtest_dax/test_dax.py[0m:306: in test_list_tags_unknown
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mClusterNotFoundFault[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'ClusterNotFoundFault'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ClusterNotFoundFault[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m________________________________ test_list_tags ________________________________[0m
+[1m[31mtest_dax/test_dax.py[0m:312: in test_list_tags
+    [0mcluster = client.create_cluster([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateCluster operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>268f1dae-0343-413b-9467-c2aea640837d</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________________ test_increase_replication_factor_unknown ___________________[0m
+[1m[31mtest_dax/test_dax.py[0m:346: in test_increase_replication_factor_unknown
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mClusterNotFoundFault[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'ClusterNotFoundFault'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ClusterNotFoundFault[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m_______________________ test_increase_replication_factor _______________________[0m
+[1m[31mtest_dax/test_dax.py[0m:353: in test_increase_replication_factor
+    [0mcluster = client.create_cluster([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateCluster operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>1a69860b-8090-4350-9594-b21d6a37d971</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________________ test_decrease_replication_factor_unknown ___________________[0m
+[1m[31mtest_dax/test_dax.py[0m:396: in test_decrease_replication_factor_unknown
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mClusterNotFoundFault[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'ClusterNotFoundFault'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ClusterNotFoundFault[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m_______________________ test_decrease_replication_factor _______________________[0m
+[1m[31mtest_dax/test_dax.py[0m:403: in test_decrease_replication_factor
+    [0mclient.create_cluster([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateCluster operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>98973d4b-33e8-4afb-8c4d-7393f6b9ae50</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______________ test_decrease_replication_factor_specific_nodeids _______________[0m
+[1m[31mtest_dax/test_dax.py[0m:432: in test_decrease_replication_factor_specific_nodeids
+    [0mclient.create_cluster([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateCluster operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>1002d6d8-1b2b-47e7-9bc1-2f9e7a4a85b0</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______________________________ test_tag_resource _______________________________[0m
+[1m[31mtest_dax/test_dax.py[0m:463: in test_tag_resource
+    [0mclient.create_cluster([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateCluster operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>ba996b7f-27d2-4c88-a4d7-95e70ad6deb3</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m__________________________ test_tag_resource_unknown ___________________________[0m
+[1m[31mtest_dax/test_dax.py[0m:487: in test_tag_resource_unknown
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mClusterNotFoundFault[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'ClusterNotFoundFault'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ClusterNotFoundFault[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m_____________________________ test_untag_resource ______________________________[0m
+[1m[31mtest_dax/test_dax.py[0m:494: in test_untag_resource
+    [0mclient.create_cluster([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateCluster operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>ec311f97-3c0f-41f4-9a18-3aea9fa8cc47</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_________________________ test_untag_resource_unknown __________________________[0m
+[1m[31mtest_dax/test_dax.py[0m:523: in test_untag_resource_unknown
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mClusterNotFoundFault[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'ClusterNotFoundFault'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ClusterNotFoundFault[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[33m=============================== warnings summary ===============================[0m
+tests/test_dax/test_dax.py: 35 warnings
+  /Users/lucas/.cache/fakecloud/moto/.venv/lib/python3.9/site-packages/boto3/compat.py:89: PythonDeprecationWarning: Boto3 will no longer support Python 3.9 starting April 29, 2026. To continue receiving service updates, bug fixes, and security updates please upgrade to Python 3.10 or later. More information can be found here: https://aws.amazon.com/blogs/developer/python-support-policy-updates-for-aws-sdks-and-tools/
+    warnings.warn(warning, PythonDeprecationWarning)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+[36m[1m=========================== short test summary info ============================[0m
+[31mFAILED[0m test_dax/test_dax.py::[1mtest_create_cluster_minimal[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_dax/test_dax.py::[1mtest_create_cluster_description[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_dax/test_dax.py::[1mtest_create_cluster_with_sse_enabled[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_dax/test_dax.py::[1mtest_create_cluster_invalid_arn[n/a-ARNs must start with 'arn:': n/a][0m - AssertionError: assert '400' == 'InvalidParam...alueException'
+[31mFAILED[0m test_dax/test_dax.py::[1mtest_create_cluster_invalid_arn[arn:sth-Second colon partition not found: arn:sth][0m - AssertionError: assert '400' == 'InvalidParam...alueException'
+[31mFAILED[0m test_dax/test_dax.py::[1mtest_create_cluster_invalid_arn[arn:sth:aws-Third colon vendor not found: arn:sth:aws][0m - AssertionError: assert '400' == 'InvalidParam...alueException'
+[31mFAILED[0m test_dax/test_dax.py::[1mtest_create_cluster_invalid_arn[arn:sth:aws:else-Fourth colon (region/namespace delimiter) not found: arn:sth:aws:else][0m - AssertionError: assert '400' == 'InvalidParam...alueException'
+[31mFAILED[0m test_dax/test_dax.py::[1mtest_create_cluster_invalid_arn[arn:sth:aws:else:eu-west-1-Fifth colon (namespace/relative-id delimiter) not found: arn:sth:aws:else:eu-west-1][0m - AssertionError: assert '400' == 'InvalidParam...alueException'
+[31mFAILED[0m test_dax/test_dax.py::[1mtest_create_cluster_invalid_name[1invalid][0m - AssertionError: assert '400' == 'InvalidParam...alueException'
+[31mFAILED[0m test_dax/test_dax.py::[1mtest_create_cluster_invalid_name[i\u0418valid][0m - AssertionError: assert '400' == 'InvalidParam...alueException'
+[31mFAILED[0m test_dax/test_dax.py::[1mtest_create_cluster_invalid_name[in_valid][0m - AssertionError: assert '400' == 'InvalidParam...alueException'
+[31mFAILED[0m test_dax/test_dax.py::[1mtest_create_cluster_invalid_name[invalid-][0m - AssertionError: assert '400' == 'InvalidParam...alueException'
+[31mFAILED[0m test_dax/test_dax.py::[1mtest_create_cluster_invalid_name[in--valid][0m - AssertionError: assert '400' == 'InvalidParam...alueException'
+[31mFAILED[0m test_dax/test_dax.py::[1mtest_describe_clusters_invalid_name[1invalid][0m - AssertionError: assert '400' == 'InvalidParam...alueException'
+[31mFAILED[0m test_dax/test_dax.py::[1mtest_describe_clusters_invalid_name[i\u0418valid][0m - AssertionError: assert '400' == 'InvalidParam...alueException'
+[31mFAILED[0m test_dax/test_dax.py::[1mtest_describe_clusters_invalid_name[in_valid][0m - AssertionError: assert '400' == 'InvalidParam...alueException'
+[31mFAILED[0m test_dax/test_dax.py::[1mtest_describe_clusters_invalid_name[invalid-][0m - AssertionError: assert '400' == 'InvalidParam...alueException'
+[31mFAILED[0m test_dax/test_dax.py::[1mtest_describe_clusters_invalid_name[in--valid][0m - AssertionError: assert '400' == 'InvalidParam...alueException'
+[31mFAILED[0m test_dax/test_dax.py::[1mtest_delete_cluster_unknown[0m - AssertionError: assert '400' == 'ClusterNotFoundFault'
+[31mFAILED[0m test_dax/test_dax.py::[1mtest_delete_cluster[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_dax/test_dax.py::[1mtest_describe_cluster_unknown[0m - AssertionError: assert '400' == 'ClusterNotFoundFault'
+[31mFAILED[0m test_dax/test_dax.py::[1mtest_describe_clusters_returns_all[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_dax/test_dax.py::[1mtest_describe_clusters_paginates[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_dax/test_dax.py::[1mtest_describe_clusters_returns_nodes_after_some_time[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_dax/test_dax.py::[1mtest_list_tags_unknown[0m - AssertionError: assert '400' == 'ClusterNotFoundFault'
+[31mFAILED[0m test_dax/test_dax.py::[1mtest_list_tags[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_dax/test_dax.py::[1mtest_increase_replication_factor_unknown[0m - AssertionError: assert '400' == 'ClusterNotFoundFault'
+[31mFAILED[0m test_dax/test_dax.py::[1mtest_increase_replication_factor[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_dax/test_dax.py::[1mtest_decrease_replication_factor_unknown[0m - AssertionError: assert '400' == 'ClusterNotFoundFault'
+[31mFAILED[0m test_dax/test_dax.py::[1mtest_decrease_replication_factor[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_dax/test_dax.py::[1mtest_decrease_replication_factor_specific_nodeids[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_dax/test_dax.py::[1mtest_tag_resource[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_dax/test_dax.py::[1mtest_tag_resource_unknown[0m - AssertionError: assert '400' == 'ClusterNotFoundFault'
+[31mFAILED[0m test_dax/test_dax.py::[1mtest_untag_resource[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_dax/test_dax.py::[1mtest_untag_resource_unknown[0m - AssertionError: assert '400' == 'ClusterNotFoundFault'
+[31m[31m[1m35 failed[0m, [33m35 warnings[0m[31m in 0.82s[0m[0m

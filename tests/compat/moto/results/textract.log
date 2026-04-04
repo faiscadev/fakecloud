@@ -1,0 +1,94 @@
+[33ms[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[33ms[0m[31mF[0m[31m                                                                  [100%][0m
+=================================== FAILURES ===================================
+[31m[1m______________________ test_start_document_text_detection ______________________[0m
+[1m[31mtest_textract/test_textract.py[0m:60: in test_start_document_text_detection
+    [0mresp = client.start_document_text_detection([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the StartDocumentTextDetection operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>ac432cde-9f58-4c1b-83e9-7ecefff67ac4</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________ test_get_document_text_detection_without_job_id ________________[0m
+[1m[31mtest_textract/test_textract.py[0m:73: in test_get_document_text_detection_without_job_id
+    [0m[94massert[39;49;00m e.value.response[[33m"[39;49;00m[33mError[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mInvalidJobIdException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'InvalidJobIdException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- InvalidJobIdException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m__________________________ test_detect_document_text ___________________________[0m
+[1m[31mtest_textract/test_textract.py[0m:79: in test_detect_document_text
+    [0mresult = client.detect_document_text([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the DetectDocumentText operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>3ee533b7-4e38-41a3-b5c9-13ddb58e39cb</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________ test_start_document_text_detection_with_sns_notification ___________[0m
+[1m[31mtest_textract/test_textract.py[0m:115: in test_start_document_text_detection_with_sns_notification
+    [0mresp = client.start_document_text_detection([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the StartDocumentTextDetection operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>717db061-d8f5-4069-ab67-6ade7c82c1b3</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_________________________ test_start_document_analysis _________________________[0m
+[1m[31mtest_textract/test_textract.py[0m:191: in test_start_document_analysis
+    [0mresp = client.start_document_analysis([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the StartDocumentAnalysis operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>9c6b202c-b0e5-4024-b5d3-a02cf84453a5</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[33m=============================== warnings summary ===============================[0m
+tests/test_textract/test_textract.py::test_start_document_text_detection
+tests/test_textract/test_textract.py::test_get_document_text_detection_without_job_id
+tests/test_textract/test_textract.py::test_detect_document_text
+tests/test_textract/test_textract.py::test_start_document_text_detection_with_sns_notification
+tests/test_textract/test_textract.py::test_start_document_analysis
+  /Users/lucas/.cache/fakecloud/moto/.venv/lib/python3.9/site-packages/boto3/compat.py:89: PythonDeprecationWarning: Boto3 will no longer support Python 3.9 starting April 29, 2026. To continue receiving service updates, bug fixes, and security updates please upgrade to Python 3.10 or later. More information can be found here: https://aws.amazon.com/blogs/developer/python-support-policy-updates-for-aws-sdks-and-tools/
+    warnings.warn(warning, PythonDeprecationWarning)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+[36m[1m=========================== short test summary info ============================[0m
+[31mFAILED[0m test_textract/test_textract.py::[1mtest_start_document_text_detection[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the S...
+[31mFAILED[0m test_textract/test_textract.py::[1mtest_get_document_text_detection_without_job_id[0m - AssertionError: assert '400' == 'InvalidJobIdException'
+[31mFAILED[0m test_textract/test_textract.py::[1mtest_detect_document_text[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the D...
+[31mFAILED[0m test_textract/test_textract.py::[1mtest_start_document_text_detection_with_sns_notification[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the S...
+[31mFAILED[0m test_textract/test_textract.py::[1mtest_start_document_analysis[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the S...
+[31m[31m[1m5 failed[0m, [33m2 skipped[0m, [33m5 warnings[0m[31m in 0.32s[0m[0m

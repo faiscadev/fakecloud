@@ -1,0 +1,811 @@
+[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[32m.[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31m [ 90%]
+[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31m                                                                 [100%][0m
+=================================== FAILURES ===================================
+[31m[1m____________________ test_create_user_no_password_required _____________________[0m
+[1m[31mtest_elasticache/test_elasticache.py[0m:16: in test_create_user_no_password_required
+    [0mresp = client.create_user([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateUser operation: Service 'elasticache' is not available[0m
+[31m[1m___________________ test_create_user_with_password_too_short ___________________[0m
+[1m[31mtest_elasticache/test_elasticache.py[0m:51: in test_create_user_with_password_too_short
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mInvalidParameterValue[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'UnknownService' == 'InvalidParameterValue'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- InvalidParameterValue[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ UnknownService[39;49;00m[90m[39;49;00m[0m
+[31m[1m________________________ test_create_user_with_password ________________________[0m
+[1m[31mtest_elasticache/test_elasticache.py[0m:59: in test_create_user_with_password
+    [0mresp = client.create_user([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateUser operation: Service 'elasticache' is not available[0m
+[31m[1m______________________ test_create_user_without_password _______________________[0m
+[1m[31mtest_elasticache/test_elasticache.py[0m:89: in test_create_user_without_password
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mInvalidParameterValue[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'UnknownService' == 'InvalidParameterValue'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- InvalidParameterValue[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ UnknownService[39;49;00m[90m[39;49;00m[0m
+[31m[1m__________________________ test_create_user_with_iam ___________________________[0m
+[1m[31mtest_elasticache/test_elasticache.py[0m:100: in test_create_user_with_iam
+    [0mresp = client.create_user([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateUser operation: Service 'elasticache' is not available[0m
+[31m[1m_________________ test_create_user_invalid_authentication_type _________________[0m
+[1m[31mtest_elasticache/test_elasticache.py[0m:127: in test_create_user_invalid_authentication_type
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mInvalidParameterValue[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'UnknownService' == 'InvalidParameterValue'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- InvalidParameterValue[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ UnknownService[39;49;00m[90m[39;49;00m[0m
+[31m[1m___________________ test_create_user_with_iam_with_passwords ___________________[0m
+[1m[31mtest_elasticache/test_elasticache.py[0m:148: in test_create_user_with_iam_with_passwords
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mInvalidParameterCombination[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'UnknownService' == 'InvalidParameterCombination'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- InvalidParameterCombination[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ UnknownService[39;49;00m[90m[39;49;00m[0m
+[31m[1m_______ test_create_user_authmode_password_with_multiple_password_fields _______[0m
+[1m[31mtest_elasticache/test_elasticache.py[0m:168: in test_create_user_authmode_password_with_multiple_password_fields
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mInvalidParameterCombination[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'UnknownService' == 'InvalidParameterCombination'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- InvalidParameterCombination[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ UnknownService[39;49;00m[90m[39;49;00m[0m
+[31m[1m__________ test_create_user_with_authmode_password_without_passwords ___________[0m
+[1m[31mtest_elasticache/test_elasticache.py[0m:187: in test_create_user_with_authmode_password_without_passwords
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mInvalidParameterCombination[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'UnknownService' == 'InvalidParameterCombination'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- InvalidParameterCombination[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ UnknownService[39;49;00m[90m[39;49;00m[0m
+[31m[1m__________________ test_create_user_with_authmode_no_password __________________[0m
+[1m[31mtest_elasticache/test_elasticache.py[0m:199: in test_create_user_with_authmode_no_password
+    [0mresp = client.create_user([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateUser operation: Service 'elasticache' is not available[0m
+[31m[1m______ test_create_user_with_no_password_required_and_authmode_nopassword ______[0m
+[1m[31mtest_elasticache/test_elasticache.py[0m:221: in test_create_user_with_no_password_required_and_authmode_nopassword
+    [0mresp = client.create_user([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateUser operation: Service 'elasticache' is not available[0m
+[31m[1m______ test_create_user_with_no_password_required_and_authmode_different _______[0m
+[1m[31mtest_elasticache/test_elasticache.py[0m:254: in test_create_user_with_no_password_required_and_authmode_different
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mInvalidParameterCombination[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'UnknownService' == 'InvalidParameterCombination'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- InvalidParameterCombination[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ UnknownService[39;49;00m[90m[39;49;00m[0m
+[31m[1m___________________ test_create_user_with_authmode_password ____________________[0m
+[1m[31mtest_elasticache/test_elasticache.py[0m:266: in test_create_user_with_authmode_password
+    [0mresp = client.create_user([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateUser operation: Service 'elasticache' is not available[0m
+[31m[1m_______________ test_create_user_with_authmode_password_multiple _______________[0m
+[1m[31mtest_elasticache/test_elasticache.py[0m:290: in test_create_user_with_authmode_password_multiple
+    [0mresp = client.create_user([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateUser operation: Service 'elasticache' is not available[0m
+[31m[1m____________________________ test_create_user_twice ____________________________[0m
+[1m[31mtest_elasticache/test_elasticache.py[0m:313: in test_create_user_twice
+    [0mclient.create_user([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateUser operation: Service 'elasticache' is not available[0m
+[31m[1m_________ test_create_user_engine_parameter_is_case_insensitive[redis] _________[0m
+[1m[31mtest_elasticache/test_elasticache.py[0m:339: in test_create_user_engine_parameter_is_case_insensitive
+    [0mresp = client.create_user([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateUser operation: Service 'elasticache' is not available[0m
+[31m[1m_________ test_create_user_engine_parameter_is_case_insensitive[Redis] _________[0m
+[1m[31mtest_elasticache/test_elasticache.py[0m:339: in test_create_user_engine_parameter_is_case_insensitive
+    [0mresp = client.create_user([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateUser operation: Service 'elasticache' is not available[0m
+[31m[1m_________ test_create_user_engine_parameter_is_case_insensitive[reDis] _________[0m
+[1m[31mtest_elasticache/test_elasticache.py[0m:339: in test_create_user_engine_parameter_is_case_insensitive
+    [0mresp = client.create_user([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateUser operation: Service 'elasticache' is not available[0m
+[31m[1m__________________ test_create_user_with_invalid_engine_type ___________________[0m
+[1m[31mtest_elasticache/test_elasticache.py[0m:362: in test_create_user_with_invalid_engine_type
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mInvalidParameterValue[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'UnknownService' == 'InvalidParameterValue'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- InvalidParameterValue[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ UnknownService[39;49;00m[90m[39;49;00m[0m
+[31m[1m__________________________ test_create_user_with_tags __________________________[0m
+[1m[31mtest_elasticache/test_elasticache.py[0m:371: in test_create_user_with_tags
+    [0mcreate_user_response = client.create_user([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateUser operation: Service 'elasticache' is not available[0m
+[31m[1m___________________________ test_delete_user_unknown ___________________________[0m
+[1m[31mtest_elasticache/test_elasticache.py[0m:390: in test_delete_user_unknown
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mUserNotFound[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'UnknownService' == 'UserNotFound'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- UserNotFound[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ UnknownService[39;49;00m[90m[39;49;00m[0m
+[31m[1m_______________________________ test_delete_user _______________________________[0m
+[1m[31mtest_elasticache/test_elasticache.py[0m:398: in test_delete_user
+    [0mclient.create_user([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateUser operation: Service 'elasticache' is not available[0m
+[31m[1m_________________________ test_describe_users_initial __________________________[0m
+[1m[31mtest_elasticache/test_elasticache.py[0m:421: in test_describe_users_initial
+    [0mresp = client.describe_users()[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the DescribeUsers operation: Service 'elasticache' is not available[0m
+[31m[1m_____________________________ test_describe_users ______________________________[0m
+[1m[31mtest_elasticache/test_elasticache.py[0m:441: in test_describe_users
+    [0mclient.create_user([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateUser operation: Service 'elasticache' is not available[0m
+[31m[1m______________________ test_describe_users_unknown_userid ______________________[0m
+[1m[31mtest_elasticache/test_elasticache.py[0m:472: in test_describe_users_unknown_userid
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mUserNotFound[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'UnknownService' == 'UserNotFound'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- UserNotFound[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ UnknownService[39;49;00m[90m[39;49;00m[0m
+[31m[1m_______________________ test_create_redis_cache_cluster ________________________[0m
+[1m[31mtest_elasticache/test_elasticache.py[0m:487: in test_create_redis_cache_cluster
+    [0mresp = client.create_cache_cluster([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateCacheCluster operation: Service 'elasticache' is not available[0m
+[31m[1m_____________________ test_create_memcached_cache_cluster ______________________[0m
+[1m[31mtest_elasticache/test_elasticache.py[0m:520: in test_create_memcached_cache_cluster
+    [0mresp = client.create_cache_cluster([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateCacheCluster operation: Service 'elasticache' is not available[0m
+[31m[1m_____________________ test_create_duplicate_cache_cluster ______________________[0m
+[1m[31mtest_elasticache/test_elasticache.py[0m:545: in test_create_duplicate_cache_cluster
+    [0mclient.create_cache_cluster([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateCacheCluster operation: Service 'elasticache' is not available[0m
+[31m[1m________________ test_create_cache_cluster_invalid_param_value _________________[0m
+[1m[31mtest_elasticache/test_elasticache.py[0m:576: in test_create_cache_cluster_invalid_param_value
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mInvalidParameterValue[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'UnknownService' == 'InvalidParameterValue'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- InvalidParameterValue[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ UnknownService[39;49;00m[90m[39;49;00m[0m
+[31m[1m_______________________ test_describe_all_cache_clusters _______________________[0m
+[1m[31mtest_elasticache/test_elasticache.py[0m:591: in test_describe_all_cache_clusters
+    [0mclient.create_cache_cluster([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateCacheCluster operation: Service 'elasticache' is not available[0m
+[31m[1m____________________ test_describe_specific_cache_clusters _____________________[0m
+[1m[31mtest_elasticache/test_elasticache.py[0m:621: in test_describe_specific_cache_clusters
+    [0mclient.create_cache_cluster([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateCacheCluster operation: Service 'elasticache' is not available[0m
+[31m[1m_____________________ test_describe_unknown_cache_cluster ______________________[0m
+[1m[31mtest_elasticache/test_elasticache.py[0m:657: in test_describe_unknown_cache_cluster
+    [0mclient.create_cache_cluster([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateCacheCluster operation: Service 'elasticache' is not available[0m
+[31m[1m__________________________ test_delete_cache_cluster ___________________________[0m
+[1m[31mtest_elasticache/test_elasticache.py[0m:682: in test_delete_cache_cluster
+    [0mclient.create_cache_cluster([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateCacheCluster operation: Service 'elasticache' is not available[0m
+[31m[1m______________________ test_delete_unknown_cache_cluster _______________________[0m
+[1m[31mtest_elasticache/test_elasticache.py[0m:707: in test_delete_unknown_cache_cluster
+    [0mclient.create_cache_cluster([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateCacheCluster operation: Service 'elasticache' is not available[0m
+[31m[1m_________________________ test_list_tags_cache_cluster _________________________[0m
+[1m[31mtest_elasticache/test_elasticache.py[0m:726: in test_list_tags_cache_cluster
+    [0mresult = conn.list_tags_for_resource([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the ListTagsForResource operation: Service 'elasticache' is not available[0m
+[31m[1m________________________ test_create_cache_subnet_group ________________________[0m
+[1m[31mtest_elasticache/test_elasticache.py[0m:750: in test_create_cache_subnet_group
+    [0mresp = client.create_cache_subnet_group([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateCacheSubnetGroup operation: Service 'elasticache' is not available[0m
+[31m[1m_________________ test_create_cache_subnet_group_and_mock_vpc __________________[0m
+[1m[31mtest_elasticache/test_elasticache.py[0m:781: in test_create_cache_subnet_group_and_mock_vpc
+    [0mvpc = ec2_client.create_vpc(CidrBlock=[33m"[39;49;00m[33m10.0.0.0/16[39;49;00m[33m"[39;49;00m).get([33m"[39;49;00m[33mVpc[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m______________________ test_describe_cache_subnet_groups _______________________[0m
+[1m[31mtest_elasticache/test_elasticache.py[0m:817: in test_describe_cache_subnet_groups
+    [0mclient.create_cache_subnet_group([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateCacheSubnetGroup operation: Service 'elasticache' is not available[0m
+[31m[1m_________________ test_describe_cache_subnet_groups_pagination _________________[0m
+[1m[31mtest_elasticache/test_elasticache.py[0m:832: in test_describe_cache_subnet_groups_pagination
+    [0mclient.create_cache_subnet_group([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateCacheSubnetGroup operation: Service 'elasticache' is not available[0m
+[31m[1m__________________ test_describe_cache_subnet_group_specific ___________________[0m
+[1m[31mtest_elasticache/test_elasticache.py[0m:853: in test_describe_cache_subnet_group_specific
+    [0mclient.create_cache_subnet_group([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateCacheSubnetGroup operation: Service 'elasticache' is not available[0m
+[31m[1m__________________ test_describe_cache_subnet_group_not_found __________________[0m
+[1m[31mtest_elasticache/test_elasticache.py[0m:875: in test_describe_cache_subnet_group_not_found
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mCacheSubnetGroupNotFoundFault[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'UnknownService' == 'CacheSubnetG...NotFoundFault'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- CacheSubnetGroupNotFoundFault[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ UnknownService[39;49;00m[90m[39;49;00m[0m
+[31m[1m_________________________ test_subnet_groups_list_tags _________________________[0m
+[1m[31mtest_elasticache/test_elasticache.py[0m:882: in test_subnet_groups_list_tags
+    [0mclient.create_cache_subnet_group([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateCacheSubnetGroup operation: Service 'elasticache' is not available[0m
+[31m[1m____________________ test_cache_subnet_group_already_exists ____________________[0m
+[1m[31mtest_elasticache/test_elasticache.py[0m:916: in test_cache_subnet_group_already_exists
+    [0mclient.create_cache_subnet_group([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateCacheSubnetGroup operation: Service 'elasticache' is not available[0m
+[31m[1m_______________ test_cache_subnet_group_with_invalid_subnet_ids ________________[0m
+[1m[31mtest_elasticache/test_elasticache.py[0m:937: in test_cache_subnet_group_with_invalid_subnet_ids
+    [0mvpc = ec2_client.create_vpc(CidrBlock=[33m"[39;49;00m[33m10.0.0.0/16[39;49;00m[33m"[39;49;00m).get([33m"[39;49;00m[33mVpc[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m______________ test_cache_subnet_group_with_ipv4_and_ipv6_subnets ______________[0m
+[1m[31mtest_elasticache/test_elasticache.py[0m:965: in test_cache_subnet_group_with_ipv4_and_ipv6_subnets
+    [0mvpc = ec2_client.create_vpc([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m_______________ test_cache_subnet_group_with_ipv6_native_subnets _______________[0m
+[1m[31mtest_elasticache/test_elasticache.py[0m:1021: in test_cache_subnet_group_with_ipv6_native_subnets
+    [0mvpc = ec2_client.create_vpc([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m________________ test_create_replication_group_cluster_disabled ________________[0m
+[1m[31mtest_elasticache/test_elasticache.py[0m:1056: in test_create_replication_group_cluster_disabled
+    [0mresp = client.create_replication_group([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateReplicationGroup operation: Service 'elasticache' is not available[0m
+[31m[1m____________ test_create_replication_group_cluster_disabled_one_az _____________[0m
+[1m[31mtest_elasticache/test_elasticache.py[0m:1133: in test_create_replication_group_cluster_disabled_one_az
+    [0mresp = client.create_replication_group([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateReplicationGroup operation: Service 'elasticache' is not available[0m
+[31m[1m________________ test_create_replication_group_cluster_enabled _________________[0m
+[1m[31mtest_elasticache/test_elasticache.py[0m:1160: in test_create_replication_group_cluster_enabled
+    [0mresp = client.create_replication_group([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateReplicationGroup operation: Service 'elasticache' is not available[0m
+[31m[1m____________ test_create_replication_group_cluster_enabled_fallback ____________[0m
+[1m[31mtest_elasticache/test_elasticache.py[0m:1238: in test_create_replication_group_cluster_enabled_fallback
+    [0mclient.create_replication_group([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateReplicationGroup operation: Service 'elasticache' is not available[0m
+[31m[1m________________ test_create_replication_groups_single_disabled ________________[0m
+[1m[31mtest_elasticache/test_elasticache.py[0m:1278: in test_create_replication_groups_single_disabled
+    [0mresp = client.create_replication_group([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateReplicationGroup operation: Service 'elasticache' is not available[0m
+[31m[1m________________ test_create_replication_groups_single_enabled _________________[0m
+[1m[31mtest_elasticache/test_elasticache.py[0m:1296: in test_create_replication_groups_single_enabled
+    [0mresp = client.create_replication_group([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateReplicationGroup operation: Service 'elasticache' is not available[0m
+[31m[1m_________________ test_describe_replication_groups_pagination __________________[0m
+[1m[31mtest_elasticache/test_elasticache.py[0m:1319: in test_describe_replication_groups_pagination
+    [0mclient.create_replication_group([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateReplicationGroup operation: Service 'elasticache' is not available[0m
+[31m[1m______________ test_describe_replication_groups_cluster_disabled _______________[0m
+[1m[31mtest_elasticache/test_elasticache.py[0m:1351: in test_describe_replication_groups_cluster_disabled
+    [0mclient.create_replication_group([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateReplicationGroup operation: Service 'elasticache' is not available[0m
+[31m[1m_______________ test_describe_replication_groups_cluster_enabled _______________[0m
+[1m[31mtest_elasticache/test_elasticache.py[0m:1414: in test_describe_replication_groups_cluster_enabled
+    [0mclient.create_replication_group([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateReplicationGroup operation: Service 'elasticache' is not available[0m
+[31m[1m__________________ test_describe_replication_group_not_found ___________________[0m
+[1m[31mtest_elasticache/test_elasticache.py[0m:1453: in test_describe_replication_group_not_found
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mReplicationGroupNotFoundFault[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'UnknownService' == 'ReplicationG...NotFoundFault'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ReplicationGroupNotFoundFault[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ UnknownService[39;49;00m[90m[39;49;00m[0m
+[31m[1m______________________ test_replication_groups_list_tags _______________________[0m
+[1m[31mtest_elasticache/test_elasticache.py[0m:1462: in test_replication_groups_list_tags
+    [0mclient.create_replication_group([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateReplicationGroup operation: Service 'elasticache' is not available[0m
+[31m[1m____________________ test_replication_groups_already_exists ____________________[0m
+[1m[31mtest_elasticache/test_elasticache.py[0m:1495: in test_replication_groups_already_exists
+    [0mclient.create_replication_group([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateReplicationGroup operation: Service 'elasticache' is not available[0m
+[31m[1m_________________ test_list_tags_raises_error_for_invalid_arn __________________[0m
+[1m[31mtest_elasticache/test_elasticache.py[0m:1529: in test_list_tags_raises_error_for_invalid_arn
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mInvalidARN[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'UnknownService' == 'InvalidARN'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- InvalidARN[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ UnknownService[39;49;00m[90m[39;49;00m[0m
+[31m[1m________________________ test_delete_replication_group _________________________[0m
+[1m[31mtest_elasticache/test_elasticache.py[0m:1538: in test_delete_replication_group
+    [0mclient.create_replication_group([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateReplicationGroup operation: Service 'elasticache' is not available[0m
+[31m[1m__________________ test_create_cache_cluster_with_auth_token ___________________[0m
+[1m[31mtest_elasticache/test_elasticache.py[0m:1586: in test_create_cache_cluster_with_auth_token
+    [0mclient.create_cache_cluster([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateCacheCluster operation: Service 'elasticache' is not available[0m
+[31m[1m_________________ test_create_cache_cluster_without_auth_token _________________[0m
+[1m[31mtest_elasticache/test_elasticache.py[0m:1604: in test_create_cache_cluster_without_auth_token
+    [0mclient.create_cache_cluster([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateCacheCluster operation: Service 'elasticache' is not available[0m
+[31m[1m_____________________________ test_create_snapshot _____________________________[0m
+[1m[31mtest_elasticache/test_elasticache.py[0m:1623: in test_create_snapshot
+    [0mclient.create_cache_cluster([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateCacheCluster operation: Service 'elasticache' is not available[0m
+[31m[1m________________________ test_create_snapshot_with_vpc _________________________[0m
+[1m[31mtest_elasticache/test_elasticache.py[0m:1676: in test_create_snapshot_with_vpc
+    [0mvpc = ec2_client.create_vpc(CidrBlock=[33m"[39;49;00m[33m10.0.0.0/16[39;49;00m[33m"[39;49;00m).get([33m"[39;49;00m[33mVpc[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m_____________________ test_create_snapshot_already_exists ______________________[0m
+[1m[31mtest_elasticache/test_elasticache.py[0m:1714: in test_create_snapshot_already_exists
+    [0mclient.create_cache_cluster([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateCacheCluster operation: Service 'elasticache' is not available[0m
+[31m[1m____________________ test_create_snapshot_cluster_not_found ____________________[0m
+[1m[31mtest_elasticache/test_elasticache.py[0m:1750: in test_create_snapshot_cluster_not_found
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mCacheClusterNotFound[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'UnknownService' == 'CacheClusterNotFound'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- CacheClusterNotFound[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ UnknownService[39;49;00m[90m[39;49;00m[0m
+[31m[1m_______________ test_create_snapshot_replication_group_not_found _______________[0m
+[1m[31mtest_elasticache/test_elasticache.py[0m:1767: in test_create_snapshot_replication_group_not_found
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mReplicationGroupNotFoundFault[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'UnknownService' == 'ReplicationG...NotFoundFault'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ReplicationGroupNotFoundFault[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ UnknownService[39;49;00m[90m[39;49;00m[0m
+[31m[1m________________ test_create_snapshot_invalid_param_combination ________________[0m
+[1m[31mtest_elasticache/test_elasticache.py[0m:1784: in test_create_snapshot_invalid_param_combination
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mInvalidParameterCombination[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'UnknownService' == 'InvalidParameterCombination'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- InvalidParameterCombination[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ UnknownService[39;49;00m[90m[39;49;00m[0m
+[31m[1m_________________ test_describe_snapshots_invalid_param_value __________________[0m
+[1m[31mtest_elasticache/test_elasticache.py[0m:1795: in test_describe_snapshots_invalid_param_value
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mInvalidParameterValue[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'UnknownService' == 'InvalidParameterValue'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- InvalidParameterValue[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ UnknownService[39;49;00m[90m[39;49;00m[0m
+[31m[1m___________________________ test_describe_snapshots ____________________________[0m
+[1m[31mtest_elasticache/test_elasticache.py[0m:1804: in test_describe_snapshots
+    [0mclient.create_cache_cluster([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateCacheCluster operation: Service 'elasticache' is not available[0m
+[31m[1m______________________ test_describe_snapshots_not_found _______________________[0m
+[1m[31mtest_elasticache/test_elasticache.py[0m:1839: in test_describe_snapshots_not_found
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mSnapshotNotFoundFault[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'UnknownService' == 'SnapshotNotFoundFault'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- SnapshotNotFoundFault[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ UnknownService[39;49;00m[90m[39;49;00m[0m
+[31m[1m_____________ test_describe_snapshots_replication_group_not_found ______________[0m
+[1m[31mtest_elasticache/test_elasticache.py[0m:1851: in test_describe_snapshots_replication_group_not_found
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mReplicationGroupNotFoundFault[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'UnknownService' == 'ReplicationG...NotFoundFault'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ReplicationGroupNotFoundFault[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ UnknownService[39;49;00m[90m[39;49;00m[0m
+[31m[1m_______________ test_describe_snapshots_cache_cluster_not_found ________________[0m
+[1m[31mtest_elasticache/test_elasticache.py[0m:1863: in test_describe_snapshots_cache_cluster_not_found
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mCacheClusterNotFound[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'UnknownService' == 'CacheClusterNotFound'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- CacheClusterNotFound[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ UnknownService[39;49;00m[90m[39;49;00m[0m
+[31m[1m_________________ test_describe_snapshots_invalid_param_combo __________________[0m
+[1m[31mtest_elasticache/test_elasticache.py[0m:1878: in test_describe_snapshots_invalid_param_combo
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mInvalidParameterCombination[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'UnknownService' == 'InvalidParameterCombination'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- InvalidParameterCombination[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ UnknownService[39;49;00m[90m[39;49;00m[0m
+[31m[1m_____________________________ test_delete_snapshot _____________________________[0m
+[1m[31mtest_elasticache/test_elasticache.py[0m:1887: in test_delete_snapshot
+    [0mclient.create_cache_cluster([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateCacheCluster operation: Service 'elasticache' is not available[0m
+[31m[1m________________________ test_delete_snapshot_not_found ________________________[0m
+[1m[31mtest_elasticache/test_elasticache.py[0m:1917: in test_delete_snapshot_not_found
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mSnapshotNotFoundFault[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'UnknownService' == 'SnapshotNotFoundFault'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- SnapshotNotFoundFault[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ UnknownService[39;49;00m[90m[39;49;00m[0m
+[31m[1m___________________________ test_list_tags_snapshot ____________________________[0m
+[1m[31mtest_elasticache/test_elasticache.py[0m:1927: in test_list_tags_snapshot
+    [0mclient.create_cache_cluster([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateCacheCluster operation: Service 'elasticache' is not available[0m
+[31m[1m__________________________ test_add_tags_to_resource ___________________________[0m
+[1m[31mtest_elasticache/test_elasticache.py[0m:1966: in test_add_tags_to_resource
+    [0mclient.create_cache_cluster([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateCacheCluster operation: Service 'elasticache' is not available[0m
+[31m[1m________________________ test_remove_tags_from_resource ________________________[0m
+[1m[31mtest_elasticache/test_elasticache.py[0m:2032: in test_remove_tags_from_resource
+    [0mclient.create_cache_cluster([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateCacheCluster operation: Service 'elasticache' is not available[0m
+[33m=============================== warnings summary ===============================[0m
+tests/test_elasticache/test_elasticache.py: 80 warnings
+  /Users/lucas/.cache/fakecloud/moto/.venv/lib/python3.9/site-packages/boto3/compat.py:89: PythonDeprecationWarning: Boto3 will no longer support Python 3.9 starting April 29, 2026. To continue receiving service updates, bug fixes, and security updates please upgrade to Python 3.10 or later. More information can be found here: https://aws.amazon.com/blogs/developer/python-support-policy-updates-for-aws-sdks-and-tools/
+    warnings.warn(warning, PythonDeprecationWarning)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+[36m[1m=========================== short test summary info ============================[0m
+[31mFAILED[0m test_elasticache/test_elasticache.py::[1mtest_create_user_no_password_required[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_elasticache/test_elasticache.py::[1mtest_create_user_with_password_too_short[0m - AssertionError: assert 'UnknownService' == 'InvalidParameterValue'
+[31mFAILED[0m test_elasticache/test_elasticache.py::[1mtest_create_user_with_password[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_elasticache/test_elasticache.py::[1mtest_create_user_without_password[0m - AssertionError: assert 'UnknownService' == 'InvalidParameterValue'
+[31mFAILED[0m test_elasticache/test_elasticache.py::[1mtest_create_user_with_iam[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_elasticache/test_elasticache.py::[1mtest_create_user_invalid_authentication_type[0m - AssertionError: assert 'UnknownService' == 'InvalidParameterValue'
+[31mFAILED[0m test_elasticache/test_elasticache.py::[1mtest_create_user_with_iam_with_passwords[0m - AssertionError: assert 'UnknownService' == 'InvalidParameterCombination'
+[31mFAILED[0m test_elasticache/test_elasticache.py::[1mtest_create_user_authmode_password_with_multiple_password_fields[0m - AssertionError: assert 'UnknownService' == 'InvalidParameterCombination'
+[31mFAILED[0m test_elasticache/test_elasticache.py::[1mtest_create_user_with_authmode_password_without_passwords[0m - AssertionError: assert 'UnknownService' == 'InvalidParameterCombination'
+[31mFAILED[0m test_elasticache/test_elasticache.py::[1mtest_create_user_with_authmode_no_password[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_elasticache/test_elasticache.py::[1mtest_create_user_with_no_password_required_and_authmode_nopassword[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_elasticache/test_elasticache.py::[1mtest_create_user_with_no_password_required_and_authmode_different[0m - AssertionError: assert 'UnknownService' == 'InvalidParameterCombination'
+[31mFAILED[0m test_elasticache/test_elasticache.py::[1mtest_create_user_with_authmode_password[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_elasticache/test_elasticache.py::[1mtest_create_user_with_authmode_password_multiple[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_elasticache/test_elasticache.py::[1mtest_create_user_twice[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_elasticache/test_elasticache.py::[1mtest_create_user_engine_parameter_is_case_insensitive[redis][0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_elasticache/test_elasticache.py::[1mtest_create_user_engine_parameter_is_case_insensitive[Redis][0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_elasticache/test_elasticache.py::[1mtest_create_user_engine_parameter_is_case_insensitive[reDis][0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_elasticache/test_elasticache.py::[1mtest_create_user_with_invalid_engine_type[0m - AssertionError: assert 'UnknownService' == 'InvalidParameterValue'
+[31mFAILED[0m test_elasticache/test_elasticache.py::[1mtest_create_user_with_tags[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_elasticache/test_elasticache.py::[1mtest_delete_user_unknown[0m - AssertionError: assert 'UnknownService' == 'UserNotFound'
+[31mFAILED[0m test_elasticache/test_elasticache.py::[1mtest_delete_user[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_elasticache/test_elasticache.py::[1mtest_describe_users_initial[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_elasticache/test_elasticache.py::[1mtest_describe_users[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_elasticache/test_elasticache.py::[1mtest_describe_users_unknown_userid[0m - AssertionError: assert 'UnknownService' == 'UserNotFound'
+[31mFAILED[0m test_elasticache/test_elasticache.py::[1mtest_create_redis_cache_cluster[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_elasticache/test_elasticache.py::[1mtest_create_memcached_cache_cluster[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_elasticache/test_elasticache.py::[1mtest_create_duplicate_cache_cluster[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_elasticache/test_elasticache.py::[1mtest_create_cache_cluster_invalid_param_value[0m - AssertionError: assert 'UnknownService' == 'InvalidParameterValue'
+[31mFAILED[0m test_elasticache/test_elasticache.py::[1mtest_describe_all_cache_clusters[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_elasticache/test_elasticache.py::[1mtest_describe_specific_cache_clusters[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_elasticache/test_elasticache.py::[1mtest_describe_unknown_cache_cluster[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_elasticache/test_elasticache.py::[1mtest_delete_cache_cluster[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_elasticache/test_elasticache.py::[1mtest_delete_unknown_cache_cluster[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_elasticache/test_elasticache.py::[1mtest_list_tags_cache_cluster[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_elasticache/test_elasticache.py::[1mtest_create_cache_subnet_group[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_elasticache/test_elasticache.py::[1mtest_create_cache_subnet_group_and_mock_vpc[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_elasticache/test_elasticache.py::[1mtest_describe_cache_subnet_groups[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_elasticache/test_elasticache.py::[1mtest_describe_cache_subnet_groups_pagination[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_elasticache/test_elasticache.py::[1mtest_describe_cache_subnet_group_specific[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_elasticache/test_elasticache.py::[1mtest_describe_cache_subnet_group_not_found[0m - AssertionError: assert 'UnknownService' == 'CacheSubnetG...NotFoundFault'
+[31mFAILED[0m test_elasticache/test_elasticache.py::[1mtest_subnet_groups_list_tags[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_elasticache/test_elasticache.py::[1mtest_cache_subnet_group_already_exists[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_elasticache/test_elasticache.py::[1mtest_cache_subnet_group_with_invalid_subnet_ids[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_elasticache/test_elasticache.py::[1mtest_cache_subnet_group_with_ipv4_and_ipv6_subnets[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_elasticache/test_elasticache.py::[1mtest_cache_subnet_group_with_ipv6_native_subnets[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_elasticache/test_elasticache.py::[1mtest_create_replication_group_cluster_disabled[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_elasticache/test_elasticache.py::[1mtest_create_replication_group_cluster_disabled_one_az[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_elasticache/test_elasticache.py::[1mtest_create_replication_group_cluster_enabled[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_elasticache/test_elasticache.py::[1mtest_create_replication_group_cluster_enabled_fallback[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_elasticache/test_elasticache.py::[1mtest_create_replication_groups_single_disabled[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_elasticache/test_elasticache.py::[1mtest_create_replication_groups_single_enabled[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_elasticache/test_elasticache.py::[1mtest_describe_replication_groups_pagination[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_elasticache/test_elasticache.py::[1mtest_describe_replication_groups_cluster_disabled[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_elasticache/test_elasticache.py::[1mtest_describe_replication_groups_cluster_enabled[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_elasticache/test_elasticache.py::[1mtest_describe_replication_group_not_found[0m - AssertionError: assert 'UnknownService' == 'ReplicationG...NotFoundFault'
+[31mFAILED[0m test_elasticache/test_elasticache.py::[1mtest_replication_groups_list_tags[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_elasticache/test_elasticache.py::[1mtest_replication_groups_already_exists[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_elasticache/test_elasticache.py::[1mtest_list_tags_raises_error_for_invalid_arn[0m - AssertionError: assert 'UnknownService' == 'InvalidARN'
+[31mFAILED[0m test_elasticache/test_elasticache.py::[1mtest_delete_replication_group[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_elasticache/test_elasticache.py::[1mtest_create_cache_cluster_with_auth_token[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_elasticache/test_elasticache.py::[1mtest_create_cache_cluster_without_auth_token[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_elasticache/test_elasticache.py::[1mtest_create_snapshot[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_elasticache/test_elasticache.py::[1mtest_create_snapshot_with_vpc[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_elasticache/test_elasticache.py::[1mtest_create_snapshot_already_exists[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_elasticache/test_elasticache.py::[1mtest_create_snapshot_cluster_not_found[0m - AssertionError: assert 'UnknownService' == 'CacheClusterNotFound'
+[31mFAILED[0m test_elasticache/test_elasticache.py::[1mtest_create_snapshot_replication_group_not_found[0m - AssertionError: assert 'UnknownService' == 'ReplicationG...NotFoundFault'
+[31mFAILED[0m test_elasticache/test_elasticache.py::[1mtest_create_snapshot_invalid_param_combination[0m - AssertionError: assert 'UnknownService' == 'InvalidParameterCombination'
+[31mFAILED[0m test_elasticache/test_elasticache.py::[1mtest_describe_snapshots_invalid_param_value[0m - AssertionError: assert 'UnknownService' == 'InvalidParameterValue'
+[31mFAILED[0m test_elasticache/test_elasticache.py::[1mtest_describe_snapshots[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_elasticache/test_elasticache.py::[1mtest_describe_snapshots_not_found[0m - AssertionError: assert 'UnknownService' == 'SnapshotNotFoundFault'
+[31mFAILED[0m test_elasticache/test_elasticache.py::[1mtest_describe_snapshots_replication_group_not_found[0m - AssertionError: assert 'UnknownService' == 'ReplicationG...NotFoundFault'
+[31mFAILED[0m test_elasticache/test_elasticache.py::[1mtest_describe_snapshots_cache_cluster_not_found[0m - AssertionError: assert 'UnknownService' == 'CacheClusterNotFound'
+[31mFAILED[0m test_elasticache/test_elasticache.py::[1mtest_describe_snapshots_invalid_param_combo[0m - AssertionError: assert 'UnknownService' == 'InvalidParameterCombination'
+[31mFAILED[0m test_elasticache/test_elasticache.py::[1mtest_delete_snapshot[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_elasticache/test_elasticache.py::[1mtest_delete_snapshot_not_found[0m - AssertionError: assert 'UnknownService' == 'SnapshotNotFoundFault'
+[31mFAILED[0m test_elasticache/test_elasticache.py::[1mtest_list_tags_snapshot[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_elasticache/test_elasticache.py::[1mtest_add_tags_to_resource[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_elasticache/test_elasticache.py::[1mtest_remove_tags_from_resource[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31m[31m[1m79 failed[0m, [32m1 passed[0m, [33m80 warnings[0m[31m in 3.32s[0m[0m

@@ -1,0 +1,549 @@
+[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31m                                   [100%][0m
+=================================== FAILURES ===================================
+[31m[1m___________________________ test_ds_delete_directory ___________________________[0m
+[1m[31mtest_ds/test_ds.py[0m:29: in test_ds_delete_directory
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mEntityDoesNotExistException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'EntityDoesNotExistException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- EntityDoesNotExistException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m_________________________ test_ds_get_directory_limits _________________________[0m
+[1m[31mtest_ds/test_ds.py[0m:75: in test_ds_get_directory_limits
+    [0mlimits = client.get_directory_limits()[[33m"[39;49;00m[33mDirectoryLimits[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the GetDirectoryLimits operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>3a788e5b-1194-467d-ad2e-b88072ce19d8</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_________________________ test_ds_describe_directories _________________________[0m
+[1m[31mtest_ds/test_ds.py[0m:103: in test_ds_describe_directories
+    [0mexpected_ids.add(create_test_directory(client, ec2_client))[90m[39;49;00m
+[1m[31mtest_ds/test_ds_simple_ad_directory.py[0m:33: in create_test_directory
+    [0mgood_vpc_id = create_vpc(ec2_client)[90m[39;49;00m
+[1m[31mtest_ds/test_ds_simple_ad_directory.py[0m:13: in create_vpc
+    [0m[94mreturn[39;49;00m ec2_client.create_vpc(CidrBlock=[33m"[39;49;00m[33m10.0.0.0/16[39;49;00m[33m"[39;49;00m)[[33m"[39;49;00m[33mVpc[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mVpcId[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m_____________________________ test_ds_create_alias _____________________________[0m
+[1m[31mtest_ds/test_ds.py[0m:173: in test_ds_create_alias
+    [0mdirectory_id = create_test_directory(client, ec2_client)[90m[39;49;00m
+[1m[31mtest_ds/test_ds_simple_ad_directory.py[0m:33: in create_test_directory
+    [0mgood_vpc_id = create_vpc(ec2_client)[90m[39;49;00m
+[1m[31mtest_ds/test_ds_simple_ad_directory.py[0m:13: in create_vpc
+    [0m[94mreturn[39;49;00m ec2_client.create_vpc(CidrBlock=[33m"[39;49;00m[33m10.0.0.0/16[39;49;00m[33m"[39;49;00m)[[33m"[39;49;00m[33mVpc[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mVpcId[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m______________________________ test_ds_enable_sso ______________________________[0m
+[1m[31mtest_ds/test_ds.py[0m:235: in test_ds_enable_sso
+    [0mdirectory_id = create_test_directory(client, ec2_client)[90m[39;49;00m
+[1m[31mtest_ds/test_ds_simple_ad_directory.py[0m:33: in create_test_directory
+    [0mgood_vpc_id = create_vpc(ec2_client)[90m[39;49;00m
+[1m[31mtest_ds/test_ds_simple_ad_directory.py[0m:13: in create_vpc
+    [0m[94mreturn[39;49;00m ec2_client.create_vpc(CidrBlock=[33m"[39;49;00m[33m10.0.0.0/16[39;49;00m[33m"[39;49;00m)[[33m"[39;49;00m[33mVpc[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mVpcId[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m_____________________________ test_ds_disable_sso ______________________________[0m
+[1m[31mtest_ds/test_ds.py[0m:291: in test_ds_disable_sso
+    [0mdirectory_id = create_test_directory(client, ec2_client)[90m[39;49;00m
+[1m[31mtest_ds/test_ds_simple_ad_directory.py[0m:33: in create_test_directory
+    [0mgood_vpc_id = create_vpc(ec2_client)[90m[39;49;00m
+[1m[31mtest_ds/test_ds_simple_ad_directory.py[0m:13: in create_vpc
+    [0m[94mreturn[39;49;00m ec2_client.create_vpc(CidrBlock=[33m"[39;49;00m[33m10.0.0.0/16[39;49;00m[33m"[39;49;00m)[[33m"[39;49;00m[33mVpc[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mVpcId[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m______________________________ test_create_trust _______________________________[0m
+[1m[31mtest_ds/test_ds.py[0m:334: in test_create_trust
+    [0mdirectory_id = create_test_directory(client, ec2_client)[90m[39;49;00m
+[1m[31mtest_ds/test_ds_simple_ad_directory.py[0m:33: in create_test_directory
+    [0mgood_vpc_id = create_vpc(ec2_client)[90m[39;49;00m
+[1m[31mtest_ds/test_ds_simple_ad_directory.py[0m:13: in create_vpc
+    [0m[94mreturn[39;49;00m ec2_client.create_vpc(CidrBlock=[33m"[39;49;00m[33m10.0.0.0/16[39;49;00m[33m"[39;49;00m)[[33m"[39;49;00m[33mVpc[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mVpcId[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m_____________________________ test_describe_trusts _____________________________[0m
+[1m[31mtest_ds/test_ds.py[0m:358: in test_describe_trusts
+    [0mdirectory_id = create_test_directory(client, ec2_client)[90m[39;49;00m
+[1m[31mtest_ds/test_ds_simple_ad_directory.py[0m:33: in create_test_directory
+    [0mgood_vpc_id = create_vpc(ec2_client)[90m[39;49;00m
+[1m[31mtest_ds/test_ds_simple_ad_directory.py[0m:13: in create_vpc
+    [0m[94mreturn[39;49;00m ec2_client.create_vpc(CidrBlock=[33m"[39;49;00m[33m10.0.0.0/16[39;49;00m[33m"[39;49;00m)[[33m"[39;49;00m[33mVpc[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mVpcId[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m______________________________ test_delete_trust _______________________________[0m
+[1m[31mtest_ds/test_ds.py[0m:402: in test_delete_trust
+    [0mdirectory_id = create_test_directory(client, ec2_client)[90m[39;49;00m
+[1m[31mtest_ds/test_ds_simple_ad_directory.py[0m:33: in create_test_directory
+    [0mgood_vpc_id = create_vpc(ec2_client)[90m[39;49;00m
+[1m[31mtest_ds/test_ds_simple_ad_directory.py[0m:13: in create_vpc
+    [0m[94mreturn[39;49;00m ec2_client.create_vpc(CidrBlock=[33m"[39;49;00m[33m10.0.0.0/16[39;49;00m[33m"[39;49;00m)[[33m"[39;49;00m[33mVpc[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mVpcId[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m____________________ test_ldaps_exceptions_non_microsoftad _____________________[0m
+[1m[31mtest_ds/test_ds.py[0m:443: in test_ldaps_exceptions_non_microsoftad
+    [0mdirectory_id = create_test_directory(client, ec2_client)[90m[39;49;00m
+[1m[31mtest_ds/test_ds_simple_ad_directory.py[0m:33: in create_test_directory
+    [0mgood_vpc_id = create_vpc(ec2_client)[90m[39;49;00m
+[1m[31mtest_ds/test_ds_simple_ad_directory.py[0m:13: in create_vpc
+    [0m[94mreturn[39;49;00m ec2_client.create_vpc(CidrBlock=[33m"[39;49;00m[33m10.0.0.0/16[39;49;00m[33m"[39;49;00m)[[33m"[39;49;00m[33mVpc[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mVpcId[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m___________________ test_settings_exception_non_microsoftad ____________________[0m
+[1m[31mtest_ds/test_ds.py[0m:471: in test_settings_exception_non_microsoftad
+    [0mdirectory_id = create_test_directory(client, ec2_client)[90m[39;49;00m
+[1m[31mtest_ds/test_ds_simple_ad_directory.py[0m:33: in create_test_directory
+    [0mgood_vpc_id = create_vpc(ec2_client)[90m[39;49;00m
+[1m[31mtest_ds/test_ds_simple_ad_directory.py[0m:13: in create_vpc
+    [0m[94mreturn[39;49;00m ec2_client.create_vpc(CidrBlock=[33m"[39;49;00m[33m10.0.0.0/16[39;49;00m[33m"[39;49;00m)[[33m"[39;49;00m[33mVpc[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mVpcId[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m_________________________ test_create_log_subscription _________________________[0m
+[1m[31mtest_ds/test_ds.py[0m:485: in test_create_log_subscription
+    [0mdirectory_id = create_test_directory(client, ec2_client)[90m[39;49;00m
+[1m[31mtest_ds/test_ds_simple_ad_directory.py[0m:33: in create_test_directory
+    [0mgood_vpc_id = create_vpc(ec2_client)[90m[39;49;00m
+[1m[31mtest_ds/test_ds_simple_ad_directory.py[0m:13: in create_vpc
+    [0m[94mreturn[39;49;00m ec2_client.create_vpc(CidrBlock=[33m"[39;49;00m[33m10.0.0.0/16[39;49;00m[33m"[39;49;00m)[[33m"[39;49;00m[33mVpc[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mVpcId[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m_________________________ test_list_log_subscriptions __________________________[0m
+[1m[31mtest_ds/test_ds.py[0m:512: in test_list_log_subscriptions
+    [0mdirectory_id = create_test_directory(client, ec2_client)[90m[39;49;00m
+[1m[31mtest_ds/test_ds_simple_ad_directory.py[0m:33: in create_test_directory
+    [0mgood_vpc_id = create_vpc(ec2_client)[90m[39;49;00m
+[1m[31mtest_ds/test_ds_simple_ad_directory.py[0m:13: in create_vpc
+    [0m[94mreturn[39;49;00m ec2_client.create_vpc(CidrBlock=[33m"[39;49;00m[33m10.0.0.0/16[39;49;00m[33m"[39;49;00m)[[33m"[39;49;00m[33mVpc[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mVpcId[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m_________________________ test_delete_log_subscription _________________________[0m
+[1m[31mtest_ds/test_ds.py[0m:533: in test_delete_log_subscription
+    [0mdirectory_id = create_test_directory(client, ec2_client)[90m[39;49;00m
+[1m[31mtest_ds/test_ds_simple_ad_directory.py[0m:33: in create_test_directory
+    [0mgood_vpc_id = create_vpc(ec2_client)[90m[39;49;00m
+[1m[31mtest_ds/test_ds_simple_ad_directory.py[0m:13: in create_vpc
+    [0m[94mreturn[39;49;00m ec2_client.create_vpc(CidrBlock=[33m"[39;49;00m[33m10.0.0.0/16[39;49;00m[33m"[39;49;00m)[[33m"[39;49;00m[33mVpc[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mVpcId[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m____________________ test_ds_connect_directory_validations _____________________[0m
+[1m[31mtest_ds/test_ds_ad_connect.py[0m:82: in test_ds_connect_directory_validations
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mValidationException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'ValidationException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ValidationException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m_____________________ test_ds_connect_directory_good_args ______________________[0m
+[1m[31mtest_ds/test_ds_ad_connect.py[0m:161: in test_ds_connect_directory_good_args
+    [0mdirectory_id = create_test_ad_connector(client, ec2_client)[90m[39;49;00m
+[1m[31mtest_ds/test_ds_ad_connect.py[0m:29: in create_test_ad_connector
+    [0mgood_vpc_id = create_vpc(ec2_client)[90m[39;49;00m
+[1m[31mtest_ds/test_ds_simple_ad_directory.py[0m:13: in create_vpc
+    [0m[94mreturn[39;49;00m ec2_client.create_vpc(CidrBlock=[33m"[39;49;00m[33m10.0.0.0/16[39;49;00m[33m"[39;49;00m)[[33m"[39;49;00m[33mVpc[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mVpcId[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m______________________ test_ds_connect_directory_bad_args ______________________[0m
+[1m[31mtest_ds/test_ds_ad_connect.py[0m:190: in test_ds_connect_directory_bad_args
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mValidationException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'UnknownService' == 'ValidationException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ValidationException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ UnknownService[39;49;00m[90m[39;49;00m[0m
+[31m[1m_______________________ test_ds_connect_directory_delete _______________________[0m
+[1m[31mtest_ds/test_ds_ad_connect.py[0m:220: in test_ds_connect_directory_delete
+    [0mdirectory_id = create_test_ad_connector(client, ec2_client)[90m[39;49;00m
+[1m[31mtest_ds/test_ds_ad_connect.py[0m:29: in create_test_ad_connector
+    [0mgood_vpc_id = create_vpc(ec2_client)[90m[39;49;00m
+[1m[31mtest_ds/test_ds_simple_ad_directory.py[0m:13: in create_vpc
+    [0m[94mreturn[39;49;00m ec2_client.create_vpc(CidrBlock=[33m"[39;49;00m[33m10.0.0.0/16[39;49;00m[33m"[39;49;00m)[[33m"[39;49;00m[33mVpc[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mVpcId[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m______________________ test_ds_connect_directory_describe ______________________[0m
+[1m[31mtest_ds/test_ds_ad_connect.py[0m:232: in test_ds_connect_directory_describe
+    [0mdirectory_id = create_test_ad_connector(client, ec2_client)[90m[39;49;00m
+[1m[31mtest_ds/test_ds_ad_connect.py[0m:29: in create_test_ad_connector
+    [0mgood_vpc_id = create_vpc(ec2_client)[90m[39;49;00m
+[1m[31mtest_ds/test_ds_simple_ad_directory.py[0m:13: in create_vpc
+    [0m[94mreturn[39;49;00m ec2_client.create_vpc(CidrBlock=[33m"[39;49;00m[33m10.0.0.0/16[39;49;00m[33m"[39;49;00m)[[33m"[39;49;00m[33mVpc[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mVpcId[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m________________________ test_ds_connect_directory_tags ________________________[0m
+[1m[31mtest_ds/test_ds_ad_connect.py[0m:263: in test_ds_connect_directory_tags
+    [0mdirectory_id = create_test_ad_connector(client, ec2_client, tags=added_tags)[90m[39;49;00m
+[1m[31mtest_ds/test_ds_ad_connect.py[0m:29: in create_test_ad_connector
+    [0mgood_vpc_id = create_vpc(ec2_client)[90m[39;49;00m
+[1m[31mtest_ds/test_ds_simple_ad_directory.py[0m:13: in create_vpc
+    [0m[94mreturn[39;49;00m ec2_client.create_vpc(CidrBlock=[33m"[39;49;00m[33m10.0.0.0/16[39;49;00m[33m"[39;49;00m)[[33m"[39;49;00m[33mVpc[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mVpcId[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m_____________________ test_ds_get_connect_directory_limits _____________________[0m
+[1m[31mtest_ds/test_ds_ad_connect.py[0m:278: in test_ds_get_connect_directory_limits
+    [0mlimits = client.get_directory_limits()[[33m"[39;49;00m[33mDirectoryLimits[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the GetDirectoryLimits operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>0627895d-2c12-4193-86bb-10cb7f00dc0d</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______________________ test_enable_describe_disable_ldaps ______________________[0m
+[1m[31mtest_ds/test_ds_ad_connect.py[0m:298: in test_enable_describe_disable_ldaps
+    [0mdirectory_id = create_test_ad_connector(client, ec2_client)[90m[39;49;00m
+[1m[31mtest_ds/test_ds_ad_connect.py[0m:29: in create_test_ad_connector
+    [0mgood_vpc_id = create_vpc(ec2_client)[90m[39;49;00m
+[1m[31mtest_ds/test_ds_simple_ad_directory.py[0m:13: in create_vpc
+    [0m[94mreturn[39;49;00m ec2_client.create_vpc(CidrBlock=[33m"[39;49;00m[33m10.0.0.0/16[39;49;00m[33m"[39;49;00m)[[33m"[39;49;00m[33mVpc[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mVpcId[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m___________________ test_ds_create_microsoft_ad_validations ____________________[0m
+[1m[31mtest_ds/test_ds_microsoft_ad.py[0m:65: in test_ds_create_microsoft_ad_validations
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mValidationException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'ValidationException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ValidationException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m____________________ test_ds_create_microsoft_ad_good_args _____________________[0m
+[1m[31mtest_ds/test_ds_microsoft_ad.py[0m:137: in test_ds_create_microsoft_ad_good_args
+    [0mdirectory_id = create_test_microsoft_ad(client, ec2_client)[90m[39;49;00m
+[1m[31mtest_ds/test_ds_microsoft_ad.py[0m:22: in create_test_microsoft_ad
+    [0mgood_vpc_id = create_vpc(ec2_client)[90m[39;49;00m
+[1m[31mtest_ds/test_ds_simple_ad_directory.py[0m:13: in create_vpc
+    [0m[94mreturn[39;49;00m ec2_client.create_vpc(CidrBlock=[33m"[39;49;00m[33m10.0.0.0/16[39;49;00m[33m"[39;49;00m)[[33m"[39;49;00m[33mVpc[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mVpcId[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m______________________ test_ds_create_microsoft_ad_delete ______________________[0m
+[1m[31mtest_ds/test_ds_microsoft_ad.py[0m:162: in test_ds_create_microsoft_ad_delete
+    [0mdirectory_id = create_test_microsoft_ad(client, ec2_client)[90m[39;49;00m
+[1m[31mtest_ds/test_ds_microsoft_ad.py[0m:22: in create_test_microsoft_ad
+    [0mgood_vpc_id = create_vpc(ec2_client)[90m[39;49;00m
+[1m[31mtest_ds/test_ds_simple_ad_directory.py[0m:13: in create_vpc
+    [0m[94mreturn[39;49;00m ec2_client.create_vpc(CidrBlock=[33m"[39;49;00m[33m10.0.0.0/16[39;49;00m[33m"[39;49;00m)[[33m"[39;49;00m[33mVpc[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mVpcId[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m_____________________ test_ds_create_microsoft_ad_describe _____________________[0m
+[1m[31mtest_ds/test_ds_microsoft_ad.py[0m:174: in test_ds_create_microsoft_ad_describe
+    [0mdirectory_id = create_test_microsoft_ad(client, ec2_client)[90m[39;49;00m
+[1m[31mtest_ds/test_ds_microsoft_ad.py[0m:22: in create_test_microsoft_ad
+    [0mgood_vpc_id = create_vpc(ec2_client)[90m[39;49;00m
+[1m[31mtest_ds/test_ds_simple_ad_directory.py[0m:13: in create_vpc
+    [0m[94mreturn[39;49;00m ec2_client.create_vpc(CidrBlock=[33m"[39;49;00m[33m10.0.0.0/16[39;49;00m[33m"[39;49;00m)[[33m"[39;49;00m[33mVpc[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mVpcId[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m_______________________ test_ds_create_microsoft_ad_tags _______________________[0m
+[1m[31mtest_ds/test_ds_microsoft_ad.py[0m:203: in test_ds_create_microsoft_ad_tags
+    [0mdirectory_id = create_test_microsoft_ad(client, ec2_client, tags=added_tags)[90m[39;49;00m
+[1m[31mtest_ds/test_ds_microsoft_ad.py[0m:22: in create_test_microsoft_ad
+    [0mgood_vpc_id = create_vpc(ec2_client)[90m[39;49;00m
+[1m[31mtest_ds/test_ds_simple_ad_directory.py[0m:13: in create_vpc
+    [0m[94mreturn[39;49;00m ec2_client.create_vpc(CidrBlock=[33m"[39;49;00m[33m10.0.0.0/16[39;49;00m[33m"[39;49;00m)[[33m"[39;49;00m[33mVpc[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mVpcId[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m__________________ test_ds_get_microsoft_ad_directory_limits ___________________[0m
+[1m[31mtest_ds/test_ds_microsoft_ad.py[0m:218: in test_ds_get_microsoft_ad_directory_limits
+    [0mlimits = client.get_directory_limits()[[33m"[39;49;00m[33mDirectoryLimits[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the GetDirectoryLimits operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>2d8fe582-cdbe-400c-a458-e8d2092262b5</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______________________ test_enable_describe_disable_ldaps ______________________[0m
+[1m[31mtest_ds/test_ds_microsoft_ad.py[0m:238: in test_enable_describe_disable_ldaps
+    [0mdirectory_id = create_test_microsoft_ad(client, ec2_client)[90m[39;49;00m
+[1m[31mtest_ds/test_ds_microsoft_ad.py[0m:22: in create_test_microsoft_ad
+    [0mgood_vpc_id = create_vpc(ec2_client)[90m[39;49;00m
+[1m[31mtest_ds/test_ds_simple_ad_directory.py[0m:13: in create_vpc
+    [0m[94mreturn[39;49;00m ec2_client.create_vpc(CidrBlock=[33m"[39;49;00m[33m10.0.0.0/16[39;49;00m[33m"[39;49;00m)[[33m"[39;49;00m[33mVpc[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mVpcId[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m____________________________ test_describe_settings ____________________________[0m
+[1m[31mtest_ds/test_ds_microsoft_ad.py[0m:267: in test_describe_settings
+    [0mdirectory_id = create_test_microsoft_ad(client, ec2_client)[90m[39;49;00m
+[1m[31mtest_ds/test_ds_microsoft_ad.py[0m:22: in create_test_microsoft_ad
+    [0mgood_vpc_id = create_vpc(ec2_client)[90m[39;49;00m
+[1m[31mtest_ds/test_ds_simple_ad_directory.py[0m:13: in create_vpc
+    [0m[94mreturn[39;49;00m ec2_client.create_vpc(CidrBlock=[33m"[39;49;00m[33m10.0.0.0/16[39;49;00m[33m"[39;49;00m)[[33m"[39;49;00m[33mVpc[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mVpcId[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m_____________________________ test_update_settings _____________________________[0m
+[1m[31mtest_ds/test_ds_microsoft_ad.py[0m:279: in test_update_settings
+    [0mdirectory_id = create_test_microsoft_ad(client, ec2_client)[90m[39;49;00m
+[1m[31mtest_ds/test_ds_microsoft_ad.py[0m:22: in create_test_microsoft_ad
+    [0mgood_vpc_id = create_vpc(ec2_client)[90m[39;49;00m
+[1m[31mtest_ds/test_ds_simple_ad_directory.py[0m:13: in create_vpc
+    [0m[94mreturn[39;49;00m ec2_client.create_vpc(CidrBlock=[33m"[39;49;00m[33m10.0.0.0/16[39;49;00m[33m"[39;49;00m)[[33m"[39;49;00m[33mVpc[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mVpcId[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m_____________________ test_ds_create_directory_validations _____________________[0m
+[1m[31mtest_ds/test_ds_simple_ad_directory.py[0m:72: in test_ds_create_directory_validations
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mValidationException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'ValidationException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ValidationException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m__________________ test_ds_create_directory_bad_vpc_settings ___________________[0m
+[1m[31mtest_ds/test_ds_simple_ad_directory.py[0m:152: in test_ds_create_directory_bad_vpc_settings
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mInvalidParameterException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'InvalidParameterException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- InvalidParameterException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m_____________________ test_ds_create_directory_bad_subnets _____________________[0m
+[1m[31mtest_ds/test_ds_simple_ad_directory.py[0m:174: in test_ds_create_directory_bad_subnets
+    [0mgood_vpc_id = create_vpc(ec2_client)[90m[39;49;00m
+[1m[31mtest_ds/test_ds_simple_ad_directory.py[0m:13: in create_vpc
+    [0m[94mreturn[39;49;00m ec2_client.create_vpc(CidrBlock=[33m"[39;49;00m[33m10.0.0.0/16[39;49;00m[33m"[39;49;00m)[[33m"[39;49;00m[33mVpc[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mVpcId[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m______________________ test_ds_create_directory_good_args ______________________[0m
+[1m[31mtest_ds/test_ds_simple_ad_directory.py[0m:224: in test_ds_create_directory_good_args
+    [0mdirectory_id = create_test_directory(client, ec2_client)[90m[39;49;00m
+[1m[31mtest_ds/test_ds_simple_ad_directory.py[0m:33: in create_test_directory
+    [0mgood_vpc_id = create_vpc(ec2_client)[90m[39;49;00m
+[1m[31mtest_ds/test_ds_simple_ad_directory.py[0m:13: in create_vpc
+    [0m[94mreturn[39;49;00m ec2_client.create_vpc(CidrBlock=[33m"[39;49;00m[33m10.0.0.0/16[39;49;00m[33m"[39;49;00m)[[33m"[39;49;00m[33mVpc[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mVpcId[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m_________________________ test_ds_add_tags_to_resource _________________________[0m
+[1m[31mtest_ds/test_ds_tags.py[0m:22: in test_ds_add_tags_to_resource
+    [0mdirectory_id = create_test_directory(client, ec2_client)[90m[39;49;00m
+[1m[31mtest_ds/test_ds_simple_ad_directory.py[0m:33: in create_test_directory
+    [0mgood_vpc_id = create_vpc(ec2_client)[90m[39;49;00m
+[1m[31mtest_ds/test_ds_simple_ad_directory.py[0m:13: in create_vpc
+    [0m[94mreturn[39;49;00m ec2_client.create_vpc(CidrBlock=[33m"[39;49;00m[33m10.0.0.0/16[39;49;00m[33m"[39;49;00m)[[33m"[39;49;00m[33mVpc[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mVpcId[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m______________________ test_ds_remove_tags_from_resource _______________________[0m
+[1m[31mtest_ds/test_ds_tags.py[0m:78: in test_ds_remove_tags_from_resource
+    [0mdirectory_id = create_test_directory(client, ec2_client, tags=tag_list)[90m[39;49;00m
+[1m[31mtest_ds/test_ds_simple_ad_directory.py[0m:33: in create_test_directory
+    [0mgood_vpc_id = create_vpc(ec2_client)[90m[39;49;00m
+[1m[31mtest_ds/test_ds_simple_ad_directory.py[0m:13: in create_vpc
+    [0m[94mreturn[39;49;00m ec2_client.create_vpc(CidrBlock=[33m"[39;49;00m[33m10.0.0.0/16[39;49;00m[33m"[39;49;00m)[[33m"[39;49;00m[33mVpc[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mVpcId[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m________________________ test_ds_list_tags_for_resource ________________________[0m
+[1m[31mtest_ds/test_ds_tags.py[0m:100: in test_ds_list_tags_for_resource
+    [0mdirectory_id = create_test_directory(client, ec2_client, tags=tags)[90m[39;49;00m
+[1m[31mtest_ds/test_ds_simple_ad_directory.py[0m:33: in create_test_directory
+    [0mgood_vpc_id = create_vpc(ec2_client)[90m[39;49;00m
+[1m[31mtest_ds/test_ds_simple_ad_directory.py[0m:13: in create_vpc
+    [0m[94mreturn[39;49;00m ec2_client.create_vpc(CidrBlock=[33m"[39;49;00m[33m10.0.0.0/16[39;49;00m[33m"[39;49;00m)[[33m"[39;49;00m[33mVpc[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mVpcId[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[33m=============================== warnings summary ===============================[0m
+tests/test_ds/test_ds.py: 14 warnings
+tests/test_ds/test_ds_ad_connect.py: 8 warnings
+tests/test_ds/test_ds_microsoft_ad.py: 9 warnings
+tests/test_ds/test_ds_simple_ad_directory.py: 4 warnings
+tests/test_ds/test_ds_tags.py: 3 warnings
+  /Users/lucas/.cache/fakecloud/moto/.venv/lib/python3.9/site-packages/boto3/compat.py:89: PythonDeprecationWarning: Boto3 will no longer support Python 3.9 starting April 29, 2026. To continue receiving service updates, bug fixes, and security updates please upgrade to Python 3.10 or later. More information can be found here: https://aws.amazon.com/blogs/developer/python-support-policy-updates-for-aws-sdks-and-tools/
+    warnings.warn(warning, PythonDeprecationWarning)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+[36m[1m=========================== short test summary info ============================[0m
+[31mFAILED[0m test_ds/test_ds.py::[1mtest_ds_delete_directory[0m - AssertionError: assert '400' == 'EntityDoesNotExistException'
+[31mFAILED[0m test_ds/test_ds.py::[1mtest_ds_get_directory_limits[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the G...
+[31mFAILED[0m test_ds/test_ds.py::[1mtest_ds_describe_directories[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ds/test_ds.py::[1mtest_ds_create_alias[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ds/test_ds.py::[1mtest_ds_enable_sso[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ds/test_ds.py::[1mtest_ds_disable_sso[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ds/test_ds.py::[1mtest_create_trust[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ds/test_ds.py::[1mtest_describe_trusts[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ds/test_ds.py::[1mtest_delete_trust[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ds/test_ds.py::[1mtest_ldaps_exceptions_non_microsoftad[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ds/test_ds.py::[1mtest_settings_exception_non_microsoftad[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ds/test_ds.py::[1mtest_create_log_subscription[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ds/test_ds.py::[1mtest_list_log_subscriptions[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ds/test_ds.py::[1mtest_delete_log_subscription[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ds/test_ds_ad_connect.py::[1mtest_ds_connect_directory_validations[0m - AssertionError: assert '400' == 'ValidationException'
+[31mFAILED[0m test_ds/test_ds_ad_connect.py::[1mtest_ds_connect_directory_good_args[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ds/test_ds_ad_connect.py::[1mtest_ds_connect_directory_bad_args[0m - AssertionError: assert 'UnknownService' == 'ValidationException'
+[31mFAILED[0m test_ds/test_ds_ad_connect.py::[1mtest_ds_connect_directory_delete[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ds/test_ds_ad_connect.py::[1mtest_ds_connect_directory_describe[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ds/test_ds_ad_connect.py::[1mtest_ds_connect_directory_tags[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ds/test_ds_ad_connect.py::[1mtest_ds_get_connect_directory_limits[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the G...
+[31mFAILED[0m test_ds/test_ds_ad_connect.py::[1mtest_enable_describe_disable_ldaps[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ds/test_ds_microsoft_ad.py::[1mtest_ds_create_microsoft_ad_validations[0m - AssertionError: assert '400' == 'ValidationException'
+[31mFAILED[0m test_ds/test_ds_microsoft_ad.py::[1mtest_ds_create_microsoft_ad_good_args[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ds/test_ds_microsoft_ad.py::[1mtest_ds_create_microsoft_ad_delete[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ds/test_ds_microsoft_ad.py::[1mtest_ds_create_microsoft_ad_describe[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ds/test_ds_microsoft_ad.py::[1mtest_ds_create_microsoft_ad_tags[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ds/test_ds_microsoft_ad.py::[1mtest_ds_get_microsoft_ad_directory_limits[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the G...
+[31mFAILED[0m test_ds/test_ds_microsoft_ad.py::[1mtest_enable_describe_disable_ldaps[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ds/test_ds_microsoft_ad.py::[1mtest_describe_settings[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ds/test_ds_microsoft_ad.py::[1mtest_update_settings[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ds/test_ds_simple_ad_directory.py::[1mtest_ds_create_directory_validations[0m - AssertionError: assert '400' == 'ValidationException'
+[31mFAILED[0m test_ds/test_ds_simple_ad_directory.py::[1mtest_ds_create_directory_bad_vpc_settings[0m - AssertionError: assert '400' == 'InvalidParameterException'
+[31mFAILED[0m test_ds/test_ds_simple_ad_directory.py::[1mtest_ds_create_directory_bad_subnets[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ds/test_ds_simple_ad_directory.py::[1mtest_ds_create_directory_good_args[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ds/test_ds_tags.py::[1mtest_ds_add_tags_to_resource[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ds/test_ds_tags.py::[1mtest_ds_remove_tags_from_resource[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ds/test_ds_tags.py::[1mtest_ds_list_tags_for_resource[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31m[31m[1m38 failed[0m, [33m38 warnings[0m[31m in 2.21s[0m[0m

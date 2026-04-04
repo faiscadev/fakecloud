@@ -1,0 +1,292 @@
+[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31m                                             [100%][0m
+=================================== FAILURES ===================================
+[31m[1m____________________________ test_get_session_token ____________________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_sts/test_sts.py[0m:21: in test_get_session_token
+    [0mcreds = client.get_session_token(DurationSeconds=[94m903[39;49;00m)[[33m"[39;49;00m[33mCredentials[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (InvalidAction) when calling the GetSessionToken operation: action GetSessionToken not implemented for service sts[0m
+[31m[1m__________________________ test_get_federation_token ___________________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_sts/test_sts.py[0m:43: in test_get_federation_token
+    [0mfed_token = client.get_federation_token(DurationSeconds=[94m903[39;49;00m, Name=token_name)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (InvalidAction) when calling the GetFederationToken operation: action GetFederationToken not implemented for service sts[0m
+[31m[1m_______________________ test_assume_role[us-east-1-aws] ________________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_sts/test_sts.py[0m:99: in test_assume_role
+    [0mrole = iam_client.create_role([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.errorfactory.EntityAlreadyExistsException: An error occurred (EntityAlreadyExists) when calling the CreateRole operation: EntityAlreadyExists: Role with name test-role already exists.[0m
+[31m[1m_____________________ test_assume_role[cn-north-1-aws-cn] ______________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_sts/test_sts.py[0m:99: in test_assume_role
+    [0mrole = iam_client.create_role([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.errorfactory.EntityAlreadyExistsException: An error occurred (EntityAlreadyExists) when calling the CreateRole operation: EntityAlreadyExists: Role with name test-role already exists.[0m
+[31m[1m__________________ test_assume_role[us-isob-east-1-aws-iso-b] __________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_sts/test_sts.py[0m:99: in test_assume_role
+    [0mrole = iam_client.create_role([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.errorfactory.EntityAlreadyExistsException: An error occurred (EntityAlreadyExists) when calling the CreateRole operation: EntityAlreadyExists: Role with name test-role already exists.[0m
+[31m[1m_______________ test_assume_role_with_too_long_role_session_name _______________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_sts/test_sts.py[0m:150: in test_assume_role_with_too_long_role_session_name
+    [0mrole = iam_client.create_role([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.errorfactory.EntityAlreadyExistsException: An error occurred (EntityAlreadyExists) when calling the CreateRole operation: EntityAlreadyExists: Role with name test-role already exists.[0m
+[31m[1m__________________________ test_assume_role_with_saml __________________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_sts/test_sts.py[0m:234: in test_assume_role_with_saml
+    [0massume_role_response = client.assume_role_with_saml([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the AssumeRoleWithSAML operation: Could not determine target service or action from request[0m
+[31m[1m________ test_assume_role_with_saml_should_not_rely_on_attribute_order _________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_sts/test_sts.py[0m:330: in test_assume_role_with_saml_should_not_rely_on_attribute_order
+    [0massume_role_response = client.assume_role_with_saml([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the AssumeRoleWithSAML operation: Could not determine target service or action from request[0m
+[31m[1m___________ test_assume_role_with_saml_should_respect_xml_namespaces ___________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_sts/test_sts.py[0m:414: in test_assume_role_with_saml_should_respect_xml_namespaces
+    [0massume_role_response = client.assume_role_with_saml([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the AssumeRoleWithSAML operation: Could not determine target service or action from request[0m
+[31m[1m______ test_assume_role_with_saml_when_xml_tag_contains_xmlns_attributes _______[0m
+[1m[31m/private/tmp/moto-tests/tests/test_sts/test_sts.py[0m:509: in test_assume_role_with_saml_when_xml_tag_contains_xmlns_attributes
+    [0massume_role_response = client.assume_role_with_saml([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the AssumeRoleWithSAML operation: Could not determine target service or action from request[0m
+[31m[1m_________ test_assume_role_with_saml_when_saml_attribute_not_provided __________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_sts/test_sts.py[0m:595: in test_assume_role_with_saml_when_saml_attribute_not_provided
+    [0massume_role_response = client.assume_role_with_saml([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the AssumeRoleWithSAML operation: Could not determine target service or action from request[0m
+[31m[1m______________ test_assume_role_with_web_identity[us-east-1-aws] _______________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_sts/test_sts.py[0m:630: in test_assume_role_with_web_identity
+    [0mrole = client.assume_role_with_web_identity([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the AssumeRoleWithWebIdentity operation: Could not determine target service or action from request[0m
+[31m[1m____________ test_assume_role_with_web_identity[cn-north-1-aws-cn] _____________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_sts/test_sts.py[0m:630: in test_assume_role_with_web_identity
+    [0mrole = client.assume_role_with_web_identity([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the AssumeRoleWithWebIdentity operation: Could not determine target service or action from request[0m
+[31m[1m_______ test_get_caller_identity_with_default_credentials[us-east-1-aws] _______[0m
+[1m[31m/private/tmp/moto-tests/tests/test_sts/test_sts.py[0m:666: in test_get_caller_identity_with_default_credentials
+    [0m[94massert[39;49;00m identity[[33m"[39;49;00m[33mArn[39;49;00m[33m"[39;49;00m] == [33mf[39;49;00m[33m"[39;49;00m[33marn:[39;49;00m[33m{[39;49;00mpartition[33m}[39;49;00m[33m:sts::[39;49;00m[33m{[39;49;00mACCOUNT_ID[33m}[39;49;00m[33m:user/moto[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'arn:aws:iam:...00000000:root' == 'arn:aws:sts:...012:user/moto'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- arn:aws:sts::123456789012:user/moto[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ arn:aws:iam::000000000000:root[39;49;00m[90m[39;49;00m[0m
+[31m[1m_____ test_get_caller_identity_with_default_credentials[cn-north-1-aws-cn] _____[0m
+[1m[31m/private/tmp/moto-tests/tests/test_sts/test_sts.py[0m:666: in test_get_caller_identity_with_default_credentials
+    [0m[94massert[39;49;00m identity[[33m"[39;49;00m[33mArn[39;49;00m[33m"[39;49;00m] == [33mf[39;49;00m[33m"[39;49;00m[33marn:[39;49;00m[33m{[39;49;00mpartition[33m}[39;49;00m[33m:sts::[39;49;00m[33m{[39;49;00mACCOUNT_ID[33m}[39;49;00m[33m:user/moto[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'arn:aws:iam:...00000000:root' == 'arn:aws-cn:s...012:user/moto'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- arn:aws-cn:sts::123456789012:user/moto[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ arn:aws:iam::000000000000:root[39;49;00m[90m[39;49;00m[0m
+[31m[1m______ test_get_caller_identity_with_iam_user_credentials[us-east-1-aws] _______[0m
+[1m[31m/private/tmp/moto-tests/tests/test_sts/test_sts.py[0m:679: in test_get_caller_identity_with_iam_user_credentials
+    [0m[94massert[39;49;00m iam_user[[33m"[39;49;00m[33mArn[39;49;00m[33m"[39;49;00m] == [33mf[39;49;00m[33m"[39;49;00m[33marn:[39;49;00m[33m{[39;49;00mpartition[33m}[39;49;00m[33m:iam::123456789012:user/new-user[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'arn:aws:iam:...user/new-user' == 'arn:aws:iam:...user/new-user'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- arn:aws:iam::123456789012:user/new-user[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ arn:aws:iam::000000000000:user/new-user[39;49;00m[90m[39;49;00m[0m
+[31m[1m____ test_get_caller_identity_with_iam_user_credentials[cn-north-1-aws-cn] _____[0m
+[1m[31m/private/tmp/moto-tests/tests/test_sts/test_sts.py[0m:678: in test_get_caller_identity_with_iam_user_credentials
+    [0miam_user = iam_client.create_user(UserName=iam_user_name)[[33m"[39;49;00m[33mUser[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.errorfactory.EntityAlreadyExistsException: An error occurred (EntityAlreadyExists) when calling the CreateUser operation: EntityAlreadyExists: User with name new-user already exists.[0m
+[31m[1m____ test_get_caller_identity_with_assumed_role_credentials[us-east-1-aws] _____[0m
+[1m[31m/private/tmp/moto-tests/tests/test_sts/test_sts.py[0m:718: in test_get_caller_identity_with_assumed_role_credentials
+    [0m[94massert[39;49;00m ([90m[39;49;00m
+[1m[31mE   AssertionError: assert 'arn:aws:iam:...role/new-user' == 'arn:aws:sts:...r/new-session'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- arn:aws:sts::123456789012:assumed-role/new-user/new-session[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ arn:aws:iam::000000000000:role/new-user[39;49;00m[90m[39;49;00m[0m
+[31m[1m__ test_get_caller_identity_with_assumed_role_credentials[cn-north-1-aws-cn] ___[0m
+[1m[31m/private/tmp/moto-tests/tests/test_sts/test_sts.py[0m:710: in test_get_caller_identity_with_assumed_role_credentials
+    [0miam_role_arn = iam_client.role_arn = iam_client.create_role([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.errorfactory.EntityAlreadyExistsException: An error occurred (EntityAlreadyExists) when calling the CreateRole operation: EntityAlreadyExists: Role with name new-user already exists.[0m
+[31m[1m__________________ test_federation_token_with_too_long_policy __________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_sts/test_sts.py[0m:758: in test_federation_token_with_too_long_policy
+    [0m[94massert[39;49;00m ex.value.response[[33m"[39;49;00m[33mError[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mValidationError[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'InvalidAction' == 'ValidationError'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ValidationError[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ InvalidAction[39;49;00m[90m[39;49;00m[0m
+[31m[1m_________________________ test_sts_regions[us-west-2] __________________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_sts/test_sts.py[0m:773: in test_sts_regions
+    [0m[94massert[39;49;00m resp[[33m"[39;49;00m[33mArn[39;49;00m[33m"[39;49;00m] == [33mf[39;49;00m[33m"[39;49;00m[33marn:aws:sts::[39;49;00m[33m{[39;49;00mACCOUNT_ID[33m}[39;49;00m[33m:user/moto[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'arn:aws:iam:...00000000:root' == 'arn:aws:sts:...012:user/moto'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- arn:aws:sts::123456789012:user/moto[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ arn:aws:iam::000000000000:root[39;49;00m[90m[39;49;00m[0m
+[31m[1m_______________________ test_sts_regions[cn-northwest-1] _______________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_sts/test_sts.py[0m:775: in test_sts_regions
+    [0m[94massert[39;49;00m resp[[33m"[39;49;00m[33mArn[39;49;00m[33m"[39;49;00m] == [33mf[39;49;00m[33m"[39;49;00m[33marn:aws-cn:sts::[39;49;00m[33m{[39;49;00mACCOUNT_ID[33m}[39;49;00m[33m:user/moto[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'arn:aws:iam:...00000000:root' == 'arn:aws-cn:s...012:user/moto'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- arn:aws-cn:sts::123456789012:user/moto[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ arn:aws:iam::000000000000:root[39;49;00m[90m[39;49;00m[0m
+[31m[1m_______________________ test_sts_regions[us-isob-east-1] _______________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_sts/test_sts.py[0m:777: in test_sts_regions
+    [0m[94massert[39;49;00m resp[[33m"[39;49;00m[33mArn[39;49;00m[33m"[39;49;00m] == [33mf[39;49;00m[33m"[39;49;00m[33marn:aws-iso-b:sts::[39;49;00m[33m{[39;49;00mACCOUNT_ID[33m}[39;49;00m[33m:user/moto[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'arn:aws:iam:...00000000:root' == 'arn:aws-iso-...012:user/moto'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- arn:aws-iso-b:sts::123456789012:user/moto[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ arn:aws:iam::000000000000:root[39;49;00m[90m[39;49;00m[0m
+[31m[1m_______________________ test_get_access_key_info_default _______________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_sts/test_sts.py[0m:784: in test_get_access_key_info_default
+    [0mresp = client.get_access_key_info(AccessKeyId=[33m"[39;49;00m[33mAKIAIOSFODNN7EXAMPLE[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (InvalidAction) when calling the GetAccessKeyInfo operation: action GetAccessKeyInfo not implemented for service sts[0m
+[31m[1m____________________ test_get_access_key_info_with_iam_user ____________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_sts/test_sts.py[0m:796: in test_get_access_key_info_with_iam_user
+    [0mresp = client.get_access_key_info(AccessKeyId=key[[33m"[39;49;00m[33mAccessKeyId[39;49;00m[33m"[39;49;00m])[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (InvalidAction) when calling the GetAccessKeyInfo operation: action GetAccessKeyInfo not implemented for service sts[0m
+[31m[1m___________ TestStsAssumeRole.test_assume_role_in_different_account ____________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_sts/test_sts_integration.py[0m:34: in test_assume_role_in_different_account
+    [0m[94massert[39;49;00m assumed_arn == ([90m[39;49;00m
+[1m[31mE   AssertionError: assert 'arn:aws:iam:...00000000:root' == 'arn:aws:sts:...-session-name'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- arn:aws:sts::111111111111:assumed-role/my-role/test-session-name[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ arn:aws:iam::000000000000:root[39;49;00m[90m[39;49;00m[0m
+[31m[1m______ TestStsAssumeRole.test_assume_role_with_saml_in_different_account _______[0m
+[1m[31m/private/tmp/moto-tests/tests/test_sts/test_sts_integration.py[0m:116: in test_assume_role_with_saml_in_different_account
+    [0massume_role_response = [96mself[39;49;00m.sts.assume_role_with_saml([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the AssumeRoleWithSAML operation: Could not determine target service or action from request[0m
+[31m[1m__________ TestStsAssumeRole.test_dynamodb_supports_multiple_accounts __________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_sts/test_sts_integration.py[0m:142: in test_dynamodb_supports_multiple_accounts
+    [0mddb_client.create_table([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateTable operation: Service 'dynamodb' is not available[0m
+[33m=============================== warnings summary ===============================[0m
+tests/test_sts/test_sts.py: 25 warnings
+tests/test_sts/test_sts_integration.py: 3 warnings
+  /Users/lucas/.cache/fakecloud/moto/.venv/lib/python3.9/site-packages/boto3/compat.py:89: PythonDeprecationWarning: Boto3 will no longer support Python 3.9 starting April 29, 2026. To continue receiving service updates, bug fixes, and security updates please upgrade to Python 3.10 or later. More information can be found here: https://aws.amazon.com/blogs/developer/python-support-policy-updates-for-aws-sdks-and-tools/
+    warnings.warn(warning, PythonDeprecationWarning)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+[36m[1m=========================== short test summary info ============================[0m
+[31mFAILED[0m test_sts/test_sts.py::[1mtest_get_session_token[0m - botocore.exceptions.ClientError: An error occurred (InvalidAction) when cal...
+[31mFAILED[0m test_sts/test_sts.py::[1mtest_get_federation_token[0m - botocore.exceptions.ClientError: An error occurred (InvalidAction) when cal...
+[31mFAILED[0m test_sts/test_sts.py::[1mtest_assume_role[us-east-1-aws][0m - botocore.errorfactory.EntityAlreadyExistsException: An error occurred (Enti...
+[31mFAILED[0m test_sts/test_sts.py::[1mtest_assume_role[cn-north-1-aws-cn][0m - botocore.errorfactory.EntityAlreadyExistsException: An error occurred (Enti...
+[31mFAILED[0m test_sts/test_sts.py::[1mtest_assume_role[us-isob-east-1-aws-iso-b][0m - botocore.errorfactory.EntityAlreadyExistsException: An error occurred (Enti...
+[31mFAILED[0m test_sts/test_sts.py::[1mtest_assume_role_with_too_long_role_session_name[0m - botocore.errorfactory.EntityAlreadyExistsException: An error occurred (Enti...
+[31mFAILED[0m test_sts/test_sts.py::[1mtest_assume_role_with_saml[0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_sts/test_sts.py::[1mtest_assume_role_with_saml_should_not_rely_on_attribute_order[0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_sts/test_sts.py::[1mtest_assume_role_with_saml_should_respect_xml_namespaces[0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_sts/test_sts.py::[1mtest_assume_role_with_saml_when_xml_tag_contains_xmlns_attributes[0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_sts/test_sts.py::[1mtest_assume_role_with_saml_when_saml_attribute_not_provided[0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_sts/test_sts.py::[1mtest_assume_role_with_web_identity[us-east-1-aws][0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_sts/test_sts.py::[1mtest_assume_role_with_web_identity[cn-north-1-aws-cn][0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_sts/test_sts.py::[1mtest_get_caller_identity_with_default_credentials[us-east-1-aws][0m - AssertionError: assert 'arn:aws:iam:...00000000:root' == 'arn:aws:sts:...01...
+[31mFAILED[0m test_sts/test_sts.py::[1mtest_get_caller_identity_with_default_credentials[cn-north-1-aws-cn][0m - AssertionError: assert 'arn:aws:iam:...00000000:root' == 'arn:aws-cn:s...01...
+[31mFAILED[0m test_sts/test_sts.py::[1mtest_get_caller_identity_with_iam_user_credentials[us-east-1-aws][0m - AssertionError: assert 'arn:aws:iam:...user/new-user' == 'arn:aws:iam:...us...
+[31mFAILED[0m test_sts/test_sts.py::[1mtest_get_caller_identity_with_iam_user_credentials[cn-north-1-aws-cn][0m - botocore.errorfactory.EntityAlreadyExistsException: An error occurred (Enti...
+[31mFAILED[0m test_sts/test_sts.py::[1mtest_get_caller_identity_with_assumed_role_credentials[us-east-1-aws][0m - AssertionError: assert 'arn:aws:iam:...role/new-user' == 'arn:aws:sts:...r/...
+[31mFAILED[0m test_sts/test_sts.py::[1mtest_get_caller_identity_with_assumed_role_credentials[cn-north-1-aws-cn][0m - botocore.errorfactory.EntityAlreadyExistsException: An error occurred (Enti...
+[31mFAILED[0m test_sts/test_sts.py::[1mtest_federation_token_with_too_long_policy[0m - AssertionError: assert 'InvalidAction' == 'ValidationError'
+[31mFAILED[0m test_sts/test_sts.py::[1mtest_sts_regions[us-west-2][0m - AssertionError: assert 'arn:aws:iam:...00000000:root' == 'arn:aws:sts:...01...
+[31mFAILED[0m test_sts/test_sts.py::[1mtest_sts_regions[cn-northwest-1][0m - AssertionError: assert 'arn:aws:iam:...00000000:root' == 'arn:aws-cn:s...01...
+[31mFAILED[0m test_sts/test_sts.py::[1mtest_sts_regions[us-isob-east-1][0m - AssertionError: assert 'arn:aws:iam:...00000000:root' == 'arn:aws-iso-...01...
+[31mFAILED[0m test_sts/test_sts.py::[1mtest_get_access_key_info_default[0m - botocore.exceptions.ClientError: An error occurred (InvalidAction) when cal...
+[31mFAILED[0m test_sts/test_sts.py::[1mtest_get_access_key_info_with_iam_user[0m - botocore.exceptions.ClientError: An error occurred (InvalidAction) when cal...
+[31mFAILED[0m test_sts/test_sts_integration.py::[1mTestStsAssumeRole::test_assume_role_in_different_account[0m - AssertionError: assert 'arn:aws:iam:...00000000:root' == 'arn:aws:sts:...-s...
+[31mFAILED[0m test_sts/test_sts_integration.py::[1mTestStsAssumeRole::test_assume_role_with_saml_in_different_account[0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_sts/test_sts_integration.py::[1mTestStsAssumeRole::test_dynamodb_supports_multiple_accounts[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31m[31m[1m28 failed[0m, [33m28 warnings[0m[31m in 0.97s[0m[0m

@@ -1,0 +1,1191 @@
+[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[32m.[0m[32m.[0m[32m.[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31m [ 91%]
+[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31m                                                                  [100%][0m
+=================================== FAILURES ===================================
+[31m[1m______________________ test_put_metric_data_no_dimensions ______________________[0m
+[1m[31mtest_cloudwatch/test_cloudwatch.py[0m:21: in test_put_metric_data_no_dimensions
+    [0mconn.put_metric_data([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the PutMetricData operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>0b64a6a8-5a18-4a04-a60e-8dd4aedc90d8</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m________________________ test_put_a_ton_of_metric_data _________________________[0m
+[1m[31mtest_cloudwatch/test_cloudwatch.py[0m:60: in test_put_a_ton_of_metric_data
+    [0mcloudwatch.put_metric_data(Namespace=[33m"[39;49;00m[33macme[39;49;00m[33m"[39;49;00m, MetricData=metrics)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the PutMetricData operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>f599b61b-4cc2-4af8-adc0-082d4998dc29</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m____________________ test_put_metric_data_can_not_have_nan _____________________[0m
+[1m[31mtest_cloudwatch/test_cloudwatch.py[0m:82: in test_put_metric_data_can_not_have_nan
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mInvalidParameterValue[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'InvalidParameterValue'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- InvalidParameterValue[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m______________ test_put_metric_data_can_not_have_value_and_values ______________[0m
+[1m[31mtest_cloudwatch/test_cloudwatch.py[0m:107: in test_put_metric_data_can_not_have_value_and_values
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mInvalidParameterValue[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'InvalidParameterValue'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- InvalidParameterValue[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m________ test_put_metric_data_can_not_have_and_values_mismatched_counts ________[0m
+[1m[31mtest_cloudwatch/test_cloudwatch.py[0m:132: in test_put_metric_data_can_not_have_and_values_mismatched_counts
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mInvalidParameterValue[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'InvalidParameterValue'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- InvalidParameterValue[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m____________________ test_put_metric_data_values_and_counts ____________________[0m
+[1m[31mtest_cloudwatch/test_cloudwatch.py[0m:145: in test_put_metric_data_values_and_counts
+    [0mclient.put_metric_data([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the PutMetricData operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>eeac5ee3-cda6-4963-950f-a92ade161d08</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m__________________ test_put_metric_data_values_without_counts __________________[0m
+[1m[31mtest_cloudwatch/test_cloudwatch.py[0m:176: in test_put_metric_data_values_without_counts
+    [0mclient.put_metric_data([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the PutMetricData operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>79066a89-948e-49a9-9171-b132e21c5814</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m__________________ test_put_metric_data_value_and_statistics ___________________[0m
+[1m[31mtest_cloudwatch/test_cloudwatch.py[0m:220: in test_put_metric_data_value_and_statistics
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mInvalidParameterCombination[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'InvalidParameterCombination'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- InvalidParameterCombination[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m_____________________ test_put_metric_data_with_statistics _____________________[0m
+[1m[31mtest_cloudwatch/test_cloudwatch.py[0m:232: in test_put_metric_data_with_statistics
+    [0mconn.put_metric_data([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the PutMetricData operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>37962030-d578-48fb-9ff4-11f62b8af47a</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m__________________________ test_get_metric_statistics __________________________[0m
+[1m[31mtest_cloudwatch/test_cloudwatch.py[0m:311: in test_get_metric_statistics
+    [0mconn.put_metric_data([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the PutMetricData operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>6ceba299-5a23-49fb-8b76-9bf673d8d9a8</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m________________ test_get_metric_invalid_parameter_combination _________________[0m
+[1m[31mtest_cloudwatch/test_cloudwatch.py[0m:336: in test_get_metric_invalid_parameter_combination
+    [0mconn.put_metric_data([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the PutMetricData operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>38c7b130-267c-430c-8cb3-a6160b39cddc</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m____________________ test_get_metric_statistics_dimensions _____________________[0m
+[1m[31mtest_cloudwatch/test_cloudwatch.py[0m:365: in test_get_metric_statistics_dimensions
+    [0mconn.put_metric_data([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the PutMetricData operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>f08199a1-d4bb-409e-b2cb-3a4a3963581a</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________ test_get_metric_statistics_endtime_sooner_than_starttime ___________[0m
+[1m[31mtest_cloudwatch/test_cloudwatch.py[0m:447: in test_get_metric_statistics_endtime_sooner_than_starttime
+    [0m[94massert[39;49;00m ex.response[[33m"[39;49;00m[33mError[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mInvalidParameterValue[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'InvalidParameterValue'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- InvalidParameterValue[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m_____________ test_get_metric_statistics_starttime_endtime_equals ______________[0m
+[1m[31mtest_cloudwatch/test_cloudwatch.py[0m:476: in test_get_metric_statistics_starttime_endtime_equals
+    [0m[94massert[39;49;00m ex.response[[33m"[39;49;00m[33mError[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mInvalidParameterValue[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'InvalidParameterValue'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- InvalidParameterValue[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m_________ test_get_metric_statistics_starttime_endtime_within_1_second _________[0m
+[1m[31mtest_cloudwatch/test_cloudwatch.py[0m:505: in test_get_metric_statistics_starttime_endtime_within_1_second
+    [0m[94massert[39;49;00m ex.response[[33m"[39;49;00m[33mError[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mInvalidParameterValue[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'InvalidParameterValue'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- InvalidParameterValue[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m_______ test_get_metric_statistics_starttime_endtime_ignore_miliseconds ________[0m
+[1m[31mtest_cloudwatch/test_cloudwatch.py[0m:517: in test_get_metric_statistics_starttime_endtime_ignore_miliseconds
+    [0mcloudwatch.put_metric_data([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the PutMetricData operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>9cbad6ef-e258-416c-a9a3-41ace89569e4</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m________________________ test_duplicate_put_metric_data ________________________[0m
+[1m[31mtest_cloudwatch/test_cloudwatch.py[0m:548: in test_duplicate_put_metric_data
+    [0mconn.put_metric_data([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the PutMetricData operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>e17ece45-db86-4447-998c-c01abaa08363</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m____________________________ test_custom_timestamp _____________________________[0m
+[1m[31mtest_cloudwatch/test_cloudwatch.py[0m:645: in test_custom_timestamp
+    [0mcw.put_metric_data([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the PutMetricData operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>2a7e8764-fbec-484c-b3db-8cc137dfdad9</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______________________________ test_list_metrics _______________________________[0m
+[1m[31mtest_cloudwatch/test_cloudwatch.py[0m:672: in test_list_metrics
+    [0mres = cloudwatch.list_metrics(Namespace=[33m"[39;49;00m[33munknown/[39;49;00m[33m"[39;49;00m)[[33m"[39;49;00m[33mMetrics[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the ListMetrics operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>9b78e362-05ff-4422-bcf9-0b8460439036</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_________________________ test_list_metrics_paginated __________________________[0m
+[1m[31mtest_cloudwatch/test_cloudwatch.py[0m:701: in test_list_metrics_paginated
+    [0m[94massert[39;49;00m [33m"[39;49;00m[33mNextToken[39;49;00m[33m"[39;49;00m [95mnot[39;49;00m [95min[39;49;00m cloudwatch.list_metrics()[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the ListMetrics operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>80436446-f576-4ca2-ba96-3346f946fd9c</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________________ test_list_metrics_without_value ________________________[0m
+[1m[31mtest_cloudwatch/test_cloudwatch.py[0m:750: in test_list_metrics_without_value
+    [0mcreate_metrics_with_dimensions(cloudwatch, namespace=[33m"[39;49;00m[33mMyNamespace[39;49;00m[33m"[39;49;00m, data_points=[94m3[39;49;00m)[90m[39;49;00m
+[1m[31mtest_cloudwatch/test_cloudwatch.py[0m:824: in create_metrics_with_dimensions
+    [0mcloudwatch.put_metric_data([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the PutMetricData operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>696034d4-dff4-4161-a31a-37ca0fd861b3</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_________ test_list_metrics_with_same_dimensions_different_metric_name _________[0m
+[1m[31mtest_cloudwatch/test_cloudwatch.py[0m:770: in test_list_metrics_with_same_dimensions_different_metric_name
+    [0mcloudwatch.put_metric_data([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the PutMetricData operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>ac27efca-5636-41f8-9a2f-b2f0c22d578e</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_________ test_get_metric_data_for_multiple_metrics_w_same_dimensions __________[0m
+[1m[31mtest_cloudwatch/test_cloudwatch.py[0m:841: in test_get_metric_data_for_multiple_metrics_w_same_dimensions
+    [0mcloudwatch.put_metric_data([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the PutMetricData operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>edd56b90-00f4-438a-b639-d2a2ca2323c3</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m____________________ test_get_metric_data_within_timeframe _____________________[0m
+[1m[31mtest_cloudwatch/test_cloudwatch.py[0m:915: in test_get_metric_data_within_timeframe
+    [0mcloudwatch.put_metric_data([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the PutMetricData operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>c82fb190-593f-4a69-a933-1c56f8dfbcf0</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________ test_get_metric_data_partially_within_timeframe ________________[0m
+[1m[31mtest_cloudwatch/test_cloudwatch.py[0m:977: in test_get_metric_data_partially_within_timeframe
+    [0mcloudwatch.put_metric_data([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the PutMetricData operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>39d1730c-c859-4bc8-87b7-099f80278e04</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m____________________ test_get_metric_data_outside_timeframe ____________________[0m
+[1m[31mtest_cloudwatch/test_cloudwatch.py[0m:1100: in test_get_metric_data_outside_timeframe
+    [0mcloudwatch.put_metric_data([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the PutMetricData operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>51b36b32-0554-4bb7-b93d-298f8074dcb7</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m__________________ test_get_metric_data_for_multiple_metrics ___________________[0m
+[1m[31mtest_cloudwatch/test_cloudwatch.py[0m:1140: in test_get_metric_data_for_multiple_metrics
+    [0mcloudwatch.put_metric_data([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the PutMetricData operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>7a30ab1b-0cf2-441a-864f-9fe668e0ed5d</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_____________________ test_get_metric_data_for_dimensions ______________________[0m
+[1m[31mtest_cloudwatch/test_cloudwatch.py[0m:1208: in test_get_metric_data_for_dimensions
+    [0mcloudwatch.put_metric_data([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the PutMetricData operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>209c814f-ca2d-41a5-b733-0490d0f1a40b</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m________________________ test_get_metric_data_for_unit _________________________[0m
+[1m[31mtest_cloudwatch/test_cloudwatch.py[0m:1312: in test_get_metric_data_for_unit
+    [0mcloudwatch.put_metric_data([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the PutMetricData operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>65319916-88dc-4682-9851-a5d87a4d2313</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______________ test_get_metric_data_endtime_sooner_than_starttime ______________[0m
+[1m[31mtest_cloudwatch/test_cloudwatch.py[0m:1407: in test_get_metric_data_endtime_sooner_than_starttime
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mValidationError[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'ValidationError'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ValidationError[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m________________ test_get_metric_data_starttime_endtime_equals _________________[0m
+[1m[31mtest_cloudwatch/test_cloudwatch.py[0m:1443: in test_get_metric_data_starttime_endtime_equals
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mValidationError[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'ValidationError'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ValidationError[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m____________ test_get_metric_data_starttime_endtime_within_1_second ____________[0m
+[1m[31mtest_cloudwatch/test_cloudwatch.py[0m:1478: in test_get_metric_data_starttime_endtime_within_1_second
+    [0m[94massert[39;49;00m ex.response[[33m"[39;49;00m[33mError[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mValidationError[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'ValidationError'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ValidationError[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m__________ test_get_metric_data_starttime_endtime_ignore_miliseconds ___________[0m
+[1m[31mtest_cloudwatch/test_cloudwatch.py[0m:1492: in test_get_metric_data_starttime_endtime_ignore_miliseconds
+    [0mcloudwatch.put_metric_data([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the PutMetricData operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>bb889c4b-5d51-4262-85b1-f83cb76e2d61</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______________________ test_cloudwatch_return_s3_metrics _______________________[0m
+[1m[31mtest_cloudwatch/test_cloudwatch.py[0m:1536: in test_cloudwatch_return_s3_metrics
+    [0mbucket.create(CreateBucketConfiguration={[33m"[39;49;00m[33mLocationConstraint[39;49;00m[33m"[39;49;00m: [33m"[39;49;00m[33meu-west-3[39;49;00m[33m"[39;49;00m})[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/boto3/resources/factory.py[0m:581: in do_action
+    [0mresponse = action([96mself[39;49;00m, *args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/boto3/resources/action.py[0m:88: in __call__
+    [0mresponse = [96mgetattr[39;49;00m(parent.meta.client, operation_name)(*args, **params)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateBucket operation: Could not determine target service or action from request[0m
+[31m[1m____________________________ test_put_metric_alarm _____________________________[0m
+[1m[31mtest_cloudwatch/test_cloudwatch.py[0m:1619: in test_put_metric_alarm
+    [0mclient.put_metric_alarm([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the PutMetricAlarm operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>d66ba770-fb6d-4ead-be3e-deb0f254f09e</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m____________________ test_put_metric_alarm_with_percentile _____________________[0m
+[1m[31mtest_cloudwatch/test_cloudwatch.py[0m:1686: in test_put_metric_alarm_with_percentile
+    [0mclient.put_metric_alarm([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the PutMetricAlarm operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>6f4cdd22-7414-47e4-9a65-877575d2190f</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_________________ test_put_metric_alarm_with_anomaly_detection _________________[0m
+[1m[31mtest_cloudwatch/test_cloudwatch.py[0m:1770: in test_put_metric_alarm_with_anomaly_detection
+    [0mclient.put_metric_alarm([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the PutMetricAlarm operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>c847567c-c7e9-4e11-8039-47f25bbc759c</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m________________ test_put_metric_alarm_error_extended_statistic ________________[0m
+[1m[31mtest_cloudwatch/test_cloudwatch.py[0m:1831: in test_put_metric_alarm_error_extended_statistic
+    [0m[94massert[39;49;00m ex.response[[33m"[39;49;00m[33mError[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mInvalidParameterValue[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'InvalidParameterValue'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- InvalidParameterValue[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m_______ test_put_metric_alarm_error_evaluate_low_sample_count_percentile _______[0m
+[1m[31mtest_cloudwatch/test_cloudwatch.py[0m:1872: in test_put_metric_alarm_error_evaluate_low_sample_count_percentile
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mValidationError[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'ValidationError'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ValidationError[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m____________________ test_get_metric_data_with_custom_label ____________________[0m
+[1m[31mtest_cloudwatch/test_cloudwatch.py[0m:1888: in test_get_metric_data_with_custom_label
+    [0mcloudwatch.put_metric_data([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the PutMetricData operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>e430df92-ac98-46ef-9ff4-400609107c10</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m________________ test_get_metric_data_queries[ReturnData=True] _________________[0m
+[1m[31mtest_cloudwatch/test_cloudwatch.py[0m:1986: in test_get_metric_data_queries
+    [0mresponse = boto3.client([33m"[39;49;00m[33mcloudwatch[39;49;00m[33m"[39;49;00m, [33m"[39;49;00m[33meu-west-1[39;49;00m[33m"[39;49;00m).get_metric_data([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the GetMetricData operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>a75f6e81-4493-41eb-af85-53841eceaa65</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m________________ test_get_metric_data_queries[ReturnData=False] ________________[0m
+[1m[31mtest_cloudwatch/test_cloudwatch.py[0m:1986: in test_get_metric_data_queries
+    [0mresponse = boto3.client([33m"[39;49;00m[33mcloudwatch[39;49;00m[33m"[39;49;00m, [33m"[39;49;00m[33meu-west-1[39;49;00m[33m"[39;49;00m).get_metric_data([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the GetMetricData operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>3c6296f5-197b-4858-a6a4-005daec97ace</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m________________ test_get_metric_data_queries[ReturnData=None] _________________[0m
+[1m[31mtest_cloudwatch/test_cloudwatch.py[0m:1986: in test_get_metric_data_queries
+    [0mresponse = boto3.client([33m"[39;49;00m[33mcloudwatch[39;49;00m[33m"[39;49;00m, [33m"[39;49;00m[33meu-west-1[39;49;00m[33m"[39;49;00m).get_metric_data([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the GetMetricData operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>a541eceb-3c23-45b4-b0aa-d44025ff9080</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_________________ test_put_dashboard_invalid_json_raises_error _________________[0m
+[1m[31mtest_cloudwatch/test_cloudwatch.py[0m:1998: in test_put_dashboard_invalid_json_raises_error
+    [0m[94massert[39;49;00m error[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mInvalidParameterInput[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'InvalidParameterInput'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- InvalidParameterInput[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m______________ test_delete_dashboard_with_empty_list_raises_error ______________[0m
+[1m[31mtest_cloudwatch/test_cloudwatch.py[0m:2007: in test_delete_dashboard_with_empty_list_raises_error
+    [0m[94massert[39;49;00m error[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mInvalidParameterValue[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'InvalidParameterValue'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- InvalidParameterValue[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m_______________________ test_create_alarm[eu-west-1-aws] _______________________[0m
+[1m[31mtest_cloudwatch/test_cloudwatch_alarms.py[0m:16: in test_create_alarm
+    [0mcloudwatch.put_metric_alarm([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the PutMetricAlarm operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>f023121f-868a-463e-8964-710141776b0e</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_____________________ test_create_alarm[cn-north-1-aws-cn] _____________________[0m
+[1m[31mtest_cloudwatch/test_cloudwatch_alarms.py[0m:16: in test_create_alarm
+    [0mcloudwatch.put_metric_alarm([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the PutMetricAlarm operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>82fbdde6-c877-4087-9043-dc7c829cfb0a</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______________________________ test_delete_alarm _______________________________[0m
+[1m[31mtest_cloudwatch/test_cloudwatch_alarms.py[0m:62: in test_delete_alarm
+    [0malarms = cloudwatch.describe_alarms()[[33m"[39;49;00m[33mMetricAlarms[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the DescribeAlarms operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>796452bd-9402-4655-8ac0-f46805b72390</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________________ test_delete_alarms_without_error _______________________[0m
+[1m[31mtest_cloudwatch/test_cloudwatch_alarms.py[0m:98: in test_delete_alarms_without_error
+    [0mcloudwatch.delete_alarms(AlarmNames=[[33m"[39;49;00m[33mnot-exists[39;49;00m[33m"[39;49;00m])[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the DeleteAlarms operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>42b8ea00-b829-4a3d-9cb1-63f708456677</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________________ test_describe_alarms_for_metric ________________________[0m
+[1m[31mtest_cloudwatch/test_cloudwatch_alarms.py[0m:104: in test_describe_alarms_for_metric
+    [0mconn.put_metric_alarm([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the PutMetricAlarm operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>41319f38-069d-44ae-9dad-13ed948762cd</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_____________________________ test_describe_alarms _____________________________[0m
+[1m[31mtest_cloudwatch/test_cloudwatch_alarms.py[0m:125: in test_describe_alarms
+    [0mconn.put_metric_alarm([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the PutMetricAlarm operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>3959fc6e-12b9-4fa8-bcd3-ea8d155bfb70</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________________________ test_alarm_state _______________________________[0m
+[1m[31mtest_cloudwatch/test_cloudwatch_alarms.py[0m:212: in test_alarm_state
+    [0mclient.put_metric_alarm([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the PutMetricAlarm operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>5c3bb4ab-57e2-48e5-89e8-18555d66045e</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m__________________________ test_cloudwatch_dashboard ___________________________[0m
+[1m[31mtest_cloudwatch/test_cloudwatch_cloudformation.py[0m:20: in test_cloudwatch_dashboard
+    [0mcf.create_stack(StackName=stack_name, TemplateBody=dashboard_template_json)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateStack operation: Service 'cloudformation' is not available[0m
+[31m[1m__________________ test_put_list_dashboard[eu-central-1-aws] ___________________[0m
+[1m[31mtest_cloudwatch/test_cloudwatch_dashboards.py[0m:16: in test_put_list_dashboard
+    [0mclient.put_dashboard(DashboardName=[33m"[39;49;00m[33mtest1[39;49;00m[33m"[39;49;00m, DashboardBody=widget)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the PutDashboard operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>98f5487c-32a9-43c7-be7b-c054927f1cd0</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m__________________ test_put_list_dashboard[cn-north-1-aws-cn] __________________[0m
+[1m[31mtest_cloudwatch/test_cloudwatch_dashboards.py[0m:16: in test_put_list_dashboard
+    [0mclient.put_dashboard(DashboardName=[33m"[39;49;00m[33mtest1[39;49;00m[33m"[39;49;00m, DashboardBody=widget)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the PutDashboard operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>7c3f762b-1fbe-41b5-8d2f-89c70dbfcc42</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m____________________ test_put_list_prefix_nomatch_dashboard ____________________[0m
+[1m[31mtest_cloudwatch/test_cloudwatch_dashboards.py[0m:31: in test_put_list_prefix_nomatch_dashboard
+    [0mclient.put_dashboard(DashboardName=[33m"[39;49;00m[33mtest1[39;49;00m[33m"[39;49;00m, DashboardBody=widget)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the PutDashboard operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>417fe744-87fe-4512-a0c4-a3e2d6496829</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m____________________________ test_delete_dashboard _____________________________[0m
+[1m[31mtest_cloudwatch/test_cloudwatch_dashboards.py[0m:42: in test_delete_dashboard
+    [0mclient.put_dashboard(DashboardName=[33m"[39;49;00m[33mtest1[39;49;00m[33m"[39;49;00m, DashboardBody=widget)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the PutDashboard operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>305f732c-415c-4078-844e-d5b6f276f3b3</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m__________________________ test_delete_dashboard_fail __________________________[0m
+[1m[31mtest_cloudwatch/test_cloudwatch_dashboards.py[0m:56: in test_delete_dashboard_fail
+    [0mclient.put_dashboard(DashboardName=[33m"[39;49;00m[33mtest1[39;49;00m[33m"[39;49;00m, DashboardBody=widget)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the PutDashboard operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>c06512d0-5c0b-4ebe-b62e-abf84da7308b</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______________________________ test_get_dashboard ______________________________[0m
+[1m[31mtest_cloudwatch/test_cloudwatch_dashboards.py[0m:72: in test_get_dashboard
+    [0mclient.put_dashboard(DashboardName=[33m"[39;49;00m[33mtest1[39;49;00m[33m"[39;49;00m, DashboardBody=widget)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the PutDashboard operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>d08a0ff5-8532-4c0f-b583-9889742ec8ce</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________________________ test_get_dashboard_fail ____________________________[0m
+[1m[31mtest_cloudwatch/test_cloudwatch_dashboards.py[0m:86: in test_get_dashboard_fail
+    [0m[94massert[39;49;00m exc.value.response[[33m"[39;49;00m[33mError[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mResourceNotFound[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'ResourceNotFound'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ResourceNotFound[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m______________ test_get_metric_data__no_metric_data_or_expression ______________[0m
+[1m[31mtest_cloudwatch/test_cloudwatch_expressions.py[0m:26: in test_get_metric_data__no_metric_data_or_expression
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mValidationError[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'ValidationError'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ValidationError[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m_________________ test_get_metric_data_with_simple_expression __________________[0m
+[1m[31mtest_cloudwatch/test_cloudwatch_expressions.py[0m:38: in test_get_metric_data_with_simple_expression
+    [0mcloudwatch.put_metric_data([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the PutMetricData operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>403bd8b1-dbf3-4f46-abda-d38c83e49be2</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________ test_get_metric_data_with_expressive_expression ________________[0m
+[1m[31mtest_cloudwatch/test_cloudwatch_expressions.py[0m:83: in test_get_metric_data_with_expressive_expression
+    [0mcloudwatch.put_metric_data([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the PutMetricData operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>c5222cfd-c190-457a-b86e-8e5a2157357a</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_____________________ test_put_insight_rule[eu-west-1-aws] _____________________[0m
+[1m[31mtest_cloudwatch/test_cloudwatch_insight_rules.py[0m:28: in test_put_insight_rule
+    [0mcloudwatch.put_insight_rule([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the PutInsightRule operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>4239fa5f-fd8e-4b0f-8567-ba31b6ebdfbc</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________________ test_put_insight_rule[cn-north-1-aws-cn] ___________________[0m
+[1m[31mtest_cloudwatch/test_cloudwatch_insight_rules.py[0m:28: in test_put_insight_rule
+    [0mcloudwatch.put_insight_rule([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the PutInsightRule operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>904e546b-6b8d-4ab9-8292-27a81419d990</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m__________________________ test_delete_insight_rules ___________________________[0m
+[1m[31mtest_cloudwatch/test_cloudwatch_insight_rules.py[0m:61: in test_delete_insight_rules
+    [0mcloudwatch.put_insight_rule([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the PutInsightRule operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>9d9481b5-a95c-41d8-b4b1-6d28fc92c9a2</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m__________________________ test_disable_insight_rules __________________________[0m
+[1m[31mtest_cloudwatch/test_cloudwatch_insight_rules.py[0m:98: in test_disable_insight_rules
+    [0mcloudwatch.put_insight_rule([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the PutInsightRule operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>abc50a68-e786-4942-bf3d-23509f651a12</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m__________________________ test_enable_insight_rules ___________________________[0m
+[1m[31mtest_cloudwatch/test_cloudwatch_insight_rules.py[0m:137: in test_enable_insight_rules
+    [0mcloudwatch.put_insight_rule([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the PutInsightRule operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>d58d2b4d-6ba3-4c62-995d-616342d61270</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_________________________ test_list_tags_for_resource __________________________[0m
+[1m[31mtest_cloudwatch/test_cloudwatch_tags.py[0m:17: in test_list_tags_for_resource
+    [0mclient.put_metric_alarm([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the PutMetricAlarm operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>625d06fd-8de0-493d-a785-84d711c2ec40</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______________ test_list_tags_for_resource_with_unknown_resource _______________[0m
+[1m[31mtest_cloudwatch/test_cloudwatch_tags.py[0m:52: in test_list_tags_for_resource_with_unknown_resource
+    [0mresponse = client.list_tags_for_resource([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the ListTagsForResource operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>8450f171-64ff-448f-a7fb-937a0875c672</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______________________________ test_tag_resource _______________________________[0m
+[1m[31mtest_cloudwatch/test_cloudwatch_tags.py[0m:67: in test_tag_resource
+    [0mclient.put_metric_alarm([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the PutMetricAlarm operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>808ef291-9540-40cf-8230-f4a88de846b8</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m__________________ test_tag_resource_on_resource_without_tags __________________[0m
+[1m[31mtest_cloudwatch/test_cloudwatch_tags.py[0m:102: in test_tag_resource_on_resource_without_tags
+    [0mcw.put_metric_alarm([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the PutMetricAlarm operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>13923b92-4b55-4c75-b273-26c55713f27c</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______________________ test_tag_resource_error_not_exists ______________________[0m
+[1m[31mtest_cloudwatch/test_cloudwatch_tags.py[0m:139: in test_tag_resource_error_not_exists
+    [0m[94massert[39;49;00m ex.response[[33m"[39;49;00m[33mResponseMetadata[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mHTTPStatusCode[39;49;00m[33m"[39;49;00m] == [94m404[39;49;00m[90m[39;49;00m
+[1m[31mE   assert 400 == 404[0m
+[31m[1m_____________________________ test_untag_resource ______________________________[0m
+[1m[31mtest_cloudwatch/test_cloudwatch_tags.py[0m:149: in test_untag_resource
+    [0mclient.put_metric_alarm([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the PutMetricAlarm operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>5f9da2ce-30a5-4469-833d-840b44f12479</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_____________________ test_untag_resource_error_not_exists _____________________[0m
+[1m[31mtest_cloudwatch/test_cloudwatch_tags.py[0m:199: in test_untag_resource_error_not_exists
+    [0m[94massert[39;49;00m ex.response[[33m"[39;49;00m[33mResponseMetadata[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mHTTPStatusCode[39;49;00m[33m"[39;49;00m] == [94m404[39;49;00m[90m[39;49;00m
+[1m[31mE   assert 400 == 404[0m
+[31m[1m_______________________ test_tag_insight_rules_resource ________________________[0m
+[1m[31mtest_cloudwatch/test_cloudwatch_tags.py[0m:224: in test_tag_insight_rules_resource
+    [0mclient.put_insight_rule([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the PutInsightRule operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>48a84cd1-b988-4d12-8fd5-c53e597918da</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[33m=============================== warnings summary ===============================[0m
+tests/test_cloudwatch/test_cloudwatch.py: 45 warnings
+tests/test_cloudwatch/test_cloudwatch_alarms.py: 7 warnings
+tests/test_cloudwatch/test_cloudwatch_cloudformation.py: 1 warning
+tests/test_cloudwatch/test_cloudwatch_dashboards.py: 7 warnings
+tests/test_cloudwatch/test_cloudwatch_expressions.py: 3 warnings
+tests/test_cloudwatch/test_cloudwatch_insight_rules.py: 5 warnings
+tests/test_cloudwatch/test_cloudwatch_tags.py: 8 warnings
+  /Users/lucas/.cache/fakecloud/moto/.venv/lib/python3.9/site-packages/boto3/compat.py:89: PythonDeprecationWarning: Boto3 will no longer support Python 3.9 starting April 29, 2026. To continue receiving service updates, bug fixes, and security updates please upgrade to Python 3.10 or later. More information can be found here: https://aws.amazon.com/blogs/developer/python-support-policy-updates-for-aws-sdks-and-tools/
+    warnings.warn(warning, PythonDeprecationWarning)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+[36m[1m=========================== short test summary info ============================[0m
+[31mFAILED[0m test_cloudwatch/test_cloudwatch.py::[1mtest_put_metric_data_no_dimensions[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the P...
+[31mFAILED[0m test_cloudwatch/test_cloudwatch.py::[1mtest_put_a_ton_of_metric_data[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the P...
+[31mFAILED[0m test_cloudwatch/test_cloudwatch.py::[1mtest_put_metric_data_can_not_have_nan[0m - AssertionError: assert '400' == 'InvalidParameterValue'
+[31mFAILED[0m test_cloudwatch/test_cloudwatch.py::[1mtest_put_metric_data_can_not_have_value_and_values[0m - AssertionError: assert '400' == 'InvalidParameterValue'
+[31mFAILED[0m test_cloudwatch/test_cloudwatch.py::[1mtest_put_metric_data_can_not_have_and_values_mismatched_counts[0m - AssertionError: assert '400' == 'InvalidParameterValue'
+[31mFAILED[0m test_cloudwatch/test_cloudwatch.py::[1mtest_put_metric_data_values_and_counts[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the P...
+[31mFAILED[0m test_cloudwatch/test_cloudwatch.py::[1mtest_put_metric_data_values_without_counts[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the P...
+[31mFAILED[0m test_cloudwatch/test_cloudwatch.py::[1mtest_put_metric_data_value_and_statistics[0m - AssertionError: assert '400' == 'InvalidParameterCombination'
+[31mFAILED[0m test_cloudwatch/test_cloudwatch.py::[1mtest_put_metric_data_with_statistics[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the P...
+[31mFAILED[0m test_cloudwatch/test_cloudwatch.py::[1mtest_get_metric_statistics[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the P...
+[31mFAILED[0m test_cloudwatch/test_cloudwatch.py::[1mtest_get_metric_invalid_parameter_combination[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the P...
+[31mFAILED[0m test_cloudwatch/test_cloudwatch.py::[1mtest_get_metric_statistics_dimensions[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the P...
+[31mFAILED[0m test_cloudwatch/test_cloudwatch.py::[1mtest_get_metric_statistics_endtime_sooner_than_starttime[0m - AssertionError: assert '400' == 'InvalidParameterValue'
+[31mFAILED[0m test_cloudwatch/test_cloudwatch.py::[1mtest_get_metric_statistics_starttime_endtime_equals[0m - AssertionError: assert '400' == 'InvalidParameterValue'
+[31mFAILED[0m test_cloudwatch/test_cloudwatch.py::[1mtest_get_metric_statistics_starttime_endtime_within_1_second[0m - AssertionError: assert '400' == 'InvalidParameterValue'
+[31mFAILED[0m test_cloudwatch/test_cloudwatch.py::[1mtest_get_metric_statistics_starttime_endtime_ignore_miliseconds[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the P...
+[31mFAILED[0m test_cloudwatch/test_cloudwatch.py::[1mtest_duplicate_put_metric_data[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the P...
+[31mFAILED[0m test_cloudwatch/test_cloudwatch.py::[1mtest_custom_timestamp[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the P...
+[31mFAILED[0m test_cloudwatch/test_cloudwatch.py::[1mtest_list_metrics[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the L...
+[31mFAILED[0m test_cloudwatch/test_cloudwatch.py::[1mtest_list_metrics_paginated[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the L...
+[31mFAILED[0m test_cloudwatch/test_cloudwatch.py::[1mtest_list_metrics_without_value[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the P...
+[31mFAILED[0m test_cloudwatch/test_cloudwatch.py::[1mtest_list_metrics_with_same_dimensions_different_metric_name[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the P...
+[31mFAILED[0m test_cloudwatch/test_cloudwatch.py::[1mtest_get_metric_data_for_multiple_metrics_w_same_dimensions[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the P...
+[31mFAILED[0m test_cloudwatch/test_cloudwatch.py::[1mtest_get_metric_data_within_timeframe[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the P...
+[31mFAILED[0m test_cloudwatch/test_cloudwatch.py::[1mtest_get_metric_data_partially_within_timeframe[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the P...
+[31mFAILED[0m test_cloudwatch/test_cloudwatch.py::[1mtest_get_metric_data_outside_timeframe[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the P...
+[31mFAILED[0m test_cloudwatch/test_cloudwatch.py::[1mtest_get_metric_data_for_multiple_metrics[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the P...
+[31mFAILED[0m test_cloudwatch/test_cloudwatch.py::[1mtest_get_metric_data_for_dimensions[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the P...
+[31mFAILED[0m test_cloudwatch/test_cloudwatch.py::[1mtest_get_metric_data_for_unit[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the P...
+[31mFAILED[0m test_cloudwatch/test_cloudwatch.py::[1mtest_get_metric_data_endtime_sooner_than_starttime[0m - AssertionError: assert '400' == 'ValidationError'
+[31mFAILED[0m test_cloudwatch/test_cloudwatch.py::[1mtest_get_metric_data_starttime_endtime_equals[0m - AssertionError: assert '400' == 'ValidationError'
+[31mFAILED[0m test_cloudwatch/test_cloudwatch.py::[1mtest_get_metric_data_starttime_endtime_within_1_second[0m - AssertionError: assert '400' == 'ValidationError'
+[31mFAILED[0m test_cloudwatch/test_cloudwatch.py::[1mtest_get_metric_data_starttime_endtime_ignore_miliseconds[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the P...
+[31mFAILED[0m test_cloudwatch/test_cloudwatch.py::[1mtest_cloudwatch_return_s3_metrics[0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_cloudwatch/test_cloudwatch.py::[1mtest_put_metric_alarm[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the P...
+[31mFAILED[0m test_cloudwatch/test_cloudwatch.py::[1mtest_put_metric_alarm_with_percentile[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the P...
+[31mFAILED[0m test_cloudwatch/test_cloudwatch.py::[1mtest_put_metric_alarm_with_anomaly_detection[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the P...
+[31mFAILED[0m test_cloudwatch/test_cloudwatch.py::[1mtest_put_metric_alarm_error_extended_statistic[0m - AssertionError: assert '400' == 'InvalidParameterValue'
+[31mFAILED[0m test_cloudwatch/test_cloudwatch.py::[1mtest_put_metric_alarm_error_evaluate_low_sample_count_percentile[0m - AssertionError: assert '400' == 'ValidationError'
+[31mFAILED[0m test_cloudwatch/test_cloudwatch.py::[1mtest_get_metric_data_with_custom_label[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the P...
+[31mFAILED[0m test_cloudwatch/test_cloudwatch.py::[1mtest_get_metric_data_queries[ReturnData=True][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the G...
+[31mFAILED[0m test_cloudwatch/test_cloudwatch.py::[1mtest_get_metric_data_queries[ReturnData=False][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the G...
+[31mFAILED[0m test_cloudwatch/test_cloudwatch.py::[1mtest_get_metric_data_queries[ReturnData=None][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the G...
+[31mFAILED[0m test_cloudwatch/test_cloudwatch.py::[1mtest_put_dashboard_invalid_json_raises_error[0m - AssertionError: assert '400' == 'InvalidParameterInput'
+[31mFAILED[0m test_cloudwatch/test_cloudwatch.py::[1mtest_delete_dashboard_with_empty_list_raises_error[0m - AssertionError: assert '400' == 'InvalidParameterValue'
+[31mFAILED[0m test_cloudwatch/test_cloudwatch_alarms.py::[1mtest_create_alarm[eu-west-1-aws][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the P...
+[31mFAILED[0m test_cloudwatch/test_cloudwatch_alarms.py::[1mtest_create_alarm[cn-north-1-aws-cn][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the P...
+[31mFAILED[0m test_cloudwatch/test_cloudwatch_alarms.py::[1mtest_delete_alarm[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the D...
+[31mFAILED[0m test_cloudwatch/test_cloudwatch_alarms.py::[1mtest_delete_alarms_without_error[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the D...
+[31mFAILED[0m test_cloudwatch/test_cloudwatch_alarms.py::[1mtest_describe_alarms_for_metric[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the P...
+[31mFAILED[0m test_cloudwatch/test_cloudwatch_alarms.py::[1mtest_describe_alarms[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the P...
+[31mFAILED[0m test_cloudwatch/test_cloudwatch_alarms.py::[1mtest_alarm_state[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the P...
+[31mFAILED[0m test_cloudwatch/test_cloudwatch_cloudformation.py::[1mtest_cloudwatch_dashboard[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_cloudwatch/test_cloudwatch_dashboards.py::[1mtest_put_list_dashboard[eu-central-1-aws][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the P...
+[31mFAILED[0m test_cloudwatch/test_cloudwatch_dashboards.py::[1mtest_put_list_dashboard[cn-north-1-aws-cn][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the P...
+[31mFAILED[0m test_cloudwatch/test_cloudwatch_dashboards.py::[1mtest_put_list_prefix_nomatch_dashboard[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the P...
+[31mFAILED[0m test_cloudwatch/test_cloudwatch_dashboards.py::[1mtest_delete_dashboard[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the P...
+[31mFAILED[0m test_cloudwatch/test_cloudwatch_dashboards.py::[1mtest_delete_dashboard_fail[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the P...
+[31mFAILED[0m test_cloudwatch/test_cloudwatch_dashboards.py::[1mtest_get_dashboard[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the P...
+[31mFAILED[0m test_cloudwatch/test_cloudwatch_dashboards.py::[1mtest_get_dashboard_fail[0m - AssertionError: assert '400' == 'ResourceNotFound'
+[31mFAILED[0m test_cloudwatch/test_cloudwatch_expressions.py::[1mtest_get_metric_data__no_metric_data_or_expression[0m - AssertionError: assert '400' == 'ValidationError'
+[31mFAILED[0m test_cloudwatch/test_cloudwatch_expressions.py::[1mtest_get_metric_data_with_simple_expression[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the P...
+[31mFAILED[0m test_cloudwatch/test_cloudwatch_expressions.py::[1mtest_get_metric_data_with_expressive_expression[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the P...
+[31mFAILED[0m test_cloudwatch/test_cloudwatch_insight_rules.py::[1mtest_put_insight_rule[eu-west-1-aws][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the P...
+[31mFAILED[0m test_cloudwatch/test_cloudwatch_insight_rules.py::[1mtest_put_insight_rule[cn-north-1-aws-cn][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the P...
+[31mFAILED[0m test_cloudwatch/test_cloudwatch_insight_rules.py::[1mtest_delete_insight_rules[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the P...
+[31mFAILED[0m test_cloudwatch/test_cloudwatch_insight_rules.py::[1mtest_disable_insight_rules[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the P...
+[31mFAILED[0m test_cloudwatch/test_cloudwatch_insight_rules.py::[1mtest_enable_insight_rules[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the P...
+[31mFAILED[0m test_cloudwatch/test_cloudwatch_tags.py::[1mtest_list_tags_for_resource[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the P...
+[31mFAILED[0m test_cloudwatch/test_cloudwatch_tags.py::[1mtest_list_tags_for_resource_with_unknown_resource[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the L...
+[31mFAILED[0m test_cloudwatch/test_cloudwatch_tags.py::[1mtest_tag_resource[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the P...
+[31mFAILED[0m test_cloudwatch/test_cloudwatch_tags.py::[1mtest_tag_resource_on_resource_without_tags[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the P...
+[31mFAILED[0m test_cloudwatch/test_cloudwatch_tags.py::[1mtest_tag_resource_error_not_exists[0m - assert 400 == 404
+[31mFAILED[0m test_cloudwatch/test_cloudwatch_tags.py::[1mtest_untag_resource[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the P...
+[31mFAILED[0m test_cloudwatch/test_cloudwatch_tags.py::[1mtest_untag_resource_error_not_exists[0m - assert 400 == 404
+[31mFAILED[0m test_cloudwatch/test_cloudwatch_tags.py::[1mtest_tag_insight_rules_resource[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the P...
+[31m[31m[1m76 failed[0m, [32m3 passed[0m, [33m76 warnings[0m[31m in 2.67s[0m[0m

@@ -1,0 +1,761 @@
+[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[32m.[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[32m.[0m[32m.[0m[32m.[0m[31m [ 91%]
+[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[31m                                                                  [100%][0m
+=================================== FAILURES ===================================
+[31m[1m________________________ test_list_verified_identities _________________________[0m
+[1m[31mtest_ses/test_ses.py[0m:19: in test_list_verified_identities
+    [0mconn.verify_email_identity(EmailAddress=[33m"[39;49;00m[33mtest@example.com[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the VerifyEmailIdentity operation: Service 'ses' is not available[0m
+[31m[1m_____________________ test_identities_are_region_specific ______________________[0m
+[1m[31mtest_ses/test_ses.py[0m:49: in test_identities_are_region_specific
+    [0mus_east.verify_email_identity(EmailAddress=[33m"[39;49;00m[33mtest@example.com[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the VerifyEmailIdentity operation: Service 'ses' is not available[0m
+[31m[1m____________________ test_verify_email_identity_idempotency ____________________[0m
+[1m[31mtest_ses/test_ses.py[0m:59: in test_verify_email_identity_idempotency
+    [0mconn.verify_email_identity(EmailAddress=address)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the VerifyEmailIdentity operation: Service 'ses' is not available[0m
+[31m[1m__________________________ test_verify_email_address ___________________________[0m
+[1m[31mtest_ses/test_ses.py[0m:70: in test_verify_email_address
+    [0mconn.verify_email_address(EmailAddress=[33m"[39;49;00m[33mtest@example.com[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the VerifyEmailAddress operation: Service 'ses' is not available[0m
+[31m[1m_____________________________ test_delete_identity _____________________________[0m
+[1m[31mtest_ses/test_ses.py[0m:79: in test_delete_identity
+    [0mconn.verify_email_identity(EmailAddress=[33m"[39;49;00m[33mtest@example.com[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the VerifyEmailIdentity operation: Service 'ses' is not available[0m
+[31m[1m_______________________________ test_send_email ________________________________[0m
+[1m[31mtest_ses/test_ses.py[0m:106: in test_send_email
+    [0mconn.verify_domain_identity(Domain=[33m"[39;49;00m[33mexample.com[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the VerifyDomainIdentity operation: Service 'ses' is not available[0m
+[31m[1m______________________ test_send_email_when_verify_source ______________________[0m
+[1m[31mtest_ses/test_ses.py[0m:133: in test_send_email_when_verify_source
+    [0mconn.verify_email_address(EmailAddress=[33m"[39;49;00m[33mverify_email_address@example.com[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the VerifyEmailAddress operation: Service 'ses' is not available[0m
+[31m[1m___________________ test_send_unverified_email_with_chevrons ___________________[0m
+[1m[31mtest_ses/test_ses.py[0m:166: in test_send_unverified_email_with_chevrons
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mMessageRejected[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'UnknownService' == 'MessageRejected'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- MessageRejected[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ UnknownService[39;49;00m[90m[39;49;00m[0m
+[31m[1m_______________________ test_send_email_invalid_address ________________________[0m
+[1m[31mtest_ses/test_ses.py[0m:176: in test_send_email_invalid_address
+    [0mconn.verify_domain_identity(Domain=[33m"[39;49;00m[33mexample.com[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the VerifyDomainIdentity operation: Service 'ses' is not available[0m
+[31m[1m________________________ test_send_bulk_templated_email ________________________[0m
+[1m[31mtest_ses/test_ses.py[0m:225: in test_send_bulk_templated_email
+    [0m[94massert[39;49;00m ex.value.response[[33m"[39;49;00m[33mError[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mMessageRejected[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'UnknownService' == 'MessageRejected'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- MessageRejected[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ UnknownService[39;49;00m[90m[39;49;00m[0m
+[31m[1m__________________________ test_send_templated_email ___________________________[0m
+[1m[31mtest_ses/test_ses.py[0m:310: in test_send_templated_email
+    [0mconn.verify_domain_identity(Domain=[33m"[39;49;00m[33mexample.com[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the VerifyDomainIdentity operation: Service 'ses' is not available[0m
+[31m[1m__________________ test_send_templated_email_invalid_address ___________________[0m
+[1m[31mtest_ses/test_ses.py[0m:342: in test_send_templated_email_invalid_address
+    [0mconn.verify_domain_identity(Domain=[33m"[39;49;00m[33mexample.com[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the VerifyDomainIdentity operation: Service 'ses' is not available[0m
+[31m[1m_____________________________ test_send_html_email _____________________________[0m
+[1m[31mtest_ses/test_ses.py[0m:384: in test_send_html_email
+    [0mconn.verify_email_identity(EmailAddress=[33m"[39;49;00m[33mtest@example.com[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the VerifyEmailIdentity operation: Service 'ses' is not available[0m
+[31m[1m_____________________________ test_send_raw_email ______________________________[0m
+[1m[31mtest_ses/test_ses.py[0m:403: in test_send_raw_email
+    [0mconn.verify_email_identity(EmailAddress=[33m"[39;49;00m[33mtest@example.com[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the VerifyEmailIdentity operation: Service 'ses' is not available[0m
+[31m[1m_____________________ test_send_raw_email_validate_domain ______________________[0m
+[1m[31mtest_ses/test_ses.py[0m:422: in test_send_raw_email_validate_domain
+    [0mconn.verify_domain_identity(Domain=[33m"[39;49;00m[33mexample.com[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the VerifyDomainIdentity operation: Service 'ses' is not available[0m
+[31m[1m_____________________ test_send_raw_email_invalid_address ______________________[0m
+[1m[31mtest_ses/test_ses.py[0m:433: in test_send_raw_email_invalid_address
+    [0mconn.verify_domain_identity(Domain=[33m"[39;49;00m[33mexample.com[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the VerifyDomainIdentity operation: Service 'ses' is not available[0m
+[31m[1m______________________ test_send_raw_email_without_source ______________________[0m
+[1m[31mtest_ses/test_ses.py[0m:487: in test_send_raw_email_without_source
+    [0mconn.verify_email_identity(EmailAddress=[33m"[39;49;00m[33mtest@example.com[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the VerifyEmailIdentity operation: Service 'ses' is not available[0m
+[31m[1m_______________ test_send_email_notification_with_encoded_sender _______________[0m
+[1m[31mtest_ses/test_ses.py[0m:521: in test_send_email_notification_with_encoded_sender
+    [0mconn.verify_email_identity(EmailAddress=sender)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the VerifyEmailIdentity operation: Service 'ses' is not available[0m
+[31m[1m________________________ test_create_configuration_set _________________________[0m
+[1m[31mtest_ses/test_ses.py[0m:533: in test_create_configuration_set
+    [0mconn.create_configuration_set(ConfigurationSet={[33m"[39;49;00m[33mName[39;49;00m[33m"[39;49;00m: [33m"[39;49;00m[33mtest[39;49;00m[33m"[39;49;00m})[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateConfigurationSet operation: Service 'ses' is not available[0m
+[31m[1m_______________________ test_describe_configuration_set ________________________[0m
+[1m[31mtest_ses/test_ses.py[0m:587: in test_describe_configuration_set
+    [0mconn.create_configuration_set(ConfigurationSet={[33m"[39;49;00m[33mName[39;49;00m[33m"[39;49;00m: name})[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateConfigurationSet operation: Service 'ses' is not available[0m
+[31m[1m_________________________ test_list_configuration_sets _________________________[0m
+[1m[31mtest_ses/test_ses.py[0m:634: in test_list_configuration_sets
+    [0mconn.create_configuration_set(ConfigurationSet={[33m"[39;49;00m[33mName[39;49;00m[33m"[39;49;00m: [33m"[39;49;00m[33mtest1[39;49;00m[33m"[39;49;00m})[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateConfigurationSet operation: Service 'ses' is not available[0m
+[31m[1m___________________ test_list_configuration_sets_pagination ____________________[0m
+[1m[31mtest_ses/test_ses.py[0m:650: in test_list_configuration_sets_pagination
+    [0mconn.create_configuration_set(ConfigurationSet={[33m"[39;49;00m[33mName[39;49;00m[33m"[39;49;00m: [33mf[39;49;00m[33m"[39;49;00m[33mtest[39;49;00m[33m{[39;49;00mi[33m}[39;49;00m[33m"[39;49;00m})[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateConfigurationSet operation: Service 'ses' is not available[0m
+[31m[1m________________________ test_delete_configuration_set _________________________[0m
+[1m[31mtest_ses/test_ses.py[0m:669: in test_delete_configuration_set
+    [0mconn.create_configuration_set(ConfigurationSet={[33m"[39;49;00m[33mName[39;49;00m[33m"[39;49;00m: [33m"[39;49;00m[33mtest1[39;49;00m[33m"[39;49;00m})[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateConfigurationSet operation: Service 'ses' is not available[0m
+[31m[1m_________________________ test_create_receipt_rule_set _________________________[0m
+[1m[31mtest_ses/test_ses.py[0m:686: in test_create_receipt_rule_set
+    [0mresult = conn.create_receipt_rule_set(RuleSetName=[33m"[39;49;00m[33mtestRuleSet[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateReceiptRuleSet operation: Service 'ses' is not available[0m
+[31m[1m_______ test_create_receipt_rule_set_invalid[having_invalid_characters] ________[0m
+[1m[31mtest_ses/test_ses.py[0m:728: in test_create_receipt_rule_set_invalid
+    [0m[94massert[39;49;00m ex.value.response[[33m"[39;49;00m[33mError[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mValidationError[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'UnknownService' == 'ValidationError'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ValidationError[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ UnknownService[39;49;00m[90m[39;49;00m[0m
+[31m[1m________ test_create_receipt_rule_set_invalid[invalid_start_character] _________[0m
+[1m[31mtest_ses/test_ses.py[0m:728: in test_create_receipt_rule_set_invalid
+    [0m[94massert[39;49;00m ex.value.response[[33m"[39;49;00m[33mError[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mValidationError[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'UnknownService' == 'ValidationError'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ValidationError[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ UnknownService[39;49;00m[90m[39;49;00m[0m
+[31m[1m_________ test_create_receipt_rule_set_invalid[invalid_end_character] __________[0m
+[1m[31mtest_ses/test_ses.py[0m:728: in test_create_receipt_rule_set_invalid
+    [0m[94massert[39;49;00m ex.value.response[[33m"[39;49;00m[33mError[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mValidationError[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'UnknownService' == 'ValidationError'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ValidationError[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ UnknownService[39;49;00m[90m[39;49;00m[0m
+[31m[1m__________ test_create_receipt_rule_set_invalid[exceeding_max_length] __________[0m
+[1m[31mtest_ses/test_ses.py[0m:728: in test_create_receipt_rule_set_invalid
+    [0m[94massert[39;49;00m ex.value.response[[33m"[39;49;00m[33mError[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mValidationError[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'UnknownService' == 'ValidationError'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ValidationError[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ UnknownService[39;49;00m[90m[39;49;00m[0m
+[31m[1m___________________________ test_create_receipt_rule ___________________________[0m
+[1m[31mtest_ses/test_ses.py[0m:736: in test_create_receipt_rule
+    [0mconn.create_receipt_rule_set(RuleSetName=rule_set_name)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateReceiptRuleSet operation: Service 'ses' is not available[0m
+[31m[1m______ test_create_receipt_rule_invalid_top_level[invalid_rule_set_name] _______[0m
+[1m[31mtest_ses/test_ses.py[0m:848: in test_create_receipt_rule_invalid_top_level
+    [0mresponse = conn.create_receipt_rule_set(RuleSetName=[33m"[39;49;00m[33mtestRuleSet[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateReceiptRuleSet operation: Service 'ses' is not available[0m
+[31m[1m________ test_create_receipt_rule_invalid_top_level[invalid_rule_name] _________[0m
+[1m[31mtest_ses/test_ses.py[0m:848: in test_create_receipt_rule_invalid_top_level
+    [0mresponse = conn.create_receipt_rule_set(RuleSetName=[33m"[39;49;00m[33mtestRuleSet[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateReceiptRuleSet operation: Service 'ses' is not available[0m
+[31m[1m_____ test_create_receipt_rule_invalid_top_level[invalid_after_rule_param] _____[0m
+[1m[31mtest_ses/test_ses.py[0m:848: in test_create_receipt_rule_invalid_top_level
+    [0mresponse = conn.create_receipt_rule_set(RuleSetName=[33m"[39;49;00m[33mtestRuleSet[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateReceiptRuleSet operation: Service 'ses' is not available[0m
+[31m[1m_________ test_create_receipt_rule_invalid_action[non_existent_bucket] _________[0m
+[1m[31mtest_ses/test_ses.py[0m:966: in test_create_receipt_rule_invalid_action
+    [0mresponse = conn.create_receipt_rule_set(RuleSetName=[33m"[39;49;00m[33mtestRuleSet[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateReceiptRuleSet operation: Service 'ses' is not available[0m
+[31m[1m________ test_create_receipt_rule_invalid_action[non_existent_kms_key] _________[0m
+[1m[31mtest_ses/test_ses.py[0m:966: in test_create_receipt_rule_invalid_action
+    [0mresponse = conn.create_receipt_rule_set(RuleSetName=[33m"[39;49;00m[33mtestRuleSet[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateReceiptRuleSet operation: Service 'ses' is not available[0m
+[31m[1m_______ test_create_receipt_rule_invalid_action[non_existent_sns_topic] ________[0m
+[1m[31mtest_ses/test_ses.py[0m:966: in test_create_receipt_rule_invalid_action
+    [0mresponse = conn.create_receipt_rule_set(RuleSetName=[33m"[39;49;00m[33mtestRuleSet[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateReceiptRuleSet operation: Service 'ses' is not available[0m
+[31m[1m________ test_create_receipt_rule_invalid_action[non_existent_iam_role] ________[0m
+[1m[31mtest_ses/test_ses.py[0m:966: in test_create_receipt_rule_invalid_action
+    [0mresponse = conn.create_receipt_rule_set(RuleSetName=[33m"[39;49;00m[33mtestRuleSet[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateReceiptRuleSet operation: Service 'ses' is not available[0m
+[31m[1m__ test_create_receipt_rule_invalid_action[non_existent_sns_topic_for_bounce] __[0m
+[1m[31mtest_ses/test_ses.py[0m:966: in test_create_receipt_rule_invalid_action
+    [0mresponse = conn.create_receipt_rule_set(RuleSetName=[33m"[39;49;00m[33mtestRuleSet[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateReceiptRuleSet operation: Service 'ses' is not available[0m
+[31m[1m_ test_create_receipt_rule_invalid_action[non_existent_sns_topic_for_workmail] _[0m
+[1m[31mtest_ses/test_ses.py[0m:966: in test_create_receipt_rule_invalid_action
+    [0mresponse = conn.create_receipt_rule_set(RuleSetName=[33m"[39;49;00m[33mtestRuleSet[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateReceiptRuleSet operation: Service 'ses' is not available[0m
+[31m[1m____ test_create_receipt_rule_invalid_action[non_existent_lambda_function] _____[0m
+[1m[31mtest_ses/test_ses.py[0m:966: in test_create_receipt_rule_invalid_action
+    [0mresponse = conn.create_receipt_rule_set(RuleSetName=[33m"[39;49;00m[33mtestRuleSet[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateReceiptRuleSet operation: Service 'ses' is not available[0m
+[31m[1m_ test_create_receipt_rule_invalid_action[non_existent_sns_topic_for_lambda_action] _[0m
+[1m[31mtest_ses/test_ses.py[0m:966: in test_create_receipt_rule_invalid_action
+    [0mresponse = conn.create_receipt_rule_set(RuleSetName=[33m"[39;49;00m[33mtestRuleSet[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateReceiptRuleSet operation: Service 'ses' is not available[0m
+[31m[1m_________________________ test_clone_receipt_rule_set __________________________[0m
+[1m[31mtest_ses/test_ses.py[0m:995: in test_clone_receipt_rule_set
+    [0mconn.create_receipt_rule_set(RuleSetName=rule_set_name)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateReceiptRuleSet operation: Service 'ses' is not available[0m
+[31m[1m_________________________ test_active_receipt_rule_set _________________________[0m
+[1m[31mtest_ses/test_ses.py[0m:1060: in test_active_receipt_rule_set
+    [0mcreate_response = conn.create_receipt_rule_set(RuleSetName=[33m"[39;49;00m[33mtestRuleSet[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateReceiptRuleSet operation: Service 'ses' is not available[0m
+[31m[1m________________________ test_describe_receipt_rule_set ________________________[0m
+[1m[31mtest_ses/test_ses.py[0m:1112: in test_describe_receipt_rule_set
+    [0mcreate_receipt_rule_set_response = conn.create_receipt_rule_set([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateReceiptRuleSet operation: Service 'ses' is not available[0m
+[31m[1m__________________ test_describe_receipt_rule_set_with_rules ___________________[0m
+[1m[31mtest_ses/test_ses.py[0m:1129: in test_describe_receipt_rule_set_with_rules
+    [0mcreate_receipt_rule_set_response = conn.create_receipt_rule_set([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateReceiptRuleSet operation: Service 'ses' is not available[0m
+[31m[1m_________________________ test_delete_receipt_rule_set _________________________[0m
+[1m[31mtest_ses/test_ses.py[0m:1223: in test_delete_receipt_rule_set
+    [0mcreate_response = conn.create_receipt_rule_set(RuleSetName=[33m"[39;49;00m[33mtestRuleSet[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateReceiptRuleSet operation: Service 'ses' is not available[0m
+[31m[1m__________________________ test_describe_receipt_rule __________________________[0m
+[1m[31mtest_ses/test_ses.py[0m:1261: in test_describe_receipt_rule
+    [0mconn.create_receipt_rule_set(RuleSetName=rule_set_name)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateReceiptRuleSet operation: Service 'ses' is not available[0m
+[31m[1m___________________________ test_update_receipt_rule ___________________________[0m
+[1m[31mtest_ses/test_ses.py[0m:1362: in test_update_receipt_rule
+    [0mconn.create_receipt_rule_set(RuleSetName=rule_set_name)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateReceiptRuleSet operation: Service 'ses' is not available[0m
+[31m[1m_______________________ test_update_receipt_rule_actions _______________________[0m
+[1m[31mtest_ses/test_ses.py[0m:1500: in test_update_receipt_rule_actions
+    [0mconn.create_receipt_rule_set(RuleSetName=rule_set_name)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateReceiptRuleSet operation: Service 'ses' is not available[0m
+[31m[1m___________________________ test_create_ses_template ___________________________[0m
+[1m[31mtest_ses/test_ses.py[0m:1601: in test_create_ses_template
+    [0mconn.create_template([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateTemplate operation: Service 'ses' is not available[0m
+[31m[1m_____________________________ test_render_template _____________________________[0m
+[1m[31mtest_ses/test_ses.py[0m:1652: in test_render_template
+    [0m[94massert[39;49;00m ex.value.response[[33m"[39;49;00m[33mError[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mTemplateDoesNotExist[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'UnknownService' == 'TemplateDoesNotExist'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- TemplateDoesNotExist[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ UnknownService[39;49;00m[90m[39;49;00m[0m
+[31m[1m________________________ test_render_template__advanced ________________________[0m
+[1m[31mtest_ses/test_ses.py[0m:1722: in test_render_template__advanced
+    [0mconn.create_template([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateTemplate operation: Service 'ses' is not available[0m
+
+[33mDuring handling of the above exception, another exception occurred:[0m
+[1m[31mtest_ses/test_ses.py[0m:1734: in test_render_template__advanced
+    [0mconn.delete_template(TemplateName=[33m"[39;49;00m[33mMTT[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the DeleteTemplate operation: Service 'ses' is not available[0m
+[31m[1m___________________________ test_update_ses_template ___________________________[0m
+[1m[31mtest_ses/test_ses.py[0m:1750: in test_update_ses_template
+    [0m[94massert[39;49;00m ex.value.response[[33m"[39;49;00m[33mError[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mTemplateDoesNotExist[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'UnknownService' == 'TemplateDoesNotExist'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- TemplateDoesNotExist[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ UnknownService[39;49;00m[90m[39;49;00m[0m
+[31m[1m______________________ test_domains_are_case_insensitive _______________________[0m
+[1m[31mtest_ses/test_ses.py[0m:1780: in test_domains_are_case_insensitive
+    [0mclient.verify_domain_identity(Domain=domain)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the VerifyDomainIdentity operation: Service 'ses' is not available[0m
+[31m[1m___________________________ test_get_send_statistics ___________________________[0m
+[1m[31mtest_ses/test_ses.py[0m:1802: in test_get_send_statistics
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mMessageRejected[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'UnknownService' == 'MessageRejected'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- MessageRejected[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ UnknownService[39;49;00m[90m[39;49;00m[0m
+[31m[1m______________________ test_set_identity_mail_from_domain ______________________[0m
+[1m[31mtest_ses/test_ses.py[0m:1836: in test_set_identity_mail_from_domain
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mInvalidParameterValue[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'UnknownService' == 'InvalidParameterValue'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- InvalidParameterValue[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ UnknownService[39;49;00m[90m[39;49;00m[0m
+[31m[1m________________ test_get_identity_mail_from_domain_attributes _________________[0m
+[1m[31mtest_ses/test_ses.py[0m:1915: in test_get_identity_mail_from_domain_attributes
+    [0mattributes = conn.get_identity_mail_from_domain_attributes([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the GetIdentityMailFromDomainAttributes operation: Service 'ses' is not available[0m
+[31m[1m__________________ test_get_identity_verification_attributes ___________________[0m
+[1m[31mtest_ses/test_ses.py[0m:1946: in test_get_identity_verification_attributes
+    [0mconn.verify_email_identity(EmailAddress=[33m"[39;49;00m[33mfoo@bar.com[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the VerifyEmailIdentity operation: Service 'ses' is not available[0m
+[31m[1m_______________ test_update_configuration_set_reputation_metrics _______________[0m
+[1m[31mtest_ses/test_ses.py[0m:1969: in test_update_configuration_set_reputation_metrics
+    [0mconn.create_configuration_set(ConfigurationSet={[33m"[39;49;00m[33mName[39;49;00m[33m"[39;49;00m: [33m"[39;49;00m[33mtest-config-set[39;49;00m[33m"[39;49;00m})[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateConfigurationSet operation: Service 'ses' is not available[0m
+[31m[1m______________________ test_get_identity_dkim_attributes _______________________[0m
+[1m[31mtest_ses/test_ses.py[0m:1991: in test_get_identity_dkim_attributes
+    [0mconn.verify_domain_identity(Domain=domain)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the VerifyDomainIdentity operation: Service 'ses' is not available[0m
+[31m[1m_________________ test_send_raw_email_single_large_attachment __________________[0m
+[1m[31mtest_ses/test_ses.py[0m:2047: in test_send_raw_email_single_large_attachment
+    [0mconn.verify_email_identity(EmailAddress=message[[33m"[39;49;00m[33mFrom[39;49;00m[33m"[39;49;00m])[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the VerifyEmailIdentity operation: Service 'ses' is not available[0m
+[31m[1m__________________ test_enable_disable_ses_sns_communication ___________________[0m
+[1m[31mtest_ses/test_ses_sns.py[0m:13: in test_enable_disable_ses_sns_communication
+    [0mconn.set_identity_notification_topic([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the SetIdentityNotificationTopic operation: Service 'ses' is not available[0m
+[31m[1m_____________________________ test_no_sns_feedback _____________________________[0m
+[1m[31mtest_ses/test_ses_sns.py[0m:98: in test_no_sns_feedback
+    [0m__test_sns_feedback__([33m"[39;49;00m[33mtest[39;49;00m[33m"[39;49;00m, [94mNone[39;49;00m)[90m[39;49;00m
+[1m[31mtest_ses/test_ses_sns.py[0m:55: in __test_sns_feedback__
+    [0m__setup_feedback_env__([90m[39;49;00m
+[1m[31mtest_ses/test_ses_sns.py[0m:36: in __setup_feedback_env__
+    [0mses_conn.verify_domain_identity(Domain=domain)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the VerifyDomainIdentity operation: Service 'ses' is not available[0m
+[31m[1m___________________________ test_sns_feedback_bounce ___________________________[0m
+[1m[31mtest_ses/test_ses_sns.py[0m:103: in test_sns_feedback_bounce
+    [0m__test_sns_feedback__(SESFeedback.BOUNCE_ADDR, SESFeedback.BOUNCE)[90m[39;49;00m
+[1m[31mtest_ses/test_ses_sns.py[0m:55: in __test_sns_feedback__
+    [0m__setup_feedback_env__([90m[39;49;00m
+[1m[31mtest_ses/test_ses_sns.py[0m:36: in __setup_feedback_env__
+    [0mses_conn.verify_domain_identity(Domain=domain)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the VerifyDomainIdentity operation: Service 'ses' is not available[0m
+[31m[1m_________________________ test_sns_feedback_complaint __________________________[0m
+[1m[31mtest_ses/test_ses_sns.py[0m:108: in test_sns_feedback_complaint
+    [0m__test_sns_feedback__(SESFeedback.COMPLAINT_ADDR, SESFeedback.COMPLAINT)[90m[39;49;00m
+[1m[31mtest_ses/test_ses_sns.py[0m:55: in __test_sns_feedback__
+    [0m__setup_feedback_env__([90m[39;49;00m
+[1m[31mtest_ses/test_ses_sns.py[0m:36: in __setup_feedback_env__
+    [0mses_conn.verify_domain_identity(Domain=domain)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the VerifyDomainIdentity operation: Service 'ses' is not available[0m
+[31m[1m__________________________ test_sns_feedback_delivery __________________________[0m
+[1m[31mtest_ses/test_ses_sns.py[0m:113: in test_sns_feedback_delivery
+    [0m__test_sns_feedback__(SESFeedback.SUCCESS_ADDR, SESFeedback.DELIVERY)[90m[39;49;00m
+[1m[31mtest_ses/test_ses_sns.py[0m:55: in __test_sns_feedback__
+    [0m__setup_feedback_env__([90m[39;49;00m
+[1m[31mtest_ses/test_ses_sns.py[0m:36: in __setup_feedback_env__
+    [0mses_conn.verify_domain_identity(Domain=domain)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the VerifyDomainIdentity operation: Service 'ses' is not available[0m
+[31m[1m_____________________ test_sns_feedback_delivery_raw_email _____________________[0m
+[1m[31mtest_ses/test_ses_sns.py[0m:118: in test_sns_feedback_delivery_raw_email
+    [0m__test_sns_feedback__([90m[39;49;00m
+[1m[31mtest_ses/test_ses_sns.py[0m:55: in __test_sns_feedback__
+    [0m__setup_feedback_env__([90m[39;49;00m
+[1m[31mtest_ses/test_ses_sns.py[0m:36: in __setup_feedback_env__
+    [0mses_conn.verify_domain_identity(Domain=domain)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the VerifyDomainIdentity operation: Service 'ses' is not available[0m
+[31m[1m___________ test_get_identity_notification_attributes_default_values ___________[0m
+[1m[31mtest_ses/test_ses_sns.py[0m:126: in test_get_identity_notification_attributes_default_values
+    [0mses.verify_domain_identity(Domain=[33m"[39;49;00m[33mexample.com[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the VerifyDomainIdentity operation: Service 'ses' is not available[0m
+[31m[1m________________ test_set_identity_feedback_forwarding_enabled _________________[0m
+[1m[31mtest_ses/test_ses_sns.py[0m:147: in test_set_identity_feedback_forwarding_enabled
+    [0mses.verify_domain_identity(Domain=[33m"[39;49;00m[33mexample.com[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the VerifyDomainIdentity operation: Service 'ses' is not available[0m
+[33m=============================== warnings summary ===============================[0m
+tests/test_ses/test_ses.py: 61 warnings
+tests/test_ses/test_ses_sns.py: 8 warnings
+  /Users/lucas/.cache/fakecloud/moto/.venv/lib/python3.9/site-packages/boto3/compat.py:89: PythonDeprecationWarning: Boto3 will no longer support Python 3.9 starting April 29, 2026. To continue receiving service updates, bug fixes, and security updates please upgrade to Python 3.10 or later. More information can be found here: https://aws.amazon.com/blogs/developer/python-support-policy-updates-for-aws-sdks-and-tools/
+    warnings.warn(warning, PythonDeprecationWarning)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+[36m[1m=========================== short test summary info ============================[0m
+[31mFAILED[0m test_ses/test_ses.py::[1mtest_list_verified_identities[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ses/test_ses.py::[1mtest_identities_are_region_specific[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ses/test_ses.py::[1mtest_verify_email_identity_idempotency[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ses/test_ses.py::[1mtest_verify_email_address[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ses/test_ses.py::[1mtest_delete_identity[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ses/test_ses.py::[1mtest_send_email[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ses/test_ses.py::[1mtest_send_email_when_verify_source[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ses/test_ses.py::[1mtest_send_unverified_email_with_chevrons[0m - AssertionError: assert 'UnknownService' == 'MessageRejected'
+[31mFAILED[0m test_ses/test_ses.py::[1mtest_send_email_invalid_address[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ses/test_ses.py::[1mtest_send_bulk_templated_email[0m - AssertionError: assert 'UnknownService' == 'MessageRejected'
+[31mFAILED[0m test_ses/test_ses.py::[1mtest_send_templated_email[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ses/test_ses.py::[1mtest_send_templated_email_invalid_address[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ses/test_ses.py::[1mtest_send_html_email[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ses/test_ses.py::[1mtest_send_raw_email[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ses/test_ses.py::[1mtest_send_raw_email_validate_domain[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ses/test_ses.py::[1mtest_send_raw_email_invalid_address[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ses/test_ses.py::[1mtest_send_raw_email_without_source[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ses/test_ses.py::[1mtest_send_email_notification_with_encoded_sender[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ses/test_ses.py::[1mtest_create_configuration_set[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ses/test_ses.py::[1mtest_describe_configuration_set[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ses/test_ses.py::[1mtest_list_configuration_sets[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ses/test_ses.py::[1mtest_list_configuration_sets_pagination[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ses/test_ses.py::[1mtest_delete_configuration_set[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ses/test_ses.py::[1mtest_create_receipt_rule_set[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ses/test_ses.py::[1mtest_create_receipt_rule_set_invalid[having_invalid_characters][0m - AssertionError: assert 'UnknownService' == 'ValidationError'
+[31mFAILED[0m test_ses/test_ses.py::[1mtest_create_receipt_rule_set_invalid[invalid_start_character][0m - AssertionError: assert 'UnknownService' == 'ValidationError'
+[31mFAILED[0m test_ses/test_ses.py::[1mtest_create_receipt_rule_set_invalid[invalid_end_character][0m - AssertionError: assert 'UnknownService' == 'ValidationError'
+[31mFAILED[0m test_ses/test_ses.py::[1mtest_create_receipt_rule_set_invalid[exceeding_max_length][0m - AssertionError: assert 'UnknownService' == 'ValidationError'
+[31mFAILED[0m test_ses/test_ses.py::[1mtest_create_receipt_rule[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ses/test_ses.py::[1mtest_create_receipt_rule_invalid_top_level[invalid_rule_set_name][0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ses/test_ses.py::[1mtest_create_receipt_rule_invalid_top_level[invalid_rule_name][0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ses/test_ses.py::[1mtest_create_receipt_rule_invalid_top_level[invalid_after_rule_param][0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ses/test_ses.py::[1mtest_create_receipt_rule_invalid_action[non_existent_bucket][0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ses/test_ses.py::[1mtest_create_receipt_rule_invalid_action[non_existent_kms_key][0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ses/test_ses.py::[1mtest_create_receipt_rule_invalid_action[non_existent_sns_topic][0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ses/test_ses.py::[1mtest_create_receipt_rule_invalid_action[non_existent_iam_role][0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ses/test_ses.py::[1mtest_create_receipt_rule_invalid_action[non_existent_sns_topic_for_bounce][0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ses/test_ses.py::[1mtest_create_receipt_rule_invalid_action[non_existent_sns_topic_for_workmail][0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ses/test_ses.py::[1mtest_create_receipt_rule_invalid_action[non_existent_lambda_function][0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ses/test_ses.py::[1mtest_create_receipt_rule_invalid_action[non_existent_sns_topic_for_lambda_action][0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ses/test_ses.py::[1mtest_clone_receipt_rule_set[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ses/test_ses.py::[1mtest_active_receipt_rule_set[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ses/test_ses.py::[1mtest_describe_receipt_rule_set[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ses/test_ses.py::[1mtest_describe_receipt_rule_set_with_rules[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ses/test_ses.py::[1mtest_delete_receipt_rule_set[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ses/test_ses.py::[1mtest_describe_receipt_rule[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ses/test_ses.py::[1mtest_update_receipt_rule[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ses/test_ses.py::[1mtest_update_receipt_rule_actions[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ses/test_ses.py::[1mtest_create_ses_template[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ses/test_ses.py::[1mtest_render_template[0m - AssertionError: assert 'UnknownService' == 'TemplateDoesNotExist'
+[31mFAILED[0m test_ses/test_ses.py::[1mtest_render_template__advanced[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ses/test_ses.py::[1mtest_update_ses_template[0m - AssertionError: assert 'UnknownService' == 'TemplateDoesNotExist'
+[31mFAILED[0m test_ses/test_ses.py::[1mtest_domains_are_case_insensitive[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ses/test_ses.py::[1mtest_get_send_statistics[0m - AssertionError: assert 'UnknownService' == 'MessageRejected'
+[31mFAILED[0m test_ses/test_ses.py::[1mtest_set_identity_mail_from_domain[0m - AssertionError: assert 'UnknownService' == 'InvalidParameterValue'
+[31mFAILED[0m test_ses/test_ses.py::[1mtest_get_identity_mail_from_domain_attributes[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ses/test_ses.py::[1mtest_get_identity_verification_attributes[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ses/test_ses.py::[1mtest_update_configuration_set_reputation_metrics[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ses/test_ses.py::[1mtest_get_identity_dkim_attributes[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ses/test_ses.py::[1mtest_send_raw_email_single_large_attachment[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ses/test_ses_sns.py::[1mtest_enable_disable_ses_sns_communication[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ses/test_ses_sns.py::[1mtest_no_sns_feedback[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ses/test_ses_sns.py::[1mtest_sns_feedback_bounce[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ses/test_ses_sns.py::[1mtest_sns_feedback_complaint[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ses/test_ses_sns.py::[1mtest_sns_feedback_delivery[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ses/test_ses_sns.py::[1mtest_sns_feedback_delivery_raw_email[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ses/test_ses_sns.py::[1mtest_get_identity_notification_attributes_default_values[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ses/test_ses_sns.py::[1mtest_set_identity_feedback_forwarding_enabled[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31m[31m[1m68 failed[0m, [32m11 passed[0m, [33m69 warnings[0m[31m in 2.89s[0m[0m

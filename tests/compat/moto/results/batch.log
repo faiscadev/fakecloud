@@ -1,0 +1,1333 @@
+[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[32m.[0m[31mF[0m[32m.[0m[32m.[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[33ms[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31m [ 65%]
+[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[31m                                   [100%][0m
+=================================== FAILURES ===================================
+[31m[1m________________________ test_batch_regions[us-west-2] _________________________[0m
+[1m[31mtest_batch/test_batch.py[0m:11: in test_batch_regions
+    [0mresp = client.describe_jobs(jobs=[[33m"[39;49;00m[33m"[39;49;00m])[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the DescribeJobs operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>bba33a5d-cbcf-4bc3-a8a2-8957625dd76c</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______________________ test_batch_regions[cn-northwest-1] ______________________[0m
+[1m[31mtest_batch/test_batch.py[0m:11: in test_batch_regions
+    [0mresp = client.describe_jobs(jobs=[[33m"[39;49;00m[33m"[39;49;00m])[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the DescribeJobs operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>82651e60-e57b-4127-b315-1844aa57d335</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______________________________ test_create_env_cf ______________________________[0m
+[1m[31mtest_batch/test_batch_cloudformation.py[0m:54: in test_create_env_cf
+    [0m_, subnet_id, sg_id, iam_arn = _setup(ec2_client, iam_client)[90m[39;49;00m
+[1m[31mtest_batch/test_batch_cloudformation.py[0m:27: in _setup
+    [0mresp = ec2_client.create_vpc(CidrBlock=[33m"[39;49;00m[33m172.30.0.0/24[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m___________________________ test_create_job_queue_cf ___________________________[0m
+[1m[31mtest_batch/test_batch_cloudformation.py[0m:97: in test_create_job_queue_cf
+    [0m_, subnet_id, sg_id, iam_arn = _setup(ec2_client, iam_client)[90m[39;49;00m
+[1m[31mtest_batch/test_batch_cloudformation.py[0m:27: in _setup
+    [0mresp = ec2_client.create_vpc(CidrBlock=[33m"[39;49;00m[33m172.30.0.0/24[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m____________________________ test_create_job_def_cf ____________________________[0m
+[1m[31mtest_batch/test_batch_cloudformation.py[0m:160: in test_create_job_def_cf
+    [0m_, subnet_id, sg_id, iam_arn = _setup(ec2_client, iam_client)[90m[39;49;00m
+[1m[31mtest_batch/test_batch_cloudformation.py[0m:27: in _setup
+    [0mresp = ec2_client.create_vpc(CidrBlock=[33m"[39;49;00m[33m172.30.0.0/24[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m________________ test_create_managed_compute_environment[True] _________________[0m
+[1m[31mtest_batch/test_batch_compute_envs.py[0m:15: in test_create_managed_compute_environment
+    [0m_, subnet_id, sg_id, iam_arn = _setup(ec2_client, iam_client)[90m[39;49;00m
+[1m[31mtest_batch/__init__.py[0m:26: in _setup
+    [0mresp = ec2_client.create_vpc(CidrBlock=[33m"[39;49;00m[33m172.30.0.0/24[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m________________ test_create_managed_compute_environment[False] ________________[0m
+[1m[31mtest_batch/test_batch_compute_envs.py[0m:15: in test_create_managed_compute_environment
+    [0m_, subnet_id, sg_id, iam_arn = _setup(ec2_client, iam_client)[90m[39;49;00m
+[1m[31mtest_batch/__init__.py[0m:26: in _setup
+    [0mresp = ec2_client.create_vpc(CidrBlock=[33m"[39;49;00m[33m172.30.0.0/24[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m___________ test_create_managed_compute_environment_with_tags[True] ____________[0m
+[1m[31mtest_batch/test_batch_compute_envs.py[0m:67: in test_create_managed_compute_environment_with_tags
+    [0m_, subnet_id, sg_id, iam_arn = _setup(ec2_client, iam_client)[90m[39;49;00m
+[1m[31mtest_batch/__init__.py[0m:26: in _setup
+    [0mresp = ec2_client.create_vpc(CidrBlock=[33m"[39;49;00m[33m172.30.0.0/24[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m___________ test_create_managed_compute_environment_with_tags[False] ___________[0m
+[1m[31mtest_batch/test_batch_compute_envs.py[0m:67: in test_create_managed_compute_environment_with_tags
+    [0m_, subnet_id, sg_id, iam_arn = _setup(ec2_client, iam_client)[90m[39;49;00m
+[1m[31mtest_batch/__init__.py[0m:26: in _setup
+    [0mresp = ec2_client.create_vpc(CidrBlock=[33m"[39;49;00m[33m172.30.0.0/24[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m_________ test_create_managed_compute_environment_with_instance_family _________[0m
+[1m[31mtest_batch/test_batch_compute_envs.py[0m:129: in test_create_managed_compute_environment_with_instance_family
+    [0m_, subnet_id, sg_id, iam_arn = _setup(ec2_client, iam_client)[90m[39;49;00m
+[1m[31mtest_batch/__init__.py[0m:26: in _setup
+    [0mresp = ec2_client.create_vpc(CidrBlock=[33m"[39;49;00m[33m172.30.0.0/24[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m______ test_create_managed_compute_environment_with_unknown_instance_type ______[0m
+[1m[31mtest_batch/test_batch_compute_envs.py[0m:170: in test_create_managed_compute_environment_with_unknown_instance_type
+    [0m_, subnet_id, sg_id, iam_arn = _setup(ec2_client, iam_client)[90m[39;49;00m
+[1m[31mtest_batch/__init__.py[0m:26: in _setup
+    [0mresp = ec2_client.create_vpc(CidrBlock=[33m"[39;49;00m[33m172.30.0.0/24[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m__________________ test_create_unmanaged_compute_environment ___________________[0m
+[1m[31mtest_batch/test_batch_compute_envs.py[0m:203: in test_create_unmanaged_compute_environment
+    [0m_, _, _, iam_arn = _setup(ec2_client, iam_client)[90m[39;49;00m
+[1m[31mtest_batch/__init__.py[0m:26: in _setup
+    [0mresp = ec2_client.create_vpc(CidrBlock=[33m"[39;49;00m[33m172.30.0.0/24[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m______________________ test_describe_compute_environment _______________________[0m
+[1m[31mtest_batch/test_batch_compute_envs.py[0m:238: in test_describe_compute_environment
+    [0m_, _, _, iam_arn = _setup(ec2_client, iam_client)[90m[39;49;00m
+[1m[31mtest_batch/__init__.py[0m:26: in _setup
+    [0mresp = ec2_client.create_vpc(CidrBlock=[33m"[39;49;00m[33m172.30.0.0/24[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m__________________ test_delete_unmanaged_compute_environment ___________________[0m
+[1m[31mtest_batch/test_batch_compute_envs.py[0m:268: in test_delete_unmanaged_compute_environment
+    [0m_, _, _, iam_arn = _setup(ec2_client, iam_client)[90m[39;49;00m
+[1m[31mtest_batch/__init__.py[0m:26: in _setup
+    [0mresp = ec2_client.create_vpc(CidrBlock=[33m"[39;49;00m[33m172.30.0.0/24[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m___________________ test_delete_managed_compute_environment ____________________[0m
+[1m[31mtest_batch/test_batch_compute_envs.py[0m:297: in test_delete_managed_compute_environment
+    [0m_, subnet_id, sg_id, iam_arn = _setup(ec2_client, iam_client)[90m[39;49;00m
+[1m[31mtest_batch/__init__.py[0m:26: in _setup
+    [0mresp = ec2_client.create_vpc(CidrBlock=[33m"[39;49;00m[33m172.30.0.0/24[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m_______________ test_update_unmanaged_compute_environment_state ________________[0m
+[1m[31mtest_batch/test_batch_compute_envs.py[0m:349: in test_update_unmanaged_compute_environment_state
+    [0m_, _, _, iam_arn = _setup(ec2_client, iam_client)[90m[39;49;00m
+[1m[31mtest_batch/__init__.py[0m:26: in _setup
+    [0mresp = ec2_client.create_vpc(CidrBlock=[33m"[39;49;00m[33m172.30.0.0/24[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m_____________________________ test_update_iam_role _____________________________[0m
+[1m[31mtest_batch/test_batch_compute_envs.py[0m:372: in test_update_iam_role
+    [0m_, _, _, iam_arn = _setup(ec2_client, iam_client)[90m[39;49;00m
+[1m[31mtest_batch/__init__.py[0m:26: in _setup
+    [0mresp = ec2_client.create_vpc(CidrBlock=[33m"[39;49;00m[33m172.30.0.0/24[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m___________ test_create_fargate_managed_compute_environment[FARGATE] ___________[0m
+[1m[31mtest_batch/test_batch_compute_envs.py[0m:406: in test_create_fargate_managed_compute_environment
+    [0m_, subnet_id, sg_id, iam_arn = _setup(ec2_client, iam_client)[90m[39;49;00m
+[1m[31mtest_batch/__init__.py[0m:26: in _setup
+    [0mresp = ec2_client.create_vpc(CidrBlock=[33m"[39;49;00m[33m172.30.0.0/24[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m________ test_create_fargate_managed_compute_environment[FARGATE_SPOT] _________[0m
+[1m[31mtest_batch/test_batch_compute_envs.py[0m:406: in test_create_fargate_managed_compute_environment
+    [0m_, subnet_id, sg_id, iam_arn = _setup(ec2_client, iam_client)[90m[39;49;00m
+[1m[31mtest_batch/__init__.py[0m:26: in _setup
+    [0mresp = ec2_client.create_vpc(CidrBlock=[33m"[39;49;00m[33m172.30.0.0/24[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m_____ test_create_ec2_managed_compute_environment__without_required_params _____[0m
+[1m[31mtest_batch/test_batch_compute_envs.py[0m:437: in test_create_ec2_managed_compute_environment__without_required_params
+    [0m_, subnet_id, _, iam_arn = _setup(ec2_client, iam_client)[90m[39;49;00m
+[1m[31mtest_batch/__init__.py[0m:26: in _setup
+    [0mresp = ec2_client.create_vpc(CidrBlock=[33m"[39;49;00m[33m172.30.0.0/24[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m_______________ test_register_job_definition_with_eks_properties _______________[0m
+[1m[31mtest_batch/test_batch_eks.py[0m:16: in test_register_job_definition_with_eks_properties
+    [0m_, _, _, iam_arn = _setup(ec2_client, iam_client)[90m[39;49;00m
+[1m[31mtest_batch/__init__.py[0m:26: in _setup
+    [0mresp = ec2_client.create_vpc(CidrBlock=[33m"[39;49;00m[33m172.30.0.0/24[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m_________________ test_submit_job_with_eks_properties_override _________________[0m
+[1m[31mtest_batch/test_batch_eks.py[0m:67: in test_submit_job_with_eks_properties_override
+    [0m_, _, _, iam_arn = _setup(ec2_client, iam_client)[90m[39;49;00m
+[1m[31mtest_batch/__init__.py[0m:26: in _setup
+    [0mresp = ec2_client.create_vpc(CidrBlock=[33m"[39;49;00m[33m172.30.0.0/24[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m_____________________ test_submit_eks_job_without_override _____________________[0m
+[1m[31mtest_batch/test_batch_eks.py[0m:167: in test_submit_eks_job_without_override
+    [0m_, _, _, iam_arn = _setup(ec2_client, iam_client)[90m[39;49;00m
+[1m[31mtest_batch/__init__.py[0m:26: in _setup
+    [0mresp = ec2_client.create_vpc(CidrBlock=[33m"[39;49;00m[33m172.30.0.0/24[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m____________ test_eks_job_definition_validation_missing_containers _____________[0m
+[1m[31mtest_batch/test_batch_eks.py[0m:245: in test_eks_job_definition_validation_missing_containers
+    [0m[94massert[39;49;00m [33m"[39;49;00m[33mmust contain at least one container[39;49;00m[33m"[39;49;00m [95min[39;49;00m [96mstr[39;49;00m(exc.value)[90m[39;49;00m
+[1m[31mE   assert 'must contain at least one container' in 'An error occurred (400) when calling the RegisterJobDefinition operation: <?xml version="1.0" encoding="UTF-8"?><Erro...on from request</Message>\n  </Error>\n  <RequestId>52cb15b4-0a43-416a-8fa1-af7e7adc9467</RequestId>\n</ErrorResponse>'[0m
+[1m[31mE    +  where 'An error occurred (400) when calling the RegisterJobDefinition operation: <?xml version="1.0" encoding="UTF-8"?><Erro...on from request</Message>\n  </Error>\n  <RequestId>52cb15b4-0a43-416a-8fa1-af7e7adc9467</RequestId>\n</ErrorResponse>' = str(ClientError('An error occurred (400) when calling the RegisterJobDefinition operation: <?xml version="1.0" encoding="U...n from request</Message>\n  </Error>\n  <RequestId>52cb15b4-0a43-416a-8fa1-af7e7adc9467</RequestId>\n</ErrorResponse>'))[0m
+[1m[31mE    +    where ClientError('An error occurred (400) when calling the RegisterJobDefinition operation: <?xml version="1.0" encoding="U...n from request</Message>\n  </Error>\n  <RequestId>52cb15b4-0a43-416a-8fa1-af7e7adc9467</RequestId>\n</ErrorResponse>') = <ExceptionInfo ClientError('An error occurred (400) when calling the RegisterJobDefinition operation: <?xml version="1...quest</Message>\n  </Error>\n  <RequestId>52cb15b4-0a43-416a-8fa1-af7e7adc9467</RequestId>\n</ErrorResponse>') tblen=4>.value[0m
+[31m[1m_______________________ test_eks_job_definition_defaults _______________________[0m
+[1m[31mtest_batch/test_batch_eks.py[0m:280: in test_eks_job_definition_defaults
+    [0mbatch_client.register_job_definition([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the RegisterJobDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>e1c12ced-b5f5-4311-9ba7-1cd8e9a3713d</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m____________________________ test_create_job_queue _____________________________[0m
+[1m[31mtest_batch/test_batch_job_queue.py[0m:15: in test_create_job_queue
+    [0m_, _, _, iam_arn = _setup(ec2_client, iam_client)[90m[39;49;00m
+[1m[31mtest_batch/__init__.py[0m:26: in _setup
+    [0mresp = ec2_client.create_vpc(CidrBlock=[33m"[39;49;00m[33m172.30.0.0/24[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m____________________ test_describe_job_queue_unknown_value _____________________[0m
+[1m[31mtest_batch/test_batch_job_queue.py[0m:49: in test_describe_job_queue_unknown_value
+    [0mresp = batch_client.describe_job_queues(jobQueues=[[33m"[39;49;00m[33mtest_invalid_queue[39;49;00m[33m"[39;49;00m])[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the DescribeJobQueues operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>5479c674-f575-4970-8fb2-3f406d0730c9</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_________________________ test_create_job_queue_twice __________________________[0m
+[1m[31mtest_batch/test_batch_job_queue.py[0m:56: in test_create_job_queue_twice
+    [0m_, _, _, iam_arn = _setup(ec2_client, iam_client)[90m[39;49;00m
+[1m[31mtest_batch/__init__.py[0m:26: in _setup
+    [0mresp = ec2_client.create_vpc(CidrBlock=[33m"[39;49;00m[33m172.30.0.0/24[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m____________________ test_create_job_queue_incorrect_state _____________________[0m
+[1m[31mtest_batch/test_batch_job_queue.py[0m:101: in test_create_job_queue_incorrect_state
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mClientException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'ClientException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ClientException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m______________ test_create_job_queue_without_compute_environment _______________[0m
+[1m[31mtest_batch/test_batch_job_queue.py[0m:117: in test_create_job_queue_without_compute_environment
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mClientException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'ClientException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ClientException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m____________________________ test_job_queue_bad_arn ____________________________[0m
+[1m[31mtest_batch/test_batch_job_queue.py[0m:124: in test_job_queue_bad_arn
+    [0m_, _, _, iam_arn = _setup(ec2_client, iam_client)[90m[39;49;00m
+[1m[31mtest_batch/__init__.py[0m:26: in _setup
+    [0mresp = ec2_client.create_vpc(CidrBlock=[33m"[39;49;00m[33m172.30.0.0/24[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m____________________________ test_update_job_queue _____________________________[0m
+[1m[31mtest_batch/test_batch_job_queue.py[0m:152: in test_update_job_queue
+    [0m_, _, _, iam_arn = _setup(ec2_client, iam_client)[90m[39;49;00m
+[1m[31mtest_batch/__init__.py[0m:26: in _setup
+    [0mresp = ec2_client.create_vpc(CidrBlock=[33m"[39;49;00m[33m172.30.0.0/24[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m____________________________ test_delete_job_queue _____________________________[0m
+[1m[31mtest_batch/test_batch_job_queue.py[0m:189: in test_delete_job_queue
+    [0m_, _, _, iam_arn = _setup(ec2_client, iam_client)[90m[39;49;00m
+[1m[31mtest_batch/__init__.py[0m:26: in _setup
+    [0mresp = ec2_client.create_vpc(CidrBlock=[33m"[39;49;00m[33m172.30.0.0/24[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m___________________________ test_submit_job_by_name ____________________________[0m
+[1m[31mtest_batch/test_batch_jobs.py[0m:19: in test_submit_job_by_name
+    [0m_, _, _, iam_arn = _setup(ec2_client, iam_client)[90m[39;49;00m
+[1m[31mtest_batch/__init__.py[0m:26: in _setup
+    [0mresp = ec2_client.create_vpc(CidrBlock=[33m"[39;49;00m[33m172.30.0.0/24[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m__________________________ test_submit_job_array_size __________________________[0m
+[1m[31mtest_batch/test_batch_jobs.py[0m:100: in test_submit_job_array_size
+    [0m_, _, _, iam_arn = _setup(ec2_client, iam_client)[90m[39;49;00m
+[1m[31mtest_batch/__init__.py[0m:26: in _setup
+    [0mresp = ec2_client.create_vpc(CidrBlock=[33m"[39;49;00m[33m172.30.0.0/24[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m_______________________________ test_submit_job ________________________________[0m
+[1m[31mtest_batch/test_batch_jobs.py[0m:175: in test_submit_job
+    [0m_, _, _, iam_arn = _setup(ec2_client, iam_client)[90m[39;49;00m
+[1m[31mtest_batch/__init__.py[0m:26: in _setup
+    [0mresp = ec2_client.create_vpc(CidrBlock=[33m"[39;49;00m[33m172.30.0.0/24[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m__________________________ test_submit_job_multinode ___________________________[0m
+[1m[31mtest_batch/test_batch_jobs.py[0m:234: in test_submit_job_multinode
+    [0m_, _, _, iam_arn = _setup(ec2_client, iam_client)[90m[39;49;00m
+[1m[31mtest_batch/__init__.py[0m:26: in _setup
+    [0mresp = ec2_client.create_vpc(CidrBlock=[33m"[39;49;00m[33m172.30.0.0/24[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m________________________________ test_list_jobs ________________________________[0m
+[1m[31mtest_batch/test_batch_jobs.py[0m:295: in test_list_jobs
+    [0m_, _, _, iam_arn = _setup(ec2_client, iam_client)[90m[39;49;00m
+[1m[31mtest_batch/__init__.py[0m:26: in _setup
+    [0mresp = ec2_client.create_vpc(CidrBlock=[33m"[39;49;00m[33m172.30.0.0/24[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m______________________________ test_terminate_job ______________________________[0m
+[1m[31mtest_batch/test_batch_jobs.py[0m:374: in test_terminate_job
+    [0m_, _, _, iam_arn = _setup(ec2_client, iam_client)[90m[39;49;00m
+[1m[31mtest_batch/__init__.py[0m:26: in _setup
+    [0mresp = ec2_client.create_vpc(CidrBlock=[33m"[39;49;00m[33m172.30.0.0/24[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m________________________ test_terminate_nonexisting_job ________________________[0m
+[1m[31mtest_batch/test_batch_jobs.py[0m:414: in test_terminate_nonexisting_job
+    [0mresp = batch_client.terminate_job([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the TerminateJob operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>07ce069d-f6a3-4ed4-90b8-02384ab91f42</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m__________________ test_terminate_job_empty_argument_strings ___________________[0m
+[1m[31mtest_batch/test_batch_jobs.py[0m:428: in test_terminate_job_empty_argument_strings
+    [0m[94massert[39;49;00m exc.match([33m"[39;49;00m[33mClientException[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31mE   AssertionError: Regex pattern did not match.[0m
+[1m[31mE    Regex: 'ClientException'[0m
+[1m[31mE    Input: 'An error occurred (400) when calling the TerminateJob operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>\n  <Error>\n    <Type>Sender</Type>\n    <Code>MissingAction</Code>\n    <Message>Could not determine target service or action from request</Message>\n  </Error>\n  <RequestId>012891cd-3d70-4842-8322-2c29d5f6be69</RequestId>\n</ErrorResponse>'[0m
+[31m[1m___________________________ test_cancel_pending_job ____________________________[0m
+[1m[31mtest_batch/test_batch_jobs.py[0m:440: in test_cancel_pending_job
+    [0m_, _, _, iam_arn = _setup(ec2_client, iam_client)[90m[39;49;00m
+[1m[31mtest_batch/__init__.py[0m:26: in _setup
+    [0mresp = ec2_client.create_vpc(CidrBlock=[33m"[39;49;00m[33m172.30.0.0/24[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m___________________________ test_cancel_running_job ____________________________[0m
+[1m[31mtest_batch/test_batch_jobs.py[0m:478: in test_cancel_running_job
+    [0m_, _, _, iam_arn = _setup(ec2_client, iam_client)[90m[39;49;00m
+[1m[31mtest_batch/__init__.py[0m:26: in _setup
+    [0mresp = ec2_client.create_vpc(CidrBlock=[33m"[39;49;00m[33m172.30.0.0/24[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m_________________________ test_cancel_nonexisting_job __________________________[0m
+[1m[31mtest_batch/test_batch_jobs.py[0m:508: in test_cancel_nonexisting_job
+    [0mresp = batch_client.cancel_job([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CancelJob operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>fc2d7bac-3fbd-4acf-919f-dea89ad2058e</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m____________________ test_cancel_job_empty_argument_strings ____________________[0m
+[1m[31mtest_batch/test_batch_jobs.py[0m:522: in test_cancel_job_empty_argument_strings
+    [0m[94massert[39;49;00m exc.match([33m"[39;49;00m[33mClientException[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31mE   AssertionError: Regex pattern did not match.[0m
+[1m[31mE    Regex: 'ClientException'[0m
+[1m[31mE    Input: 'An error occurred (400) when calling the CancelJob operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>\n  <Error>\n    <Type>Sender</Type>\n    <Code>MissingAction</Code>\n    <Message>Could not determine target service or action from request</Message>\n  </Error>\n  <RequestId>48a5d18b-53e7-4d3a-854d-59218ca875a4</RequestId>\n</ErrorResponse>'[0m
+[31m[1m_______________________________ test_failed_job ________________________________[0m
+[1m[31mtest_batch/test_batch_jobs.py[0m:552: in test_failed_job
+    [0m_, _, _, iam_arn = _setup(ec2_client, iam_client)[90m[39;49;00m
+[1m[31mtest_batch/__init__.py[0m:26: in _setup
+    [0mresp = ec2_client.create_vpc(CidrBlock=[33m"[39;49;00m[33m172.30.0.0/24[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m______________________________ test_dependencies _______________________________[0m
+[1m[31mtest_batch/test_batch_jobs.py[0m:582: in test_dependencies
+    [0m_, _, _, iam_arn = _setup(ec2_client, iam_client)[90m[39;49;00m
+[1m[31mtest_batch/__init__.py[0m:26: in _setup
+    [0mresp = ec2_client.create_vpc(CidrBlock=[33m"[39;49;00m[33m172.30.0.0/24[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m___________________________ test_failed_dependencies ___________________________[0m
+[1m[31mtest_batch/test_batch_jobs.py[0m:665: in test_failed_dependencies
+    [0m_, _, _, iam_arn = _setup(ec2_client, iam_client)[90m[39;49;00m
+[1m[31mtest_batch/__init__.py[0m:26: in _setup
+    [0mresp = ec2_client.create_vpc(CidrBlock=[33m"[39;49;00m[33m172.30.0.0/24[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m___________________________ test_container_overrides ___________________________[0m
+[1m[31mtest_batch/test_batch_jobs.py[0m:769: in test_container_overrides
+    [0m_, _, _, iam_arn = _setup(ec2_client, iam_client)[90m[39;49;00m
+[1m[31mtest_batch/__init__.py[0m:26: in _setup
+    [0mresp = ec2_client.create_vpc(CidrBlock=[33m"[39;49;00m[33m172.30.0.0/24[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m__________________________ test_update_job_definition __________________________[0m
+[1m[31mtest_batch/test_batch_jobs.py[0m:970: in test_update_job_definition
+    [0mbatch_client.register_job_definition([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the RegisterJobDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>a66b8b58-951e-4996-ab40-4170e3e92381</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m__________________ test_register_job_definition_with_timeout ___________________[0m
+[1m[31mtest_batch/test_batch_jobs.py[0m:1011: in test_register_job_definition_with_timeout
+    [0mbatch_client.register_job_definition([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the RegisterJobDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>5f3fd301-1fd4-4b36-ab63-079198519005</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_________________________ test_submit_job_with_timeout _________________________[0m
+[1m[31mtest_batch/test_batch_jobs.py[0m:1028: in test_submit_job_with_timeout
+    [0m_, _, _, iam_arn = _setup(ec2_client, iam_client)[90m[39;49;00m
+[1m[31mtest_batch/__init__.py[0m:26: in _setup
+    [0mresp = ec2_client.create_vpc(CidrBlock=[33m"[39;49;00m[33m172.30.0.0/24[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m________________ test_submit_job_with_timeout_set_at_definition ________________[0m
+[1m[31mtest_batch/test_batch_jobs.py[0m:1056: in test_submit_job_with_timeout_set_at_definition
+    [0m_, _, _, iam_arn = _setup(ec2_client, iam_client)[90m[39;49;00m
+[1m[31mtest_batch/__init__.py[0m:26: in _setup
+    [0mresp = ec2_client.create_vpc(CidrBlock=[33m"[39;49;00m[33m172.30.0.0/24[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m_________________________ test_submit_job_invalid_name _________________________[0m
+[1m[31mtest_batch/test_batch_jobs.py[0m:1095: in test_submit_job_invalid_name
+    [0m[94massert[39;49;00m exc.match([33m"[39;49;00m[33mClientException[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31mE   AssertionError: Regex pattern did not match.[0m
+[1m[31mE    Regex: 'ClientException'[0m
+[1m[31mE    Input: 'An error occurred (400) when calling the SubmitJob operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>\n  <Error>\n    <Type>Sender</Type>\n    <Code>MissingAction</Code>\n    <Message>Could not determine target service or action from request</Message>\n  </Error>\n  <RequestId>1115ac41-5b3c-4cb4-80b4-1f2606c81308</RequestId>\n</ErrorResponse>'[0m
+[31m[1m_______________________ test_submit_job_with_parameters ________________________[0m
+[1m[31mtest_batch/test_batch_jobs.py[0m:1120: in test_submit_job_with_parameters
+    [0m_, _, _, iam_arn = _setup(ec2_client, iam_client)[90m[39;49;00m
+[1m[31mtest_batch/__init__.py[0m:26: in _setup
+    [0mresp = ec2_client.create_vpc(CidrBlock=[33m"[39;49;00m[33m172.30.0.0/24[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m________________________ test_create_scheduling_policy _________________________[0m
+[1m[31mtest_batch/test_batch_scheduling_policy.py[0m:10: in test_create_scheduling_policy
+    [0mresp = client.create_scheduling_policy(name=[33m"[39;49;00m[33mtest[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateSchedulingPolicy operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>faae037d-4900-4105-9e3f-10f515477d68</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________________ test_describe_default_scheduling_policy ____________________[0m
+[1m[31mtest_batch/test_batch_scheduling_policy.py[0m:21: in test_describe_default_scheduling_policy
+    [0marn = client.create_scheduling_policy(name=[33m"[39;49;00m[33mtest[39;49;00m[33m"[39;49;00m)[[33m"[39;49;00m[33marn[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateSchedulingPolicy operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>fa0f1e01-bd77-4aa6-87ad-8dc6e34641ea</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________________ test_describe_scheduling_policy ________________________[0m
+[1m[31mtest_batch/test_batch_scheduling_policy.py[0m:39: in test_describe_scheduling_policy
+    [0marn = client.create_scheduling_policy([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateSchedulingPolicy operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>e97ca025-027c-469d-a04a-8bda4b9de805</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m________________________ test_delete_scheduling_policy _________________________[0m
+[1m[31mtest_batch/test_batch_scheduling_policy.py[0m:69: in test_delete_scheduling_policy
+    [0marn = client.create_scheduling_policy(name=[33m"[39;49;00m[33mtest[39;49;00m[33m"[39;49;00m)[[33m"[39;49;00m[33marn[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateSchedulingPolicy operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>37f0bf12-a4de-48f5-be96-9a5d34a3459b</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m________________________ test_update_scheduling_policy _________________________[0m
+[1m[31mtest_batch/test_batch_scheduling_policy.py[0m:80: in test_update_scheduling_policy
+    [0marn = client.create_scheduling_policy(name=[33m"[39;49;00m[33mtest[39;49;00m[33m"[39;49;00m)[[33m"[39;49;00m[33marn[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateSchedulingPolicy operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>f08b2da4-d809-4d6a-b253-c076f84a54cb</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m__________________________ test_submit_job_with_tags ___________________________[0m
+[1m[31mtest_batch/test_batch_tags_job.py[0m:14: in test_submit_job_with_tags
+    [0m_, _, _, iam_arn = _setup(ec2_client, iam_client)[90m[39;49;00m
+[1m[31mtest_batch/__init__.py[0m:26: in _setup
+    [0mresp = ec2_client.create_vpc(CidrBlock=[33m"[39;49;00m[33m172.30.0.0/24[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m______________________ test_list_tags_with_job_definition ______________________[0m
+[1m[31mtest_batch/test_batch_tags_job_definition.py[0m:21: in test_list_tags_with_job_definition
+    [0mjob_def_arn = batch_client.register_job_definition([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the RegisterJobDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>ad97e7b3-e655-426e-a5a2-ab4f529c2bb4</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________________________ test_tag_job_definition ____________________________[0m
+[1m[31mtest_batch/test_batch_tags_job_definition.py[0m:38: in test_tag_job_definition
+    [0mjob_def_arn = batch_client.register_job_definition([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the RegisterJobDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>b33310d4-f0dc-48f4-9de9-319b450baeb0</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_____________________________ test_untag_job_queue _____________________________[0m
+[1m[31mtest_batch/test_batch_tags_job_definition.py[0m:56: in test_untag_job_queue
+    [0mjob_def_arn = batch_client.register_job_definition([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the RegisterJobDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>62a0af7f-e967-4107-a3e8-80165d7ffd29</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m____________________ test_create_job_queue_with_tags[True] _____________________[0m
+[1m[31mtest_batch/test_batch_tags_job_queue.py[0m:14: in test_create_job_queue_with_tags
+    [0m_, _, _, iam_arn = _setup(ec2_client, iam_client)[90m[39;49;00m
+[1m[31mtest_batch/__init__.py[0m:26: in _setup
+    [0mresp = ec2_client.create_vpc(CidrBlock=[33m"[39;49;00m[33m172.30.0.0/24[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m____________________ test_create_job_queue_with_tags[False] ____________________[0m
+[1m[31mtest_batch/test_batch_tags_job_queue.py[0m:14: in test_create_job_queue_with_tags
+    [0m_, _, _, iam_arn = _setup(ec2_client, iam_client)[90m[39;49;00m
+[1m[31mtest_batch/__init__.py[0m:26: in _setup
+    [0mresp = ec2_client.create_vpc(CidrBlock=[33m"[39;49;00m[33m172.30.0.0/24[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m________________________________ test_list_tags ________________________________[0m
+[1m[31mtest_batch/test_batch_tags_job_queue.py[0m:48: in test_list_tags
+    [0m_, _, _, iam_arn = _setup(ec2_client, iam_client)[90m[39;49;00m
+[1m[31mtest_batch/__init__.py[0m:26: in _setup
+    [0mresp = ec2_client.create_vpc(CidrBlock=[33m"[39;49;00m[33m172.30.0.0/24[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m______________________________ test_tag_job_queue ______________________________[0m
+[1m[31mtest_batch/test_batch_tags_job_queue.py[0m:78: in test_tag_job_queue
+    [0m_, _, _, iam_arn = _setup(ec2_client, iam_client)[90m[39;49;00m
+[1m[31mtest_batch/__init__.py[0m:26: in _setup
+    [0mresp = ec2_client.create_vpc(CidrBlock=[33m"[39;49;00m[33m172.30.0.0/24[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m_____________________________ test_untag_job_queue _____________________________[0m
+[1m[31mtest_batch/test_batch_tags_job_queue.py[0m:107: in test_untag_job_queue
+    [0m_, _, _, iam_arn = _setup(ec2_client, iam_client)[90m[39;49;00m
+[1m[31mtest_batch/__init__.py[0m:26: in _setup
+    [0mresp = ec2_client.create_vpc(CidrBlock=[33m"[39;49;00m[33m172.30.0.0/24[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m____________________________ test_create_with_tags _____________________________[0m
+[1m[31mtest_batch/test_batch_tags_scheduling_policy.py[0m:9: in test_create_with_tags
+    [0marn = client.create_scheduling_policy(name=[33m"[39;49;00m[33mtest[39;49;00m[33m"[39;49;00m, tags={[33m"[39;49;00m[33mkey[39;49;00m[33m"[39;49;00m: [33m"[39;49;00m[33mval[39;49;00m[33m"[39;49;00m})[[33m"[39;49;00m[33marn[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateSchedulingPolicy operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>d778cf98-de05-4267-b57a-26532ba0c97f</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_____________________ test_register_task_definition[True] ______________________[0m
+[1m[31mtest_batch/test_batch_task_definition.py[0m:16: in test_register_task_definition
+    [0mresp = register_job_def(batch_client, use_resource_reqs=use_resource_reqs)[90m[39;49;00m
+[1m[31mtest_batch/test_batch_task_definition.py[0m:349: in register_job_def
+    [0m[94mreturn[39;49;00m batch_client.register_job_definition([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the RegisterJobDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>439d1878-7f49-4a78-b0dc-b71856ce7f68</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_____________________ test_register_task_definition[False] _____________________[0m
+[1m[31mtest_batch/test_batch_task_definition.py[0m:16: in test_register_task_definition
+    [0mresp = register_job_def(batch_client, use_resource_reqs=use_resource_reqs)[90m[39;49;00m
+[1m[31mtest_batch/test_batch_task_definition.py[0m:349: in register_job_def
+    [0m[94mreturn[39;49;00m batch_client.register_job_definition([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the RegisterJobDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>67935935-0039-41a1-a863-fdccbd3f9ab8</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m________________ test_register_task_definition_with_tags[None] _________________[0m
+[1m[31mtest_batch/test_batch_task_definition.py[0m:31: in test_register_task_definition_with_tags
+    [0mregister_job_def_with_tags(batch_client, job_def_name, propagate_tags)[90m[39;49;00m
+[1m[31mtest_batch/test_batch_task_definition.py[0m:360: in register_job_def_with_tags
+    [0m[94mreturn[39;49;00m batch_client.register_job_definition([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the RegisterJobDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>c6056fe0-71ba-4706-a55d-ee568396e451</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m________________ test_register_task_definition_with_tags[True] _________________[0m
+[1m[31mtest_batch/test_batch_task_definition.py[0m:31: in test_register_task_definition_with_tags
+    [0mregister_job_def_with_tags(batch_client, job_def_name, propagate_tags)[90m[39;49;00m
+[1m[31mtest_batch/test_batch_task_definition.py[0m:360: in register_job_def_with_tags
+    [0m[94mreturn[39;49;00m batch_client.register_job_definition([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the RegisterJobDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>2d377640-157d-4b87-b2c5-df955216a3c0</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m________________ test_register_task_definition_with_tags[False] ________________[0m
+[1m[31mtest_batch/test_batch_task_definition.py[0m:31: in test_register_task_definition_with_tags
+    [0mregister_job_def_with_tags(batch_client, job_def_name, propagate_tags)[90m[39;49;00m
+[1m[31mtest_batch/test_batch_task_definition.py[0m:360: in register_job_def_with_tags
+    [0m[94mreturn[39;49;00m batch_client.register_job_definition([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the RegisterJobDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>0bfaa5fc-114e-4eea-b374-6580fa7655fd</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_________ test_register_task_definition_with_platform_capability[EC2] __________[0m
+[1m[31mtest_batch/test_batch_task_definition.py[0m:47: in test_register_task_definition_with_platform_capability
+    [0mbatch_client.register_job_definition([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the RegisterJobDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>a0359e45-f6b3-4487-bde9-30b3a4d11371</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______ test_register_task_definition_with_platform_capability[FARGATE] ________[0m
+[1m[31mtest_batch/test_batch_task_definition.py[0m:47: in test_register_task_definition_with_platform_capability
+    [0mbatch_client.register_job_definition([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the RegisterJobDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>0d961628-f1c0-49f1-b0e5-47ec3527d848</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m________________ test_register_task_definition_without_command _________________[0m
+[1m[31mtest_batch/test_batch_task_definition.py[0m:80: in test_register_task_definition_without_command
+    [0mbatch_client.register_job_definition([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the RegisterJobDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>a9a4a3ad-4758-4366-b1de-1e9a3512fad1</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_____________ test_register_task_definition_with_retry_strategies ______________[0m
+[1m[31mtest_batch/test_batch_task_definition.py[0m:103: in test_register_task_definition_with_retry_strategies
+    [0mbatch_client.register_job_definition([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the RegisterJobDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>c239a82c-1b5e-4445-9fe5-4a8e5f9201ff</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m____________________ test_reregister_task_definition[True] _____________________[0m
+[1m[31mtest_batch/test_batch_task_definition.py[0m:138: in test_reregister_task_definition
+    [0mresp1 = register_job_def([90m[39;49;00m
+[1m[31mtest_batch/test_batch_task_definition.py[0m:349: in register_job_def
+    [0m[94mreturn[39;49;00m batch_client.register_job_definition([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the RegisterJobDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>f9e40583-68f0-4b55-8749-e060c3dcef2e</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m____________________ test_reregister_task_definition[False] ____________________[0m
+[1m[31mtest_batch/test_batch_task_definition.py[0m:138: in test_reregister_task_definition
+    [0mresp1 = register_job_def([90m[39;49;00m
+[1m[31mtest_batch/test_batch_task_definition.py[0m:349: in register_job_def
+    [0m[94mreturn[39;49;00m batch_client.register_job_definition([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the RegisterJobDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>f13a4fe2-ba63-4cc9-ade1-170137561f88</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_ test_reregister_task_definition_should_not_reuse_parameters_from_inactive_definition _[0m
+[1m[31mtest_batch/test_batch_task_definition.py[0m:183: in test_reregister_task_definition_should_not_reuse_parameters_from_inactive_definition
+    [0mresp = batch_client.register_job_definition([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the RegisterJobDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>1e8bbbcf-fb8a-423e-a8ef-535c9dc5610e</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______________________ test_delete_task_definition[True] _______________________[0m
+[1m[31mtest_batch/test_batch_task_definition.py[0m:234: in test_delete_task_definition
+    [0mresp = register_job_def([90m[39;49;00m
+[1m[31mtest_batch/test_batch_task_definition.py[0m:349: in register_job_def
+    [0m[94mreturn[39;49;00m batch_client.register_job_definition([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the RegisterJobDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>977bf189-eccd-4a80-af3e-18f34a0d4a29</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______________________ test_delete_task_definition[False] ______________________[0m
+[1m[31mtest_batch/test_batch_task_definition.py[0m:234: in test_delete_task_definition
+    [0mresp = register_job_def([90m[39;49;00m
+[1m[31mtest_batch/test_batch_task_definition.py[0m:349: in register_job_def
+    [0m[94mreturn[39;49;00m batch_client.register_job_definition([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the RegisterJobDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>d3402f6a-a390-4c7e-afef-5357e524edf8</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m__________________ test_delete_task_definition_by_name[True] ___________________[0m
+[1m[31mtest_batch/test_batch_task_definition.py[0m:258: in test_delete_task_definition_by_name
+    [0mresp = register_job_def([90m[39;49;00m
+[1m[31mtest_batch/test_batch_task_definition.py[0m:349: in register_job_def
+    [0m[94mreturn[39;49;00m batch_client.register_job_definition([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the RegisterJobDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>e1c80fa5-9dab-4be1-946d-a182abb0abd9</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m__________________ test_delete_task_definition_by_name[False] __________________[0m
+[1m[31mtest_batch/test_batch_task_definition.py[0m:258: in test_delete_task_definition_by_name
+    [0mresp = register_job_def([90m[39;49;00m
+[1m[31mtest_batch/test_batch_task_definition.py[0m:349: in register_job_def
+    [0m[94mreturn[39;49;00m batch_client.register_job_definition([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the RegisterJobDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>cd3d2f04-c980-4593-9861-d3ba9c0b38c2</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_____________________ test_describe_task_definition[True] ______________________[0m
+[1m[31mtest_batch/test_batch_task_definition.py[0m:295: in test_describe_task_definition
+    [0mregister_job_def([90m[39;49;00m
+[1m[31mtest_batch/test_batch_task_definition.py[0m:349: in register_job_def
+    [0m[94mreturn[39;49;00m batch_client.register_job_definition([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the RegisterJobDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>23b3f645-55bd-4092-a0e9-459615bd0250</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_____________________ test_describe_task_definition[False] _____________________[0m
+[1m[31mtest_batch/test_batch_task_definition.py[0m:295: in test_describe_task_definition
+    [0mregister_job_def([90m[39;49;00m
+[1m[31mtest_batch/test_batch_task_definition.py[0m:349: in register_job_def
+    [0m[94mreturn[39;49;00m batch_client.register_job_definition([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the RegisterJobDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>3e44f6ef-632c-474c-ba63-e25c16f95024</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[33m=============================== warnings summary ===============================[0m
+tests/test_batch/test_batch.py: 2 warnings
+tests/test_batch/test_batch_cloudformation.py: 3 warnings
+tests/test_batch/test_batch_compute_envs.py: 15 warnings
+tests/test_batch/test_batch_eks.py: 6 warnings
+tests/test_batch/test_batch_job_queue.py: 8 warnings
+tests/test_batch/test_batch_jobs.py: 22 warnings
+tests/test_batch/test_batch_scheduling_policy.py: 5 warnings
+tests/test_batch/test_batch_tags_job.py: 1 warning
+tests/test_batch/test_batch_tags_job_definition.py: 3 warnings
+tests/test_batch/test_batch_tags_job_queue.py: 5 warnings
+tests/test_batch/test_batch_tags_scheduling_policy.py: 1 warning
+tests/test_batch/test_batch_task_definition.py: 18 warnings
+  /Users/lucas/.cache/fakecloud/moto/.venv/lib/python3.9/site-packages/boto3/compat.py:89: PythonDeprecationWarning: Boto3 will no longer support Python 3.9 starting April 29, 2026. To continue receiving service updates, bug fixes, and security updates please upgrade to Python 3.10 or later. More information can be found here: https://aws.amazon.com/blogs/developer/python-support-policy-updates-for-aws-sdks-and-tools/
+    warnings.warn(warning, PythonDeprecationWarning)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+[36m[1m=========================== short test summary info ============================[0m
+[31mFAILED[0m test_batch/test_batch.py::[1mtest_batch_regions[us-west-2][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the D...
+[31mFAILED[0m test_batch/test_batch.py::[1mtest_batch_regions[cn-northwest-1][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the D...
+[31mFAILED[0m test_batch/test_batch_cloudformation.py::[1mtest_create_env_cf[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_batch/test_batch_cloudformation.py::[1mtest_create_job_queue_cf[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_batch/test_batch_cloudformation.py::[1mtest_create_job_def_cf[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_batch/test_batch_compute_envs.py::[1mtest_create_managed_compute_environment[True][0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_batch/test_batch_compute_envs.py::[1mtest_create_managed_compute_environment[False][0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_batch/test_batch_compute_envs.py::[1mtest_create_managed_compute_environment_with_tags[True][0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_batch/test_batch_compute_envs.py::[1mtest_create_managed_compute_environment_with_tags[False][0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_batch/test_batch_compute_envs.py::[1mtest_create_managed_compute_environment_with_instance_family[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_batch/test_batch_compute_envs.py::[1mtest_create_managed_compute_environment_with_unknown_instance_type[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_batch/test_batch_compute_envs.py::[1mtest_create_unmanaged_compute_environment[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_batch/test_batch_compute_envs.py::[1mtest_describe_compute_environment[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_batch/test_batch_compute_envs.py::[1mtest_delete_unmanaged_compute_environment[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_batch/test_batch_compute_envs.py::[1mtest_delete_managed_compute_environment[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_batch/test_batch_compute_envs.py::[1mtest_update_unmanaged_compute_environment_state[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_batch/test_batch_compute_envs.py::[1mtest_update_iam_role[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_batch/test_batch_compute_envs.py::[1mtest_create_fargate_managed_compute_environment[FARGATE][0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_batch/test_batch_compute_envs.py::[1mtest_create_fargate_managed_compute_environment[FARGATE_SPOT][0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_batch/test_batch_compute_envs.py::[1mtest_create_ec2_managed_compute_environment__without_required_params[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_batch/test_batch_eks.py::[1mtest_register_job_definition_with_eks_properties[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_batch/test_batch_eks.py::[1mtest_submit_job_with_eks_properties_override[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_batch/test_batch_eks.py::[1mtest_submit_eks_job_without_override[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_batch/test_batch_eks.py::[1mtest_eks_job_definition_validation_missing_containers[0m - assert 'must contain at least one container' in 'An error occurred (400) wh...
+[31mFAILED[0m test_batch/test_batch_eks.py::[1mtest_eks_job_definition_defaults[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the R...
+[31mFAILED[0m test_batch/test_batch_job_queue.py::[1mtest_create_job_queue[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_batch/test_batch_job_queue.py::[1mtest_describe_job_queue_unknown_value[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the D...
+[31mFAILED[0m test_batch/test_batch_job_queue.py::[1mtest_create_job_queue_twice[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_batch/test_batch_job_queue.py::[1mtest_create_job_queue_incorrect_state[0m - AssertionError: assert '400' == 'ClientException'
+[31mFAILED[0m test_batch/test_batch_job_queue.py::[1mtest_create_job_queue_without_compute_environment[0m - AssertionError: assert '400' == 'ClientException'
+[31mFAILED[0m test_batch/test_batch_job_queue.py::[1mtest_job_queue_bad_arn[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_batch/test_batch_job_queue.py::[1mtest_update_job_queue[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_batch/test_batch_job_queue.py::[1mtest_delete_job_queue[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_batch/test_batch_jobs.py::[1mtest_submit_job_by_name[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_batch/test_batch_jobs.py::[1mtest_submit_job_array_size[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_batch/test_batch_jobs.py::[1mtest_submit_job[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_batch/test_batch_jobs.py::[1mtest_submit_job_multinode[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_batch/test_batch_jobs.py::[1mtest_list_jobs[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_batch/test_batch_jobs.py::[1mtest_terminate_job[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_batch/test_batch_jobs.py::[1mtest_terminate_nonexisting_job[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the T...
+[31mFAILED[0m test_batch/test_batch_jobs.py::[1mtest_terminate_job_empty_argument_strings[0m - AssertionError: Regex pattern did not match.
+[31mFAILED[0m test_batch/test_batch_jobs.py::[1mtest_cancel_pending_job[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_batch/test_batch_jobs.py::[1mtest_cancel_running_job[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_batch/test_batch_jobs.py::[1mtest_cancel_nonexisting_job[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_batch/test_batch_jobs.py::[1mtest_cancel_job_empty_argument_strings[0m - AssertionError: Regex pattern did not match.
+[31mFAILED[0m test_batch/test_batch_jobs.py::[1mtest_failed_job[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_batch/test_batch_jobs.py::[1mtest_dependencies[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_batch/test_batch_jobs.py::[1mtest_failed_dependencies[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_batch/test_batch_jobs.py::[1mtest_container_overrides[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_batch/test_batch_jobs.py::[1mtest_update_job_definition[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the R...
+[31mFAILED[0m test_batch/test_batch_jobs.py::[1mtest_register_job_definition_with_timeout[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the R...
+[31mFAILED[0m test_batch/test_batch_jobs.py::[1mtest_submit_job_with_timeout[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_batch/test_batch_jobs.py::[1mtest_submit_job_with_timeout_set_at_definition[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_batch/test_batch_jobs.py::[1mtest_submit_job_invalid_name[0m - AssertionError: Regex pattern did not match.
+[31mFAILED[0m test_batch/test_batch_jobs.py::[1mtest_submit_job_with_parameters[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_batch/test_batch_scheduling_policy.py::[1mtest_create_scheduling_policy[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_batch/test_batch_scheduling_policy.py::[1mtest_describe_default_scheduling_policy[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_batch/test_batch_scheduling_policy.py::[1mtest_describe_scheduling_policy[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_batch/test_batch_scheduling_policy.py::[1mtest_delete_scheduling_policy[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_batch/test_batch_scheduling_policy.py::[1mtest_update_scheduling_policy[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_batch/test_batch_tags_job.py::[1mtest_submit_job_with_tags[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_batch/test_batch_tags_job_definition.py::[1mtest_list_tags_with_job_definition[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the R...
+[31mFAILED[0m test_batch/test_batch_tags_job_definition.py::[1mtest_tag_job_definition[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the R...
+[31mFAILED[0m test_batch/test_batch_tags_job_definition.py::[1mtest_untag_job_queue[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the R...
+[31mFAILED[0m test_batch/test_batch_tags_job_queue.py::[1mtest_create_job_queue_with_tags[True][0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_batch/test_batch_tags_job_queue.py::[1mtest_create_job_queue_with_tags[False][0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_batch/test_batch_tags_job_queue.py::[1mtest_list_tags[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_batch/test_batch_tags_job_queue.py::[1mtest_tag_job_queue[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_batch/test_batch_tags_job_queue.py::[1mtest_untag_job_queue[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_batch/test_batch_tags_scheduling_policy.py::[1mtest_create_with_tags[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_batch/test_batch_task_definition.py::[1mtest_register_task_definition[True][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the R...
+[31mFAILED[0m test_batch/test_batch_task_definition.py::[1mtest_register_task_definition[False][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the R...
+[31mFAILED[0m test_batch/test_batch_task_definition.py::[1mtest_register_task_definition_with_tags[None][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the R...
+[31mFAILED[0m test_batch/test_batch_task_definition.py::[1mtest_register_task_definition_with_tags[True][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the R...
+[31mFAILED[0m test_batch/test_batch_task_definition.py::[1mtest_register_task_definition_with_tags[False][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the R...
+[31mFAILED[0m test_batch/test_batch_task_definition.py::[1mtest_register_task_definition_with_platform_capability[EC2][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the R...
+[31mFAILED[0m test_batch/test_batch_task_definition.py::[1mtest_register_task_definition_with_platform_capability[FARGATE][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the R...
+[31mFAILED[0m test_batch/test_batch_task_definition.py::[1mtest_register_task_definition_without_command[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the R...
+[31mFAILED[0m test_batch/test_batch_task_definition.py::[1mtest_register_task_definition_with_retry_strategies[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the R...
+[31mFAILED[0m test_batch/test_batch_task_definition.py::[1mtest_reregister_task_definition[True][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the R...
+[31mFAILED[0m test_batch/test_batch_task_definition.py::[1mtest_reregister_task_definition[False][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the R...
+[31mFAILED[0m test_batch/test_batch_task_definition.py::[1mtest_reregister_task_definition_should_not_reuse_parameters_from_inactive_definition[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the R...
+[31mFAILED[0m test_batch/test_batch_task_definition.py::[1mtest_delete_task_definition[True][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the R...
+[31mFAILED[0m test_batch/test_batch_task_definition.py::[1mtest_delete_task_definition[False][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the R...
+[31mFAILED[0m test_batch/test_batch_task_definition.py::[1mtest_delete_task_definition_by_name[True][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the R...
+[31mFAILED[0m test_batch/test_batch_task_definition.py::[1mtest_delete_task_definition_by_name[False][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the R...
+[31mFAILED[0m test_batch/test_batch_task_definition.py::[1mtest_describe_task_definition[True][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the R...
+[31mFAILED[0m test_batch/test_batch_task_definition.py::[1mtest_describe_task_definition[False][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the R...
+[31m[31m[1m88 failed[0m, [32m21 passed[0m, [33m1 skipped[0m, [33m89 warnings[0m[31m in 5.47s[0m[0m

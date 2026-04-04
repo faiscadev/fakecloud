@@ -1,0 +1,504 @@
+[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31m                                         [100%][0m
+=================================== FAILURES ===================================
+[31m[1m______________________________ test_create_group _______________________________[0m
+[1m[31mtest_identitystore/test_identitystore.py[0m:25: in test_create_group
+    [0mcreate_resp = client.create_group([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateGroup operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>00ddf80a-d096-4c4c-9fc7-645845358591</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________________ test_create_group_duplicate_name _______________________[0m
+[1m[31mtest_identitystore/test_identitystore.py[0m:38: in test_create_group_duplicate_name
+    [0mcreate_resp = client.create_group([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateGroup operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>3118d480-00c4-4b15-a19b-4bb242bbc6f4</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_____________________ test_group_multiple_identity_stores ______________________[0m
+[1m[31mtest_identitystore/test_identitystore.py[0m:71: in test_group_multiple_identity_stores
+    [0mgroup1 = __create_test_group(client, store_id=identity_store_id)[90m[39;49;00m
+[1m[31mtest_identitystore/test_identitystore.py[0m:959: in __create_test_group
+    [0mcreate_resp = client.create_group([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateGroup operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>514ecb00-febb-4039-844e-f23a792cd411</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_________________________ test_create_group_membership _________________________[0m
+[1m[31mtest_identitystore/test_identitystore.py[0m:86: in test_create_group_membership
+    [0mgroup_id = client.create_group([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateGroup operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>7243272a-9918-412e-8e14-f132f2a15077</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m________________________ test_create_duplicate_username ________________________[0m
+[1m[31mtest_identitystore/test_identitystore.py[0m:119: in test_create_duplicate_username
+    [0mclient.create_user([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateUser operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>e7e7159e-defb-4471-8c65-93ba05785fb2</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________________ test_create_username_no_username _______________________[0m
+[1m[31mtest_identitystore/test_identitystore.py[0m:156: in test_create_username_no_username
+    [0m[94massert[39;49;00m [33m"[39;49;00m[33mValidationException[39;49;00m[33m"[39;49;00m [95min[39;49;00m [96mstr[39;49;00m([96mtype[39;49;00m(err))[90m[39;49;00m
+[1m[31mE   assert 'ValidationException' in "<class 'botocore.exceptions.ClientError'>"[0m
+[1m[31mE    +  where "<class 'botocore.exceptions.ClientError'>" = str(<class 'botocore.exceptions.ClientError'>)[0m
+[1m[31mE    +    where <class 'botocore.exceptions.ClientError'> = type(ClientError('An error occurred (400) when calling the CreateUser operation: <?xml version="1.0" encoding="UTF-8"?><Err...n from request</Message>\n  </Error>\n  <RequestId>f23d1b86-53bc-4fcf-acef-b6cd63f6c861</RequestId>\n</ErrorResponse>'))[0m
+[31m[1m_______________ test_create_username_missing_required_attributes _______________[0m
+[1m[31mtest_identitystore/test_identitystore.py[0m:178: in test_create_username_missing_required_attributes
+    [0m[94massert[39;49;00m [33m"[39;49;00m[33mValidationException[39;49;00m[33m"[39;49;00m [95min[39;49;00m [96mstr[39;49;00m([96mtype[39;49;00m(err))[90m[39;49;00m
+[1m[31mE   assert 'ValidationException' in "<class 'botocore.exceptions.ClientError'>"[0m
+[1m[31mE    +  where "<class 'botocore.exceptions.ClientError'>" = str(<class 'botocore.exceptions.ClientError'>)[0m
+[1m[31mE    +    where <class 'botocore.exceptions.ClientError'> = type(ClientError('An error occurred (400) when calling the CreateUser operation: <?xml version="1.0" encoding="UTF-8"?><Err...n from request</Message>\n  </Error>\n  <RequestId>772aa2e9-e521-48ed-8bd8-522f803ce231</RequestId>\n</ErrorResponse>'))[0m
+[31m[1m____ test_create_username_missing_required_name_field[GivenName-familyname] ____[0m
+[1m[31mtest_identitystore/test_identitystore.py[0m:212: in test_create_username_missing_required_name_field
+    [0m[94massert[39;49;00m [33m"[39;49;00m[33mValidationException[39;49;00m[33m"[39;49;00m [95min[39;49;00m [96mstr[39;49;00m([96mtype[39;49;00m(err))[90m[39;49;00m
+[1m[31mE   assert 'ValidationException' in "<class 'botocore.exceptions.ClientError'>"[0m
+[1m[31mE    +  where "<class 'botocore.exceptions.ClientError'>" = str(<class 'botocore.exceptions.ClientError'>)[0m
+[1m[31mE    +    where <class 'botocore.exceptions.ClientError'> = type(ClientError('An error occurred (400) when calling the CreateUser operation: <?xml version="1.0" encoding="UTF-8"?><Err...n from request</Message>\n  </Error>\n  <RequestId>8d3cdeb9-ae13-41ef-8092-ef644b21a9b7</RequestId>\n</ErrorResponse>'))[0m
+[31m[1m____ test_create_username_missing_required_name_field[FamilyName-givenname] ____[0m
+[1m[31mtest_identitystore/test_identitystore.py[0m:212: in test_create_username_missing_required_name_field
+    [0m[94massert[39;49;00m [33m"[39;49;00m[33mValidationException[39;49;00m[33m"[39;49;00m [95min[39;49;00m [96mstr[39;49;00m([96mtype[39;49;00m(err))[90m[39;49;00m
+[1m[31mE   assert 'ValidationException' in "<class 'botocore.exceptions.ClientError'>"[0m
+[1m[31mE    +  where "<class 'botocore.exceptions.ClientError'>" = str(<class 'botocore.exceptions.ClientError'>)[0m
+[1m[31mE    +    where <class 'botocore.exceptions.ClientError'> = type(ClientError('An error occurred (400) when calling the CreateUser operation: <?xml version="1.0" encoding="UTF-8"?><Err...n from request</Message>\n  </Error>\n  <RequestId>34feae9f-2dfe-4b5d-8b65-d33073d8d7a0</RequestId>\n</ErrorResponse>'))[0m
+[31m[1m_______________________ test_create_describe_sparse_user _______________________[0m
+[1m[31mtest_identitystore/test_identitystore.py[0m:231: in test_create_describe_sparse_user
+    [0mresponse = client.create_user([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateUser operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>4323f1a2-b5f3-4f0e-b6ba-f0f1fdbedeb7</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m________________________ test_create_describe_full_user ________________________[0m
+[1m[31mtest_identitystore/test_identitystore.py[0m:254: in test_create_describe_full_user
+    [0mresponse = client.create_user([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateUser operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>864e5d7a-51f2-4a04-a0eb-6b0cda88d2a0</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________________ test_describe_user_doesnt_exist ________________________[0m
+[1m[31mtest_identitystore/test_identitystore.py[0m:356: in test_describe_user_doesnt_exist
+    [0m[94massert[39;49;00m err.response[[33m"[39;49;00m[33mError[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mResourceNotFoundException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'ResourceNotFoundException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ResourceNotFoundException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m_________________________ test_get_user_id_by_username _________________________[0m
+[1m[31mtest_identitystore/test_identitystore.py[0m:371: in test_get_user_id_by_username
+    [0muser = __create_and_verify_sparse_user(client, identity_store_id)[90m[39;49;00m
+[1m[31mtest_identitystore/test_identitystore.py[0m:990: in __create_and_verify_sparse_user
+    [0mresponse = client.create_user([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateUser operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>51067305-f408-418b-ad9e-142ae73bbe91</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m__________________________ test_get_user_id_by_email ___________________________[0m
+[1m[31mtest_identitystore/test_identitystore.py[0m:396: in test_get_user_id_by_email
+    [0muser = client.create_user([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateUser operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>a0aa67a0-067a-4df8-b86b-100227912e84</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________________ test_get_user_id_does_not_exist ________________________[0m
+[1m[31mtest_identitystore/test_identitystore.py[0m:435: in test_get_user_id_does_not_exist
+    [0m[94massert[39;49;00m err.response[[33m"[39;49;00m[33mError[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mResourceNotFoundException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'ResourceNotFoundException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ResourceNotFoundException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m____________________ test_get_user_id_empty_attribute_value ____________________[0m
+[1m[31mtest_identitystore/test_identitystore.py[0m:460: in test_get_user_id_empty_attribute_value
+    [0m[94massert[39;49;00m err.response[[33m"[39;49;00m[33mError[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mValidationException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'ValidationException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ValidationException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m___________________ test_get_user_id_invalid_attribute_path ____________________[0m
+[1m[31mtest_identitystore/test_identitystore.py[0m:486: in test_get_user_id_invalid_attribute_path
+    [0m[94massert[39;49;00m err.response[[33m"[39;49;00m[33mError[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mValidationException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'ValidationException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ValidationException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m______________________________ test_get_group_id _______________________________[0m
+[1m[31mtest_identitystore/test_identitystore.py[0m:501: in test_get_group_id
+    [0mgroup = __create_test_group(client, identity_store_id)[90m[39;49;00m
+[1m[31mtest_identitystore/test_identitystore.py[0m:959: in __create_test_group
+    [0mcreate_resp = client.create_group([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateGroup operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>3467691f-6ecc-4f3f-8a35-cc42a7d8cd01</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________________ test_get_group_id_does_not_exist _______________________[0m
+[1m[31mtest_identitystore/test_identitystore.py[0m:535: in test_get_group_id_does_not_exist
+    [0m[94massert[39;49;00m err.response[[33m"[39;49;00m[33mError[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mResourceNotFoundException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'ResourceNotFoundException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ResourceNotFoundException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m_______________________________ test_list_groups _______________________________[0m
+[1m[31mtest_identitystore/test_identitystore.py[0m:555: in test_list_groups
+    [0mdisplay_name, description, group_id = __create_test_group([90m[39;49;00m
+[1m[31mtest_identitystore/test_identitystore.py[0m:959: in __create_test_group
+    [0mcreate_resp = client.create_group([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateGroup operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>0d277784-e054-48ad-a8ac-97c18c82fe45</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________________________ test_list_groups_filter ____________________________[0m
+[1m[31mtest_identitystore/test_identitystore.py[0m:601: in test_list_groups_filter
+    [0mdisplay_name, description, group_id = __create_test_group([90m[39;49;00m
+[1m[31mtest_identitystore/test_identitystore.py[0m:959: in __create_test_group
+    [0mcreate_resp = client.create_group([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateGroup operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>ef821618-055b-4664-994f-ce990778d424</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_________________________ test_list_group_memberships __________________________[0m
+[1m[31mtest_identitystore/test_identitystore.py[0m:646: in test_list_group_memberships
+    [0mgroup_id = client.create_group([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateGroup operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>c031c6bf-e02a-4d6e-8d12-b905d3154bb2</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m____________________ test_list_group_memberships_for_member ____________________[0m
+[1m[31mtest_identitystore/test_identitystore.py[0m:702: in test_list_group_memberships_for_member
+    [0muser_id = __create_and_verify_sparse_user(client, identity_store_id)[[33m"[39;49;00m[33mUserId[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31mtest_identitystore/test_identitystore.py[0m:990: in __create_and_verify_sparse_user
+    [0mresponse = client.create_user([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateUser operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>c3b45a60-7237-4a40-9fa5-eaa6d0df0073</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________________________ test_list_users ________________________________[0m
+[1m[31mtest_identitystore/test_identitystore.py[0m:765: in test_list_users
+    [0mdummy_user = __create_and_verify_sparse_user(client, identity_store_id)[90m[39;49;00m
+[1m[31mtest_identitystore/test_identitystore.py[0m:990: in __create_and_verify_sparse_user
+    [0mresponse = client.create_user([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateUser operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>5725e760-a50d-4d50-b57b-0c5c2b176fdb</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m____________________________ test_list_users_filter ____________________________[0m
+[1m[31mtest_identitystore/test_identitystore.py[0m:801: in test_list_users_filter
+    [0mclient.create_user([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateUser operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>ba359770-465c-4859-962b-6c553988eea1</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______________________________ test_delete_group _______________________________[0m
+[1m[31mtest_identitystore/test_identitystore.py[0m:841: in test_delete_group
+    [0mtest_group = __create_test_group(client, identity_store_id)[90m[39;49;00m
+[1m[31mtest_identitystore/test_identitystore.py[0m:959: in __create_test_group
+    [0mcreate_resp = client.create_group([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateGroup operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>b1fa35cd-1ec5-4be2-90a8-3042dfdb5403</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m________________________ test_delete_group_doesnt_exist ________________________[0m
+[1m[31mtest_identitystore/test_identitystore.py[0m:858: in test_delete_group_doesnt_exist
+    [0mresp = client.delete_group(IdentityStoreId=identity_store_id, GroupId=bogus_id)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the DeleteGroup operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>14bbdb6a-eabf-4587-850a-5ff84eeade35</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_________________________ test_delete_group_membership _________________________[0m
+[1m[31mtest_identitystore/test_identitystore.py[0m:869: in test_delete_group_membership
+    [0muser_id = __create_and_verify_sparse_user(client, identity_store_id)[[33m"[39;49;00m[33mUserId[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31mtest_identitystore/test_identitystore.py[0m:990: in __create_and_verify_sparse_user
+    [0mresponse = client.create_user([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateUser operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>8f0ade1b-d7de-4643-8c50-7695657a3869</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________________________ test_delete_user _______________________________[0m
+[1m[31mtest_identitystore/test_identitystore.py[0m:899: in test_delete_user
+    [0muser_id = __create_and_verify_sparse_user(client, identity_store_id)[[33m"[39;49;00m[33mUserId[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31mtest_identitystore/test_identitystore.py[0m:990: in __create_and_verify_sparse_user
+    [0mresponse = client.create_user([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateUser operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>9edeccca-b609-4c2b-931d-95410900cc17</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m________________________ test_delete_user_doesnt_exist _________________________[0m
+[1m[31mtest_identitystore/test_identitystore.py[0m:915: in test_delete_user_doesnt_exist
+    [0mclient.delete_user([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the DeleteUser operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>5b4f5764-d716-4638-ab8f-44155bb86d98</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m__________________________ test_create_describe_group __________________________[0m
+[1m[31mtest_identitystore/test_identitystore.py[0m:924: in test_create_describe_group
+    [0mgroup_name, group_descriprion, group_id = __create_test_group([90m[39;49;00m
+[1m[31mtest_identitystore/test_identitystore.py[0m:959: in __create_test_group
+    [0mcreate_resp = client.create_group([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateGroup operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>b45600c4-5a06-400d-8345-5108c115de21</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________________ test_describe_group_doesnt_exist _______________________[0m
+[1m[31mtest_identitystore/test_identitystore.py[0m:946: in test_describe_group_doesnt_exist
+    [0m[94massert[39;49;00m err.response[[33m"[39;49;00m[33mError[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mResourceNotFoundException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'ResourceNotFoundException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ResourceNotFoundException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[33m=============================== warnings summary ===============================[0m
+tests/test_identitystore/test_identitystore.py: 32 warnings
+  /Users/lucas/.cache/fakecloud/moto/.venv/lib/python3.9/site-packages/boto3/compat.py:89: PythonDeprecationWarning: Boto3 will no longer support Python 3.9 starting April 29, 2026. To continue receiving service updates, bug fixes, and security updates please upgrade to Python 3.10 or later. More information can be found here: https://aws.amazon.com/blogs/developer/python-support-policy-updates-for-aws-sdks-and-tools/
+    warnings.warn(warning, PythonDeprecationWarning)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+[36m[1m=========================== short test summary info ============================[0m
+[31mFAILED[0m test_identitystore/test_identitystore.py::[1mtest_create_group[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_identitystore/test_identitystore.py::[1mtest_create_group_duplicate_name[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_identitystore/test_identitystore.py::[1mtest_group_multiple_identity_stores[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_identitystore/test_identitystore.py::[1mtest_create_group_membership[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_identitystore/test_identitystore.py::[1mtest_create_duplicate_username[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_identitystore/test_identitystore.py::[1mtest_create_username_no_username[0m - assert 'ValidationException' in "<class 'botocore.exceptions.ClientError'>"
+[31mFAILED[0m test_identitystore/test_identitystore.py::[1mtest_create_username_missing_required_attributes[0m - assert 'ValidationException' in "<class 'botocore.exceptions.ClientError'>"
+[31mFAILED[0m test_identitystore/test_identitystore.py::[1mtest_create_username_missing_required_name_field[GivenName-familyname][0m - assert 'ValidationException' in "<class 'botocore.exceptions.ClientError'>"
+[31mFAILED[0m test_identitystore/test_identitystore.py::[1mtest_create_username_missing_required_name_field[FamilyName-givenname][0m - assert 'ValidationException' in "<class 'botocore.exceptions.ClientError'>"
+[31mFAILED[0m test_identitystore/test_identitystore.py::[1mtest_create_describe_sparse_user[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_identitystore/test_identitystore.py::[1mtest_create_describe_full_user[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_identitystore/test_identitystore.py::[1mtest_describe_user_doesnt_exist[0m - AssertionError: assert '400' == 'ResourceNotFoundException'
+[31mFAILED[0m test_identitystore/test_identitystore.py::[1mtest_get_user_id_by_username[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_identitystore/test_identitystore.py::[1mtest_get_user_id_by_email[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_identitystore/test_identitystore.py::[1mtest_get_user_id_does_not_exist[0m - AssertionError: assert '400' == 'ResourceNotFoundException'
+[31mFAILED[0m test_identitystore/test_identitystore.py::[1mtest_get_user_id_empty_attribute_value[0m - AssertionError: assert '400' == 'ValidationException'
+[31mFAILED[0m test_identitystore/test_identitystore.py::[1mtest_get_user_id_invalid_attribute_path[0m - AssertionError: assert '400' == 'ValidationException'
+[31mFAILED[0m test_identitystore/test_identitystore.py::[1mtest_get_group_id[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_identitystore/test_identitystore.py::[1mtest_get_group_id_does_not_exist[0m - AssertionError: assert '400' == 'ResourceNotFoundException'
+[31mFAILED[0m test_identitystore/test_identitystore.py::[1mtest_list_groups[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_identitystore/test_identitystore.py::[1mtest_list_groups_filter[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_identitystore/test_identitystore.py::[1mtest_list_group_memberships[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_identitystore/test_identitystore.py::[1mtest_list_group_memberships_for_member[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_identitystore/test_identitystore.py::[1mtest_list_users[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_identitystore/test_identitystore.py::[1mtest_list_users_filter[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_identitystore/test_identitystore.py::[1mtest_delete_group[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_identitystore/test_identitystore.py::[1mtest_delete_group_doesnt_exist[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the D...
+[31mFAILED[0m test_identitystore/test_identitystore.py::[1mtest_delete_group_membership[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_identitystore/test_identitystore.py::[1mtest_delete_user[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_identitystore/test_identitystore.py::[1mtest_delete_user_doesnt_exist[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the D...
+[31mFAILED[0m test_identitystore/test_identitystore.py::[1mtest_create_describe_group[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_identitystore/test_identitystore.py::[1mtest_describe_group_doesnt_exist[0m - AssertionError: assert '400' == 'ResourceNotFoundException'
+[31m[31m[1m32 failed[0m, [33m32 warnings[0m[31m in 1.09s[0m[0m

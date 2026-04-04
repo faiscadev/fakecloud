@@ -1,0 +1,186 @@
+[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[32m.[0m[31mF[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[32m.[0m[31mF[0m[32m.[0m[32m.[0m[31m                                                 [100%][0m
+=================================== FAILURES ===================================
+[31m[1m______________________________ test_get_findings _______________________________[0m
+[1m[31mtest_securityhub/test_securityhub.py[0m:33: in test_get_findings
+    [0mimport_response = client.batch_import_findings(Findings=[test_finding])[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the BatchImportFindings operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>c80064c3-3aa6-49a2-bc6d-6687efffed8d</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m__________________________ test_batch_import_findings __________________________[0m
+[1m[31mtest_securityhub/test_securityhub.py[0m:65: in test_batch_import_findings
+    [0mresponse = client.batch_import_findings(Findings=[valid_finding])[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the BatchImportFindings operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>f9fb116b-abf8-4342-b231-4d9d101d4b5e</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_____________________ test_get_findings_invalid_parameters _____________________[0m
+[1m[31mtest_securityhub/test_securityhub.py[0m:89: in test_get_findings_invalid_parameters
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mInvalidInputException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'InvalidInputException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- InvalidInputException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m_____________________ test_batch_import_multiple_findings ______________________[0m
+[1m[31mtest_securityhub/test_securityhub.py[0m:115: in test_batch_import_multiple_findings
+    [0mimport_response = client.batch_import_findings(Findings=findings)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the BatchImportFindings operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>8fb210e1-b28f-48a4-9e6a-ac3c91c72a5b</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m________________________ test_get_findings_max_results _________________________[0m
+[1m[31mtest_securityhub/test_securityhub.py[0m:152: in test_get_findings_max_results
+    [0mimport_response = client.batch_import_findings(Findings=findings)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the BatchImportFindings operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>57506c9e-41c3-4b1c-8140-43a44a52d55a</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______________ test_enable_organization_admin_account_without_org ______________[0m
+[1m[31mtest_securityhub/test_securityhub.py[0m:211: in test_enable_organization_admin_account_without_org
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mAWSOrganizationsNotInUseException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'AWSOrganizat...nUseException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- AWSOrganizationsNotInUseException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m___________________________ test_enable_security_hub ___________________________[0m
+[1m[31mtest_securityhub/test_securityhub.py[0m:719: in test_enable_security_hub
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mInvalidAccessException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'InvalidAccessException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- InvalidAccessException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m__________________________ test_disable_security_hub ___________________________[0m
+[1m[31mtest_securityhub/test_securityhub.py[0m:744: in test_disable_security_hub
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mInvalidAccessException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'InvalidAccessException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- InvalidAccessException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m___________________ test_enable_security_hub_with_parameters ___________________[0m
+[1m[31mtest_securityhub/test_securityhub.py[0m:760: in test_enable_security_hub_with_parameters
+    [0mresponse = client.enable_security_hub(EnableDefaultStandards=[94mFalse[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the EnableSecurityHub operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>45e5fb0f-fea2-417e-9a64-34bca7037b1c</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_____________________________ test_create_members ______________________________[0m
+[1m[31mtest_securityhub/test_securityhub.py[0m:775: in test_create_members
+    [0mclient.enable_security_hub()[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the EnableSecurityHub operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>7b92c760-b212-4d5f-93aa-025a0bea5e11</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________________________ test_get_members _______________________________[0m
+[1m[31mtest_securityhub/test_securityhub.py[0m:802: in test_get_members
+    [0mclient.enable_security_hub()[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the EnableSecurityHub operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>8c3a591c-f17e-4049-91b0-c8e73cb5fc51</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______________________________ test_list_members _______________________________[0m
+[1m[31mtest_securityhub/test_securityhub.py[0m:890: in test_list_members
+    [0mclient.enable_security_hub()[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the EnableSecurityHub operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>c45c0ffe-1b7d-435e-b882-7f76452acb62</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[33m=============================== warnings summary ===============================[0m
+tests/test_securityhub/test_securityhub.py: 12 warnings
+  /Users/lucas/.cache/fakecloud/moto/.venv/lib/python3.9/site-packages/boto3/compat.py:89: PythonDeprecationWarning: Boto3 will no longer support Python 3.9 starting April 29, 2026. To continue receiving service updates, bug fixes, and security updates please upgrade to Python 3.10 or later. More information can be found here: https://aws.amazon.com/blogs/developer/python-support-policy-updates-for-aws-sdks-and-tools/
+    warnings.warn(warning, PythonDeprecationWarning)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+[36m[1m=========================== short test summary info ============================[0m
+[31mFAILED[0m test_securityhub/test_securityhub.py::[1mtest_get_findings[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the B...
+[31mFAILED[0m test_securityhub/test_securityhub.py::[1mtest_batch_import_findings[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the B...
+[31mFAILED[0m test_securityhub/test_securityhub.py::[1mtest_get_findings_invalid_parameters[0m - AssertionError: assert '400' == 'InvalidInputException'
+[31mFAILED[0m test_securityhub/test_securityhub.py::[1mtest_batch_import_multiple_findings[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the B...
+[31mFAILED[0m test_securityhub/test_securityhub.py::[1mtest_get_findings_max_results[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the B...
+[31mFAILED[0m test_securityhub/test_securityhub.py::[1mtest_enable_organization_admin_account_without_org[0m - AssertionError: assert '400' == 'AWSOrganizat...nUseException'
+[31mFAILED[0m test_securityhub/test_securityhub.py::[1mtest_enable_security_hub[0m - AssertionError: assert '400' == 'InvalidAccessException'
+[31mFAILED[0m test_securityhub/test_securityhub.py::[1mtest_disable_security_hub[0m - AssertionError: assert '400' == 'InvalidAccessException'
+[31mFAILED[0m test_securityhub/test_securityhub.py::[1mtest_enable_security_hub_with_parameters[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the E...
+[31mFAILED[0m test_securityhub/test_securityhub.py::[1mtest_create_members[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the E...
+[31mFAILED[0m test_securityhub/test_securityhub.py::[1mtest_get_members[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the E...
+[31mFAILED[0m test_securityhub/test_securityhub.py::[1mtest_list_members[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the E...
+[31m[31m[1m12 failed[0m, [32m12 passed[0m, [33m12 warnings[0m[31m in 0.62s[0m[0m

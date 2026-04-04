@@ -1,0 +1,899 @@
+[31mF[0m[31mF[0m[31mF[0m[31mE[0m[31mE[0m[31mE[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mE[0m[31mE[0m[31mE[0m[31mE[0m[31mE[0m[31mE[0m[31mE[0m[31mE[0m[31mE[0m[31mE[0m[31mE[0m[31mE[0m[31mE[0m[31mE[0m[31mE[0m[31mE[0m[31mE[0m[31mE[0m[31mE[0m[31mE[0m[31mE[0m[31mE[0m[31mE[0m[31mE[0m[31mE[0m[31mE[0m[31mE[0m[31mE[0m[31mE[0m[31mE[0m[31mE[0m[31mE[0m[31mE[0m[31mE[0m[31mE[0m[31mE[0m[31mE[0m[31mE[0m[31mE[0m[31m                      [100%][0m
+==================================== ERRORS ====================================
+[31m[1m_ ERROR at setup of TestDeleteApplication.test_valid_application_id[0-STARTED-expectation0] _[0m
+[1m[31mtest_emrserverless/test_emrserverless.py[0m:34: in fixture_application_factory
+    [0mresp = client.create_application([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateApplication operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>1d0695fb-6ae4-4455-9315-e9aafce63d13</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_ ERROR at setup of TestDeleteApplication.test_valid_application_id[1-STOPPED-expectation1] _[0m
+[1m[31mtest_emrserverless/test_emrserverless.py[0m:34: in fixture_application_factory
+    [0mresp = client.create_application([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateApplication operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>206a0f58-9ff4-450d-8c0c-5285d6d4f6fa</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_____ ERROR at setup of TestDeleteApplication.test_invalid_application_id ______[0m
+[1m[31mtest_emrserverless/test_emrserverless.py[0m:34: in fixture_application_factory
+    [0mresp = client.create_application([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateApplication operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>32b39b2a-a9dd-47f5-8c90-bba76494b8ed</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_________ ERROR at setup of TestListApplication.test_response_context __________[0m
+[1m[31mtest_emrserverless/test_emrserverless.py[0m:34: in fixture_application_factory
+    [0mresp = client.create_application([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateApplication operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>92b9e7b1-468f-40be-b709-a9bca9b06456</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_ ERROR at setup of TestListApplication.test_filtering[list_applications_args0-2] _[0m
+[1m[31mtest_emrserverless/test_emrserverless.py[0m:34: in fixture_application_factory
+    [0mresp = client.create_application([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateApplication operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>f42a8961-2472-4c51-ac61-67611595e25a</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_ ERROR at setup of TestListApplication.test_filtering[list_applications_args1-1] _[0m
+[1m[31mtest_emrserverless/test_emrserverless.py[0m:34: in fixture_application_factory
+    [0mresp = client.create_application([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateApplication operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>b52b5e11-b15c-4992-aae9-ce79bd67b8bd</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_ ERROR at setup of TestListApplication.test_filtering[list_applications_args2-2] _[0m
+[1m[31mtest_emrserverless/test_emrserverless.py[0m:34: in fixture_application_factory
+    [0mresp = client.create_application([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateApplication operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>53c17456-0925-4639-8f76-b2707a7d63e3</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_ ERROR at setup of TestListApplication.test_filtering[list_applications_args3-0] _[0m
+[1m[31mtest_emrserverless/test_emrserverless.py[0m:34: in fixture_application_factory
+    [0mresp = client.create_application([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateApplication operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>329cd7cf-c9ea-46b1-a62a-19bff7bfda2a</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_ ERROR at setup of TestListApplication.test_filtering[list_applications_args4-1] _[0m
+[1m[31mtest_emrserverless/test_emrserverless.py[0m:34: in fixture_application_factory
+    [0mresp = client.create_application([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateApplication operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>fbf3e659-632a-4f0a-a202-c7464ee0b9f5</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m____________ ERROR at setup of TestListApplication.test_next_token _____________[0m
+[1m[31mtest_emrserverless/test_emrserverless.py[0m:34: in fixture_application_factory
+    [0mresp = client.create_application([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateApplication operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>295fd1b3-2eab-4f97-80d1-600b6b4a9247</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______ ERROR at setup of TestStartApplication.test_valid_application_id _______[0m
+[1m[31mtest_emrserverless/test_emrserverless.py[0m:34: in fixture_application_factory
+    [0mresp = client.create_application([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateApplication operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>dbade48b-430b-4e41-812c-cc81fbc8f9ff</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______ ERROR at setup of TestStartApplication.test_invalid_application_id ______[0m
+[1m[31mtest_emrserverless/test_emrserverless.py[0m:34: in fixture_application_factory
+    [0mresp = client.create_application([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateApplication operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>89b54651-6d8b-4ddf-871a-cae2583f9e7f</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______ ERROR at setup of TestStopApplication.test_valid_application_id ________[0m
+[1m[31mtest_emrserverless/test_emrserverless.py[0m:34: in fixture_application_factory
+    [0mresp = client.create_application([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateApplication operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>b5c226e7-9649-4436-89a7-312506c34097</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______ ERROR at setup of TestStopApplication.test_invalid_application_id _______[0m
+[1m[31mtest_emrserverless/test_emrserverless.py[0m:34: in fixture_application_factory
+    [0mresp = client.create_application([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateApplication operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>039bed61-ea99-4f51-8265-987020db823c</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_ ERROR at setup of TestUpdateApplication.test_application_status[0-STARTED-expectation0] _[0m
+[1m[31mtest_emrserverless/test_emrserverless.py[0m:34: in fixture_application_factory
+    [0mresp = client.create_application([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateApplication operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>2ddd04c6-d770-4b04-b462-9e18be1fca86</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_ ERROR at setup of TestUpdateApplication.test_application_status[1-STOPPED-expectation1] _[0m
+[1m[31mtest_emrserverless/test_emrserverless.py[0m:34: in fixture_application_factory
+    [0mresp = client.create_application([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateApplication operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>e3cd2449-f9f2-4c3f-b0f7-8e8a60a55b76</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_ ERROR at setup of TestUpdateApplication.test_valid_update[update_configuration0] _[0m
+[1m[31mtest_emrserverless/test_emrserverless.py[0m:34: in fixture_application_factory
+    [0mresp = client.create_application([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateApplication operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>991d5fe1-b0c4-4021-b4c5-25a1dfed4c45</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_ ERROR at setup of TestUpdateApplication.test_valid_update[update_configuration1] _[0m
+[1m[31mtest_emrserverless/test_emrserverless.py[0m:34: in fixture_application_factory
+    [0mresp = client.create_application([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateApplication operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>9b440e10-2b73-4aa0-81d4-c81615060098</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_ ERROR at setup of TestUpdateApplication.test_valid_update[update_configuration2] _[0m
+[1m[31mtest_emrserverless/test_emrserverless.py[0m:34: in fixture_application_factory
+    [0mresp = client.create_application([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateApplication operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>015ef0d6-4afc-4267-975f-cfdedddf5318</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_ ERROR at setup of TestUpdateApplication.test_valid_update[update_configuration3] _[0m
+[1m[31mtest_emrserverless/test_emrserverless.py[0m:34: in fixture_application_factory
+    [0mresp = client.create_application([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateApplication operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>038b43cd-0094-44d8-9f2e-9d0dc3633e9e</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_ ERROR at setup of TestUpdateApplication.test_valid_update[update_configuration4] _[0m
+[1m[31mtest_emrserverless/test_emrserverless.py[0m:34: in fixture_application_factory
+    [0mresp = client.create_application([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateApplication operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>4785f3a1-7109-4d31-88e7-e52a286629b9</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_ ERROR at setup of TestUpdateApplication.test_valid_update[update_configuration5] _[0m
+[1m[31mtest_emrserverless/test_emrserverless.py[0m:34: in fixture_application_factory
+    [0mresp = client.create_application([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateApplication operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>bd66a269-a02d-4de3-be41-5ab2c02c6f2d</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_ ERROR at setup of TestUpdateApplication.test_valid_update[update_configuration6] _[0m
+[1m[31mtest_emrserverless/test_emrserverless.py[0m:34: in fixture_application_factory
+    [0mresp = client.create_application([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateApplication operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>800c86c3-ef67-4b66-a282-02388d6691c8</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_____ ERROR at setup of TestUpdateApplication.test_invalid_application_id ______[0m
+[1m[31mtest_emrserverless/test_emrserverless.py[0m:34: in fixture_application_factory
+    [0mresp = client.create_application([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateApplication operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>e56b1a04-7391-4b99-9f20-d000d3a9e9b9</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_____________ ERROR at setup of TestStartJobRun.test_start_job_run _____________[0m
+[1m[31mtest_emrserverless/test_emrserverless.py[0m:34: in fixture_application_factory
+    [0mresp = client.create_application([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateApplication operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>19aa3225-5733-43e0-af8f-000852e939fa</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m________ ERROR at setup of TestStartJobRun.test_invalid_application_id _________[0m
+[1m[31mtest_emrserverless/test_emrserverless.py[0m:34: in fixture_application_factory
+    [0mresp = client.create_application([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateApplication operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>4d5092ad-09f3-4702-805d-43e4301e5d89</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m__________ ERROR at setup of TestStartJobRun.test_cross_account_role ___________[0m
+[1m[31mtest_emrserverless/test_emrserverless.py[0m:34: in fixture_application_factory
+    [0mresp = client.create_application([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateApplication operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>b61af694-0cd9-442e-a09a-1a0b918358e2</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______________ ERROR at setup of TestStartJobRun.test_run_timeout ______________[0m
+[1m[31mtest_emrserverless/test_emrserverless.py[0m:34: in fixture_application_factory
+    [0mresp = client.create_application([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateApplication operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>15a4a59e-04e4-49ee-b1d6-0b551483ff6d</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m__ ERROR at setup of TestGetJobRun.test_job_not_belongs_to_other_application ___[0m
+[1m[31mtest_emrserverless/test_emrserverless.py[0m:34: in fixture_application_factory
+    [0mresp = client.create_application([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateApplication operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>ba2b32ce-cef6-47d5-8afd-00d674cfabd6</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________ ERROR at setup of TestGetJobRun.test_get_job_run _______________[0m
+[1m[31mtest_emrserverless/test_emrserverless.py[0m:34: in fixture_application_factory
+    [0mresp = client.create_application([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateApplication operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>c7cadfc9-805a-4245-af21-564485fcb390</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_________ ERROR at setup of TestGetJobRun.test_invalid_application_id __________[0m
+[1m[31mtest_emrserverless/test_emrserverless.py[0m:34: in fixture_application_factory
+    [0mresp = client.create_application([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateApplication operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>af289600-d549-42d3-90c2-5a8bfe4184e4</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________ ERROR at setup of TestGetJobRun.test_invalid_job_run_id ____________[0m
+[1m[31mtest_emrserverless/test_emrserverless.py[0m:34: in fixture_application_factory
+    [0mresp = client.create_application([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateApplication operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>1457d0f9-6bde-4ed3-bba3-45103601d145</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_____________ ERROR at setup of TestListJobRun.test_list_job_runs ______________[0m
+[1m[31mtest_emrserverless/test_emrserverless.py[0m:34: in fixture_application_factory
+    [0mresp = client.create_application([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateApplication operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>ae643861-5b55-4043-a10d-7c9dbb951cc9</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_________ ERROR at setup of TestListJobRun.test_invalid_application_id _________[0m
+[1m[31mtest_emrserverless/test_emrserverless.py[0m:34: in fixture_application_factory
+    [0mresp = client.create_application([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateApplication operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>ecd81717-5ddf-464b-a0e1-9d4d4fa83b10</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________ ERROR at setup of TestListJobRun.test_application_states ___________[0m
+[1m[31mtest_emrserverless/test_emrserverless.py[0m:34: in fixture_application_factory
+    [0mresp = client.create_application([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateApplication operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>51609bc5-ec12-4653-9be6-d7884e0f84c9</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m____________ ERROR at setup of TestListJobRun.test_created_filters _____________[0m
+[1m[31mtest_emrserverless/test_emrserverless.py[0m:34: in fixture_application_factory
+    [0mresp = client.create_application([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateApplication operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>959ec370-1dba-4524-b45f-dee2643c6963</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_____________ ERROR at setup of TestListJobRun.test_created_after ______________[0m
+[1m[31mtest_emrserverless/test_emrserverless.py[0m:34: in fixture_application_factory
+    [0mresp = client.create_application([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateApplication operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>8c71f703-f0db-463b-aafb-14c5751fe26a</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______________ ERROR at setup of TestListJobRun.test_max_results _______________[0m
+[1m[31mtest_emrserverless/test_emrserverless.py[0m:34: in fixture_application_factory
+    [0mresp = client.create_application([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateApplication operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>084621f1-c59b-4b44-b34f-6b519a82dd8a</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________ ERROR at setup of TestListJobRun.test_invalid_job_run_id ___________[0m
+[1m[31mtest_emrserverless/test_emrserverless.py[0m:34: in fixture_application_factory
+    [0mresp = client.create_application([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateApplication operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>798999a0-4d08-4337-b103-83603883fb61</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m____________ ERROR at setup of TestCancelJobRun.test_cancel_job_run ____________[0m
+[1m[31mtest_emrserverless/test_emrserverless.py[0m:34: in fixture_application_factory
+    [0mresp = client.create_application([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateApplication operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>e8b02bf0-2d80-406f-a866-4bcc83986ff9</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m________ ERROR at setup of TestCancelJobRun.test_invalid_application_id ________[0m
+[1m[31mtest_emrserverless/test_emrserverless.py[0m:34: in fixture_application_factory
+    [0mresp = client.create_application([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateApplication operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>af1e8010-cc2d-4571-a54a-a35276ed632e</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m__________ ERROR at setup of TestCancelJobRun.test_invalid_job_run_id __________[0m
+[1m[31mtest_emrserverless/test_emrserverless.py[0m:34: in fixture_application_factory
+    [0mresp = client.create_application([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateApplication operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>3b620266-f204-43b9-ad2f-061a56fc7858</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+=================================== FAILURES ===================================
+[31m[1m________________ TestCreateApplication.test_create_application _________________[0m
+[1m[31mtest_emrserverless/test_emrserverless.py[0m:177: in test_create_application
+    [0mresp = client.create_application([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateApplication operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>cff844da-b19d-412d-b059-f7410da93f24</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_________ TestCreateApplication.test_create_application_incorrect_type _________[0m
+[1m[31mtest_emrserverless/test_emrserverless.py[0m:202: in test_create_application_incorrect_type
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mValidationException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'ValidationException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ValidationException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m____ TestCreateApplication.test_create_application_incorrect_release_label _____[0m
+[1m[31mtest_emrserverless/test_emrserverless.py[0m:217: in test_create_application_incorrect_release_label
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mValidationException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'ValidationException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ValidationException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m___________ TestGetApplication.test_filtering[extra_configuration0] ____________[0m
+[1m[31mtest_emrserverless/test_emrserverless.py[0m:360: in test_filtering
+    [0mapplication_id = [96mself[39;49;00m.client.create_application([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateApplication operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>674bb28d-fae3-40f0-a6cf-236d38441fad</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________ TestGetApplication.test_filtering[extra_configuration1] ____________[0m
+[1m[31mtest_emrserverless/test_emrserverless.py[0m:360: in test_filtering
+    [0mapplication_id = [96mself[39;49;00m.client.create_application([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateApplication operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>11d18e77-372d-46da-9079-65fb1a39dfb5</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________ TestGetApplication.test_filtering[extra_configuration2] ____________[0m
+[1m[31mtest_emrserverless/test_emrserverless.py[0m:360: in test_filtering
+    [0mapplication_id = [96mself[39;49;00m.client.create_application([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateApplication operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>a6fa0bf3-9191-4e56-ab4b-7a0a7a4cbad5</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________ TestGetApplication.test_filtering[extra_configuration3] ____________[0m
+[1m[31mtest_emrserverless/test_emrserverless.py[0m:360: in test_filtering
+    [0mapplication_id = [96mself[39;49;00m.client.create_application([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateApplication operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>d3b2528d-9998-4a72-bcb6-8298241b258a</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________ TestGetApplication.test_filtering[extra_configuration4] ____________[0m
+[1m[31mtest_emrserverless/test_emrserverless.py[0m:360: in test_filtering
+    [0mapplication_id = [96mself[39;49;00m.client.create_application([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateApplication operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>f0efe7a1-1db2-409c-bfa0-bc3d731e371a</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m________________ TestGetApplication.test_invalid_application_id ________________[0m
+[1m[31mtest_emrserverless/test_emrserverless.py[0m:379: in test_invalid_application_id
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mResourceNotFoundException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'ResourceNotFoundException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ResourceNotFoundException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[33m=============================== warnings summary ===============================[0m
+tests/test_emrserverless/test_emrserverless.py: 51 warnings
+  /Users/lucas/.cache/fakecloud/moto/.venv/lib/python3.9/site-packages/boto3/compat.py:89: PythonDeprecationWarning: Boto3 will no longer support Python 3.9 starting April 29, 2026. To continue receiving service updates, bug fixes, and security updates please upgrade to Python 3.10 or later. More information can be found here: https://aws.amazon.com/blogs/developer/python-support-policy-updates-for-aws-sdks-and-tools/
+    warnings.warn(warning, PythonDeprecationWarning)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+[36m[1m=========================== short test summary info ============================[0m
+[31mFAILED[0m test_emrserverless/test_emrserverless.py::[1mTestCreateApplication::test_create_application[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_emrserverless/test_emrserverless.py::[1mTestCreateApplication::test_create_application_incorrect_type[0m - AssertionError: assert '400' == 'ValidationException'
+[31mFAILED[0m test_emrserverless/test_emrserverless.py::[1mTestCreateApplication::test_create_application_incorrect_release_label[0m - AssertionError: assert '400' == 'ValidationException'
+[31mFAILED[0m test_emrserverless/test_emrserverless.py::[1mTestGetApplication::test_filtering[extra_configuration0][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_emrserverless/test_emrserverless.py::[1mTestGetApplication::test_filtering[extra_configuration1][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_emrserverless/test_emrserverless.py::[1mTestGetApplication::test_filtering[extra_configuration2][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_emrserverless/test_emrserverless.py::[1mTestGetApplication::test_filtering[extra_configuration3][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_emrserverless/test_emrserverless.py::[1mTestGetApplication::test_filtering[extra_configuration4][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_emrserverless/test_emrserverless.py::[1mTestGetApplication::test_invalid_application_id[0m - AssertionError: assert '400' == 'ResourceNotFoundException'
+[31mERROR[0m test_emrserverless/test_emrserverless.py::[1mTestDeleteApplication::test_valid_application_id[0-STARTED-expectation0][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mERROR[0m test_emrserverless/test_emrserverless.py::[1mTestDeleteApplication::test_valid_application_id[1-STOPPED-expectation1][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mERROR[0m test_emrserverless/test_emrserverless.py::[1mTestDeleteApplication::test_invalid_application_id[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mERROR[0m test_emrserverless/test_emrserverless.py::[1mTestListApplication::test_response_context[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mERROR[0m test_emrserverless/test_emrserverless.py::[1mTestListApplication::test_filtering[list_applications_args0-2][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mERROR[0m test_emrserverless/test_emrserverless.py::[1mTestListApplication::test_filtering[list_applications_args1-1][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mERROR[0m test_emrserverless/test_emrserverless.py::[1mTestListApplication::test_filtering[list_applications_args2-2][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mERROR[0m test_emrserverless/test_emrserverless.py::[1mTestListApplication::test_filtering[list_applications_args3-0][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mERROR[0m test_emrserverless/test_emrserverless.py::[1mTestListApplication::test_filtering[list_applications_args4-1][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mERROR[0m test_emrserverless/test_emrserverless.py::[1mTestListApplication::test_next_token[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mERROR[0m test_emrserverless/test_emrserverless.py::[1mTestStartApplication::test_valid_application_id[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mERROR[0m test_emrserverless/test_emrserverless.py::[1mTestStartApplication::test_invalid_application_id[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mERROR[0m test_emrserverless/test_emrserverless.py::[1mTestStopApplication::test_valid_application_id[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mERROR[0m test_emrserverless/test_emrserverless.py::[1mTestStopApplication::test_invalid_application_id[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mERROR[0m test_emrserverless/test_emrserverless.py::[1mTestUpdateApplication::test_application_status[0-STARTED-expectation0][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mERROR[0m test_emrserverless/test_emrserverless.py::[1mTestUpdateApplication::test_application_status[1-STOPPED-expectation1][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mERROR[0m test_emrserverless/test_emrserverless.py::[1mTestUpdateApplication::test_valid_update[update_configuration0][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mERROR[0m test_emrserverless/test_emrserverless.py::[1mTestUpdateApplication::test_valid_update[update_configuration1][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mERROR[0m test_emrserverless/test_emrserverless.py::[1mTestUpdateApplication::test_valid_update[update_configuration2][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mERROR[0m test_emrserverless/test_emrserverless.py::[1mTestUpdateApplication::test_valid_update[update_configuration3][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mERROR[0m test_emrserverless/test_emrserverless.py::[1mTestUpdateApplication::test_valid_update[update_configuration4][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mERROR[0m test_emrserverless/test_emrserverless.py::[1mTestUpdateApplication::test_valid_update[update_configuration5][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mERROR[0m test_emrserverless/test_emrserverless.py::[1mTestUpdateApplication::test_valid_update[update_configuration6][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mERROR[0m test_emrserverless/test_emrserverless.py::[1mTestUpdateApplication::test_invalid_application_id[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mERROR[0m test_emrserverless/test_emrserverless.py::[1mTestStartJobRun::test_start_job_run[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mERROR[0m test_emrserverless/test_emrserverless.py::[1mTestStartJobRun::test_invalid_application_id[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mERROR[0m test_emrserverless/test_emrserverless.py::[1mTestStartJobRun::test_cross_account_role[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mERROR[0m test_emrserverless/test_emrserverless.py::[1mTestStartJobRun::test_run_timeout[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mERROR[0m test_emrserverless/test_emrserverless.py::[1mTestGetJobRun::test_job_not_belongs_to_other_application[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mERROR[0m test_emrserverless/test_emrserverless.py::[1mTestGetJobRun::test_get_job_run[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mERROR[0m test_emrserverless/test_emrserverless.py::[1mTestGetJobRun::test_invalid_application_id[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mERROR[0m test_emrserverless/test_emrserverless.py::[1mTestGetJobRun::test_invalid_job_run_id[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mERROR[0m test_emrserverless/test_emrserverless.py::[1mTestListJobRun::test_list_job_runs[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mERROR[0m test_emrserverless/test_emrserverless.py::[1mTestListJobRun::test_invalid_application_id[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mERROR[0m test_emrserverless/test_emrserverless.py::[1mTestListJobRun::test_application_states[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mERROR[0m test_emrserverless/test_emrserverless.py::[1mTestListJobRun::test_created_filters[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mERROR[0m test_emrserverless/test_emrserverless.py::[1mTestListJobRun::test_created_after[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mERROR[0m test_emrserverless/test_emrserverless.py::[1mTestListJobRun::test_max_results[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mERROR[0m test_emrserverless/test_emrserverless.py::[1mTestListJobRun::test_invalid_job_run_id[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mERROR[0m test_emrserverless/test_emrserverless.py::[1mTestCancelJobRun::test_cancel_job_run[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mERROR[0m test_emrserverless/test_emrserverless.py::[1mTestCancelJobRun::test_invalid_application_id[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mERROR[0m test_emrserverless/test_emrserverless.py::[1mTestCancelJobRun::test_invalid_job_run_id[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31m[31m[1m9 failed[0m, [33m51 warnings[0m, [31m[1m42 errors[0m[31m in 1.79s[0m[0m

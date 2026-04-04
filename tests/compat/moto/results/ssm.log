@@ -1,0 +1,1522 @@
+[32m.[0m[31mF[0m[32m.[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[32m.[0m[31mF[0m[31mF[0m[32m.[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[32m.[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[32m.[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31m [ 40%]
+[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[32m.[0m[32m.[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[33ms[0m[33ms[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31m [ 80%]
+[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[32m.[0m[32m.[0m[32m.[0m[31m                                       [100%][0m
+=================================== FAILURES ===================================
+[31m[1m______________________ test_delete_nonexistent_parameter _______________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:47: in test_delete_nonexistent_parameter
+    [0m[94massert[39;49;00m ex.value.response[[33m"[39;49;00m[33mError[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mMessage[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mParameter test_noexist not found.[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'ParameterNot...st not found.' == 'Parameter te...st not found.'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- Parameter test_noexist not found.[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ ParameterNotFound: Parameter test_noexist not found.[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     ?          +++++++++++++++++++[90m[39;49;00m[0m
+[31m[1m_________________________ test_get_parameters_by_path __________________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:107: in test_get_parameters_by_path
+    [0m[94massert[39;49;00m [96mlen[39;49;00m(response[[33m"[39;49;00m[33mParameters[39;49;00m[33m"[39;49;00m]) == [94m2[39;49;00m[90m[39;49;00m
+[1m[31mE   assert 0 == 2[0m
+[1m[31mE    +  where 0 = len([])[0m
+[31m[1m___________________________ test_put_parameter[test] ___________________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:243: in test_put_parameter
+    [0m[94massert[39;49;00m response[[33m"[39;49;00m[33mParameters[39;49;00m[33m"[39;49;00m][[94m0[39;49;00m][[33m"[39;49;00m[33mARN[39;49;00m[33m"[39;49;00m] == ([90m[39;49;00m
+[1m[31mE   AssertionError: assert 'arn:aws:ssm:...parametertest' == 'arn:aws:ssm:...arameter/test'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- arn:aws:ssm:us-east-1:123456789012:parameter/test[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     ?                       --------- ^^          -[90m[39;49;00m[0m
+[1m[31mE     [92m+ arn:aws:ssm:us-east-1:000000000000:parametertest[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     ?                        ^^^^^^^^^^^[90m[39;49;00m[0m
+[31m[1m____________________ test_put_parameter[my-cool-parameter] _____________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:243: in test_put_parameter
+    [0m[94massert[39;49;00m response[[33m"[39;49;00m[33mParameters[39;49;00m[33m"[39;49;00m][[94m0[39;49;00m][[33m"[39;49;00m[33mARN[39;49;00m[33m"[39;49;00m] == ([90m[39;49;00m
+[1m[31mE   AssertionError: assert 'arn:aws:ssm:...ool-parameter' == 'arn:aws:ssm:...ool-parameter'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- arn:aws:ssm:us-east-1:123456789012:parameter/my-cool-parameter[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     ?                       --------- ^^          -[90m[39;49;00m[0m
+[1m[31mE     [92m+ arn:aws:ssm:us-east-1:000000000000:parametermy-cool-parameter[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     ?                        ^^^^^^^^^^^[90m[39;49;00m[0m
+[31m[1m____________ test_put_parameter_overwrite_preserves_metadata[test] _____________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:337: in test_put_parameter_overwrite_preserves_metadata
+    [0m[94massert[39;49;00m response[[33m"[39;49;00m[33mTier[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mAdvanced[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'Standard' == 'Advanced'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- Advanced[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ Standard[39;49;00m[90m[39;49;00m[0m
+[31m[1m______ test_put_parameter_overwrite_preserves_metadata[my-cool-parameter] ______[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:337: in test_put_parameter_overwrite_preserves_metadata
+    [0m[94massert[39;49;00m response[[33m"[39;49;00m[33mTier[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mAdvanced[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'Standard' == 'Advanced'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- Advanced[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ Standard[39;49;00m[90m[39;49;00m[0m
+[31m[1m____________________ test_put_parameter_empty_string_value _____________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:442: in test_put_parameter_empty_string_value
+    [0mclient.put_parameter(Name=[33m"[39;49;00m[33mtest_name[39;49;00m[33m"[39;49;00m, Value=[33m"[39;49;00m[33m"[39;49;00m, Type=[33m"[39;49;00m[33mString[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31mE   Failed: DID NOT RAISE <class 'botocore.exceptions.ClientError'>[0m
+[31m[1m_______________________ test_put_parameter_invalid_names _______________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:463: in test_put_parameter_invalid_names
+    [0mclient.put_parameter(Name=[33m"[39;49;00m[33mssm_test[39;49;00m[33m"[39;49;00m, Value=[33m"[39;49;00m[33mvalue[39;49;00m[33m"[39;49;00m, Type=[33m"[39;49;00m[33mString[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31mE   Failed: DID NOT RAISE <class 'botocore.exceptions.ClientError'>[0m
+[31m[1m________________ test_put_parameter_invalid_data_type[not_text] ________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:535: in test_put_parameter_invalid_data_type
+    [0m[94massert[39;49;00m [33m"[39;49;00m[33mValidationException[39;49;00m[33m"[39;49;00m [95min[39;49;00m ex.response[[33m"[39;49;00m[33mError[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31mE   AssertionError: assert 'ValidationException' in 'ParameterAlreadyExists'[0m
+[31m[1m________________ test_put_parameter_invalid_data_type[not_ec2] _________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:535: in test_put_parameter_invalid_data_type
+    [0m[94massert[39;49;00m [33m"[39;49;00m[33mValidationException[39;49;00m[33m"[39;49;00m [95min[39;49;00m ex.response[[33m"[39;49;00m[33mError[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31mE   AssertionError: assert 'ValidationException' in 'ParameterAlreadyExists'[0m
+[31m[1m____________ test_put_parameter_invalid_data_type[something weird] _____________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:535: in test_put_parameter_invalid_data_type
+    [0m[94massert[39;49;00m [33m"[39;49;00m[33mValidationException[39;49;00m[33m"[39;49;00m [95min[39;49;00m ex.response[[33m"[39;49;00m[33mError[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31mE   AssertionError: assert 'ValidationException' in 'ParameterAlreadyExists'[0m
+[31m[1m_______________________ test_put_parameter_invalid_type ________________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:553: in test_put_parameter_invalid_type
+    [0m[94massert[39;49;00m [33m"[39;49;00m[33mValidationException[39;49;00m[33m"[39;49;00m [95min[39;49;00m ex.response[[33m"[39;49;00m[33mError[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31mE   AssertionError: assert 'ValidationException' in 'ParameterAlreadyExists'[0m
+[31m[1m__________________________ test_put_parameter_no_type __________________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:572: in test_put_parameter_no_type
+    [0m[94massert[39;49;00m ex.response[[33m"[39;49;00m[33mError[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mValidationException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'ParameterAlreadyExists' == 'ValidationException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ValidationException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ ParameterAlreadyExists[39;49;00m[90m[39;49;00m[0m
+[31m[1m__________________ test_update_parameter_already_exists_error __________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:633: in test_update_parameter_already_exists_error
+    [0m[94massert[39;49;00m ex.response[[33m"[39;49;00m[33mError[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mMessage[39;49;00m[33m"[39;49;00m] == ([90m[39;49;00m
+[1m[31mE   AssertionError: assert 'ParameterAlr...ready exists.' == 'The paramete...uest to true.'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- The parameter already exists. To overwrite this value, set the overwrite option in the request to true.[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ ParameterAlreadyExists: The parameter Name already exists.[39;49;00m[90m[39;49;00m[0m
+[31m[1m__________________________ test_get_parameter[/test] ___________________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:660: in test_get_parameter
+    [0m[94massert[39;49;00m response[[33m"[39;49;00m[33mParameter[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mARN[39;49;00m[33m"[39;49;00m] == ([90m[39;49;00m
+[1m[31mE   AssertionError: assert 'arn:aws:ssm:...arameter/test' == 'arn:aws:ssm:...arameter/test'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- arn:aws:ssm:us-east-1:123456789012:parameter/test[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     ?                       --------- ^^[90m[39;49;00m[0m
+[1m[31mE     [92m+ arn:aws:ssm:us-east-1:000000000000:parameter/test[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     ?                        ^^^^^^^^^^^[90m[39;49;00m[0m
+[31m[1m____ test_get_parameter[arn:aws:ssm:us-east-1:123456789012:parameter/test] _____[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:652: in test_get_parameter
+    [0mresponse = client.get_parameter(Name=param, WithDecryption=[94mFalse[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.errorfactory.ParameterNotFound: An error occurred (ParameterNotFound) when calling the GetParameter operation: ParameterNotFound: Parameter arn:aws:ssm:us-east-1:123456789012:parameter/test not found.[0m
+[31m[1m__________________ test_get_parameter_with_version_and_labels __________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:680: in test_get_parameter_with_version_and_labels
+    [0mresponse = client.get_parameter(Name=[33m"[39;49;00m[33mtest-1:1[39;49;00m[33m"[39;49;00m, WithDecryption=[94mFalse[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.errorfactory.ParameterNotFound: An error occurred (ParameterNotFound) when calling the GetParameter operation: ParameterNotFound: Parameter test-1:1 not found.[0m
+[31m[1m__________________________ test_get_parameters_errors __________________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:739: in test_get_parameters_errors
+    [0mclient.get_parameters(Names=[96mlist[39;49;00m(ssm_parameters.keys()))[90m[39;49;00m
+[1m[31mE   Failed: DID NOT RAISE <class 'botocore.exceptions.ClientError'>[0m
+[31m[1m________________________ test_get_nonexistant_parameter ________________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:757: in test_get_nonexistant_parameter
+    [0mclient.get_parameter(Name=[33m"[39;49;00m[33mtest_noexist[39;49;00m[33m"[39;49;00m, WithDecryption=[94mFalse[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.errorfactory.ParameterNotFound: An error occurred (ParameterNotFound) when calling the GetParameter operation: ParameterNotFound: Parameter test_noexist not found.[0m
+
+[33mDuring handling of the above exception, another exception occurred:[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:761: in test_get_nonexistant_parameter
+    [0m[94massert[39;49;00m err.response[[33m"[39;49;00m[33mError[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mMessage[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mParameter test_noexist not found.[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'ParameterNot...st not found.' == 'Parameter te...st not found.'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- Parameter test_noexist not found.[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ ParameterNotFound: Parameter test_noexist not found.[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     ?          +++++++++++++++++++[90m[39;49;00m[0m
+[31m[1m___________________________ test_describe_parameters ___________________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:779: in test_describe_parameters
+    [0m[94massert[39;49;00m [96mlen[39;49;00m(parameters) == [94m1[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 10 == 1[0m
+[1m[31mE    +  where 10 = len([{'ARN': 'arn:aws:ssm:us-east-1:000000000000:parameter/bar/name3', 'DataType': 'text', 'LastModifiedDate': datetime.da...text', 'LastModifiedDate': datetime.datetime(2026, 4, 4, 14, 25, 2, tzinfo=tzlocal()), 'Name': '/foo/name1', ...}, ...])[0m
+[31m[1m_______________________ test_describe_parameters_paging ________________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:814: in test_describe_parameters_paging
+    [0m[94massert[39;49;00m [96mlen[39;49;00m(response[[33m"[39;49;00m[33mParameters[39;49;00m[33m"[39;49;00m]) == [94m0[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 10 == 0[0m
+[1m[31mE    +  where 10 = len([{'ARN': 'arn:aws:ssm:us-east-1:000000000000:parameterparam-31', 'DataType': 'text', 'LastModifiedDate': datetime.date... 'text', 'LastModifiedDate': datetime.datetime(2026, 4, 4, 14, 25, 3, tzinfo=tzlocal()), 'Name': 'param-36', ...}, ...])[0m
+[31m[1m____________________ test_describe_parameters_filter_names _____________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:827: in test_describe_parameters_filter_names
+    [0mclient.put_parameter(**p)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.errorfactory.ParameterAlreadyExists: An error occurred (ParameterAlreadyExists) when calling the PutParameter operation: ParameterAlreadyExists: The parameter param-0 already exists.[0m
+[31m[1m_____________________ test_describe_parameters_filter_type _____________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:849: in test_describe_parameters_filter_type
+    [0mclient.put_parameter(**p)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.errorfactory.ParameterAlreadyExists: An error occurred (ParameterAlreadyExists) when calling the PutParameter operation: ParameterAlreadyExists: The parameter param-0 already exists.[0m
+[31m[1m____________________ test_describe_parameters_filter_keyid _____________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:870: in test_describe_parameters_filter_keyid
+    [0mclient.put_parameter(**p)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.errorfactory.ParameterAlreadyExists: An error occurred (ParameterAlreadyExists) when calling the PutParameter operation: ParameterAlreadyExists: The parameter param-0 already exists.[0m
+[31m[1m____________ test_describe_parameters_with_parameter_filters_keyid _____________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:900: in test_describe_parameters_with_parameter_filters_keyid
+    [0m[94massert[39;49;00m [96mlen[39;49;00m(parameters) == [94m1[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 3 == 1[0m
+[1m[31mE    +  where 3 = len([{'ARN': 'arn:aws:ssm:us-east-1:000000000000:parameter/baz/pwd', 'DataType': 'text', 'LastModifiedDate': datetime.date...: 'text', 'LastModifiedDate': datetime.datetime(2026, 4, 4, 14, 25, 3, tzinfo=tzlocal()), 'Name': 'secure-param', ...}])[0m
+[31m[1m_____________ test_describe_parameters_with_parameter_filters_name _____________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:948: in test_describe_parameters_with_parameter_filters_name
+    [0m[94massert[39;49;00m [96mlen[39;49;00m(parameters) == [94m1[39;49;00m[90m[39;49;00m
+[1m[31mE   assert 0 == 1[0m
+[1m[31mE    +  where 0 = len([])[0m
+[31m[1m_____________ test_describe_parameters_with_parameter_filters_path _____________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:1006: in test_describe_parameters_with_parameter_filters_path
+    [0m[94massert[39;49;00m [96mlen[39;49;00m(parameters) == [94m0[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 10 == 0[0m
+[1m[31mE    +  where 10 = len([{'ARN': 'arn:aws:ssm:us-east-1:000000000000:parameter/bar/name3', 'DataType': 'text', 'LastModifiedDate': datetime.da...text', 'LastModifiedDate': datetime.datetime(2026, 4, 4, 14, 25, 2, tzinfo=tzlocal()), 'Name': '/foo/name1', ...}, ...])[0m
+[31m[1m_____________________ test_describe_parameters_needs_param _____________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:1117: in test_describe_parameters_needs_param
+    [0mclient.describe_parameters([90m[39;49;00m
+[1m[31mE   Failed: DID NOT RAISE <class 'botocore.exceptions.ClientError'>[0m
+[31m[1m_ test_describe_parameters_invalid_parameter_filters[filters0-Member must satisfy regular expression pattern: tag:.+|Name|Type|KeyId|Path|Label|Tier] _[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:1222: in test_describe_parameters_invalid_parameter_filters
+    [0mclient.describe_parameters(ParameterFilters=filters)[90m[39;49;00m
+[1m[31mE   Failed: DID NOT RAISE <class 'botocore.exceptions.ClientError'>[0m
+[31m[1m_ test_describe_parameters_invalid_parameter_filters[filters1-Member must have length less than or equal to 132] _[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:1222: in test_describe_parameters_invalid_parameter_filters
+    [0mclient.describe_parameters(ParameterFilters=filters)[90m[39;49;00m
+[1m[31mE   Failed: DID NOT RAISE <class 'botocore.exceptions.ClientError'>[0m
+[31m[1m_ test_describe_parameters_invalid_parameter_filters[filters2-Member must have length less than or equal to 10] _[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:1222: in test_describe_parameters_invalid_parameter_filters
+    [0mclient.describe_parameters(ParameterFilters=filters)[90m[39;49;00m
+[1m[31mE   Failed: DID NOT RAISE <class 'botocore.exceptions.ClientError'>[0m
+[31m[1m_ test_describe_parameters_invalid_parameter_filters[filters3-Member must have length less than or equal to 50] _[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:1222: in test_describe_parameters_invalid_parameter_filters
+    [0mclient.describe_parameters(ParameterFilters=filters)[90m[39;49;00m
+[1m[31mE   Failed: DID NOT RAISE <class 'botocore.exceptions.ClientError'>[0m
+[31m[1m_ test_describe_parameters_invalid_parameter_filters[filters4-Member must have length less than or equal to 1024, Member must have length greater than or equal to 1] _[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:1222: in test_describe_parameters_invalid_parameter_filters
+    [0mclient.describe_parameters(ParameterFilters=filters)[90m[39;49;00m
+[1m[31mE   Failed: DID NOT RAISE <class 'botocore.exceptions.ClientError'>[0m
+[31m[1m_ test_describe_parameters_invalid_parameter_filters[filters5-2 validation errors detected:] _[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:1222: in test_describe_parameters_invalid_parameter_filters
+    [0mclient.describe_parameters(ParameterFilters=filters)[90m[39;49;00m
+[1m[31mE   Failed: DID NOT RAISE <class 'botocore.exceptions.ClientError'>[0m
+[31m[1m_ test_describe_parameters_invalid_parameter_filters[filters6-The following filter key is not valid: Label. Valid filter keys include: [Path, Name, Type, KeyId, Tier]] _[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:1222: in test_describe_parameters_invalid_parameter_filters
+    [0mclient.describe_parameters(ParameterFilters=filters)[90m[39;49;00m
+[1m[31mE   Failed: DID NOT RAISE <class 'botocore.exceptions.ClientError'>[0m
+[31m[1m_ test_describe_parameters_invalid_parameter_filters[filters7-The following filter values are missing : null for filter key Name] _[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:1222: in test_describe_parameters_invalid_parameter_filters
+    [0mclient.describe_parameters(ParameterFilters=filters)[90m[39;49;00m
+[1m[31mE   Failed: DID NOT RAISE <class 'botocore.exceptions.ClientError'>[0m
+[31m[1m_ test_describe_parameters_invalid_parameter_filters[filters8-The following filter is duplicated in the request: Name. A request can contain only one occurrence of a specific filter.] _[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:1222: in test_describe_parameters_invalid_parameter_filters
+    [0mclient.describe_parameters(ParameterFilters=filters)[90m[39;49;00m
+[1m[31mE   Failed: DID NOT RAISE <class 'botocore.exceptions.ClientError'>[0m
+[31m[1m_ test_describe_parameters_invalid_parameter_filters[filters9-Filters for common parameters can't be prefixed with "aws" or "ssm" (case-insensitive).] _[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:1222: in test_describe_parameters_invalid_parameter_filters
+    [0mclient.describe_parameters(ParameterFilters=filters)[90m[39;49;00m
+[1m[31mE   Failed: DID NOT RAISE <class 'botocore.exceptions.ClientError'>[0m
+[31m[1m_ test_describe_parameters_invalid_parameter_filters[filters10-The following filter option is not valid: Equals. Valid options include: [Recursive, OneLevel]] _[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:1222: in test_describe_parameters_invalid_parameter_filters
+    [0mclient.describe_parameters(ParameterFilters=filters)[90m[39;49;00m
+[1m[31mE   Failed: DID NOT RAISE <class 'botocore.exceptions.ClientError'>[0m
+[31m[1m_ test_describe_parameters_invalid_parameter_filters[filters11-The following filter value is not valid: test. Valid values include: [Standard, Advanced, Intelligent-Tiering]] _[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:1222: in test_describe_parameters_invalid_parameter_filters
+    [0mclient.describe_parameters(ParameterFilters=filters)[90m[39;49;00m
+[1m[31mE   Failed: DID NOT RAISE <class 'botocore.exceptions.ClientError'>[0m
+[31m[1m_ test_describe_parameters_invalid_parameter_filters[filters12-The following filter value is not valid: test. Valid values include: [String, StringList, SecureString]] _[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:1222: in test_describe_parameters_invalid_parameter_filters
+    [0mclient.describe_parameters(ParameterFilters=filters)[90m[39;49;00m
+[1m[31mE   Failed: DID NOT RAISE <class 'botocore.exceptions.ClientError'>[0m
+[31m[1m_ test_describe_parameters_invalid_parameter_filters[filters13-The following filter option is not valid: option. Valid options include: [BeginsWith, Equals].] _[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:1222: in test_describe_parameters_invalid_parameter_filters
+    [0mclient.describe_parameters(ParameterFilters=filters)[90m[39;49;00m
+[1m[31mE   Failed: DID NOT RAISE <class 'botocore.exceptions.ClientError'>[0m
+[31m[1m_________________ test_describe_parameters_invalid_path[/###] __________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:1232: in test_describe_parameters_invalid_path
+    [0mclient.describe_parameters([90m[39;49;00m
+[1m[31mE   Failed: DID NOT RAISE <class 'botocore.exceptions.ClientError'>[0m
+[31m[1m__________________ test_describe_parameters_invalid_path[//] ___________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:1232: in test_describe_parameters_invalid_path
+    [0mclient.describe_parameters([90m[39;49;00m
+[1m[31mE   Failed: DID NOT RAISE <class 'botocore.exceptions.ClientError'>[0m
+[31m[1m_________________ test_describe_parameters_invalid_path[test] __________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:1232: in test_describe_parameters_invalid_path
+    [0mclient.describe_parameters([90m[39;49;00m
+[1m[31mE   Failed: DID NOT RAISE <class 'botocore.exceptions.ClientError'>[0m
+[31m[1m_____________________ test_describe_parameters_attributes ______________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:1263: in test_describe_parameters_attributes
+    [0m[94massert[39;49;00m [96mlen[39;49;00m(parameters) == [94m2[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 10 == 2[0m
+[1m[31mE    +  where 10 = len([{'ARN': 'arn:aws:ssm:us-east-1:000000000000:parameter/bar/name3', 'DataType': 'text', 'LastModifiedDate': datetime.da...text', 'LastModifiedDate': datetime.datetime(2026, 4, 4, 14, 25, 2, tzinfo=tzlocal()), 'Name': '/foo/name1', ...}, ...])[0m
+[31m[1m________________________ test_describe_parameters_tags _________________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:1336: in test_describe_parameters_tags
+    [0m[94massert[39;49;00m [96mlen[39;49;00m(parameters) == [94m3[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 10 == 3[0m
+[1m[31mE    +  where 10 = len([{'ARN': 'arn:aws:ssm:us-east-1:000000000000:parameter/bar/name3', 'DataType': 'text', 'LastModifiedDate': datetime.da... 'text', 'LastModifiedDate': datetime.datetime(2026, 4, 4, 14, 25, 4, tzinfo=tzlocal()), 'Name': '/foo/bar', ...}, ...])[0m
+[31m[1m___________________ test_describe_parameters__multiple_tags ____________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:1373: in test_describe_parameters__multiple_tags
+    [0m[94massert[39;49;00m [96mlen[39;49;00m(response[[33m"[39;49;00m[33mParameters[39;49;00m[33m"[39;49;00m]) == [94m1[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 10 == 1[0m
+[1m[31mE    +  where 10 = len([{'ARN': 'arn:aws:ssm:us-east-1:000000000000:parameter/bar/name3', 'DataType': 'text', 'LastModifiedDate': datetime.da... 'text', 'LastModifiedDate': datetime.datetime(2026, 4, 4, 14, 25, 4, tzinfo=tzlocal()), 'Name': '/foo/bar', ...}, ...])[0m
+[31m[1m________________ test_tags_in_list_tags_from_resource_parameter ________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:1421: in test_tags_in_list_tags_from_resource_parameter
+    [0m[94massert[39;49;00m tags.get([33m"[39;49;00m[33mTagList[39;49;00m[33m"[39;49;00m) == [{[33m"[39;49;00m[33mKey[39;49;00m[33m"[39;49;00m: [33m"[39;49;00m[33mspam[39;49;00m[33m"[39;49;00m, [33m"[39;49;00m[33mValue[39;49;00m[33m"[39;49;00m: [33m"[39;49;00m[33meggs[39;49;00m[33m"[39;49;00m}][90m[39;49;00m
+[1m[31mE   AssertionError: assert [] == [{'Key': 'spa...lue': 'eggs'}][0m
+[1m[31mE     [0m
+[1m[31mE     Right contains one more item: [0m{[33m'[39;49;00m[33mKey[39;49;00m[33m'[39;49;00m: [33m'[39;49;00m[33mspam[39;49;00m[33m'[39;49;00m, [33m'[39;49;00m[33mValue[39;49;00m[33m'[39;49;00m: [33m'[39;49;00m[33meggs[39;49;00m[33m'[39;49;00m}[90m[39;49;00m[0m
+[1m[31mE     Use -v to get more diff[0m
+[31m[1m________________________ test_tags_invalid_resource_id _________________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:1436: in test_tags_invalid_resource_id
+    [0m[94massert[39;49;00m ex.value.response[[33m"[39;49;00m[33mError[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mInvalidResourceId[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'ParameterNotFound' == 'InvalidResourceId'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- InvalidResourceId[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ ParameterNotFound[39;49;00m[90m[39;49;00m[0m
+[31m[1m_______________________ test_tags_invalid_resource_type ________________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:1445: in test_tags_invalid_resource_type
+    [0m[94massert[39;49;00m ex.value.response[[33m"[39;49;00m[33mError[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mInvalidResourceType[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'ParameterNotFound' == 'InvalidResourceType'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- InvalidResourceType[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ ParameterNotFound[39;49;00m[90m[39;49;00m[0m
+[31m[1m____________________ test_put_parameter_secure_default_kms _____________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:1462: in test_put_parameter_secure_default_kms
+    [0mclient.put_parameter([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.errorfactory.ParameterAlreadyExists: An error occurred (ParameterAlreadyExists) when calling the PutParameter operation: ParameterAlreadyExists: The parameter test already exists.[0m
+[31m[1m_____________________ test_put_parameter_secure_custom_kms _____________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:1485: in test_put_parameter_secure_custom_kms
+    [0mclient.put_parameter([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.errorfactory.ParameterAlreadyExists: An error occurred (ParameterAlreadyExists) when calling the PutParameter operation: ParameterAlreadyExists: The parameter test already exists.[0m
+[31m[1m__________________________ test_get_parameter_history __________________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:1529: in test_get_parameter_history
+    [0m[94massert[39;49;00m param[[33m"[39;49;00m[33mValue[39;49;00m[33m"[39;49;00m] == [33mf[39;49;00m[33m"[39;49;00m[33mvalue-[39;49;00m[33m{[39;49;00mindex[33m}[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'value' == 'value-0'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- value-0[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     ?      --[90m[39;49;00m[0m
+[1m[31mE     [92m+ value[39;49;00m[90m[39;49;00m[0m
+[31m[1m________________ test_get_parameter_history_with_secure_string _________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:1563: in test_get_parameter_history_with_secure_string
+    [0m[94massert[39;49;00m param[[33m"[39;49;00m[33mValue[39;49;00m[33m"[39;49;00m] == expected_plaintext_value[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'value' == 'value-0'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- value-0[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     ?      --[90m[39;49;00m[0m
+[1m[31mE     [92m+ value[39;49;00m[90m[39;49;00m[0m
+[31m[1m_________________________ test_label_parameter_version _________________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:1579: in test_label_parameter_version
+    [0mclient.put_parameter([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.errorfactory.ParameterAlreadyExists: An error occurred (ParameterAlreadyExists) when calling the PutParameter operation: ParameterAlreadyExists: The parameter test already exists.[0m
+[31m[1m______________ test_label_parameter_version_with_specific_version ______________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:1598: in test_label_parameter_version_with_specific_version
+    [0mclient.put_parameter([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.errorfactory.ParameterAlreadyExists: An error occurred (ParameterAlreadyExists) when calling the PutParameter operation: ParameterAlreadyExists: The parameter test already exists.[0m
+[31m[1m______________________ test_label_parameter_version_twice ______________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:1618: in test_label_parameter_version_twice
+    [0mclient.put_parameter([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.errorfactory.ParameterAlreadyExists: An error occurred (ParameterAlreadyExists) when calling the PutParameter operation: ParameterAlreadyExists: The parameter test already exists.[0m
+[31m[1m_____________________ test_label_parameter_moving_versions _____________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:1674: in test_label_parameter_moving_versions
+    [0m[94massert[39;49;00m param[[33m"[39;49;00m[33mValue[39;49;00m[33m"[39;49;00m] == [33mf[39;49;00m[33m"[39;49;00m[33mvalue-[39;49;00m[33m{[39;49;00mindex[33m}[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'value' == 'value-0'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- value-0[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     ?      --[90m[39;49;00m[0m
+[1m[31mE     [92m+ value[39;49;00m[90m[39;49;00m[0m
+[31m[1m_________________ test_label_parameter_moving_versions_complex _________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:1719: in test_label_parameter_moving_versions_complex
+    [0m[94massert[39;49;00m param[[33m"[39;49;00m[33mValue[39;49;00m[33m"[39;49;00m] == [33mf[39;49;00m[33m"[39;49;00m[33mvalue-[39;49;00m[33m{[39;49;00mindex[33m}[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'value' == 'value-0'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- value-0[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     ?      --[90m[39;49;00m[0m
+[1m[31mE     [92m+ value[39;49;00m[90m[39;49;00m[0m
+[31m[1m__________ test_label_parameter_version_exception_ten_labels_at_once ___________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:1751: in test_label_parameter_version_exception_ten_labels_at_once
+    [0mclient.put_parameter([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.errorfactory.ParameterAlreadyExists: An error occurred (ParameterAlreadyExists) when calling the PutParameter operation: ParameterAlreadyExists: The parameter test already exists.[0m
+[31m[1m____ test_label_parameter_version_exception_ten_labels_over_multiple_calls _____[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:1775: in test_label_parameter_version_exception_ten_labels_over_multiple_calls
+    [0mclient.put_parameter([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.errorfactory.ParameterAlreadyExists: An error occurred (ParameterAlreadyExists) when calling the PutParameter operation: ParameterAlreadyExists: The parameter test already exists.[0m
+[31m[1m__________________ test_label_parameter_version_invalid_name ___________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:1820: in test_label_parameter_version_invalid_name
+    [0mclient.label_parameter_version(Name=test_parameter_name, Labels=[[33m"[39;49;00m[33mtest-label[39;49;00m[33m"[39;49;00m])[90m[39;49;00m
+[1m[31mE   Failed: DID NOT RAISE <class 'botocore.exceptions.ClientError'>[0m
+[31m[1m____________ test_label_parameter_version_invalid_parameter_version ____________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:1829: in test_label_parameter_version_invalid_parameter_version
+    [0mclient.put_parameter([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.errorfactory.ParameterAlreadyExists: An error occurred (ParameterAlreadyExists) when calling the PutParameter operation: ParameterAlreadyExists: The parameter test already exists.[0m
+[31m[1m__________________ test_label_parameter_version_invalid_label __________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:1851: in test_label_parameter_version_invalid_label
+    [0mclient.put_parameter([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.errorfactory.ParameterAlreadyExists: An error occurred (ParameterAlreadyExists) when calling the PutParameter operation: ParameterAlreadyExists: The parameter test already exists.[0m
+[31m[1m____________________ test_get_parameter_history_with_label _____________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:1917: in test_get_parameter_history_with_label
+    [0m[94massert[39;49;00m param[[33m"[39;49;00m[33mValue[39;49;00m[33m"[39;49;00m] == [33mf[39;49;00m[33m"[39;49;00m[33mvalue-[39;49;00m[33m{[39;49;00mindex[33m}[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'value' == 'value-0'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- value-0[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     ?      --[90m[39;49;00m[0m
+[1m[31mE     [92m+ value[39;49;00m[90m[39;49;00m[0m
+[31m[1m_______________ test_get_parameter_history_with_label_non_latest _______________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:1952: in test_get_parameter_history_with_label_non_latest
+    [0m[94massert[39;49;00m param[[33m"[39;49;00m[33mValue[39;49;00m[33m"[39;49;00m] == [33mf[39;49;00m[33m"[39;49;00m[33mvalue-[39;49;00m[33m{[39;49;00mindex[33m}[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'value' == 'value-0'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- value-0[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     ?      --[90m[39;49;00m[0m
+[1m[31mE     [92m+ value[39;49;00m[90m[39;49;00m[0m
+[31m[1m_____________ test_get_parameter_history_with_label_latest_assumed _____________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:1985: in test_get_parameter_history_with_label_latest_assumed
+    [0m[94massert[39;49;00m param[[33m"[39;49;00m[33mValue[39;49;00m[33m"[39;49;00m] == [33mf[39;49;00m[33m"[39;49;00m[33mvalue-[39;49;00m[33m{[39;49;00mindex[33m}[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'value' == 'value-0'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- value-0[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     ?      --[90m[39;49;00m[0m
+[1m[31mE     [92m+ value[39;49;00m[90m[39;49;00m[0m
+[31m[1m_________________ test_get_parameter_history_missing_parameter _________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:1999: in test_get_parameter_history_missing_parameter
+    [0mclient.get_parameter_history(Name=[33m"[39;49;00m[33mtest_noexist[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.errorfactory.ParameterNotFound: An error occurred (ParameterNotFound) when calling the GetParameterHistory operation: ParameterNotFound: Parameter test_noexist not found.[0m
+
+[33mDuring handling of the above exception, another exception occurred:[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:2003: in test_get_parameter_history_missing_parameter
+    [0m[94massert[39;49;00m err.response[[33m"[39;49;00m[33mError[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mMessage[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mParameter test_noexist not found.[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'ParameterNot...st not found.' == 'Parameter te...st not found.'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- Parameter test_noexist not found.[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ ParameterNotFound: Parameter test_noexist not found.[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     ?          +++++++++++++++++++[90m[39;49;00m[0m
+[31m[1m____________________ test_add_remove_list_tags_for_resource ____________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:2011: in test_add_remove_list_tags_for_resource
+    [0mclient.add_tags_to_resource([90m[39;49;00m
+[1m[31mE   Failed: DID NOT RAISE <class 'botocore.exceptions.ClientError'>[0m
+[31m[1m______________________________ test_send_command _______________________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:2051: in test_send_command
+    [0mresponse = client.send_command([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (InvalidAction) when calling the SendCommand operation: action SendCommand not implemented for service ssm[0m
+[31m[1m______________________________ test_list_commands ______________________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:2097: in test_list_commands
+    [0mresponse = client.send_command([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (InvalidAction) when calling the SendCommand operation: action SendCommand not implemented for service ssm[0m
+[31m[1m_________________________ test_get_command_invocation __________________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:2141: in test_get_command_invocation
+    [0mresponse = client.send_command([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (InvalidAction) when calling the SendCommand operation: action SendCommand not implemented for service ssm[0m
+[31m[1m_________________ test_get_command_invocations_by_instance_tag _________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:2182: in test_get_command_invocations_by_instance_tag
+    [0mresp = ec2.run_instances([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the RunInstances operation: Service 'ec2' is not available[0m
+[31m[1m_________________________ test_parameter_version_limit _________________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:2222: in test_parameter_version_limit
+    [0m[94massert[39;49;00m [96mlen[39;49;00m(parameter_history) == PARAMETER_VERSION_LIMIT[90m[39;49;00m
+[1m[31mE   AssertionError: assert 101 == 100[0m
+[1m[31mE    +  where 101 = len([{'LastModifiedDate': datetime.datetime(2026, 4, 4, 14, 25, 6, tzinfo=tzlocal()), 'Name': 'test-param', 'Type': 'Strin...tetime(2026, 4, 4, 14, 25, 6, tzinfo=tzlocal()), 'Name': 'test-param', 'Type': 'String', 'Value': 'value-6', ...}, ...])[0m
+[31m[1m_ test_parameter_overwrite_fails_when_limit_reached_and_oldest_version_has_label _[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:2245: in test_parameter_overwrite_fails_when_limit_reached_and_oldest_version_has_label
+    [0mclient.put_parameter([90m[39;49;00m
+[1m[31mE   Failed: DID NOT RAISE <class 'botocore.exceptions.ClientError'>[0m
+[31m[1m_ test_get_parameters_includes_invalid_parameter_when_requesting_invalid_version _[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:2283: in test_get_parameters_includes_invalid_parameter_when_requesting_invalid_version
+    [0m[94massert[39;49;00m [96mlen[39;49;00m(response[[33m"[39;49;00m[33mInvalidParameters[39;49;00m[33m"[39;49;00m]) == [94m1[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 2 == 1[0m
+[1m[31mE    +  where 2 = len(['test-param:6', 'test-param:4'])[0m
+[31m[1m_ test_get_parameters_includes_invalid_parameter_when_requesting_invalid_label _[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:2319: in test_get_parameters_includes_invalid_parameter_when_requesting_invalid_label
+    [0m[94massert[39;49;00m [96mlen[39;49;00m(response[[33m"[39;49;00m[33mInvalidParameters[39;49;00m[33m"[39;49;00m]) == [94m1[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 3 == 1[0m
+[1m[31mE    +  where 3 = len(['test-param:test-label', 'test-param:invalid-label', 'test-param:2'])[0m
+[31m[1m____________ test_get_parameters_should_only_return_unique_requests ____________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:2330: in test_get_parameters_should_only_return_unique_requests
+    [0mclient.put_parameter(Name=parameter_name, Value=[33m"[39;49;00m[33mvalue[39;49;00m[33m"[39;49;00m, Type=[33m"[39;49;00m[33mString[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.errorfactory.ParameterAlreadyExists: An error occurred (ParameterAlreadyExists) when calling the PutParameter operation: ParameterAlreadyExists: The parameter test-param already exists.[0m
+[31m[1m_ test_get_parameter_history_should_throw_exception_when_MaxResults_is_too_large _[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:2348: in test_get_parameter_history_should_throw_exception_when_MaxResults_is_too_large
+    [0mclient.get_parameter_history([90m[39;49;00m
+[1m[31mE   Failed: DID NOT RAISE <class 'botocore.exceptions.ClientError'>[0m
+[31m[1m______________ test_get_parameter_history_NextTokenImplementation ______________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:2386: in test_get_parameter_history_NextTokenImplementation
+    [0m[94massert[39;49;00m [96mlen[39;49;00m(param_history) == [94m100[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 412 == 100[0m
+[1m[31mE    +  where 412 = len([{'Labels': ['test-label'], 'LastModifiedDate': datetime.datetime(2026, 4, 4, 14, 25, 6, tzinfo=tzlocal()), 'Name': 't...tetime(2026, 4, 4, 14, 25, 6, tzinfo=tzlocal()), 'Name': 'test-param', 'Type': 'String', 'Value': 'value-6', ...}, ...])[0m
+[31m[1m____ test_get_parameter_history_exception_when_requesting_invalid_parameter ____[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:2398: in test_get_parameter_history_exception_when_requesting_invalid_parameter
+    [0m[94massert[39;49;00m error[[33m"[39;49;00m[33mMessage[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mParameter invalid_parameter_name not found.[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'ParameterNot...me not found.' == 'Parameter in...me not found.'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- Parameter invalid_parameter_name not found.[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ ParameterNotFound: Parameter invalid_parameter_name not found.[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     ?          +++++++++++++++++++[90m[39;49;00m[0m
+[31m[1m________ test_parameter_lifecycle_with_leading_slash[True-/with-slash] _________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:2418: in test_parameter_lifecycle_with_leading_slash
+    [0mresponse = client.get_parameter(Name=access_param_name)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.errorfactory.ParameterNotFound: An error occurred (ParameterNotFound) when calling the GetParameter operation: ParameterNotFound: Parameter with-slash not found.[0m
+[31m[1m_______ test_parameter_lifecycle_with_leading_slash[False-without-slash] _______[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:2418: in test_parameter_lifecycle_with_leading_slash
+    [0mresponse = client.get_parameter(Name=access_param_name)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.errorfactory.ParameterNotFound: An error occurred (ParameterNotFound) when calling the GetParameter operation: ParameterNotFound: Parameter /without-slash not found.[0m
+[31m[1m_______ test_list_parameter_tags_created_with_leading_slash[/with-slash] _______[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:2449: in test_list_parameter_tags_created_with_leading_slash
+    [0mclient.add_tags_to_resource([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.errorfactory.ParameterNotFound: An error occurred (ParameterNotFound) when calling the AddTagsToResource operation: ParameterNotFound: Parameter with-slash not found.[0m
+[31m[1m______ test_list_parameter_tags_created_with_leading_slash[without-slash] ______[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:2455: in test_list_parameter_tags_created_with_leading_slash
+    [0mclient.add_tags_to_resource([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.errorfactory.ParameterNotFound: An error occurred (ParameterNotFound) when calling the AddTagsToResource operation: ParameterNotFound: Parameter /without-slash not found.[0m
+[31m[1m________________________ test_unlabel_parameter_version ________________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:2494: in test_unlabel_parameter_version
+    [0mresponse = client.unlabel_parameter_version([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (InvalidAction) when calling the UnlabelParameterVersion operation: action UnlabelParameterVersion not implemented for service ssm[0m
+[31m[1m___________________ test_unlabel_parameter_version_not_found ___________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:2518: in test_unlabel_parameter_version_not_found
+    [0m[94massert[39;49;00m exc.value.response[[33m"[39;49;00m[33mError[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mParameterNotFound[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'InvalidAction' == 'ParameterNotFound'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ParameterNotFound[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ InvalidAction[39;49;00m[90m[39;49;00m[0m
+[31m[1m_______________ test_unlabel_parameter_version_version_not_found _______________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm.py[0m:2524: in test_unlabel_parameter_version_version_not_found
+    [0mclient.put_parameter(Name=[33m"[39;49;00m[33m/test/param[39;49;00m[33m"[39;49;00m, Value=[33m"[39;49;00m[33mv[39;49;00m[33m"[39;49;00m, Type=[33m"[39;49;00m[33mString[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.errorfactory.ParameterAlreadyExists: An error occurred (ParameterAlreadyExists) when calling the PutParameter operation: ParameterAlreadyExists: The parameter /test/param already exists.[0m
+[31m[1m___________________ test_get_command_invocations_from_stack ____________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_cloudformation.py[0m:43: in test_get_command_invocations_from_stack
+    [0mcloudformation_client.create_stack([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateStack operation: Service 'cloudformation' is not available[0m
+[31m[1m______________________________ test_ssm_documents ______________________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_cloudformation.py[0m:83: in test_ssm_documents
+    [0mcf.create_stack(StackName=stack_name, TemplateBody=ssm_template_json)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateStack operation: Service 'cloudformation' is not available[0m
+[31m[1m_______________________ test_ssm_get_latest_ami_by_path ________________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_default_amis.py[0m:13: in test_ssm_get_latest_ami_by_path
+    [0m[94massert[39;49;00m [96mlen[39;49;00m(params) == [94m10[39;49;00m[90m[39;49;00m
+[1m[31mE   assert 0 == 10[0m
+[1m[31mE    +  where 0 = len([])[0m
+[31m[1m________________ test_ssm_latest_amis_are_different_in_regions _________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_default_amis.py[0m:26: in test_ssm_latest_amis_are_different_in_regions
+    [0mami_uswest = client.get_parameter(Name=test_ami)[[33m"[39;49;00m[33mParameter[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mValue[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.errorfactory.ParameterNotFound: An error occurred (ParameterNotFound) when calling the GetParameter operation: ParameterNotFound: Parameter /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64 not found.[0m
+[31m[1m_____________________________ test_ssm_get_by_path _____________________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_defaults.py[0m:13: in test_ssm_get_by_path
+    [0mpacific = [p [94mfor[39;49;00m p [95min[39;49;00m params [94mif[39;49;00m p[[33m"[39;49;00m[33mValue[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33maf-south-1[39;49;00m[33m"[39;49;00m][[94m0[39;49;00m][90m[39;49;00m
+[1m[31mE   IndexError: list index out of range[0m
+[31m[1m_____________________ test_global_infrastructure_services ______________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_defaults.py[0m:29: in test_global_infrastructure_services
+    [0m[94massert[39;49;00m [96mstr[39;49;00m(params[[94m0[39;49;00m][[33m"[39;49;00m[33mName[39;49;00m[33m"[39;49;00m]).startswith(path)[90m[39;49;00m
+[1m[31mE   IndexError: list index out of range[0m
+[31m[1m____________________________ test_ssm_region_query _____________________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_defaults.py[0m:35: in test_ssm_region_query
+    [0mparam = client.get_parameter([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.errorfactory.ParameterNotFound: An error occurred (ParameterNotFound) when calling the GetParameter operation: ParameterNotFound: Parameter /aws/service/global-infrastructure/regions/us-west-1/longName not found.[0m
+[31m[1m_____________ test_describe_document_permissions_unknown_document ______________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_doc_permissions.py[0m:22: in test_describe_document_permissions_unknown_document
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mInvalidDocument[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'InvalidAction' == 'InvalidDocument'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- InvalidDocument[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ InvalidAction[39;49;00m[90m[39;49;00m[0m
+[31m[1m__________________ test_describe_document_permissions_initial __________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_doc_permissions.py[0m:42: in test_describe_document_permissions_initial
+    [0mclient = get_client()[90m[39;49;00m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_doc_permissions.py[0m:30: in get_client
+    [0mclient.create_document([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (InvalidAction) when calling the CreateDocument operation: action CreateDocument not implemented for service ssm[0m
+[31m[1m__________ test_modify_document_permission_add_account_id[one_value] ___________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_doc_permissions.py[0m:58: in test_modify_document_permission_add_account_id
+    [0mclient = get_client()[90m[39;49;00m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_doc_permissions.py[0m:30: in get_client
+    [0mclient.create_document([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (InvalidAction) when calling the CreateDocument operation: action CreateDocument not implemented for service ssm[0m
+[31m[1m_____________ test_modify_document_permission_add_account_id[all] ______________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_doc_permissions.py[0m:58: in test_modify_document_permission_add_account_id
+    [0mclient = get_client()[90m[39;49;00m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_doc_permissions.py[0m:30: in get_client
+    [0mclient.create_document([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (InvalidAction) when calling the CreateDocument operation: action CreateDocument not implemented for service ssm[0m
+[31m[1m_____________ test_modify_document_permission_add_account_id[All] ______________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_doc_permissions.py[0m:58: in test_modify_document_permission_add_account_id
+    [0mclient = get_client()[90m[39;49;00m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_doc_permissions.py[0m:30: in get_client
+    [0mclient.create_document([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (InvalidAction) when calling the CreateDocument operation: action CreateDocument not implemented for service ssm[0m
+[31m[1m_______ test_modify_document_permission_add_account_id[multiple_values] ________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_doc_permissions.py[0m:58: in test_modify_document_permission_add_account_id
+    [0mclient = get_client()[90m[39;49;00m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_doc_permissions.py[0m:30: in get_client
+    [0mclient.create_document([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (InvalidAction) when calling the CreateDocument operation: action CreateDocument not implemented for service ssm[0m
+[31m[1m____________ test_modify_document_permission_remove_account_id[all] ____________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_doc_permissions.py[0m:91: in test_modify_document_permission_remove_account_id
+    [0mclient = get_client()[90m[39;49;00m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_doc_permissions.py[0m:30: in get_client
+    [0mclient.create_document([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (InvalidAction) when calling the CreateDocument operation: action CreateDocument not implemented for service ssm[0m
+[31m[1m_________ test_modify_document_permission_remove_account_id[one_value] _________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_doc_permissions.py[0m:91: in test_modify_document_permission_remove_account_id
+    [0mclient = get_client()[90m[39;49;00m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_doc_permissions.py[0m:30: in get_client
+    [0mclient.create_document([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (InvalidAction) when calling the CreateDocument operation: action CreateDocument not implemented for service ssm[0m
+[31m[1m_____ test_modify_document_permission_remove_account_id[multiple_initials] _____[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_doc_permissions.py[0m:91: in test_modify_document_permission_remove_account_id
+    [0mclient = get_client()[90m[39;49;00m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_doc_permissions.py[0m:30: in get_client
+    [0mclient.create_document([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (InvalidAction) when calling the CreateDocument operation: action CreateDocument not implemented for service ssm[0m
+[31m[1m____ test_modify_document_permission_remove_account_id[multiple_to_remove] _____[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_doc_permissions.py[0m:91: in test_modify_document_permission_remove_account_id
+    [0mclient = get_client()[90m[39;49;00m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_doc_permissions.py[0m:30: in get_client
+    [0mclient.create_document([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (InvalidAction) when calling the CreateDocument operation: action CreateDocument not implemented for service ssm[0m
+[31m[1m__________ test_fail_modify_document_permission_wrong_permission_type __________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_doc_permissions.py[0m:115: in test_fail_modify_document_permission_wrong_permission_type
+    [0mclient = get_client()[90m[39;49;00m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_doc_permissions.py[0m:30: in get_client
+    [0mclient.create_document([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (InvalidAction) when calling the CreateDocument operation: action CreateDocument not implemented for service ssm[0m
+[31m[1m_________ test_fail_modify_document_permission_wrong_document_version __________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_doc_permissions.py[0m:127: in test_fail_modify_document_permission_wrong_document_version
+    [0mclient = get_client()[90m[39;49;00m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_doc_permissions.py[0m:30: in get_client
+    [0mclient.create_document([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (InvalidAction) when calling the CreateDocument operation: action CreateDocument not implemented for service ssm[0m
+[31m[1m______ test_fail_modify_document_permission_add_invalid_account_ids[all?] ______[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_doc_permissions.py[0m:147: in test_fail_modify_document_permission_add_invalid_account_ids
+    [0mclient = get_client()[90m[39;49;00m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_doc_permissions.py[0m:30: in get_client
+    [0mclient.create_document([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (InvalidAction) when calling the CreateDocument operation: action CreateDocument not implemented for service ssm[0m
+[31m[1m___ test_fail_modify_document_permission_add_invalid_account_ids[too_short] ____[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_doc_permissions.py[0m:147: in test_fail_modify_document_permission_add_invalid_account_ids
+    [0mclient = get_client()[90m[39;49;00m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_doc_permissions.py[0m:30: in get_client
+    [0mclient.create_document([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (InvalidAction) when calling the CreateDocument operation: action CreateDocument not implemented for service ssm[0m
+[31m[1m____ test_fail_modify_document_permission_add_invalid_account_ids[too_long] ____[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_doc_permissions.py[0m:147: in test_fail_modify_document_permission_add_invalid_account_ids
+    [0mclient = get_client()[90m[39;49;00m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_doc_permissions.py[0m:30: in get_client
+    [0mclient.create_document([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (InvalidAction) when calling the CreateDocument operation: action CreateDocument not implemented for service ssm[0m
+[31m[1m___ test_fail_modify_document_permission_add_invalid_account_ids[no-digits] ____[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_doc_permissions.py[0m:147: in test_fail_modify_document_permission_add_invalid_account_ids
+    [0mclient = get_client()[90m[39;49;00m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_doc_permissions.py[0m:30: in get_client
+    [0mclient.create_document([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (InvalidAction) when calling the CreateDocument operation: action CreateDocument not implemented for service ssm[0m
+[31m[1m____ test_fail_modify_document_permission_remove_invalid_account_ids[all?] _____[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_doc_permissions.py[0m:164: in test_fail_modify_document_permission_remove_invalid_account_ids
+    [0mclient = get_client()[90m[39;49;00m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_doc_permissions.py[0m:30: in get_client
+    [0mclient.create_document([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (InvalidAction) when calling the CreateDocument operation: action CreateDocument not implemented for service ssm[0m
+[31m[1m__ test_fail_modify_document_permission_remove_invalid_account_ids[too_short] __[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_doc_permissions.py[0m:164: in test_fail_modify_document_permission_remove_invalid_account_ids
+    [0mclient = get_client()[90m[39;49;00m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_doc_permissions.py[0m:30: in get_client
+    [0mclient.create_document([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (InvalidAction) when calling the CreateDocument operation: action CreateDocument not implemented for service ssm[0m
+[31m[1m__ test_fail_modify_document_permission_remove_invalid_account_ids[too_long] ___[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_doc_permissions.py[0m:164: in test_fail_modify_document_permission_remove_invalid_account_ids
+    [0mclient = get_client()[90m[39;49;00m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_doc_permissions.py[0m:30: in get_client
+    [0mclient.create_document([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (InvalidAction) when calling the CreateDocument operation: action CreateDocument not implemented for service ssm[0m
+[31m[1m__ test_fail_modify_document_permission_remove_invalid_account_ids[no-digits] __[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_doc_permissions.py[0m:164: in test_fail_modify_document_permission_remove_invalid_account_ids
+    [0mclient = get_client()[90m[39;49;00m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_doc_permissions.py[0m:30: in get_client
+    [0mclient.create_document([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (InvalidAction) when calling the CreateDocument operation: action CreateDocument not implemented for service ssm[0m
+[31m[1m__________ test_fail_modify_document_permission_add_all_and_specific ___________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_doc_permissions.py[0m:176: in test_fail_modify_document_permission_add_all_and_specific
+    [0mclient = get_client()[90m[39;49;00m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_doc_permissions.py[0m:30: in get_client
+    [0mclient.create_document([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (InvalidAction) when calling the CreateDocument operation: action CreateDocument not implemented for service ssm[0m
+[31m[1m_________ test_fail_modify_document_permission_remove_all_and_specific _________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_doc_permissions.py[0m:190: in test_fail_modify_document_permission_remove_all_and_specific
+    [0mclient = get_client()[90m[39;49;00m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_doc_permissions.py[0m:30: in get_client
+    [0mclient.create_document([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (InvalidAction) when calling the CreateDocument operation: action CreateDocument not implemented for service ssm[0m
+[31m[1m_____________________________ test_create_document _____________________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_docs.py[0m:133: in test_create_document
+    [0mresponse = client.create_document([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (InvalidAction) when calling the CreateDocument operation: action CreateDocument not implemented for service ssm[0m
+[31m[1m______________________________ test_get_document _______________________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_docs.py[0m:239: in test_get_document
+    [0mclient.get_document(Name=[33m"[39;49;00m[33mDNE[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (InvalidAction) when calling the GetDocument operation: action GetDocument not implemented for service ssm[0m
+
+[33mDuring handling of the above exception, another exception occurred:[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_docs.py[0m:243: in test_get_document
+    [0m[94massert[39;49;00m ([90m[39;49;00m
+[1m[31mE   AssertionError: assert 'action GetDo...r service ssm' == 'The specifie...es not exist.'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- The specified document does not exist.[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ action GetDocument not implemented for service ssm[39;49;00m[90m[39;49;00m[0m
+[31m[1m_____________________________ test_delete_document _____________________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_docs.py[0m:325: in test_delete_document
+    [0mclient.delete_document(Name=[33m"[39;49;00m[33mDNE[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (InvalidAction) when calling the DeleteDocument operation: action DeleteDocument not implemented for service ssm[0m
+
+[33mDuring handling of the above exception, another exception occurred:[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_docs.py[0m:329: in test_delete_document
+    [0m[94massert[39;49;00m ([90m[39;49;00m
+[1m[31mE   AssertionError: assert 'action Delet...r service ssm' == 'The specifie...es not exist.'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- The specified document does not exist.[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ action DeleteDocument not implemented for service ssm[39;49;00m[90m[39;49;00m[0m
+[31m[1m_____________________ test_update_document_default_version _____________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_docs.py[0m:469: in test_update_document_default_version
+    [0mclient.update_document_default_version(Name=[33m"[39;49;00m[33mDNE[39;49;00m[33m"[39;49;00m, DocumentVersion=[33m"[39;49;00m[33m1[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (InvalidAction) when calling the UpdateDocumentDefaultVersion operation: action UpdateDocumentDefaultVersion not implemented for service ssm[0m
+
+[33mDuring handling of the above exception, another exception occurred:[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_docs.py[0m:473: in test_update_document_default_version
+    [0m[94massert[39;49;00m ([90m[39;49;00m
+[1m[31mE   AssertionError: assert 'action Updat...r service ssm' == 'The specifie...es not exist.'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- The specified document does not exist.[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ action UpdateDocumentDefaultVersion not implemented for service ssm[39;49;00m[90m[39;49;00m[0m
+[31m[1m_____________________________ test_update_document _____________________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_docs.py[0m:530: in test_update_document
+    [0mclient.update_document([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (InvalidAction) when calling the UpdateDocument operation: action UpdateDocument not implemented for service ssm[0m
+
+[33mDuring handling of the above exception, another exception occurred:[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_docs.py[0m:539: in test_update_document
+    [0m[94massert[39;49;00m ([90m[39;49;00m
+[1m[31mE   AssertionError: assert 'action Updat...r service ssm' == 'The specifie...es not exist.'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- The specified document does not exist.[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ action UpdateDocument not implemented for service ssm[39;49;00m[90m[39;49;00m[0m
+[31m[1m____________________________ test_describe_document ____________________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_docs.py[0m:633: in test_describe_document
+    [0mclient.describe_document(Name=[33m"[39;49;00m[33mDNE[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (InvalidAction) when calling the DescribeDocument operation: action DescribeDocument not implemented for service ssm[0m
+
+[33mDuring handling of the above exception, another exception occurred:[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_docs.py[0m:637: in test_describe_document
+    [0m[94massert[39;49;00m ([90m[39;49;00m
+[1m[31mE   AssertionError: assert 'action Descr...r service ssm' == 'The specifie...es not exist.'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- The specified document does not exist.[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ action DescribeDocument not implemented for service ssm[39;49;00m[90m[39;49;00m[0m
+[31m[1m_____________________________ test_list_documents ______________________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_docs.py[0m:677: in test_list_documents
+    [0mclient.create_document([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (InvalidAction) when calling the CreateDocument operation: action CreateDocument not implemented for service ssm[0m
+[31m[1m________________ test_tags_in_list_tags_from_resource_document _________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_docs.py[0m:768: in test_tags_in_list_tags_from_resource_document
+    [0mclient.create_document([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (InvalidAction) when calling the CreateDocument operation: action CreateDocument not implemented for service ssm[0m
+[31m[1m_______________________ test_describe_maintenance_window _______________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_maintenance_windows.py[0m:12: in test_describe_maintenance_window
+    [0mresp = ssm.describe_maintenance_windows()[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (InvalidAction) when calling the DescribeMaintenanceWindows operation: action DescribeMaintenanceWindows not implemented for service ssm[0m
+[31m[1m____________________ test_create_maintenance_windows_simple ____________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_maintenance_windows.py[0m:25: in test_create_maintenance_windows_simple
+    [0mresp = ssm.create_maintenance_window([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (InvalidAction) when calling the CreateMaintenanceWindow operation: action CreateMaintenanceWindow not implemented for service ssm[0m
+[31m[1m___________________ test_create_maintenance_windows_advanced ___________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_maintenance_windows.py[0m:57: in test_create_maintenance_windows_advanced
+    [0mresp = ssm.create_maintenance_window([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (InvalidAction) when calling the CreateMaintenanceWindow operation: action CreateMaintenanceWindow not implemented for service ssm[0m
+[31m[1m_________________________ test_get_maintenance_windows _________________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_maintenance_windows.py[0m:94: in test_get_maintenance_windows
+    [0mresp = ssm.create_maintenance_window([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (InvalidAction) when calling the CreateMaintenanceWindow operation: action CreateMaintenanceWindow not implemented for service ssm[0m
+[31m[1m______________________ test_describe_maintenance_windows _______________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_maintenance_windows.py[0m:130: in test_describe_maintenance_windows
+    [0mssm.create_maintenance_window([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (InvalidAction) when calling the CreateMaintenanceWindow operation: action CreateMaintenanceWindow not implemented for service ssm[0m
+[31m[1m_______________________ test_delete_maintenance_windows ________________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_maintenance_windows.py[0m:151: in test_delete_maintenance_windows
+    [0mresp = ssm.create_maintenance_window([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (InvalidAction) when calling the CreateMaintenanceWindow operation: action CreateMaintenanceWindow not implemented for service ssm[0m
+[31m[1m__________________________________ test_tags ___________________________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_maintenance_windows.py[0m:177: in test_tags
+    [0mmw_id = ssm.create_maintenance_window([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (InvalidAction) when calling the CreateMaintenanceWindow operation: action CreateMaintenanceWindow not implemented for service ssm[0m
+[31m[1m___________________ test_register_maintenance_window_target ____________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_maintenance_windows.py[0m:235: in test_register_maintenance_window_target
+    [0mresp = ssm.create_maintenance_window([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (InvalidAction) when calling the CreateMaintenanceWindow operation: action CreateMaintenanceWindow not implemented for service ssm[0m
+[31m[1m________________ test_deregister_target_from_maintenance_window ________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_maintenance_windows.py[0m:266: in test_deregister_target_from_maintenance_window
+    [0mresp = ssm.create_maintenance_window([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (InvalidAction) when calling the CreateMaintenanceWindow operation: action CreateMaintenanceWindow not implemented for service ssm[0m
+[31m[1m___________ test_describe_maintenance_window_with_no_task_or_targets ___________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_maintenance_windows.py[0m:297: in test_describe_maintenance_window_with_no_task_or_targets
+    [0mresp = ssm.create_maintenance_window([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (InvalidAction) when calling the CreateMaintenanceWindow operation: action CreateMaintenanceWindow not implemented for service ssm[0m
+[31m[1m____________________ test_register_maintenance_window_task _____________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_maintenance_windows.py[0m:321: in test_register_maintenance_window_task
+    [0mresp = ssm.create_maintenance_window([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (InvalidAction) when calling the CreateMaintenanceWindow operation: action CreateMaintenanceWindow not implemented for service ssm[0m
+[31m[1m___________________ test_deregister_maintenance_window_task ____________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_maintenance_windows.py[0m:364: in test_deregister_maintenance_window_task
+    [0mresp = ssm.create_maintenance_window([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (InvalidAction) when calling the CreateMaintenanceWindow operation: action CreateMaintenanceWindow not implemented for service ssm[0m
+[31m[1m________________________ test_cloudformation_lifecycle _________________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_parameterstore_cloudformation.py[0m:33: in test_cloudformation_lifecycle
+    [0mcloudformation_client.create_stack([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateStack operation: Service 'cloudformation' is not available[0m
+[31m[1m__________________ test_cloudformation_lifecycle_with_parsing __________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_parameterstore_cloudformation.py[0m:105: in test_cloudformation_lifecycle_with_parsing
+    [0mcloudformation_client.create_stack([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateStack operation: Service 'cloudformation' is not available[0m
+[31m[1m__________________________ test_create_patch_baseLine __________________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_patch_baseline.py[0m:30: in test_create_patch_baseLine
+    [0mresponse = ssm.create_patch_baseline([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (InvalidAction) when calling the CreatePatchBaseline operation: action CreatePatchBaseline not implemented for service ssm[0m
+[31m[1m__________________________ test_delete_patch_baseline __________________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_patch_baseline.py[0m:66: in test_delete_patch_baseline
+    [0mresponse = ssm.create_patch_baseline([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (InvalidAction) when calling the CreatePatchBaseline operation: action CreatePatchBaseline not implemented for service ssm[0m
+[31m[1m_________________ test_register_patch_baseline_for_patch_group _________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_patch_group.py[0m:37: in test_register_patch_baseline_for_patch_group
+    [0mbaseline_id = client.create_patch_baseline([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (InvalidAction) when calling the CreatePatchBaseline operation: action CreatePatchBaseline not implemented for service ssm[0m
+[31m[1m___________ test_register_patch_baseline_for_patch_group_invalid_id ____________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_patch_group.py[0m:61: in test_register_patch_baseline_for_patch_group_invalid_id
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mDoesNotExistException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'InvalidAction' == 'DoesNotExistException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- DoesNotExistException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ InvalidAction[39;49;00m[90m[39;49;00m[0m
+[31m[1m_________ test_register_patch_baseline_for_patch_group_already_exists __________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_patch_group.py[0m:90: in test_register_patch_baseline_for_patch_group_already_exists
+    [0mbaseline_id_a = client.create_patch_baseline([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (InvalidAction) when calling the CreatePatchBaseline operation: action CreatePatchBaseline not implemented for service ssm[0m
+[31m[1m___________________ test_get_patch_baseline_for_patch_group ____________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_patch_group.py[0m:142: in test_get_patch_baseline_for_patch_group
+    [0mbaseline_id = client.create_patch_baseline([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (InvalidAction) when calling the CreatePatchBaseline operation: action CreatePatchBaseline not implemented for service ssm[0m
+[31m[1m_______________ test_get_patch_baseline_for_patch_group_default ________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_patch_group.py[0m:169: in test_get_patch_baseline_for_patch_group_default
+    [0mresp = client.get_patch_baseline_for_patch_group([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (InvalidAction) when calling the GetPatchBaselineForPatchGroup operation: action GetPatchBaselineForPatchGroup not implemented for service ssm[0m
+[31m[1m________________ test_deregister_patch_baseline_for_patch_group ________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_patch_group.py[0m:202: in test_deregister_patch_baseline_for_patch_group
+    [0mbaseline_id = client.create_patch_baseline([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (InvalidAction) when calling the CreatePatchBaseline operation: action CreatePatchBaseline not implemented for service ssm[0m
+[31m[1m____________ test_deregister_patch_baseline_for_patch_group_default ____________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_patch_group.py[0m:228: in test_deregister_patch_baseline_for_patch_group_default
+    [0mresp = client.deregister_patch_baseline_for_patch_group([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (InvalidAction) when calling the DeregisterPatchBaselineForPatchGroup operation: action DeregisterPatchBaselineForPatchGroup not implemented for service ssm[0m
+[31m[1m__________ test_deregister_patch_baseline_for_patch_group_invalid_id ___________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_patch_group.py[0m:261: in test_deregister_patch_baseline_for_patch_group_invalid_id
+    [0mbaseline_id = client.create_patch_baseline([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (InvalidAction) when calling the CreatePatchBaseline operation: action CreatePatchBaseline not implemented for service ssm[0m
+[31m[1m_________________ test_get_value_from_secrets_manager__by_name _________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_secretsmanager.py[0m:19: in test_get_value_from_secrets_manager__by_name
+    [0msecrets_manager.create_secret(Name=secret_name, SecretString=[33m"[39;49;00m[33msome secret[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateSecret operation: Service 'secretsmanager' is not available[0m
+[31m[1m___________ test_get_value_from_secrets_manager__without_decryption ____________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_secretsmanager.py[0m:45: in test_get_value_from_secrets_manager__without_decryption
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mValidationException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'ParameterNotFound' == 'ValidationException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ValidationException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ ParameterNotFound[39;49;00m[90m[39;49;00m[0m
+[31m[1m__________ test_get_value_from_secrets_manager__with_decryption_false __________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_secretsmanager.py[0m:60: in test_get_value_from_secrets_manager__with_decryption_false
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mValidationException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'ParameterNotFound' == 'ValidationException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ValidationException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ ParameterNotFound[39;49;00m[90m[39;49;00m[0m
+[31m[1m__________________ test_get_value_from_secrets_manager__by_id __________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_secretsmanager.py[0m:73: in test_get_value_from_secrets_manager__by_id
+    [0mr1 = secrets_manager.create_secret(Name=name, SecretString=[33m"[39;49;00m[33m1st[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateSecret operation: Service 'secretsmanager' is not available[0m
+[31m[1m_______________ test_get_value_from_secrets_manager__by_version ________________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_secretsmanager.py[0m:103: in test_get_value_from_secrets_manager__by_version
+    [0msecrets_manager.create_secret(Name=name, SecretString=[33m"[39;49;00m[33m1st[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateSecret operation: Service 'secretsmanager' is not available[0m
+[31m[1m__________ test_get_value_from_secrets_manager__param_does_not_exist ___________[0m
+[1m[31m/private/tmp/moto-tests/tests/test_ssm/test_ssm_secretsmanager.py[0m:122: in test_get_value_from_secrets_manager__param_does_not_exist
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mMessage[39;49;00m[33m"[39;49;00m] == ([90m[39;49;00m
+[1m[31mE   AssertionError: assert 'ParameterNot...st not found.' == 'An error occ...st not found.'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- An error occurred (ParameterNotFound) when referencing Secrets Manager: Secret /aws/reference/secretsmanager/test not found.[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ ParameterNotFound: Parameter /aws/reference/secretsmanager/test not found.[39;49;00m[90m[39;49;00m[0m
+[33m=============================== warnings summary ===============================[0m
+tests/test_ssm/test_ssm.py: 97 warnings
+tests/test_ssm/test_ssm_cloudformation.py: 2 warnings
+tests/test_ssm/test_ssm_default_amis.py: 2 warnings
+tests/test_ssm/test_ssm_defaults.py: 3 warnings
+tests/test_ssm/test_ssm_doc_permissions.py: 22 warnings
+tests/test_ssm/test_ssm_docs.py: 8 warnings
+tests/test_ssm/test_ssm_maintenance_windows.py: 12 warnings
+tests/test_ssm/test_ssm_parameterstore_cloudformation.py: 2 warnings
+tests/test_ssm/test_ssm_patch_baseline.py: 2 warnings
+tests/test_ssm/test_ssm_patch_group.py: 8 warnings
+tests/test_ssm/test_ssm_secretsmanager.py: 6 warnings
+  /Users/lucas/.cache/fakecloud/moto/.venv/lib/python3.9/site-packages/boto3/compat.py:89: PythonDeprecationWarning: Boto3 will no longer support Python 3.9 starting April 29, 2026. To continue receiving service updates, bug fixes, and security updates please upgrade to Python 3.10 or later. More information can be found here: https://aws.amazon.com/blogs/developer/python-support-policy-updates-for-aws-sdks-and-tools/
+    warnings.warn(warning, PythonDeprecationWarning)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+[36m[1m=========================== short test summary info ============================[0m
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_delete_nonexistent_parameter[0m - AssertionError: assert 'ParameterNot...st not found.' == 'Parameter te...st...
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_get_parameters_by_path[0m - assert 0 == 2
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_put_parameter[test][0m - AssertionError: assert 'arn:aws:ssm:...parametertest' == 'arn:aws:ssm:...ar...
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_put_parameter[my-cool-parameter][0m - AssertionError: assert 'arn:aws:ssm:...ool-parameter' == 'arn:aws:ssm:...oo...
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_put_parameter_overwrite_preserves_metadata[test][0m - AssertionError: assert 'Standard' == 'Advanced'
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_put_parameter_overwrite_preserves_metadata[my-cool-parameter][0m - AssertionError: assert 'Standard' == 'Advanced'
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_put_parameter_empty_string_value[0m - Failed: DID NOT RAISE <class 'botocore.exceptions.ClientError'>
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_put_parameter_invalid_names[0m - Failed: DID NOT RAISE <class 'botocore.exceptions.ClientError'>
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_put_parameter_invalid_data_type[not_text][0m - AssertionError: assert 'ValidationException' in 'ParameterAlreadyExists'
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_put_parameter_invalid_data_type[not_ec2][0m - AssertionError: assert 'ValidationException' in 'ParameterAlreadyExists'
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_put_parameter_invalid_data_type[something weird][0m - AssertionError: assert 'ValidationException' in 'ParameterAlreadyExists'
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_put_parameter_invalid_type[0m - AssertionError: assert 'ValidationException' in 'ParameterAlreadyExists'
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_put_parameter_no_type[0m - AssertionError: assert 'ParameterAlreadyExists' == 'ValidationException'
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_update_parameter_already_exists_error[0m - AssertionError: assert 'ParameterAlr...ready exists.' == 'The paramete...ue...
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_get_parameter[/test][0m - AssertionError: assert 'arn:aws:ssm:...arameter/test' == 'arn:aws:ssm:...ar...
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_get_parameter[arn:aws:ssm:us-east-1:123456789012:parameter/test][0m - botocore.errorfactory.ParameterNotFound: An error occurred (ParameterNotFou...
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_get_parameter_with_version_and_labels[0m - botocore.errorfactory.ParameterNotFound: An error occurred (ParameterNotFou...
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_get_parameters_errors[0m - Failed: DID NOT RAISE <class 'botocore.exceptions.ClientError'>
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_get_nonexistant_parameter[0m - AssertionError: assert 'ParameterNot...st not found.' == 'Parameter te...st...
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_describe_parameters[0m - AssertionError: assert 10 == 1
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_describe_parameters_paging[0m - AssertionError: assert 10 == 0
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_describe_parameters_filter_names[0m - botocore.errorfactory.ParameterAlreadyExists: An error occurred (ParameterA...
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_describe_parameters_filter_type[0m - botocore.errorfactory.ParameterAlreadyExists: An error occurred (ParameterA...
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_describe_parameters_filter_keyid[0m - botocore.errorfactory.ParameterAlreadyExists: An error occurred (ParameterA...
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_describe_parameters_with_parameter_filters_keyid[0m - AssertionError: assert 3 == 1
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_describe_parameters_with_parameter_filters_name[0m - assert 0 == 1
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_describe_parameters_with_parameter_filters_path[0m - AssertionError: assert 10 == 0
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_describe_parameters_needs_param[0m - Failed: DID NOT RAISE <class 'botocore.exceptions.ClientError'>
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_describe_parameters_invalid_parameter_filters[filters0-Member must satisfy regular expression pattern: tag:.+|Name|Type|KeyId|Path|Label|Tier][0m - Failed: DID NOT RAISE <class 'botocore.exceptions.ClientError'>
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_describe_parameters_invalid_parameter_filters[filters1-Member must have length less than or equal to 132][0m - Failed: DID NOT RAISE <class 'botocore.exceptions.ClientError'>
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_describe_parameters_invalid_parameter_filters[filters2-Member must have length less than or equal to 10][0m - Failed: DID NOT RAISE <class 'botocore.exceptions.ClientError'>
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_describe_parameters_invalid_parameter_filters[filters3-Member must have length less than or equal to 50][0m - Failed: DID NOT RAISE <class 'botocore.exceptions.ClientError'>
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_describe_parameters_invalid_parameter_filters[filters4-Member must have length less than or equal to 1024, Member must have length greater than or equal to 1][0m - Failed: DID NOT RAISE <class 'botocore.exceptions.ClientError'>
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_describe_parameters_invalid_parameter_filters[filters5-2 validation errors detected:][0m - Failed: DID NOT RAISE <class 'botocore.exceptions.ClientError'>
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_describe_parameters_invalid_parameter_filters[filters6-The following filter key is not valid: Label. Valid filter keys include: [Path, Name, Type, KeyId, Tier]][0m - Failed: DID NOT RAISE <class 'botocore.exceptions.ClientError'>
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_describe_parameters_invalid_parameter_filters[filters7-The following filter values are missing : null for filter key Name][0m - Failed: DID NOT RAISE <class 'botocore.exceptions.ClientError'>
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_describe_parameters_invalid_parameter_filters[filters8-The following filter is duplicated in the request: Name. A request can contain only one occurrence of a specific filter.][0m - Failed: DID NOT RAISE <class 'botocore.exceptions.ClientError'>
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_describe_parameters_invalid_parameter_filters[filters9-Filters for common parameters can't be prefixed with "aws" or "ssm" (case-insensitive).][0m - Failed: DID NOT RAISE <class 'botocore.exceptions.ClientError'>
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_describe_parameters_invalid_parameter_filters[filters10-The following filter option is not valid: Equals. Valid options include: [Recursive, OneLevel]][0m - Failed: DID NOT RAISE <class 'botocore.exceptions.ClientError'>
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_describe_parameters_invalid_parameter_filters[filters11-The following filter value is not valid: test. Valid values include: [Standard, Advanced, Intelligent-Tiering]][0m - Failed: DID NOT RAISE <class 'botocore.exceptions.ClientError'>
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_describe_parameters_invalid_parameter_filters[filters12-The following filter value is not valid: test. Valid values include: [String, StringList, SecureString]][0m - Failed: DID NOT RAISE <class 'botocore.exceptions.ClientError'>
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_describe_parameters_invalid_parameter_filters[filters13-The following filter option is not valid: option. Valid options include: [BeginsWith, Equals].][0m - Failed: DID NOT RAISE <class 'botocore.exceptions.ClientError'>
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_describe_parameters_invalid_path[/###][0m - Failed: DID NOT RAISE <class 'botocore.exceptions.ClientError'>
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_describe_parameters_invalid_path[//][0m - Failed: DID NOT RAISE <class 'botocore.exceptions.ClientError'>
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_describe_parameters_invalid_path[test][0m - Failed: DID NOT RAISE <class 'botocore.exceptions.ClientError'>
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_describe_parameters_attributes[0m - AssertionError: assert 10 == 2
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_describe_parameters_tags[0m - AssertionError: assert 10 == 3
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_describe_parameters__multiple_tags[0m - AssertionError: assert 10 == 1
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_tags_in_list_tags_from_resource_parameter[0m - AssertionError: assert [] == [{'Key': 'spa...lue': 'eggs'}]
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_tags_invalid_resource_id[0m - AssertionError: assert 'ParameterNotFound' == 'InvalidResourceId'
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_tags_invalid_resource_type[0m - AssertionError: assert 'ParameterNotFound' == 'InvalidResourceType'
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_put_parameter_secure_default_kms[0m - botocore.errorfactory.ParameterAlreadyExists: An error occurred (ParameterA...
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_put_parameter_secure_custom_kms[0m - botocore.errorfactory.ParameterAlreadyExists: An error occurred (ParameterA...
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_get_parameter_history[0m - AssertionError: assert 'value' == 'value-0'
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_get_parameter_history_with_secure_string[0m - AssertionError: assert 'value' == 'value-0'
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_label_parameter_version[0m - botocore.errorfactory.ParameterAlreadyExists: An error occurred (ParameterA...
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_label_parameter_version_with_specific_version[0m - botocore.errorfactory.ParameterAlreadyExists: An error occurred (ParameterA...
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_label_parameter_version_twice[0m - botocore.errorfactory.ParameterAlreadyExists: An error occurred (ParameterA...
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_label_parameter_moving_versions[0m - AssertionError: assert 'value' == 'value-0'
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_label_parameter_moving_versions_complex[0m - AssertionError: assert 'value' == 'value-0'
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_label_parameter_version_exception_ten_labels_at_once[0m - botocore.errorfactory.ParameterAlreadyExists: An error occurred (ParameterA...
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_label_parameter_version_exception_ten_labels_over_multiple_calls[0m - botocore.errorfactory.ParameterAlreadyExists: An error occurred (ParameterA...
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_label_parameter_version_invalid_name[0m - Failed: DID NOT RAISE <class 'botocore.exceptions.ClientError'>
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_label_parameter_version_invalid_parameter_version[0m - botocore.errorfactory.ParameterAlreadyExists: An error occurred (ParameterA...
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_label_parameter_version_invalid_label[0m - botocore.errorfactory.ParameterAlreadyExists: An error occurred (ParameterA...
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_get_parameter_history_with_label[0m - AssertionError: assert 'value' == 'value-0'
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_get_parameter_history_with_label_non_latest[0m - AssertionError: assert 'value' == 'value-0'
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_get_parameter_history_with_label_latest_assumed[0m - AssertionError: assert 'value' == 'value-0'
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_get_parameter_history_missing_parameter[0m - AssertionError: assert 'ParameterNot...st not found.' == 'Parameter te...st...
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_add_remove_list_tags_for_resource[0m - Failed: DID NOT RAISE <class 'botocore.exceptions.ClientError'>
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_send_command[0m - botocore.exceptions.ClientError: An error occurred (InvalidAction) when cal...
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_list_commands[0m - botocore.exceptions.ClientError: An error occurred (InvalidAction) when cal...
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_get_command_invocation[0m - botocore.exceptions.ClientError: An error occurred (InvalidAction) when cal...
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_get_command_invocations_by_instance_tag[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_parameter_version_limit[0m - AssertionError: assert 101 == 100
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_parameter_overwrite_fails_when_limit_reached_and_oldest_version_has_label[0m - Failed: DID NOT RAISE <class 'botocore.exceptions.ClientError'>
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_get_parameters_includes_invalid_parameter_when_requesting_invalid_version[0m - AssertionError: assert 2 == 1
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_get_parameters_includes_invalid_parameter_when_requesting_invalid_label[0m - AssertionError: assert 3 == 1
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_get_parameters_should_only_return_unique_requests[0m - botocore.errorfactory.ParameterAlreadyExists: An error occurred (ParameterA...
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_get_parameter_history_should_throw_exception_when_MaxResults_is_too_large[0m - Failed: DID NOT RAISE <class 'botocore.exceptions.ClientError'>
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_get_parameter_history_NextTokenImplementation[0m - AssertionError: assert 412 == 100
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_get_parameter_history_exception_when_requesting_invalid_parameter[0m - AssertionError: assert 'ParameterNot...me not found.' == 'Parameter in...me...
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_parameter_lifecycle_with_leading_slash[True-/with-slash][0m - botocore.errorfactory.ParameterNotFound: An error occurred (ParameterNotFou...
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_parameter_lifecycle_with_leading_slash[False-without-slash][0m - botocore.errorfactory.ParameterNotFound: An error occurred (ParameterNotFou...
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_list_parameter_tags_created_with_leading_slash[/with-slash][0m - botocore.errorfactory.ParameterNotFound: An error occurred (ParameterNotFou...
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_list_parameter_tags_created_with_leading_slash[without-slash][0m - botocore.errorfactory.ParameterNotFound: An error occurred (ParameterNotFou...
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_unlabel_parameter_version[0m - botocore.exceptions.ClientError: An error occurred (InvalidAction) when cal...
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_unlabel_parameter_version_not_found[0m - AssertionError: assert 'InvalidAction' == 'ParameterNotFound'
+[31mFAILED[0m test_ssm/test_ssm.py::[1mtest_unlabel_parameter_version_version_not_found[0m - botocore.errorfactory.ParameterAlreadyExists: An error occurred (ParameterA...
+[31mFAILED[0m test_ssm/test_ssm_cloudformation.py::[1mtest_get_command_invocations_from_stack[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ssm/test_ssm_cloudformation.py::[1mtest_ssm_documents[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ssm/test_ssm_default_amis.py::[1mtest_ssm_get_latest_ami_by_path[0m - assert 0 == 10
+[31mFAILED[0m test_ssm/test_ssm_default_amis.py::[1mtest_ssm_latest_amis_are_different_in_regions[0m - botocore.errorfactory.ParameterNotFound: An error occurred (ParameterNotFou...
+[31mFAILED[0m test_ssm/test_ssm_defaults.py::[1mtest_ssm_get_by_path[0m - IndexError: list index out of range
+[31mFAILED[0m test_ssm/test_ssm_defaults.py::[1mtest_global_infrastructure_services[0m - IndexError: list index out of range
+[31mFAILED[0m test_ssm/test_ssm_defaults.py::[1mtest_ssm_region_query[0m - botocore.errorfactory.ParameterNotFound: An error occurred (ParameterNotFou...
+[31mFAILED[0m test_ssm/test_ssm_doc_permissions.py::[1mtest_describe_document_permissions_unknown_document[0m - AssertionError: assert 'InvalidAction' == 'InvalidDocument'
+[31mFAILED[0m test_ssm/test_ssm_doc_permissions.py::[1mtest_describe_document_permissions_initial[0m - botocore.exceptions.ClientError: An error occurred (InvalidAction) when cal...
+[31mFAILED[0m test_ssm/test_ssm_doc_permissions.py::[1mtest_modify_document_permission_add_account_id[one_value][0m - botocore.exceptions.ClientError: An error occurred (InvalidAction) when cal...
+[31mFAILED[0m test_ssm/test_ssm_doc_permissions.py::[1mtest_modify_document_permission_add_account_id[all][0m - botocore.exceptions.ClientError: An error occurred (InvalidAction) when cal...
+[31mFAILED[0m test_ssm/test_ssm_doc_permissions.py::[1mtest_modify_document_permission_add_account_id[All][0m - botocore.exceptions.ClientError: An error occurred (InvalidAction) when cal...
+[31mFAILED[0m test_ssm/test_ssm_doc_permissions.py::[1mtest_modify_document_permission_add_account_id[multiple_values][0m - botocore.exceptions.ClientError: An error occurred (InvalidAction) when cal...
+[31mFAILED[0m test_ssm/test_ssm_doc_permissions.py::[1mtest_modify_document_permission_remove_account_id[all][0m - botocore.exceptions.ClientError: An error occurred (InvalidAction) when cal...
+[31mFAILED[0m test_ssm/test_ssm_doc_permissions.py::[1mtest_modify_document_permission_remove_account_id[one_value][0m - botocore.exceptions.ClientError: An error occurred (InvalidAction) when cal...
+[31mFAILED[0m test_ssm/test_ssm_doc_permissions.py::[1mtest_modify_document_permission_remove_account_id[multiple_initials][0m - botocore.exceptions.ClientError: An error occurred (InvalidAction) when cal...
+[31mFAILED[0m test_ssm/test_ssm_doc_permissions.py::[1mtest_modify_document_permission_remove_account_id[multiple_to_remove][0m - botocore.exceptions.ClientError: An error occurred (InvalidAction) when cal...
+[31mFAILED[0m test_ssm/test_ssm_doc_permissions.py::[1mtest_fail_modify_document_permission_wrong_permission_type[0m - botocore.exceptions.ClientError: An error occurred (InvalidAction) when cal...
+[31mFAILED[0m test_ssm/test_ssm_doc_permissions.py::[1mtest_fail_modify_document_permission_wrong_document_version[0m - botocore.exceptions.ClientError: An error occurred (InvalidAction) when cal...
+[31mFAILED[0m test_ssm/test_ssm_doc_permissions.py::[1mtest_fail_modify_document_permission_add_invalid_account_ids[all?][0m - botocore.exceptions.ClientError: An error occurred (InvalidAction) when cal...
+[31mFAILED[0m test_ssm/test_ssm_doc_permissions.py::[1mtest_fail_modify_document_permission_add_invalid_account_ids[too_short][0m - botocore.exceptions.ClientError: An error occurred (InvalidAction) when cal...
+[31mFAILED[0m test_ssm/test_ssm_doc_permissions.py::[1mtest_fail_modify_document_permission_add_invalid_account_ids[too_long][0m - botocore.exceptions.ClientError: An error occurred (InvalidAction) when cal...
+[31mFAILED[0m test_ssm/test_ssm_doc_permissions.py::[1mtest_fail_modify_document_permission_add_invalid_account_ids[no-digits][0m - botocore.exceptions.ClientError: An error occurred (InvalidAction) when cal...
+[31mFAILED[0m test_ssm/test_ssm_doc_permissions.py::[1mtest_fail_modify_document_permission_remove_invalid_account_ids[all?][0m - botocore.exceptions.ClientError: An error occurred (InvalidAction) when cal...
+[31mFAILED[0m test_ssm/test_ssm_doc_permissions.py::[1mtest_fail_modify_document_permission_remove_invalid_account_ids[too_short][0m - botocore.exceptions.ClientError: An error occurred (InvalidAction) when cal...
+[31mFAILED[0m test_ssm/test_ssm_doc_permissions.py::[1mtest_fail_modify_document_permission_remove_invalid_account_ids[too_long][0m - botocore.exceptions.ClientError: An error occurred (InvalidAction) when cal...
+[31mFAILED[0m test_ssm/test_ssm_doc_permissions.py::[1mtest_fail_modify_document_permission_remove_invalid_account_ids[no-digits][0m - botocore.exceptions.ClientError: An error occurred (InvalidAction) when cal...
+[31mFAILED[0m test_ssm/test_ssm_doc_permissions.py::[1mtest_fail_modify_document_permission_add_all_and_specific[0m - botocore.exceptions.ClientError: An error occurred (InvalidAction) when cal...
+[31mFAILED[0m test_ssm/test_ssm_doc_permissions.py::[1mtest_fail_modify_document_permission_remove_all_and_specific[0m - botocore.exceptions.ClientError: An error occurred (InvalidAction) when cal...
+[31mFAILED[0m test_ssm/test_ssm_docs.py::[1mtest_create_document[0m - botocore.exceptions.ClientError: An error occurred (InvalidAction) when cal...
+[31mFAILED[0m test_ssm/test_ssm_docs.py::[1mtest_get_document[0m - AssertionError: assert 'action GetDo...r service ssm' == 'The specifie...es...
+[31mFAILED[0m test_ssm/test_ssm_docs.py::[1mtest_delete_document[0m - AssertionError: assert 'action Delet...r service ssm' == 'The specifie...es...
+[31mFAILED[0m test_ssm/test_ssm_docs.py::[1mtest_update_document_default_version[0m - AssertionError: assert 'action Updat...r service ssm' == 'The specifie...es...
+[31mFAILED[0m test_ssm/test_ssm_docs.py::[1mtest_update_document[0m - AssertionError: assert 'action Updat...r service ssm' == 'The specifie...es...
+[31mFAILED[0m test_ssm/test_ssm_docs.py::[1mtest_describe_document[0m - AssertionError: assert 'action Descr...r service ssm' == 'The specifie...es...
+[31mFAILED[0m test_ssm/test_ssm_docs.py::[1mtest_list_documents[0m - botocore.exceptions.ClientError: An error occurred (InvalidAction) when cal...
+[31mFAILED[0m test_ssm/test_ssm_docs.py::[1mtest_tags_in_list_tags_from_resource_document[0m - botocore.exceptions.ClientError: An error occurred (InvalidAction) when cal...
+[31mFAILED[0m test_ssm/test_ssm_maintenance_windows.py::[1mtest_describe_maintenance_window[0m - botocore.exceptions.ClientError: An error occurred (InvalidAction) when cal...
+[31mFAILED[0m test_ssm/test_ssm_maintenance_windows.py::[1mtest_create_maintenance_windows_simple[0m - botocore.exceptions.ClientError: An error occurred (InvalidAction) when cal...
+[31mFAILED[0m test_ssm/test_ssm_maintenance_windows.py::[1mtest_create_maintenance_windows_advanced[0m - botocore.exceptions.ClientError: An error occurred (InvalidAction) when cal...
+[31mFAILED[0m test_ssm/test_ssm_maintenance_windows.py::[1mtest_get_maintenance_windows[0m - botocore.exceptions.ClientError: An error occurred (InvalidAction) when cal...
+[31mFAILED[0m test_ssm/test_ssm_maintenance_windows.py::[1mtest_describe_maintenance_windows[0m - botocore.exceptions.ClientError: An error occurred (InvalidAction) when cal...
+[31mFAILED[0m test_ssm/test_ssm_maintenance_windows.py::[1mtest_delete_maintenance_windows[0m - botocore.exceptions.ClientError: An error occurred (InvalidAction) when cal...
+[31mFAILED[0m test_ssm/test_ssm_maintenance_windows.py::[1mtest_tags[0m - botocore.exceptions.ClientError: An error occurred (InvalidAction) when cal...
+[31mFAILED[0m test_ssm/test_ssm_maintenance_windows.py::[1mtest_register_maintenance_window_target[0m - botocore.exceptions.ClientError: An error occurred (InvalidAction) when cal...
+[31mFAILED[0m test_ssm/test_ssm_maintenance_windows.py::[1mtest_deregister_target_from_maintenance_window[0m - botocore.exceptions.ClientError: An error occurred (InvalidAction) when cal...
+[31mFAILED[0m test_ssm/test_ssm_maintenance_windows.py::[1mtest_describe_maintenance_window_with_no_task_or_targets[0m - botocore.exceptions.ClientError: An error occurred (InvalidAction) when cal...
+[31mFAILED[0m test_ssm/test_ssm_maintenance_windows.py::[1mtest_register_maintenance_window_task[0m - botocore.exceptions.ClientError: An error occurred (InvalidAction) when cal...
+[31mFAILED[0m test_ssm/test_ssm_maintenance_windows.py::[1mtest_deregister_maintenance_window_task[0m - botocore.exceptions.ClientError: An error occurred (InvalidAction) when cal...
+[31mFAILED[0m test_ssm/test_ssm_parameterstore_cloudformation.py::[1mtest_cloudformation_lifecycle[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ssm/test_ssm_parameterstore_cloudformation.py::[1mtest_cloudformation_lifecycle_with_parsing[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ssm/test_ssm_patch_baseline.py::[1mtest_create_patch_baseLine[0m - botocore.exceptions.ClientError: An error occurred (InvalidAction) when cal...
+[31mFAILED[0m test_ssm/test_ssm_patch_baseline.py::[1mtest_delete_patch_baseline[0m - botocore.exceptions.ClientError: An error occurred (InvalidAction) when cal...
+[31mFAILED[0m test_ssm/test_ssm_patch_group.py::[1mtest_register_patch_baseline_for_patch_group[0m - botocore.exceptions.ClientError: An error occurred (InvalidAction) when cal...
+[31mFAILED[0m test_ssm/test_ssm_patch_group.py::[1mtest_register_patch_baseline_for_patch_group_invalid_id[0m - AssertionError: assert 'InvalidAction' == 'DoesNotExistException'
+[31mFAILED[0m test_ssm/test_ssm_patch_group.py::[1mtest_register_patch_baseline_for_patch_group_already_exists[0m - botocore.exceptions.ClientError: An error occurred (InvalidAction) when cal...
+[31mFAILED[0m test_ssm/test_ssm_patch_group.py::[1mtest_get_patch_baseline_for_patch_group[0m - botocore.exceptions.ClientError: An error occurred (InvalidAction) when cal...
+[31mFAILED[0m test_ssm/test_ssm_patch_group.py::[1mtest_get_patch_baseline_for_patch_group_default[0m - botocore.exceptions.ClientError: An error occurred (InvalidAction) when cal...
+[31mFAILED[0m test_ssm/test_ssm_patch_group.py::[1mtest_deregister_patch_baseline_for_patch_group[0m - botocore.exceptions.ClientError: An error occurred (InvalidAction) when cal...
+[31mFAILED[0m test_ssm/test_ssm_patch_group.py::[1mtest_deregister_patch_baseline_for_patch_group_default[0m - botocore.exceptions.ClientError: An error occurred (InvalidAction) when cal...
+[31mFAILED[0m test_ssm/test_ssm_patch_group.py::[1mtest_deregister_patch_baseline_for_patch_group_invalid_id[0m - botocore.exceptions.ClientError: An error occurred (InvalidAction) when cal...
+[31mFAILED[0m test_ssm/test_ssm_secretsmanager.py::[1mtest_get_value_from_secrets_manager__by_name[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ssm/test_ssm_secretsmanager.py::[1mtest_get_value_from_secrets_manager__without_decryption[0m - AssertionError: assert 'ParameterNotFound' == 'ValidationException'
+[31mFAILED[0m test_ssm/test_ssm_secretsmanager.py::[1mtest_get_value_from_secrets_manager__with_decryption_false[0m - AssertionError: assert 'ParameterNotFound' == 'ValidationException'
+[31mFAILED[0m test_ssm/test_ssm_secretsmanager.py::[1mtest_get_value_from_secrets_manager__by_id[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ssm/test_ssm_secretsmanager.py::[1mtest_get_value_from_secrets_manager__by_version[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_ssm/test_ssm_secretsmanager.py::[1mtest_get_value_from_secrets_manager__param_does_not_exist[0m - AssertionError: assert 'ParameterNot...st not found.' == 'An error occ...st...
+[31m[31m[1m156 failed[0m, [32m20 passed[0m, [33m2 skipped[0m, [33m164 warnings[0m[31m in 7.47s[0m[0m

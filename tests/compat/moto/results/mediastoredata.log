@@ -1,0 +1,103 @@
+[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31m                                                                   [100%][0m
+=================================== FAILURES ===================================
+[31m[1m_______________________________ test_put_object ________________________________[0m
+[1m[31mtest_mediastoredata/test_mediastoredata.py[0m:13: in test_put_object
+    [0mresponse = client.put_object(Body=[33m"[39;49;00m[33m011001[39;49;00m[33m"[39;49;00m, Path=[33m"[39;49;00m[33mfoo[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the PutObject operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>289cda41-80c1-46d6-8869-6c8a1ce489de</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m____________________ test_get_object_throws_not_found_error ____________________[0m
+[1m[31mtest_mediastoredata/test_mediastoredata.py[0m:26: in test_get_object_throws_not_found_error
+    [0m[94massert[39;49;00m ex.value.response[[33m"[39;49;00m[33mError[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mObjectNotFoundException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'ObjectNotFoundException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ObjectNotFoundException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m_______________________________ test_get_object ________________________________[0m
+[1m[31mtest_mediastoredata/test_mediastoredata.py[0m:32: in test_get_object
+    [0mclient.put_object(Body=[33m"[39;49;00m[33m011001[39;49;00m[33m"[39;49;00m, Path=[33m"[39;49;00m[33mfoo[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the PutObject operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>f3734651-4a79-40b2-8a1f-c700075bc54e</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________________________ test_delete_object_error ___________________________[0m
+[1m[31mtest_mediastoredata/test_mediastoredata.py[0m:44: in test_delete_object_error
+    [0m[94massert[39;49;00m ex.value.response[[33m"[39;49;00m[33mError[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mObjectNotFoundException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'ObjectNotFoundException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ObjectNotFoundException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m_________________________ test_delete_object_succeeds __________________________[0m
+[1m[31mtest_mediastoredata/test_mediastoredata.py[0m:51: in test_delete_object_succeeds
+    [0mclient.put_object(Body=[33m"[39;49;00m[33m011001[39;49;00m[33m"[39;49;00m, Path=object_path)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the PutObject operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>ef6c04a7-55da-4c69-8436-2f4f104cef93</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________________________ test_list_items ________________________________[0m
+[1m[31mtest_mediastoredata/test_mediastoredata.py[0m:61: in test_list_items
+    [0m[94massert[39;49;00m [96mlen[39;49;00m(client.list_items()[[33m"[39;49;00m[33mItems[39;49;00m[33m"[39;49;00m]) == [94m0[39;49;00m[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the ListItems operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>c033798d-5949-46d8-aa54-f87eb371a802</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[33m=============================== warnings summary ===============================[0m
+tests/test_mediastoredata/test_mediastoredata.py::test_put_object
+tests/test_mediastoredata/test_mediastoredata.py::test_get_object_throws_not_found_error
+tests/test_mediastoredata/test_mediastoredata.py::test_get_object
+tests/test_mediastoredata/test_mediastoredata.py::test_delete_object_error
+tests/test_mediastoredata/test_mediastoredata.py::test_delete_object_succeeds
+tests/test_mediastoredata/test_mediastoredata.py::test_list_items
+  /Users/lucas/.cache/fakecloud/moto/.venv/lib/python3.9/site-packages/boto3/compat.py:89: PythonDeprecationWarning: Boto3 will no longer support Python 3.9 starting April 29, 2026. To continue receiving service updates, bug fixes, and security updates please upgrade to Python 3.10 or later. More information can be found here: https://aws.amazon.com/blogs/developer/python-support-policy-updates-for-aws-sdks-and-tools/
+    warnings.warn(warning, PythonDeprecationWarning)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+[36m[1m=========================== short test summary info ============================[0m
+[31mFAILED[0m test_mediastoredata/test_mediastoredata.py::[1mtest_put_object[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the P...
+[31mFAILED[0m test_mediastoredata/test_mediastoredata.py::[1mtest_get_object_throws_not_found_error[0m - AssertionError: assert '400' == 'ObjectNotFoundException'
+[31mFAILED[0m test_mediastoredata/test_mediastoredata.py::[1mtest_get_object[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the P...
+[31mFAILED[0m test_mediastoredata/test_mediastoredata.py::[1mtest_delete_object_error[0m - AssertionError: assert '400' == 'ObjectNotFoundException'
+[31mFAILED[0m test_mediastoredata/test_mediastoredata.py::[1mtest_delete_object_succeeds[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the P...
+[31mFAILED[0m test_mediastoredata/test_mediastoredata.py::[1mtest_list_items[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the L...
+[31m[31m[1m6 failed[0m, [33m6 warnings[0m[31m in 0.26s[0m[0m

@@ -1,0 +1,708 @@
+[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[33ms[0m[33ms[0m[33ms[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31m                 [100%][0m
+=================================== FAILURES ===================================
+[31m[1m_______________________ test_put_configuration_recorder ________________________[0m
+[1m[31mtest_config/test_config.py[0m:24: in test_put_configuration_recorder
+    [0m[94massert[39;49;00m ([90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'InvalidConfi...NameException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- InvalidConfigurationRecorderNameException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m______________________ test_put_configuration_aggregator _______________________[0m
+[1m[31mtest_config/test_config.py[0m:362: in test_put_configuration_aggregator
+    [0m[94massert[39;49;00m ([90m[39;49;00m
+[1m[31mE   assert 'Member must have length less than or equal to 1' in '<?xml version="1.0" encoding="UTF-8"?><ErrorResponse>\n  <Error>\n    <Type>Sender</Type>\n    <Code>MissingAction</C...on from request</Message>\n  </Error>\n  <RequestId>2cd8727e-8eeb-47c3-bdee-4f95a6686440</RequestId>\n</ErrorResponse>'[0m
+[31m[1m___________________ test_describe_configuration_aggregators ____________________[0m
+[1m[31mtest_config/test_config.py[0m:604: in test_describe_configuration_aggregators
+    [0m[94massert[39;49;00m [95mnot[39;49;00m client.describe_configuration_aggregators()[[33m"[39;49;00m[33mConfigurationAggregators[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the DescribeConfigurationAggregators operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>e30e3a0b-66b9-4ac1-8d56-383a4c84ef2c</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______________________ test_put_aggregation_authorization ______________________[0m
+[1m[31mtest_config/test_config.py[0m:716: in test_put_aggregation_authorization
+    [0m[94massert[39;49;00m ([90m[39;49;00m
+[1m[31mE   assert 'Member must have length less than or equal to 50' in '<?xml version="1.0" encoding="UTF-8"?><ErrorResponse>\n  <Error>\n    <Type>Sender</Type>\n    <Code>MissingAction</C...on from request</Message>\n  </Error>\n  <RequestId>c7c46250-1527-497b-adc6-a56c7a8599c8</RequestId>\n</ErrorResponse>'[0m
+[31m[1m___________________ test_describe_aggregation_authorizations ___________________[0m
+[1m[31mtest_config/test_config.py[0m:806: in test_describe_aggregation_authorizations
+    [0m[94massert[39;49;00m [95mnot[39;49;00m client.describe_aggregation_authorizations()[[33m"[39;49;00m[33mAggregationAuthorizations[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the DescribeAggregationAuthorizations operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>70ff8208-3138-4bb1-a3cf-306794318143</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m____________________ test_delete_aggregation_authorization _____________________[0m
+[1m[31mtest_config/test_config.py[0m:860: in test_delete_aggregation_authorization
+    [0mclient.put_aggregation_authorization([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the PutAggregationAuthorization operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>23cf6ea0-5a24-4ca3-b4ee-575672037c9a</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_____________________ test_delete_configuration_aggregator _____________________[0m
+[1m[31mtest_config/test_config.py[0m:881: in test_delete_configuration_aggregator
+    [0mclient.put_configuration_aggregator([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the PutConfigurationAggregator operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>69a76134-28d5-4696-896f-186e75a61793</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_________________________ test_describe_configurations _________________________[0m
+[1m[31mtest_config/test_config.py[0m:907: in test_describe_configurations
+    [0mresult = client.describe_configuration_recorders()[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the DescribeConfigurationRecorders operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>d9d41d78-fa02-4c0f-a3dc-a23ac1af4d94</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m____________________________ test_delivery_channels ____________________________[0m
+[1m[31mtest_config/test_config.py[0m:956: in test_delivery_channels
+    [0m[94massert[39;49;00m ([90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'NoAvailableC...rderException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- NoAvailableConfigurationRecorderException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m_______________________ test_describe_delivery_channels ________________________[0m
+[1m[31mtest_config/test_config.py[0m:1115: in test_describe_delivery_channels
+    [0mclient.put_configuration_recorder([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the PutConfigurationRecorder operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>c36a2ff2-5ac4-4c58-9831-bab2403e82da</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______________________ test_start_configuration_recorder _______________________[0m
+[1m[31mtest_config/test_config.py[0m:1184: in test_start_configuration_recorder
+    [0m[94massert[39;49;00m ce.value.response[[33m"[39;49;00m[33mError[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mNoSuchConfigurationRecorderException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'NoSuchConfig...rderException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- NoSuchConfigurationRecorderException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m_______________________ test_stop_configuration_recorder _______________________[0m
+[1m[31mtest_config/test_config.py[0m:1232: in test_stop_configuration_recorder
+    [0m[94massert[39;49;00m ce.value.response[[33m"[39;49;00m[33mError[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mNoSuchConfigurationRecorderException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'NoSuchConfig...rderException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- NoSuchConfigurationRecorderException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m_________________ test_describe_configuration_recorder_status __________________[0m
+[1m[31mtest_config/test_config.py[0m:1275: in test_describe_configuration_recorder_status
+    [0mresult = client.describe_configuration_recorder_status()[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the DescribeConfigurationRecorderStatus operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>15859d53-dfed-4331-82b7-91eff6e48991</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______________________ test_delete_configuration_recorder ______________________[0m
+[1m[31mtest_config/test_config.py[0m:1321: in test_delete_configuration_recorder
+    [0mclient.put_configuration_recorder([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the PutConfigurationRecorder operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>0672c9a2-b15b-4f2f-a8df-a9eb6b6b8df7</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_________________________ test_delete_delivery_channel _________________________[0m
+[1m[31mtest_config/test_config.py[0m:1347: in test_delete_delivery_channel
+    [0mclient.put_configuration_recorder([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the PutConfigurationRecorder operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>02c72eed-a0ab-4ae6-bae0-56e7f497a23a</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m________________________ test_list_discovered_resource _________________________[0m
+[1m[31mtest_config/test_config.py[0m:1394: in test_list_discovered_resource
+    [0m[94massert[39;49;00m [95mnot[39;49;00m client.list_discovered_resources(resourceType=[33m"[39;49;00m[33mAWS::S3::Bucket[39;49;00m[33m"[39;49;00m)[[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the ListDiscoveredResources operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>0bd1f49a-ff91-4eda-b2c5-420990abb5c8</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________________ test_list_aggregate_discovered_resource ____________________[0m
+[1m[31mtest_config/test_config.py[0m:1503: in test_list_aggregate_discovered_resource
+    [0m[94massert[39;49;00m ([90m[39;49;00m
+[1m[31mE   assert 'The configuration aggregator does not exist' in '<?xml version="1.0" encoding="UTF-8"?><ErrorResponse>\n  <Error>\n    <Type>Sender</Type>\n    <Code>MissingAction</C...on from request</Message>\n  </Error>\n  <RequestId>8e4cd93f-2038-4e5f-be36-fee67a803cc7</RequestId>\n</ErrorResponse>'[0m
+[31m[1m_______________________ test_get_resource_config_history _______________________[0m
+[1m[31mtest_config/test_config.py[0m:1646: in test_get_resource_config_history
+    [0m[94massert[39;49;00m ce.value.response[[33m"[39;49;00m[33mError[39;49;00m[33m"[39;49;00m] == {[90m[39;49;00m
+[1m[31mE   assert {'Code': '400...rorResponse>'} == {'Code': 'Res...n discovered'}[0m
+[1m[31mE     [0m
+[1m[31mE     Differing items:[0m
+[1m[31mE     [0m{[33m'[39;49;00m[33mCode[39;49;00m[33m'[39;49;00m: [33m'[39;49;00m[33m400[39;49;00m[33m'[39;49;00m}[90m[39;49;00m != [0m{[33m'[39;49;00m[33mCode[39;49;00m[33m'[39;49;00m: [33m'[39;49;00m[33mResourceNotDiscoveredException[39;49;00m[33m'[39;49;00m}[90m[39;49;00m[0m
+[1m[31mE     [0m{[33m'[39;49;00m[33mMessage[39;49;00m[33m'[39;49;00m: [33m'[39;49;00m[33m<?xml version=[39;49;00m[33m"[39;49;00m[33m1.0[39;49;00m[33m"[39;49;00m[33m encoding=[39;49;00m[33m"[39;49;00m[33mUTF-8[39;49;00m[33m"[39;49;00m[33m?><ErrorResponse>...[0m
+[1m[31mE     [0m
+[1m[31mE     ...Full output truncated (2 lines hidden), use '-vv' to show[0m
+[31m[1m________________________ test_batch_get_resource_config ________________________[0m
+[1m[31mtest_config/test_config.py[0m:1707: in test_batch_get_resource_config
+    [0m[94massert[39;49;00m ([90m[39;49;00m
+[1m[31mE   assert 'Member must have length less than or equal to 100' in '<?xml version="1.0" encoding="UTF-8"?><ErrorResponse>\n  <Error>\n    <Type>Sender</Type>\n    <Code>MissingAction</C...on from request</Message>\n  </Error>\n  <RequestId>b3d34454-7b16-42ac-b8e8-47de8cbdd07b</RequestId>\n</ErrorResponse>'[0m
+[31m[1m___________________ test_batch_get_aggregate_resource_config ___________________[0m
+[1m[31mtest_config/test_config.py[0m:1773: in test_batch_get_aggregate_resource_config
+    [0m[94massert[39;49;00m ([90m[39;49;00m
+[1m[31mE   assert 'The configuration aggregator does not exist' in '<?xml version="1.0" encoding="UTF-8"?><ErrorResponse>\n  <Error>\n    <Type>Sender</Type>\n    <Code>MissingAction</C...on from request</Message>\n  </Error>\n  <RequestId>74b6adec-03ba-4f61-aa38-869b573bd90a</RequestId>\n</ErrorResponse>'[0m
+[31m[1m_____________________________ test_put_evaluations _____________________________[0m
+[1m[31mtest_config/test_config.py[0m:1932: in test_put_evaluations
+    [0m[94massert[39;49;00m ce.value.response[[33m"[39;49;00m[33mError[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mInvalidParameterValueException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'InvalidParam...alueException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- InvalidParameterValueException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m____________________ test_put_organization_conformance_pack ____________________[0m
+[1m[31mtest_config/test_config.py[0m:2001: in test_put_organization_conformance_pack
+    [0mresponse = client.put_organization_conformance_pack([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the PutOrganizationConformancePack operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>51ab3713-423f-4f4c-b7d0-a656d8cd42fd</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m________________ test_put_organization_conformance_pack_errors _________________[0m
+[1m[31mtest_config/test_config.py[0m:2041: in test_put_organization_conformance_pack_errors
+    [0m[94massert[39;49;00m ex.response[[33m"[39;49;00m[33mError[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mValidationException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'ValidationException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ValidationException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m_________________ test_describe_organization_conformance_packs _________________[0m
+[1m[31mtest_config/test_config.py[0m:2067: in test_describe_organization_conformance_packs
+    [0marn = client.put_organization_conformance_pack([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the PutOrganizationConformancePack operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>1ca9178f-fea9-4781-bb76-65637b33b28f</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_____________ test_describe_organization_conformance_packs_errors ______________[0m
+[1m[31mtest_config/test_config.py[0m:2104: in test_describe_organization_conformance_packs_errors
+    [0m[94massert[39;49;00m ex.response[[33m"[39;49;00m[33mError[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mNoSuchOrganizationConformancePackException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'NoSuchOrgani...PackException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- NoSuchOrganizationConformancePackException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m_____________ test_describe_organization_conformance_pack_statuses _____________[0m
+[1m[31mtest_config/test_config.py[0m:2115: in test_describe_organization_conformance_pack_statuses
+    [0mclient.put_organization_conformance_pack([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the PutOrganizationConformancePack operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>e103d3d8-9eeb-4402-a32c-745d036c0813</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_________ test_describe_organization_conformance_pack_statuses_errors __________[0m
+[1m[31mtest_config/test_config.py[0m:2178: in test_describe_organization_conformance_pack_statuses_errors
+    [0m[94massert[39;49;00m ex.response[[33m"[39;49;00m[33mError[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mNoSuchOrganizationConformancePackException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'NoSuchOrgani...PackException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- NoSuchOrganizationConformancePackException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m____________ test_get_organization_conformance_pack_detailed_status ____________[0m
+[1m[31mtest_config/test_config.py[0m:2189: in test_get_organization_conformance_pack_detailed_status
+    [0marn = client.put_organization_conformance_pack([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the PutOrganizationConformancePack operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>712b2a62-504b-4ed5-9957-d0b3dfb2bc6a</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m________ test_get_organization_conformance_pack_detailed_status_errors _________[0m
+[1m[31mtest_config/test_config.py[0m:2248: in test_get_organization_conformance_pack_detailed_status_errors
+    [0m[94massert[39;49;00m ex.response[[33m"[39;49;00m[33mError[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mNoSuchOrganizationConformancePackException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'NoSuchOrgani...PackException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- NoSuchOrganizationConformancePackException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m__________________ test_delete_organization_conformance_pack ___________________[0m
+[1m[31mtest_config/test_config.py[0m:2259: in test_delete_organization_conformance_pack
+    [0mclient.put_organization_conformance_pack([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the PutOrganizationConformancePack operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>e2fd8fec-da3a-47b5-96fa-4bfaaad34c39</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________ test_delete_organization_conformance_pack_errors _______________[0m
+[1m[31mtest_config/test_config.py[0m:2290: in test_delete_organization_conformance_pack_errors
+    [0m[94massert[39;49;00m ex.response[[33m"[39;49;00m[33mError[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mNoSuchOrganizationConformancePackException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'NoSuchOrgani...PackException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- NoSuchOrganizationConformancePackException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m_______________________ test_put_retention_configuration _______________________[0m
+[1m[31mtest_config/test_config.py[0m:2309: in test_put_retention_configuration
+    [0m[94massert[39;49;00m ([90m[39;49;00m
+[1m[31mE   assert '<?xml versio...rrorResponse>' == "Value '29' a...r equal to 30"[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- Value '29' at 'retentionPeriodInDays' failed to satisfy constraint: Member must have value greater than or equal to 30[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+   <Error>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Type>Sender</Type>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Code>MissingAction</Code>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Message>Could not determine target service or action from request</Message>[39;49;00m[90m[39;49;00m...[0m
+[1m[31mE     [0m
+[1m[31mE     ...Full output truncated (3 lines hidden), use '-vv' to show[0m
+[31m[1m____________________ test_describe_retention_configurations ____________________[0m
+[1m[31mtest_config/test_config.py[0m:2335: in test_describe_retention_configurations
+    [0mresult = client.describe_retention_configurations()[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the DescribeRetentionConfigurations operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>24223803-a546-45d0-a9da-668db0ee7c7b</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_____________________ test_delete_retention_configuration ______________________[0m
+[1m[31mtest_config/test_config.py[0m:2380: in test_delete_retention_configuration
+    [0mclient.put_retention_configuration(RetentionPeriodInDays=[94m2557[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the PutRetentionConfiguration operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>18539221-b957-4dd9-a78f-ce06e0a9b5de</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_________________________ test_select_resource_config __________________________[0m
+[1m[31mtest_config/test_config.py[0m:2407: in test_select_resource_config
+    [0mresponse = config_client.select_resource_config([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the SelectResourceConfig operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>05ce5d2b-ba20-45e1-8740-997fd500a932</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________________ test_select_resource_config_with_results ___________________[0m
+[1m[31mtest_config/test_config.py[0m:2421: in test_select_resource_config_with_results
+    [0ms3_client.create_bucket(Bucket=[33m"[39;49;00m[33mtest-bucket-1[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateBucket operation: Could not determine target service or action from request[0m
+[31m[1m__________________ test_select_resource_config_empty_results ___________________[0m
+[1m[31mtest_config/test_config.py[0m:2444: in test_select_resource_config_empty_results
+    [0mresponse = config_client.select_resource_config([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the SelectResourceConfig operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>6d7f51f1-ca1c-4d24-ba7d-64b3d462c64c</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________ test_select_resource_config_with_limit_and_token _______________[0m
+[1m[31mtest_config/test_config.py[0m:2459: in test_select_resource_config_with_limit_and_token
+    [0mresponse = config_client.select_resource_config([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the SelectResourceConfig operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>84ca4793-582f-4f9c-b2de-d5b21376a2dd</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________________________ test_put_resource_config ___________________________[0m
+[1m[31mtest_config/test_config.py[0m:2481: in test_put_resource_config
+    [0mresponse = client.put_resource_config([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the PutResourceConfig operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>4a56a560-d8ba-4683-96b9-630d57d3c819</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_________________________ test_put_config_rule_errors __________________________[0m
+[1m[31mtest_config/test_config_rules.py[0m:46: in test_put_config_rule_errors
+    [0mclient.put_config_rule(ConfigRule=managed_rule)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the PutConfigRule operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>809589ca-1618-4c3f-8127-4c83ec83bdb2</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______________________ test_put_config_rule_update_errors ______________________[0m
+[1m[31mtest_config/test_config_rules.py[0m:88: in test_put_config_rule_update_errors
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mInvalidParameterValueException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'InvalidParam...alueException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- InvalidParameterValueException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m___________________________ test_config_rule_errors ____________________________[0m
+[1m[31mtest_config/test_config_rules.py[0m:127: in test_config_rule_errors
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mInvalidParameterValueException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'InvalidParam...alueException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- InvalidParameterValueException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m_________________________ test_aws_managed_rule_errors _________________________[0m
+[1m[31mtest_config/test_config_rules.py[0m:203: in test_aws_managed_rule_errors
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mInvalidParameterValueException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'InvalidParam...alueException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- InvalidParameterValueException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m________________________ test_config_rules_scope_errors ________________________[0m
+[1m[31mtest_config/test_config_rules.py[0m:249: in test_config_rules_scope_errors
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mInvalidParameterValueException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'InvalidParam...alueException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- InvalidParameterValueException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m______________________ test_valid_put_config_managed_rule ______________________[0m
+[1m[31mtest_config/test_config_rules.py[0m:325: in test_valid_put_config_managed_rule
+    [0mclient.put_config_rule(ConfigRule=managed_rule)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the PutConfigRule operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>cf05b1ce-f3d6-422d-8a02-48702ea6d26a</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m__________________________ test_describe_config_rules __________________________[0m
+[1m[31mtest_config/test_config_rules.py[0m:374: in test_describe_config_rules
+    [0mresponse = client.describe_config_rules()[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the DescribeConfigRules operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>025de472-824e-424f-a11e-abf5fcba8df4</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________________________ test_delete_config_rules ___________________________[0m
+[1m[31mtest_config/test_config_rules.py[0m:445: in test_delete_config_rules
+    [0mclient.put_config_rule(ConfigRule=managed_rule)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the PutConfigRule operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>658d2216-c6b8-4999-87ce-e3e852ebd8a5</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________________ test_config_rules_source_details_errors ____________________[0m
+[1m[31mtest_config/test_config_rules_integration.py[0m:84: in test_config_rules_source_details_errors
+    [0mcreate_lambda_for_config_rule()[90m[39;49;00m
+[1m[31mtest_config/test_config_rules_integration.py[0m:66: in create_lambda_for_config_rule
+    [0mlambda_client.create_function([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateFunction operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>aecf516d-ceab-48df-b50c-f89cfb80aa50</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______________________ test_valid_put_config_custom_rule _______________________[0m
+[1m[31mtest_config/test_config_rules_integration.py[0m:166: in test_valid_put_config_custom_rule
+    [0mcreate_lambda_for_config_rule()[90m[39;49;00m
+[1m[31mtest_config/test_config_rules_integration.py[0m:66: in create_lambda_for_config_rule
+    [0mlambda_client.create_function([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateFunction operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>fa011810-58ac-4a67-b8b1-09689c9e95ed</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________________ test_config_rules_source_errors ________________________[0m
+[1m[31mtest_config/test_config_rules_integration.py[0m:241: in test_config_rules_source_errors
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mValidationException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'ValidationException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ValidationException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m______________________________ test_tag_resource _______________________________[0m
+[1m[31mtest_config/test_config_tags.py[0m:58: in test_tag_resource
+    [0m[94massert[39;49;00m cerr.value.response[[33m"[39;49;00m[33mError[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mResourceNotFoundException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'ResourceNotFoundException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ResourceNotFoundException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m_____________________________ test_untag_resource ______________________________[0m
+[1m[31mtest_config/test_config_tags.py[0m:155: in test_untag_resource
+    [0m[94massert[39;49;00m cerr.value.response[[33m"[39;49;00m[33mError[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mResourceNotFoundException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'ResourceNotFoundException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ResourceNotFoundException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m_________________________ test_list_tags_for_resource __________________________[0m
+[1m[31mtest_config/test_config_tags.py[0m:274: in test_list_tags_for_resource
+    [0m[94massert[39;49;00m cerr.value.response[[33m"[39;49;00m[33mError[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mResourceNotFoundException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'ResourceNotFoundException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ResourceNotFoundException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[33m=============================== warnings summary ===============================[0m
+tests/test_config/test_config.py: 39 warnings
+tests/test_config/test_config_rules.py: 8 warnings
+tests/test_config/test_config_rules_integration.py: 3 warnings
+tests/test_config/test_config_tags.py: 3 warnings
+  /Users/lucas/.cache/fakecloud/moto/.venv/lib/python3.9/site-packages/boto3/compat.py:89: PythonDeprecationWarning: Boto3 will no longer support Python 3.9 starting April 29, 2026. To continue receiving service updates, bug fixes, and security updates please upgrade to Python 3.10 or later. More information can be found here: https://aws.amazon.com/blogs/developer/python-support-policy-updates-for-aws-sdks-and-tools/
+    warnings.warn(warning, PythonDeprecationWarning)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+[36m[1m=========================== short test summary info ============================[0m
+[31mFAILED[0m test_config/test_config.py::[1mtest_put_configuration_recorder[0m - AssertionError: assert '400' == 'InvalidConfi...NameException'
+[31mFAILED[0m test_config/test_config.py::[1mtest_put_configuration_aggregator[0m - assert 'Member must have length less than or equal to 1' in '<?xml version=...
+[31mFAILED[0m test_config/test_config.py::[1mtest_describe_configuration_aggregators[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the D...
+[31mFAILED[0m test_config/test_config.py::[1mtest_put_aggregation_authorization[0m - assert 'Member must have length less than or equal to 50' in '<?xml version...
+[31mFAILED[0m test_config/test_config.py::[1mtest_describe_aggregation_authorizations[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the D...
+[31mFAILED[0m test_config/test_config.py::[1mtest_delete_aggregation_authorization[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the P...
+[31mFAILED[0m test_config/test_config.py::[1mtest_delete_configuration_aggregator[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the P...
+[31mFAILED[0m test_config/test_config.py::[1mtest_describe_configurations[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the D...
+[31mFAILED[0m test_config/test_config.py::[1mtest_delivery_channels[0m - AssertionError: assert '400' == 'NoAvailableC...rderException'
+[31mFAILED[0m test_config/test_config.py::[1mtest_describe_delivery_channels[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the P...
+[31mFAILED[0m test_config/test_config.py::[1mtest_start_configuration_recorder[0m - AssertionError: assert '400' == 'NoSuchConfig...rderException'
+[31mFAILED[0m test_config/test_config.py::[1mtest_stop_configuration_recorder[0m - AssertionError: assert '400' == 'NoSuchConfig...rderException'
+[31mFAILED[0m test_config/test_config.py::[1mtest_describe_configuration_recorder_status[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the D...
+[31mFAILED[0m test_config/test_config.py::[1mtest_delete_configuration_recorder[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the P...
+[31mFAILED[0m test_config/test_config.py::[1mtest_delete_delivery_channel[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the P...
+[31mFAILED[0m test_config/test_config.py::[1mtest_list_discovered_resource[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the L...
+[31mFAILED[0m test_config/test_config.py::[1mtest_list_aggregate_discovered_resource[0m - assert 'The configuration aggregator does not exist' in '<?xml version="1.0...
+[31mFAILED[0m test_config/test_config.py::[1mtest_get_resource_config_history[0m - assert {'Code': '400...rorResponse>'} == {'Code': 'Res...n discovered'}
+[31mFAILED[0m test_config/test_config.py::[1mtest_batch_get_resource_config[0m - assert 'Member must have length less than or equal to 100' in '<?xml versio...
+[31mFAILED[0m test_config/test_config.py::[1mtest_batch_get_aggregate_resource_config[0m - assert 'The configuration aggregator does not exist' in '<?xml version="1.0...
+[31mFAILED[0m test_config/test_config.py::[1mtest_put_evaluations[0m - AssertionError: assert '400' == 'InvalidParam...alueException'
+[31mFAILED[0m test_config/test_config.py::[1mtest_put_organization_conformance_pack[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the P...
+[31mFAILED[0m test_config/test_config.py::[1mtest_put_organization_conformance_pack_errors[0m - AssertionError: assert '400' == 'ValidationException'
+[31mFAILED[0m test_config/test_config.py::[1mtest_describe_organization_conformance_packs[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the P...
+[31mFAILED[0m test_config/test_config.py::[1mtest_describe_organization_conformance_packs_errors[0m - AssertionError: assert '400' == 'NoSuchOrgani...PackException'
+[31mFAILED[0m test_config/test_config.py::[1mtest_describe_organization_conformance_pack_statuses[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the P...
+[31mFAILED[0m test_config/test_config.py::[1mtest_describe_organization_conformance_pack_statuses_errors[0m - AssertionError: assert '400' == 'NoSuchOrgani...PackException'
+[31mFAILED[0m test_config/test_config.py::[1mtest_get_organization_conformance_pack_detailed_status[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the P...
+[31mFAILED[0m test_config/test_config.py::[1mtest_get_organization_conformance_pack_detailed_status_errors[0m - AssertionError: assert '400' == 'NoSuchOrgani...PackException'
+[31mFAILED[0m test_config/test_config.py::[1mtest_delete_organization_conformance_pack[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the P...
+[31mFAILED[0m test_config/test_config.py::[1mtest_delete_organization_conformance_pack_errors[0m - AssertionError: assert '400' == 'NoSuchOrgani...PackException'
+[31mFAILED[0m test_config/test_config.py::[1mtest_put_retention_configuration[0m - assert '<?xml versio...rrorResponse>' == "Value '29' a...r equal to 30"
+[31mFAILED[0m test_config/test_config.py::[1mtest_describe_retention_configurations[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the D...
+[31mFAILED[0m test_config/test_config.py::[1mtest_delete_retention_configuration[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the P...
+[31mFAILED[0m test_config/test_config.py::[1mtest_select_resource_config[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the S...
+[31mFAILED[0m test_config/test_config.py::[1mtest_select_resource_config_with_results[0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_config/test_config.py::[1mtest_select_resource_config_empty_results[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the S...
+[31mFAILED[0m test_config/test_config.py::[1mtest_select_resource_config_with_limit_and_token[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the S...
+[31mFAILED[0m test_config/test_config.py::[1mtest_put_resource_config[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the P...
+[31mFAILED[0m test_config/test_config_rules.py::[1mtest_put_config_rule_errors[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the P...
+[31mFAILED[0m test_config/test_config_rules.py::[1mtest_put_config_rule_update_errors[0m - AssertionError: assert '400' == 'InvalidParam...alueException'
+[31mFAILED[0m test_config/test_config_rules.py::[1mtest_config_rule_errors[0m - AssertionError: assert '400' == 'InvalidParam...alueException'
+[31mFAILED[0m test_config/test_config_rules.py::[1mtest_aws_managed_rule_errors[0m - AssertionError: assert '400' == 'InvalidParam...alueException'
+[31mFAILED[0m test_config/test_config_rules.py::[1mtest_config_rules_scope_errors[0m - AssertionError: assert '400' == 'InvalidParam...alueException'
+[31mFAILED[0m test_config/test_config_rules.py::[1mtest_valid_put_config_managed_rule[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the P...
+[31mFAILED[0m test_config/test_config_rules.py::[1mtest_describe_config_rules[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the D...
+[31mFAILED[0m test_config/test_config_rules.py::[1mtest_delete_config_rules[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the P...
+[31mFAILED[0m test_config/test_config_rules_integration.py::[1mtest_config_rules_source_details_errors[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_config/test_config_rules_integration.py::[1mtest_valid_put_config_custom_rule[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_config/test_config_rules_integration.py::[1mtest_config_rules_source_errors[0m - AssertionError: assert '400' == 'ValidationException'
+[31mFAILED[0m test_config/test_config_tags.py::[1mtest_tag_resource[0m - AssertionError: assert '400' == 'ResourceNotFoundException'
+[31mFAILED[0m test_config/test_config_tags.py::[1mtest_untag_resource[0m - AssertionError: assert '400' == 'ResourceNotFoundException'
+[31mFAILED[0m test_config/test_config_tags.py::[1mtest_list_tags_for_resource[0m - AssertionError: assert '400' == 'ResourceNotFoundException'
+[31m[31m[1m53 failed[0m, [33m3 skipped[0m, [33m53 warnings[0m[31m in 2.31s[0m[0m

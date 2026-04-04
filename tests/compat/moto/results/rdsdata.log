@@ -1,0 +1,34 @@
+[31mF[0m[31mF[0m[31m                                                                       [100%][0m
+=================================== FAILURES ===================================
+[31m[1m____________________________ test_execute_statement ____________________________[0m
+[1m[31mtest_rdsdata/test_rdsdata.py[0m:14: in test_execute_statement
+    [0mresp = rdsdata.execute_statement([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the ExecuteStatement operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>b2a58472-659c-4a89-beaa-52c9ea3af90e</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m____________________________ test_set_query_results ____________________________[0m
+[1m[31mtest_rdsdata/test_rdsdata.py[0m:45: in test_set_query_results
+    [0m[94massert[39;49;00m resp.status_code == [94m201[39;49;00m[90m[39;49;00m
+[1m[31mE   assert 400 == 201[0m
+[1m[31mE    +  where 400 = <Response [400]>.status_code[0m
+[33m=============================== warnings summary ===============================[0m
+tests/test_rdsdata/test_rdsdata.py::test_execute_statement
+  /Users/lucas/.cache/fakecloud/moto/.venv/lib/python3.9/site-packages/boto3/compat.py:89: PythonDeprecationWarning: Boto3 will no longer support Python 3.9 starting April 29, 2026. To continue receiving service updates, bug fixes, and security updates please upgrade to Python 3.10 or later. More information can be found here: https://aws.amazon.com/blogs/developer/python-support-policy-updates-for-aws-sdks-and-tools/
+    warnings.warn(warning, PythonDeprecationWarning)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+[36m[1m=========================== short test summary info ============================[0m
+[31mFAILED[0m test_rdsdata/test_rdsdata.py::[1mtest_execute_statement[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the E...
+[31mFAILED[0m test_rdsdata/test_rdsdata.py::[1mtest_set_query_results[0m - assert 400 == 201
+[31m[31m[1m2 failed[0m, [33m1 warning[0m[31m in 0.17s[0m[0m

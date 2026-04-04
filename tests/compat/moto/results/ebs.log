@@ -1,0 +1,161 @@
+[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31m                                                                 [100%][0m
+=================================== FAILURES ===================================
+[31m[1m_________________________ test_start_snapshot__minimal _________________________[0m
+[1m[31mtest_ebs/test_ebs.py[0m:15: in test_start_snapshot__minimal
+    [0mresp = client.start_snapshot(VolumeSize=[94m720[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the StartSnapshot operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>b060a1fe-5fab-45b6-81de-c57dce459259</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_____________________________ test_start_snapshot ______________________________[0m
+[1m[31mtest_ebs/test_ebs.py[0m:28: in test_start_snapshot
+    [0mresp = client.start_snapshot([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the StartSnapshot operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>29c3f0da-0187-4329-a344-54cf658bff00</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m____________________________ test_complete_snapshot ____________________________[0m
+[1m[31mtest_ebs/test_ebs.py[0m:47: in test_complete_snapshot
+    [0msnapshot_id = client.start_snapshot(VolumeSize=[94m720[39;49;00m)[[33m"[39;49;00m[33mSnapshotId[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the StartSnapshot operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>68f7b911-2935-4cce-a1e0-b3deeaa2e77a</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________________________ test_put_snapshot_block ____________________________[0m
+[1m[31mtest_ebs/test_ebs.py[0m:58: in test_put_snapshot_block
+    [0msnapshot_id = client.start_snapshot(VolumeSize=[94m720[39;49;00m)[[33m"[39;49;00m[33mSnapshotId[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the StartSnapshot operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>9e30fea3-898a-41aa-8c81-220533b8c79b</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________________________ test_get_snapshot_block ____________________________[0m
+[1m[31mtest_ebs/test_ebs.py[0m:75: in test_get_snapshot_block
+    [0msnapshot_id = client.start_snapshot(VolumeSize=[94m720[39;49;00m)[[33m"[39;49;00m[33mSnapshotId[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the StartSnapshot operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>6ca99cbe-b317-42f4-9148-8aad0609ee15</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________________________ test_list_changed_blocks ___________________________[0m
+[1m[31mtest_ebs/test_ebs.py[0m:101: in test_list_changed_blocks
+    [0msnapshot_id1 = client.start_snapshot(VolumeSize=[94m415[39;49;00m)[[33m"[39;49;00m[33mSnapshotId[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the StartSnapshot operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>7b1540c9-f46b-4663-a65c-5f3125e8eeb3</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m__________________________ test_list_snapshot_blocks ___________________________[0m
+[1m[31mtest_ebs/test_ebs.py[0m:140: in test_list_snapshot_blocks
+    [0msnapshot_id = client.start_snapshot(VolumeSize=[94m415[39;49;00m)[[33m"[39;49;00m[33mSnapshotId[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the StartSnapshot operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>3ebf1101-9ebe-4fe0-bfeb-1c3f130bcba7</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m________________ test_start_snapshot__should_be_created_in_ec2 _________________[0m
+[1m[31mtest_ebs/test_ebs.py[0m:165: in test_start_snapshot__should_be_created_in_ec2
+    [0msnapshot_id = ebs.start_snapshot(VolumeSize=[94m720[39;49;00m)[[33m"[39;49;00m[33mSnapshotId[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the StartSnapshot operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>feb3a04b-9d78-45a1-ba50-688cce7c7168</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[33m=============================== warnings summary ===============================[0m
+tests/test_ebs/test_ebs.py::test_start_snapshot__minimal
+tests/test_ebs/test_ebs.py::test_start_snapshot
+tests/test_ebs/test_ebs.py::test_complete_snapshot
+tests/test_ebs/test_ebs.py::test_put_snapshot_block
+tests/test_ebs/test_ebs.py::test_get_snapshot_block
+tests/test_ebs/test_ebs.py::test_list_changed_blocks
+tests/test_ebs/test_ebs.py::test_list_snapshot_blocks
+tests/test_ebs/test_ebs.py::test_start_snapshot__should_be_created_in_ec2
+  /Users/lucas/.cache/fakecloud/moto/.venv/lib/python3.9/site-packages/boto3/compat.py:89: PythonDeprecationWarning: Boto3 will no longer support Python 3.9 starting April 29, 2026. To continue receiving service updates, bug fixes, and security updates please upgrade to Python 3.10 or later. More information can be found here: https://aws.amazon.com/blogs/developer/python-support-policy-updates-for-aws-sdks-and-tools/
+    warnings.warn(warning, PythonDeprecationWarning)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+[36m[1m=========================== short test summary info ============================[0m
+[31mFAILED[0m test_ebs/test_ebs.py::[1mtest_start_snapshot__minimal[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the S...
+[31mFAILED[0m test_ebs/test_ebs.py::[1mtest_start_snapshot[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the S...
+[31mFAILED[0m test_ebs/test_ebs.py::[1mtest_complete_snapshot[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the S...
+[31mFAILED[0m test_ebs/test_ebs.py::[1mtest_put_snapshot_block[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the S...
+[31mFAILED[0m test_ebs/test_ebs.py::[1mtest_get_snapshot_block[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the S...
+[31mFAILED[0m test_ebs/test_ebs.py::[1mtest_list_changed_blocks[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the S...
+[31mFAILED[0m test_ebs/test_ebs.py::[1mtest_list_snapshot_blocks[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the S...
+[31mFAILED[0m test_ebs/test_ebs.py::[1mtest_start_snapshot__should_be_created_in_ec2[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the S...
+[31m[31m[1m8 failed[0m, [33m8 warnings[0m[31m in 0.40s[0m[0m

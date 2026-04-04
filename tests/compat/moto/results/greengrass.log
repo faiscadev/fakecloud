@@ -1,0 +1,2182 @@
+[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[33ms[0m[33ms[0m[33ms[0m[33ms[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31m [ 54%]
+[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31m            [100%][0m
+=================================== FAILURES ===================================
+[31m[1m_________________________ test_create_core_definition __________________________[0m
+[1m[31mtest_greengrass/test_greengrass_core.py[0m:26: in test_create_core_definition
+    [0mres = client.create_core_definition(InitialVersion=initial_version, Name=core_name)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateCoreDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>2621ef74-f7d1-440b-aa31-34dad7c08c4d</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m__________________________ test_list_core_definitions __________________________[0m
+[1m[31mtest_greengrass/test_greengrass_core.py[0m:51: in test_list_core_definitions
+    [0mclient.create_core_definition(InitialVersion=initial_version, Name=core_name)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateCoreDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>c719b5fa-3515-4bd5-b7be-082ce5b56d45</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________________________ test_get_core_definition ___________________________[0m
+[1m[31mtest_greengrass/test_greengrass_core.py[0m:81: in test_get_core_definition
+    [0mcreate_res = client.create_core_definition([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateCoreDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>3fa64d32-97b6-4fde-b564-d4b348ee7260</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_________________________ test_delete_core_definition __________________________[0m
+[1m[31mtest_greengrass/test_greengrass_core.py[0m:115: in test_delete_core_definition
+    [0mcreate_res = client.create_core_definition([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateCoreDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>48219bf8-ba90-4fb9-9dd0-302722e5434c</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_________________________ test_update_core_definition __________________________[0m
+[1m[31mtest_greengrass/test_greengrass_core.py[0m:141: in test_update_core_definition
+    [0mcreate_res = client.create_core_definition([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateCoreDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>d56e4416-02bf-444e-9e53-13f1a538d3e2</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_________________ test_update_core_definition_with_empty_name __________________[0m
+[1m[31mtest_greengrass/test_greengrass_core.py[0m:163: in test_update_core_definition_with_empty_name
+    [0mcreate_res = client.create_core_definition([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateCoreDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>1e38e72b-b337-4046-a498-3d30c691ad34</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_________________ test_update_core_definition_with_invalid_id __________________[0m
+[1m[31mtest_greengrass/test_greengrass_core.py[0m:183: in test_update_core_definition_with_invalid_id
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mMessage[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mThat cores definition does not exist.[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   assert '<?xml versio...rrorResponse>' == 'That cores d...es not exist.'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- That cores definition does not exist.[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+   <Error>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Type>Sender</Type>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Code>MissingAction</Code>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Message>Could not determine target service or action from request</Message>[39;49;00m[90m[39;49;00m...[0m
+[1m[31mE     [0m
+[1m[31mE     ...Full output truncated (3 lines hidden), use '-vv' to show[0m
+[31m[1m_____________________ test_create_core_definition_version ______________________[0m
+[1m[31mtest_greengrass/test_greengrass_core.py[0m:201: in test_create_core_definition_version
+    [0mcore_def_res = client.create_core_definition([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateCoreDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>ccf88d7f-3f66-48fd-b641-962282aa7636</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________________ test_get_core_definition_version _______________________[0m
+[1m[31mtest_greengrass/test_greengrass_core.py[0m:239: in test_get_core_definition_version
+    [0mcore_def_res = client.create_core_definition([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateCoreDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>de6a3fe8-c968-4bf1-b30a-ad11ab1c0ef5</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________ test_get_core_definition_version_with_invalid_id _______________[0m
+[1m[31mtest_greengrass/test_greengrass_core.py[0m:268: in test_get_core_definition_version_with_invalid_id
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mMessage[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mThat cores definition does not exist.[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   assert '<?xml versio...rrorResponse>' == 'That cores d...es not exist.'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- That cores definition does not exist.[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+   <Error>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Type>Sender</Type>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Code>MissingAction</Code>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Message>Could not determine target service or action from request</Message>[39;49;00m[90m[39;49;00m...[0m
+[1m[31mE     [0m
+[1m[31mE     ...Full output truncated (3 lines hidden), use '-vv' to show[0m
+[31m[1m___________ test_get_core_definition_version_with_invalid_version_id ___________[0m
+[1m[31mtest_greengrass/test_greengrass_core.py[0m:275: in test_get_core_definition_version_with_invalid_version_id
+    [0mcore_def_res = client.create_core_definition([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateCoreDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>faa8b3e0-f737-42af-80da-024cc4003486</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______________________ test_list_core_definition_version _______________________[0m
+[1m[31mtest_greengrass/test_greengrass_core.py[0m:315: in test_list_core_definition_version
+    [0mcore_def_res = client.create_core_definition([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateCoreDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>509d5fd5-4708-409c-addb-d7d288195dac</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______________ test_list_core_definition_version_with_invalid_id _______________[0m
+[1m[31mtest_greengrass/test_greengrass_core.py[0m:343: in test_list_core_definition_version_with_invalid_id
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mMessage[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mThat cores definition does not exist.[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   assert '<?xml versio...rrorResponse>' == 'That cores d...es not exist.'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- That cores definition does not exist.[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+   <Error>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Type>Sender</Type>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Code>MissingAction</Code>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Message>Could not determine target service or action from request</Message>[39;49;00m[90m[39;49;00m...[0m
+[1m[31mE     [0m
+[1m[31mE     ...Full output truncated (3 lines hidden), use '-vv' to show[0m
+[31m[1m____________________________ test_create_deployment ____________________________[0m
+[1m[31mtest_greengrass/test_greengrass_deployment.py[0m:24: in test_create_deployment
+    [0mcreate_core_res = client.create_core_definition([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateCoreDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>8a47dce7-26dc-4f5a-9e78-7912b2907088</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________________ test_re_deployment_with_no_deployment_id ___________________[0m
+[1m[31mtest_greengrass/test_greengrass_deployment.py[0m:54: in test_re_deployment_with_no_deployment_id
+    [0mcreate_core_res = client.create_core_definition([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateCoreDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>bffe2594-a1a4-44b3-a19d-0597d948c012</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m________________ test_re_deployment_with_invalid_deployment_id _________________[0m
+[1m[31mtest_greengrass/test_greengrass_deployment.py[0m:90: in test_re_deployment_with_invalid_deployment_id
+    [0mcreate_core_res = client.create_core_definition([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateCoreDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>283ee91f-afdd-42f0-82a1-349a8425ce95</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m__________________ test_create_deployment_with_no_core_group ___________________[0m
+[1m[31mtest_greengrass/test_greengrass_deployment.py[0m:117: in test_create_deployment_with_no_core_group
+    [0mcreate_group_res = client.create_group(Name=[33m"[39;49;00m[33mTestGroup[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateGroup operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>e4ce3094-c9cc-4901-b232-d0a65b4864fc</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_________________ test_create_deployment_with_invalid_group_id _________________[0m
+[1m[31mtest_greengrass/test_greengrass_deployment.py[0m:150: in test_create_deployment_with_invalid_group_id
+    [0m[94massert[39;49;00m ex.value.response[[33m"[39;49;00m[33mResponseMetadata[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mHTTPStatusCode[39;49;00m[33m"[39;49;00m] == [94m404[39;49;00m[90m[39;49;00m
+[1m[31mE   assert 400 == 404[0m
+[31m[1m_____________ test_create_deployment_with_invalid_group_version_id _____________[0m
+[1m[31mtest_greengrass/test_greengrass_deployment.py[0m:168: in test_create_deployment_with_invalid_group_version_id
+    [0mcreate_core_res = client.create_core_definition([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateCoreDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>8acf99b9-ef55-4026-b11b-d6048bf88ea2</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_____________ test_create_deployment_with_invalid_deployment_type ______________[0m
+[1m[31mtest_greengrass/test_greengrass_deployment.py[0m:197: in test_create_deployment_with_invalid_deployment_type
+    [0mcreate_group_res = client.create_group(Name=[33m"[39;49;00m[33mTestGroup[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateGroup operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>24e9442e-dad7-43b4-bceb-32fb0df1f694</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m____________________________ test_list_deployments _____________________________[0m
+[1m[31mtest_greengrass/test_greengrass_deployment.py[0m:229: in test_list_deployments
+    [0mcreate_core_res = client.create_core_definition([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateCoreDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>1b6bc671-0ecf-40e5-8c1b-ceba67490366</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m__________________________ test_get_deployment_status __________________________[0m
+[1m[31mtest_greengrass/test_greengrass_deployment.py[0m:271: in test_get_deployment_status
+    [0mcreate_core_res = client.create_core_definition([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateCoreDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>f9099f85-38bd-47dd-8005-0df7b99c0f49</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m____________ test_get_deployment_status_with_invalid_deployment_id _____________[0m
+[1m[31mtest_greengrass/test_greengrass_deployment.py[0m:301: in test_get_deployment_status_with_invalid_deployment_id
+    [0mcreate_group_res = client.create_group(Name=[33m"[39;49;00m[33mTestGroup[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateGroup operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>2f22cf46-1b9a-4cc6-a11d-55863a53d583</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________ test_get_deployment_status_with_invalid_group_id _______________[0m
+[1m[31mtest_greengrass/test_greengrass_deployment.py[0m:324: in test_get_deployment_status_with_invalid_group_id
+    [0mcreate_core_res = client.create_core_definition([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateCoreDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>cb6cf41d-f6d5-48ed-bf3d-ea9df250d335</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m________________________ test_create_device_definition _________________________[0m
+[1m[31mtest_greengrass/test_greengrass_device.py[0m:27: in test_create_device_definition
+    [0mres = client.create_device_definition(InitialVersion=init_ver, Name=device_name)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateDeviceDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>fd2d79de-1508-4964-b0d3-556f891262fa</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_________________________ test_list_device_definitions _________________________[0m
+[1m[31mtest_greengrass/test_greengrass_device.py[0m:56: in test_list_device_definitions
+    [0mclient.create_device_definition(InitialVersion=init_ver, Name=device_name)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateDeviceDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>77f0d912-f0ff-4c06-a5a1-01e6027b8ab5</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m__________________________ test_get_device_definition __________________________[0m
+[1m[31mtest_greengrass/test_greengrass_device.py[0m:88: in test_get_device_definition
+    [0mcreate_res = client.create_device_definition([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateDeviceDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>b6f3d86a-9e50-4154-b303-7067c4226961</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m__________________ test_get_device_definition_with_invalid_id __________________[0m
+[1m[31mtest_greengrass/test_greengrass_device.py[0m:117: in test_get_device_definition_with_invalid_id
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mMessage[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mThat Device List Definition does not exist.[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   assert '<?xml versio...rrorResponse>' == 'That Device ...es not exist.'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- That Device List Definition does not exist.[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+   <Error>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Type>Sender</Type>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Code>MissingAction</Code>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Message>Could not determine target service or action from request</Message>[39;49;00m[90m[39;49;00m...[0m
+[1m[31mE     [0m
+[1m[31mE     ...Full output truncated (3 lines hidden), use '-vv' to show[0m
+[31m[1m____________________ test_create_device_definition_version _____________________[0m
+[1m[31mtest_greengrass/test_greengrass_device.py[0m:135: in test_create_device_definition_version
+    [0mdevice_def_res = client.create_device_definition([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateDeviceDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>3bc61407-5272-4be9-9976-6b27365842e8</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m____________ test_create_device_definition_version_with_invalid_id _____________[0m
+[1m[31mtest_greengrass/test_greengrass_device.py[0m:174: in test_create_device_definition_version_with_invalid_id
+    [0mclient.create_device_definition([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateDeviceDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>ad06c16b-c959-4911-958d-1bd473cd231a</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m________________________ test_delete_device_definition _________________________[0m
+[1m[31mtest_greengrass/test_greengrass_device.py[0m:199: in test_delete_device_definition
+    [0mcreate_res = client.create_device_definition([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateDeviceDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>3047ffd6-1285-4ea7-870c-c5a528ff8419</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m________________ test_delete_device_definition_with_invalid_id _________________[0m
+[1m[31mtest_greengrass/test_greengrass_device.py[0m:217: in test_delete_device_definition_with_invalid_id
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mMessage[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mThat devices definition does not exist.[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   assert '<?xml versio...rrorResponse>' == 'That devices...es not exist.'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- That devices definition does not exist.[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+   <Error>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Type>Sender</Type>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Code>MissingAction</Code>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Message>Could not determine target service or action from request</Message>[39;49;00m[90m[39;49;00m...[0m
+[1m[31mE     [0m
+[1m[31mE     ...Full output truncated (3 lines hidden), use '-vv' to show[0m
+[31m[1m________________________ test_update_device_definition _________________________[0m
+[1m[31mtest_greengrass/test_greengrass_device.py[0m:234: in test_update_device_definition
+    [0mcreate_res = client.create_device_definition([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateDeviceDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>78e23a0c-96f2-42ef-b4e2-88fc3df99cb5</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m________________ test_update_device_definition_with_empty_name _________________[0m
+[1m[31mtest_greengrass/test_greengrass_device.py[0m:261: in test_update_device_definition_with_empty_name
+    [0mcreate_res = client.create_device_definition([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateDeviceDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>5f854cee-8ecb-40a8-8aa0-df8e81692efe</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m________________ test_update_device_definition_with_invalid_id _________________[0m
+[1m[31mtest_greengrass/test_greengrass_device.py[0m:282: in test_update_device_definition_with_invalid_id
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mMessage[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mThat devices definition does not exist.[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   assert '<?xml versio...rrorResponse>' == 'That devices...es not exist.'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- That devices definition does not exist.[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+   <Error>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Type>Sender</Type>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Code>MissingAction</Code>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Message>Could not determine target service or action from request</Message>[39;49;00m[90m[39;49;00m...[0m
+[1m[31mE     [0m
+[1m[31mE     ...Full output truncated (3 lines hidden), use '-vv' to show[0m
+[31m[1m_____________________ test_list_device_definition_versions _____________________[0m
+[1m[31mtest_greengrass/test_greengrass_device.py[0m:300: in test_list_device_definition_versions
+    [0mcreate_res = client.create_device_definition([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateDeviceDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>ce94b868-7fc4-4102-b8e3-8d2285fd4ab7</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______________________ test_get_device_definition_version ______________________[0m
+[1m[31mtest_greengrass/test_greengrass_device.py[0m:334: in test_get_device_definition_version
+    [0mcreate_res = client.create_device_definition([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateDeviceDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>df9b97d1-1681-44ff-b0bb-978498119ed4</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______________ test_get_device_definition_version_with_invalid_id ______________[0m
+[1m[31mtest_greengrass/test_greengrass_device.py[0m:363: in test_get_device_definition_version_with_invalid_id
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mMessage[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mThat devices definition does not exist.[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   assert '<?xml versio...rrorResponse>' == 'That devices...es not exist.'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- That devices definition does not exist.[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+   <Error>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Type>Sender</Type>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Code>MissingAction</Code>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Message>Could not determine target service or action from request</Message>[39;49;00m[90m[39;49;00m...[0m
+[1m[31mE     [0m
+[1m[31mE     ...Full output truncated (3 lines hidden), use '-vv' to show[0m
+[31m[1m__________ test_get_device_definition_version_with_invalid_version_id __________[0m
+[1m[31mtest_greengrass/test_greengrass_device.py[0m:380: in test_get_device_definition_version_with_invalid_version_id
+    [0mcreate_res = client.create_device_definition([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateDeviceDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>592d1c5e-142b-4a4f-b6b3-22d9ce8d8495</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________________ test_create_function_definition ________________________[0m
+[1m[31mtest_greengrass/test_greengrass_functions.py[0m:29: in test_create_function_definition
+    [0mres = client.create_function_definition(InitialVersion=init_ver, Name=func_name)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateFunctionDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>6a36fb7c-b551-4edb-9df0-99a20c85dafd</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m________________________ test_list_function_definitions ________________________[0m
+[1m[31mtest_greengrass/test_greengrass_functions.py[0m:61: in test_list_function_definitions
+    [0mclient.create_function_definition(InitialVersion=init_ver, Name=func_name)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateFunctionDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>2f07938a-055b-4034-925c-41aab2750345</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_________________________ test_get_function_definition _________________________[0m
+[1m[31mtest_greengrass/test_greengrass_functions.py[0m:95: in test_get_function_definition
+    [0mcreate_res = client.create_function_definition([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateFunctionDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>b29fd07d-95f3-49ac-8ce7-f336c188c1e3</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_________________ test_get_function_definition_with_invalid_id _________________[0m
+[1m[31mtest_greengrass/test_greengrass_functions.py[0m:126: in test_get_function_definition_with_invalid_id
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mMessage[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mThat Lambda List Definition does not exist.[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   assert '<?xml versio...rrorResponse>' == 'That Lambda ...es not exist.'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- That Lambda List Definition does not exist.[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+   <Error>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Type>Sender</Type>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Code>MissingAction</Code>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Message>Could not determine target service or action from request</Message>[39;49;00m[90m[39;49;00m...[0m
+[1m[31mE     [0m
+[1m[31mE     ...Full output truncated (3 lines hidden), use '-vv' to show[0m
+[31m[1m_______________________ test_delete_function_definition ________________________[0m
+[1m[31mtest_greengrass/test_greengrass_functions.py[0m:147: in test_delete_function_definition
+    [0mcreate_res = client.create_function_definition([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateFunctionDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>877cfc2a-45e3-4873-9c83-c6ad5c95542c</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________ test_delete_function_definition_with_invalid_id ________________[0m
+[1m[31mtest_greengrass/test_greengrass_functions.py[0m:165: in test_delete_function_definition_with_invalid_id
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mMessage[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mThat lambdas definition does not exist.[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   assert '<?xml versio...rrorResponse>' == 'That lambdas...es not exist.'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- That lambdas definition does not exist.[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+   <Error>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Type>Sender</Type>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Code>MissingAction</Code>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Message>Could not determine target service or action from request</Message>[39;49;00m[90m[39;49;00m...[0m
+[1m[31mE     [0m
+[1m[31mE     ...Full output truncated (3 lines hidden), use '-vv' to show[0m
+[31m[1m_______________________ test_update_function_definition ________________________[0m
+[1m[31mtest_greengrass/test_greengrass_functions.py[0m:186: in test_update_function_definition
+    [0mcreate_res = client.create_function_definition([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateFunctionDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>23c4e71a-5dd1-456f-8b2b-94f211903f85</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________ test_update_function_definition_with_empty_name ________________[0m
+[1m[31mtest_greengrass/test_greengrass_functions.py[0m:218: in test_update_function_definition_with_empty_name
+    [0mcreate_res = client.create_function_definition([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateFunctionDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>02789983-b2c2-4279-9ad8-13a7d8c9b44d</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________ test_update_function_definition_with_invalid_id ________________[0m
+[1m[31mtest_greengrass/test_greengrass_functions.py[0m:240: in test_update_function_definition_with_invalid_id
+    [0m[94massert[39;49;00m rr[[33m"[39;49;00m[33mMessage[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mThat lambdas definition does not exist.[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   assert '<?xml versio...rrorResponse>' == 'That lambdas...es not exist.'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- That lambdas definition does not exist.[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+   <Error>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Type>Sender</Type>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Code>MissingAction</Code>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Message>Could not determine target service or action from request</Message>[39;49;00m[90m[39;49;00m...[0m
+[1m[31mE     [0m
+[1m[31mE     ...Full output truncated (3 lines hidden), use '-vv' to show[0m
+[31m[1m___________________ test_create_function_definition_version ____________________[0m
+[1m[31mtest_greengrass/test_greengrass_functions.py[0m:262: in test_create_function_definition_version
+    [0mfunc_def_res = client.create_function_definition([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateFunctionDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>593242c3-d454-42c5-aa26-398cecd2a0f0</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________ test_create_function_definition_version_with_invalid_id ____________[0m
+[1m[31mtest_greengrass/test_greengrass_functions.py[0m:313: in test_create_function_definition_version_with_invalid_id
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mMessage[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mThat lambdas does not exist.[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   assert '<?xml versio...rrorResponse>' == 'That lambdas does not exist.'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- That lambdas does not exist.[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+   <Error>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Type>Sender</Type>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Code>MissingAction</Code>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Message>Could not determine target service or action from request</Message>[39;49;00m[90m[39;49;00m...[0m
+[1m[31mE     [0m
+[1m[31mE     ...Full output truncated (3 lines hidden), use '-vv' to show[0m
+[31m[1m____________________ test_list_function_definition_versions ____________________[0m
+[1m[31mtest_greengrass/test_greengrass_functions.py[0m:335: in test_list_function_definition_versions
+    [0mcreate_res = client.create_function_definition([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateFunctionDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>125b6405-03cd-48db-9264-ddcfc40c9f84</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m____________ test_list_function_definition_versions_with_invalid_id ____________[0m
+[1m[31mtest_greengrass/test_greengrass_functions.py[0m:364: in test_list_function_definition_versions_with_invalid_id
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mMessage[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mThat lambdas definition does not exist.[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   assert '<?xml versio...rrorResponse>' == 'That lambdas...es not exist.'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- That lambdas definition does not exist.[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+   <Error>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Type>Sender</Type>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Code>MissingAction</Code>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Message>Could not determine target service or action from request</Message>[39;49;00m[90m[39;49;00m...[0m
+[1m[31mE     [0m
+[1m[31mE     ...Full output truncated (3 lines hidden), use '-vv' to show[0m
+[31m[1m_____________________ test_get_function_definition_version _____________________[0m
+[1m[31mtest_greengrass/test_greengrass_functions.py[0m:386: in test_get_function_definition_version
+    [0mcreate_res = client.create_function_definition([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateFunctionDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>986bc276-45aa-437e-b269-255903aec554</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_____________ test_get_function_definition_version_with_invalid_id _____________[0m
+[1m[31mtest_greengrass/test_greengrass_functions.py[0m:417: in test_get_function_definition_version_with_invalid_id
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mMessage[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mThat lambdas definition does not exist.[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   assert '<?xml versio...rrorResponse>' == 'That lambdas...es not exist.'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- That lambdas definition does not exist.[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+   <Error>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Type>Sender</Type>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Code>MissingAction</Code>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Message>Could not determine target service or action from request</Message>[39;49;00m[90m[39;49;00m...[0m
+[1m[31mE     [0m
+[1m[31mE     ...Full output truncated (3 lines hidden), use '-vv' to show[0m
+[31m[1m_________ test_get_function_definition_version_with_invalid_version_id _________[0m
+[1m[31mtest_greengrass/test_greengrass_functions.py[0m:438: in test_get_function_definition_version_with_invalid_version_id
+    [0mcreate_res = client.create_function_definition([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateFunctionDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>7462bf6d-46a9-4ea0-b5f5-c748a40824e6</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______________________________ test_create_group _______________________________[0m
+[1m[31mtest_greengrass/test_greengrass_groups.py[0m:25: in test_create_group
+    [0mcreate_core_def_res = client.create_core_definition([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateCoreDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>6cfb53c3-5e6e-4505-97ef-5f423605df61</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________________________ test_list_groups _______________________________[0m
+[1m[31mtest_greengrass/test_greengrass_groups.py[0m:52: in test_list_groups
+    [0mcreate_grp_res = client.create_group(Name=grp_name)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateGroup operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>24abd86c-d5e3-4632-9709-f7cf5cd50520</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m________________________________ test_get_group ________________________________[0m
+[1m[31mtest_greengrass/test_greengrass_groups.py[0m:73: in test_get_group
+    [0mcreate_res = client.create_group(Name=grp_name)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateGroup operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>28a2ebe3-1b28-4977-8b46-4de6b4c8bb57</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m________________________ test_get_group_with_invalid_id ________________________[0m
+[1m[31mtest_greengrass/test_greengrass_groups.py[0m:99: in test_get_group_with_invalid_id
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mMessage[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mThat Group Definition does not exist.[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   assert '<?xml versio...rrorResponse>' == 'That Group D...es not exist.'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- That Group Definition does not exist.[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+   <Error>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Type>Sender</Type>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Code>MissingAction</Code>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Message>Could not determine target service or action from request</Message>[39;49;00m[90m[39;49;00m...[0m
+[1m[31mE     [0m
+[1m[31mE     ...Full output truncated (3 lines hidden), use '-vv' to show[0m
+[31m[1m______________________________ test_delete_group _______________________________[0m
+[1m[31mtest_greengrass/test_greengrass_groups.py[0m:106: in test_delete_group
+    [0mcreate_res = client.create_group(Name=[33m"[39;49;00m[33mTestGroup[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateGroup operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>0ee050c7-7689-498e-b6d2-64659257eac6</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______________________ test_delete_group_with_invalid_id _______________________[0m
+[1m[31mtest_greengrass/test_greengrass_groups.py[0m:120: in test_delete_group_with_invalid_id
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mMessage[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mThat group definition does not exist.[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   assert '<?xml versio...rrorResponse>' == 'That group d...es not exist.'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- That group definition does not exist.[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+   <Error>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Type>Sender</Type>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Code>MissingAction</Code>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Message>Could not determine target service or action from request</Message>[39;49;00m[90m[39;49;00m...[0m
+[1m[31mE     [0m
+[1m[31mE     ...Full output truncated (3 lines hidden), use '-vv' to show[0m
+[31m[1m______________________________ test_update_group _______________________________[0m
+[1m[31mtest_greengrass/test_greengrass_groups.py[0m:127: in test_update_group
+    [0mcreate_res = client.create_group(Name=[33m"[39;49;00m[33mTestGroup[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateGroup operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>2fdaba30-3187-4efa-9964-36d33839a123</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______________________ test_update_group_with_empty_name _______________________[0m
+[1m[31mtest_greengrass/test_greengrass_groups.py[0m:141: in test_update_group_with_empty_name
+    [0mcreate_res = client.create_group(Name=[33m"[39;49;00m[33mTestGroup[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateGroup operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>b86fddfd-d337-4837-9695-c3c30b977488</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______________________ test_update_group_with_invalid_id _______________________[0m
+[1m[31mtest_greengrass/test_greengrass_groups.py[0m:159: in test_update_group_with_invalid_id
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mMessage[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mThat group definition does not exist.[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   assert '<?xml versio...rrorResponse>' == 'That group d...es not exist.'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- That group definition does not exist.[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+   <Error>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Type>Sender</Type>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Code>MissingAction</Code>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Message>Could not determine target service or action from request</Message>[39;49;00m[90m[39;49;00m...[0m
+[1m[31mE     [0m
+[1m[31mE     ...Full output truncated (3 lines hidden), use '-vv' to show[0m
+[31m[1m__________________________ test_create_group_version ___________________________[0m
+[1m[31mtest_greengrass/test_greengrass_groups.py[0m:167: in test_create_group_version
+    [0mcreate_grp_res = client.create_group(Name=[33m"[39;49;00m[33mTestGroup[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateGroup operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>87b87c80-6e90-43fc-a963-0f681bcf18cb</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m__________________ test_create_group_version_with_invalid_id ___________________[0m
+[1m[31mtest_greengrass/test_greengrass_groups.py[0m:187: in test_create_group_version_with_invalid_id
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mMessage[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mThat group does not exist.[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   assert '<?xml versio...rrorResponse>' == 'That group does not exist.'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- That group does not exist.[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+   <Error>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Type>Sender</Type>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Code>MissingAction</Code>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Message>Could not determine target service or action from request</Message>[39;49;00m[90m[39;49;00m...[0m
+[1m[31mE     [0m
+[1m[31mE     ...Full output truncated (3 lines hidden), use '-vv' to show[0m
+[31m[1m_ test_create_group_version_with_invalid_version_arn[CoreDefinitionVersionArn-123-Cores definition reference does not exist] _[0m
+[1m[31mtest_greengrass/test_greengrass_groups.py[0m:251: in test_create_group_version_with_invalid_version_arn
+    [0mcreate_grp_res = client.create_group(Name=[33m"[39;49;00m[33mTestGroup[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateGroup operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>96fffe2a-5db3-4126-ac2c-e642101f3cc3</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_ test_create_group_version_with_invalid_version_arn[CoreDefinitionVersionArn-arn:aws:greengrass:ap-northeast-1:944137583148:/greengrass/definition/cores/fc3b3e5b-f1ce-4639-88d3-3ad897d95b2a/versions/dd0f800c-246c-4973-82cf-45b109cbd99b-Cores definition reference does not exist] _[0m
+[1m[31mtest_greengrass/test_greengrass_groups.py[0m:251: in test_create_group_version_with_invalid_version_arn
+    [0mcreate_grp_res = client.create_group(Name=[33m"[39;49;00m[33mTestGroup[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateGroup operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>1cb508e0-e4aa-4af2-b73d-18e1e5c4b270</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_ test_create_group_version_with_invalid_version_arn[DeviceDefinitionVersionArn-123-Devices definition reference does not exist] _[0m
+[1m[31mtest_greengrass/test_greengrass_groups.py[0m:251: in test_create_group_version_with_invalid_version_arn
+    [0mcreate_grp_res = client.create_group(Name=[33m"[39;49;00m[33mTestGroup[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateGroup operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>3b8cb78b-808c-48f0-9468-77707aede700</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_ test_create_group_version_with_invalid_version_arn[DeviceDefinitionVersionArn-arn:aws:greengrass:ap-northeast-1:944137583148:/greengrass/definition/devices/fc3b3e5b-f1ce-4639-88d3-3ad897d95b2a/versions/dd0f800c-246c-4973-82cf-45b109cbd99b-Devices definition reference does not exist] _[0m
+[1m[31mtest_greengrass/test_greengrass_groups.py[0m:251: in test_create_group_version_with_invalid_version_arn
+    [0mcreate_grp_res = client.create_group(Name=[33m"[39;49;00m[33mTestGroup[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateGroup operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>52941f17-ac75-4bb7-99a1-b7b314f94f16</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_ test_create_group_version_with_invalid_version_arn[FunctionDefinitionVersionArn-123-Lambda definition reference does not exist] _[0m
+[1m[31mtest_greengrass/test_greengrass_groups.py[0m:251: in test_create_group_version_with_invalid_version_arn
+    [0mcreate_grp_res = client.create_group(Name=[33m"[39;49;00m[33mTestGroup[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateGroup operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>dad14687-3095-4fa1-a1ad-b96b41cdd72a</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_ test_create_group_version_with_invalid_version_arn[FunctionDefinitionVersionArn-arn:aws:greengrass:ap-northeast-1:944137583148:/greengrass/definition/functions/fc3b3e5b-f1ce-4639-88d3-3ad897d95b2a/versions/dd0f800c-246c-4973-82cf-45b109cbd99b-Lambda definition reference does not exist] _[0m
+[1m[31mtest_greengrass/test_greengrass_groups.py[0m:251: in test_create_group_version_with_invalid_version_arn
+    [0mcreate_grp_res = client.create_group(Name=[33m"[39;49;00m[33mTestGroup[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateGroup operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>12917652-a8ee-491a-bb89-c21c4e6f2f8d</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_ test_create_group_version_with_invalid_version_arn[ResourceDefinitionVersionArn-123-Resource definition reference does not exist] _[0m
+[1m[31mtest_greengrass/test_greengrass_groups.py[0m:251: in test_create_group_version_with_invalid_version_arn
+    [0mcreate_grp_res = client.create_group(Name=[33m"[39;49;00m[33mTestGroup[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateGroup operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>e532d16e-a38d-4778-b8fa-032d3327b6a7</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_ test_create_group_version_with_invalid_version_arn[ResourceDefinitionVersionArn-arn:aws:greengrass:ap-northeast-1:944137583148:/greengrass/definition/resources/fc3b3e5b-f1ce-4639-88d3-3ad897d95b2a/versions/dd0f800c-246c-4973-82cf-45b109cbd99b-Resource definition reference does not exist] _[0m
+[1m[31mtest_greengrass/test_greengrass_groups.py[0m:251: in test_create_group_version_with_invalid_version_arn
+    [0mcreate_grp_res = client.create_group(Name=[33m"[39;49;00m[33mTestGroup[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateGroup operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>33f66368-1221-4d48-beb1-96f0d6a5123b</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_ test_create_group_version_with_invalid_version_arn[SubscriptionDefinitionVersionArn-123-Subscription definition reference does not exist] _[0m
+[1m[31mtest_greengrass/test_greengrass_groups.py[0m:251: in test_create_group_version_with_invalid_version_arn
+    [0mcreate_grp_res = client.create_group(Name=[33m"[39;49;00m[33mTestGroup[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateGroup operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>9599c7ab-9f1f-4c00-9412-8a47ea99ea25</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_ test_create_group_version_with_invalid_version_arn[SubscriptionDefinitionVersionArn-arn:aws:greengrass:ap-northeast-1:944137583148:/greengrass/definition/subscriptions/fc3b3e5b-f1ce-4639-88d3-3ad897d95b2a/versions/dd0f800c-246c-4973-82cf-45b109cbd99b-Subscription definition reference does not exist] _[0m
+[1m[31mtest_greengrass/test_greengrass_groups.py[0m:251: in test_create_group_version_with_invalid_version_arn
+    [0mcreate_grp_res = client.create_group(Name=[33m"[39;49;00m[33mTestGroup[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateGroup operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>1a1b4254-6c7a-486d-a28b-63e6e7dacea1</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________________________ test_list_group_versions ___________________________[0m
+[1m[31mtest_greengrass/test_greengrass_groups.py[0m:271: in test_list_group_versions
+    [0mcreate_res = client.create_group(Name=[33m"[39;49;00m[33mTestGroup[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateGroup operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>399adfbc-e9d6-4518-84c2-0f957d5c2d4f</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________________ test_list_group_versions_with_invalid_id ___________________[0m
+[1m[31mtest_greengrass/test_greengrass_groups.py[0m:294: in test_list_group_versions_with_invalid_id
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mMessage[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mThat group definition does not exist.[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   assert '<?xml versio...rrorResponse>' == 'That group d...es not exist.'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- That group definition does not exist.[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+   <Error>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Type>Sender</Type>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Code>MissingAction</Code>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Message>Could not determine target service or action from request</Message>[39;49;00m[90m[39;49;00m...[0m
+[1m[31mE     [0m
+[1m[31mE     ...Full output truncated (3 lines hidden), use '-vv' to show[0m
+[31m[1m____________________________ test_get_group_version ____________________________[0m
+[1m[31mtest_greengrass/test_greengrass_groups.py[0m:312: in test_get_group_version
+    [0mcreate_core_def_res = client.create_core_definition([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateCoreDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>9631f21d-b90e-4dae-9bc9-ec00d3450f5d</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m____________________ test_get_group_version_with_invalid_id ____________________[0m
+[1m[31mtest_greengrass/test_greengrass_groups.py[0m:425: in test_get_group_version_with_invalid_id
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mMessage[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mThat group definition does not exist.[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   assert '<?xml versio...rrorResponse>' == 'That group d...es not exist.'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- That group definition does not exist.[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+   <Error>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Type>Sender</Type>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Code>MissingAction</Code>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Message>Could not determine target service or action from request</Message>[39;49;00m[90m[39;49;00m...[0m
+[1m[31mE     [0m
+[1m[31mE     ...Full output truncated (3 lines hidden), use '-vv' to show[0m
+[31m[1m________________ test_get_group_version_with_invalid_version_id ________________[0m
+[1m[31mtest_greengrass/test_greengrass_groups.py[0m:432: in test_get_group_version_with_invalid_version_id
+    [0mcreate_res = client.create_group(Name=[33m"[39;49;00m[33mTestGroup[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateGroup operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>507564fc-7520-49c1-92f8-2ece67b2a8b5</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_________________________ test_associate_role_to_group _________________________[0m
+[1m[31mtest_greengrass/test_greengrass_groups.py[0m:454: in test_associate_role_to_group
+    [0mres = client.associate_role_to_group([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the AssociateRoleToGroup operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>cf82a10b-41cd-4189-b988-c7e036533393</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________________________ test_get_associated_role ___________________________[0m
+[1m[31mtest_greengrass/test_greengrass_groups.py[0m:469: in test_get_associated_role
+    [0mclient.associate_role_to_group(GroupId=group_id, RoleArn=role_arn)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the AssociateRoleToGroup operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>17d9b7d4-125e-4c31-94c8-9b420ffe9941</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________________ test_get_associated_role_with_invalid_id ___________________[0m
+[1m[31mtest_greengrass/test_greengrass_groups.py[0m:487: in test_get_associated_role_with_invalid_id
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mMessage[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mYou need to attach an IAM role to this deployment group.[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   assert '<?xml versio...rrorResponse>' == 'You need to ...oyment group.'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- You need to attach an IAM role to this deployment group.[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+   <Error>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Type>Sender</Type>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Code>MissingAction</Code>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Message>Could not determine target service or action from request</Message>[39;49;00m[90m[39;49;00m...[0m
+[1m[31mE     [0m
+[1m[31mE     ...Full output truncated (3 lines hidden), use '-vv' to show[0m
+[31m[1m______________________ test_disassociate_role_from_group _______________________[0m
+[1m[31mtest_greengrass/test_greengrass_groups.py[0m:497: in test_disassociate_role_from_group
+    [0mclient.associate_role_to_group(GroupId=group_id, RoleArn=role_arn)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the AssociateRoleToGroup operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>13fbf208-8dff-4a45-a40f-b8af5d87ef24</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_________ test_disassociate_role_from_group_with_none_exists_group_id __________[0m
+[1m[31mtest_greengrass/test_greengrass_groups.py[0m:520: in test_disassociate_role_from_group_with_none_exists_group_id
+    [0mres = client.disassociate_role_from_group(GroupId=group_id)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the DisassociateRoleFromGroup operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>1e908df7-ab8f-484e-9636-51349a7c8a39</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________________ test_create_resource_definition ________________________[0m
+[1m[31mtest_greengrass/test_greengrass_resource.py[0m:31: in test_create_resource_definition
+    [0mres = client.create_resource_definition(InitialVersion=init_ver, Name=resource_name)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateResourceDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>8c356deb-3277-4105-bb3e-f7ba5366b277</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_________ test_create_resource_definition_with_invalid_volume_resource _________[0m
+[1m[31mtest_greengrass/test_greengrass_resource.py[0m:66: in test_create_resource_definition_with_invalid_volume_resource
+    [0m[94massert[39;49;00m ([90m[39;49;00m
+[1m[31mE   assert '<?xml versio...rrorResponse>' == 'The resource... prohibited])'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- The resources definition is invalid. (ErrorDetails: [Accessing /sys is prohibited])[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+   <Error>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Type>Sender</Type>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Code>MissingAction</Code>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Message>Could not determine target service or action from request</Message>[39;49;00m[90m[39;49;00m...[0m
+[1m[31mE     [0m
+[1m[31mE     ...Full output truncated (3 lines hidden), use '-vv' to show[0m
+[31m[1m______ test_create_resource_definition_with_invalid_local_device_resource ______[0m
+[1m[31mtest_greengrass/test_greengrass_resource.py[0m:94: in test_create_resource_definition_with_invalid_local_device_resource
+    [0m[94massert[39;49;00m ([90m[39;49;00m
+[1m[31mE   assert '<?xml versio...rrorResponse>' == 'The resource...t: /foo/bar])'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- The resources definition is invalid. (ErrorDetails: [Device resource path should begin with /dev, but got: /foo/bar])[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+   <Error>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Type>Sender</Type>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Code>MissingAction</Code>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Message>Could not determine target service or action from request</Message>[39;49;00m[90m[39;49;00m...[0m
+[1m[31mE     [0m
+[1m[31mE     ...Full output truncated (3 lines hidden), use '-vv' to show[0m
+[31m[1m___________________ test_create_resource_definition_version ____________________[0m
+[1m[31mtest_greengrass/test_greengrass_resource.py[0m:120: in test_create_resource_definition_version
+    [0mresource_def_res = client.create_resource_definition([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateResourceDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>4292f2c3-3aa0-46b7-abe2-335bbe6c6d07</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________ test_create_resources_definition_version_with_invalid_id ___________[0m
+[1m[31mtest_greengrass/test_greengrass_resource.py[0m:173: in test_create_resources_definition_version_with_invalid_id
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mMessage[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mThat resource definition does not exist.[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   assert '<?xml versio...rrorResponse>' == 'That resourc...es not exist.'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- That resource definition does not exist.[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+   <Error>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Type>Sender</Type>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Code>MissingAction</Code>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Message>Could not determine target service or action from request</Message>[39;49;00m[90m[39;49;00m...[0m
+[1m[31mE     [0m
+[1m[31mE     ...Full output truncated (3 lines hidden), use '-vv' to show[0m
+[31m[1m________ test_create_resources_definition_version_with_volume_resource _________[0m
+[1m[31mtest_greengrass/test_greengrass_resource.py[0m:195: in test_create_resources_definition_version_with_volume_resource
+    [0mresource_def_res = client.create_resource_definition([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateResourceDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>561ead3c-cf01-4d28-b558-3d3b3c532c2d</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_ test_create_resources_definition_version_with_invalid_local_device_resource __[0m
+[1m[31mtest_greengrass/test_greengrass_resource.py[0m:241: in test_create_resources_definition_version_with_invalid_local_device_resource
+    [0mresource_def_res = client.create_resource_definition([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateResourceDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>5caab4ed-001e-4c13-be88-3e9123177d06</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_____________________________ test_list_resources ______________________________[0m
+[1m[31mtest_greengrass/test_greengrass_resource.py[0m:288: in test_list_resources
+    [0mcreate_res = client.create_resource_definition([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateResourceDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>b35d3443-8d6a-470f-bb4c-816093e4ad62</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_________________________ test_get_resource_definition _________________________[0m
+[1m[31mtest_greengrass/test_greengrass_resource.py[0m:332: in test_get_resource_definition
+    [0mcreate_res = client.create_resource_definition([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateResourceDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>55bd11bc-aac4-4c6e-a502-b8989f082482</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_________________ test_get_resource_definition_with_invalid_id _________________[0m
+[1m[31mtest_greengrass/test_greengrass_resource.py[0m:362: in test_get_resource_definition_with_invalid_id
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mMessage[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mThat Resource List Definition does not exist.[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   assert '<?xml versio...rrorResponse>' == 'That Resourc...es not exist.'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- That Resource List Definition does not exist.[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+   <Error>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Type>Sender</Type>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Code>MissingAction</Code>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Message>Could not determine target service or action from request</Message>[39;49;00m[90m[39;49;00m...[0m
+[1m[31mE     [0m
+[1m[31mE     ...Full output truncated (3 lines hidden), use '-vv' to show[0m
+[31m[1m_______________________ test_delete_resource_definition ________________________[0m
+[1m[31mtest_greengrass/test_greengrass_resource.py[0m:384: in test_delete_resource_definition
+    [0mcreate_res = client.create_resource_definition([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateResourceDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>953ccb22-ec03-4691-a33e-078faa9b5a1c</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________ test_delete_resource_definition_with_invalid_id ________________[0m
+[1m[31mtest_greengrass/test_greengrass_resource.py[0m:402: in test_delete_resource_definition_with_invalid_id
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mMessage[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mThat resources definition does not exist.[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   assert '<?xml versio...rrorResponse>' == 'That resourc...es not exist.'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- That resources definition does not exist.[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+   <Error>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Type>Sender</Type>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Code>MissingAction</Code>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Message>Could not determine target service or action from request</Message>[39;49;00m[90m[39;49;00m...[0m
+[1m[31mE     [0m
+[1m[31mE     ...Full output truncated (3 lines hidden), use '-vv' to show[0m
+[31m[1m_______________________ test_update_resource_definition ________________________[0m
+[1m[31mtest_greengrass/test_greengrass_resource.py[0m:424: in test_update_resource_definition
+    [0mcreate_res = client.create_resource_definition([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateResourceDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>0bdb2553-4ae8-4f4f-a13b-5afa0c6463b9</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m________________ test_update_device_definition_with_empty_name _________________[0m
+[1m[31mtest_greengrass/test_greengrass_resource.py[0m:456: in test_update_device_definition_with_empty_name
+    [0mcreate_res = client.create_resource_definition([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateResourceDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>b90796c6-206e-405d-89a9-e68d041a273a</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________ test_update_resource_definition_with_invalid_id ________________[0m
+[1m[31mtest_greengrass/test_greengrass_resource.py[0m:477: in test_update_resource_definition_with_invalid_id
+    [0m[94massert[39;49;00m rr[[33m"[39;49;00m[33mMessage[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mThat resources definition does not exist.[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   assert '<?xml versio...rrorResponse>' == 'That resourc...es not exist.'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- That resources definition does not exist.[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+   <Error>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Type>Sender</Type>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Code>MissingAction</Code>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Message>Could not determine target service or action from request</Message>[39;49;00m[90m[39;49;00m...[0m
+[1m[31mE     [0m
+[1m[31mE     ...Full output truncated (3 lines hidden), use '-vv' to show[0m
+[31m[1m____________________ test_list_resource_definition_versions ____________________[0m
+[1m[31mtest_greengrass/test_greengrass_resource.py[0m:498: in test_list_resource_definition_versions
+    [0mcreate_res = client.create_resource_definition([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateResourceDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>03bb29c3-d254-4616-bf4a-ab76bfb12c8f</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m____________ test_list_resource_definition_versions_with_invalid_id ____________[0m
+[1m[31mtest_greengrass/test_greengrass_resource.py[0m:527: in test_list_resource_definition_versions_with_invalid_id
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mMessage[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mThat resources definition does not exist.[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   assert '<?xml versio...rrorResponse>' == 'That resourc...es not exist.'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- That resources definition does not exist.[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+   <Error>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Type>Sender</Type>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Code>MissingAction</Code>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Message>Could not determine target service or action from request</Message>[39;49;00m[90m[39;49;00m...[0m
+[1m[31mE     [0m
+[1m[31mE     ...Full output truncated (3 lines hidden), use '-vv' to show[0m
+[31m[1m_____________________ test_get_resource_definition_version _____________________[0m
+[1m[31mtest_greengrass/test_greengrass_resource.py[0m:548: in test_get_resource_definition_version
+    [0mcreate_res = client.create_resource_definition([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateResourceDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>72ca9f7d-ecea-4216-8727-6f7ed35fcc3f</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_____________ test_get_resource_definition_version_with_invalid_id _____________[0m
+[1m[31mtest_greengrass/test_greengrass_resource.py[0m:579: in test_get_resource_definition_version_with_invalid_id
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mMessage[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mThat resources definition does not exist.[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   assert '<?xml versio...rrorResponse>' == 'That resourc...es not exist.'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- That resources definition does not exist.[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+   <Error>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Type>Sender</Type>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Code>MissingAction</Code>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Message>Could not determine target service or action from request</Message>[39;49;00m[90m[39;49;00m...[0m
+[1m[31mE     [0m
+[1m[31mE     ...Full output truncated (3 lines hidden), use '-vv' to show[0m
+[31m[1m_________ test_get_resource_definition_version_with_invalid_version_id _________[0m
+[1m[31mtest_greengrass/test_greengrass_resource.py[0m:599: in test_get_resource_definition_version_with_invalid_version_id
+    [0mcreate_res = client.create_resource_definition([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateResourceDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>84ccbecf-42dd-4618-b62b-84b3a1a4c983</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m__________________ test_create_subscription_definition[cloud] __________________[0m
+[1m[31mtest_greengrass/test_greengrass_subscriptions.py[0m:34: in test_create_subscription_definition
+    [0mres = client.create_subscription_definition([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateSubscriptionDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>c51fd7bd-fd57-4a53-b0b4-cbafb186dd22</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_____________ test_create_subscription_definition[GGShadowService] _____________[0m
+[1m[31mtest_greengrass/test_greengrass_subscriptions.py[0m:34: in test_create_subscription_definition
+    [0mres = client.create_subscription_definition([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateSubscriptionDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>13c3b4bd-ed04-41f2-9277-53a40d4e5663</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_ test_create_subscription_definition[arn:aws:iot:ap-northeast-1:123456789012:thing/2ec8d399c34e1e3fe8da266559adcb7e47c989aab353bc0fc7d0f4bad66030ff] _[0m
+[1m[31mtest_greengrass/test_greengrass_subscriptions.py[0m:34: in test_create_subscription_definition
+    [0mres = client.create_subscription_definition([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateSubscriptionDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>2e826dfa-bae3-4d87-8d94-87feafaba46d</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_ test_create_subscription_definition[arn:aws:lambda:ap-northeast-1:123456789012:function:test-func:v1] _[0m
+[1m[31mtest_greengrass/test_greengrass_subscriptions.py[0m:34: in test_create_subscription_definition
+    [0mres = client.create_subscription_definition([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateSubscriptionDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>f4c58033-50af-4501-957f-323d248e6963</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________ test_create_subscription_definition_with_invalid_target ____________[0m
+[1m[31mtest_greengrass/test_greengrass_subscriptions.py[0m:68: in test_create_subscription_definition_with_invalid_target
+    [0m[94massert[39;49;00m ([90m[39;49;00m
+[1m[31mE   assert '<?xml versio...rrorResponse>' == "The subscrip...et is 'foo'])"[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- The subscriptions definition is invalid or corrupted. (ErrorDetails: [Subscription target is invalid. ID is '123456' and Target is 'foo'])[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+   <Error>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Type>Sender</Type>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Code>MissingAction</Code>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Message>Could not determine target service or action from request</Message>[39;49;00m[90m[39;49;00m...[0m
+[1m[31mE     [0m
+[1m[31mE     ...Full output truncated (3 lines hidden), use '-vv' to show[0m
+[31m[1m___________ test_create_subscription_definition_with_invalid_source ____________[0m
+[1m[31mtest_greengrass/test_greengrass_subscriptions.py[0m:94: in test_create_subscription_definition_with_invalid_source
+    [0m[94massert[39;49;00m ([90m[39;49;00m
+[1m[31mE   assert '<?xml versio...rrorResponse>' == "The subscrip...ce is 'foo'])"[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- The subscriptions definition is invalid or corrupted. (ErrorDetails: [Subscription source is invalid. ID is '123456' and Source is 'foo'])[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+   <Error>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Type>Sender</Type>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Code>MissingAction</Code>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Message>Could not determine target service or action from request</Message>[39;49;00m[90m[39;49;00m...[0m
+[1m[31mE     [0m
+[1m[31mE     ...Full output truncated (3 lines hidden), use '-vv' to show[0m
+[31m[1m______________________ test_list_subscription_definitions ______________________[0m
+[1m[31mtest_greengrass/test_greengrass_subscriptions.py[0m:116: in test_list_subscription_definitions
+    [0mclient.create_subscription_definition([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateSubscriptionDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>449a9f4d-cb6a-4566-816d-796c7e8877b0</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________________ test_get_subscription_definition _______________________[0m
+[1m[31mtest_greengrass/test_greengrass_subscriptions.py[0m:149: in test_get_subscription_definition
+    [0mcreate_res = client.create_subscription_definition([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateSubscriptionDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>5bef770a-1794-4922-9af5-14cf77269fa7</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________ test_get_subscription_definition_with_invalid_id _______________[0m
+[1m[31mtest_greengrass/test_greengrass_subscriptions.py[0m:183: in test_get_subscription_definition_with_invalid_id
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mMessage[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mThat Subscription List Definition does not exist.[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   assert '<?xml versio...rrorResponse>' == 'That Subscri...es not exist.'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- That Subscription List Definition does not exist.[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+   <Error>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Type>Sender</Type>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Code>MissingAction</Code>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Message>Could not determine target service or action from request</Message>[39;49;00m[90m[39;49;00m...[0m
+[1m[31mE     [0m
+[1m[31mE     ...Full output truncated (3 lines hidden), use '-vv' to show[0m
+[31m[1m_____________________ test_delete_subscription_definition ______________________[0m
+[1m[31mtest_greengrass/test_greengrass_subscriptions.py[0m:200: in test_delete_subscription_definition
+    [0mcreate_res = client.create_subscription_definition([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateSubscriptionDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>8e197377-86a1-42ca-b536-9c59a62c4fb8</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_____________________ test_update_subscription_definition ______________________[0m
+[1m[31mtest_greengrass/test_greengrass_subscriptions.py[0m:224: in test_update_subscription_definition
+    [0mcreate_res = client.create_subscription_definition([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateSubscriptionDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>681367f4-bb72-43e0-ad28-2d0661299ef2</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_____________ test_update_subscription_definition_with_empty_name ______________[0m
+[1m[31mtest_greengrass/test_greengrass_subscriptions.py[0m:254: in test_update_subscription_definition_with_empty_name
+    [0mcreate_res = client.create_subscription_definition([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateSubscriptionDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>6206483f-c16c-47a1-814b-ba019bb88eff</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_____________ test_update_subscription_definition_with_invalid_id ______________[0m
+[1m[31mtest_greengrass/test_greengrass_subscriptions.py[0m:277: in test_update_subscription_definition_with_invalid_id
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mMessage[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mThat subscriptions definition does not exist.[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   assert '<?xml versio...rrorResponse>' == 'That subscri...es not exist.'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- That subscriptions definition does not exist.[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+   <Error>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Type>Sender</Type>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Code>MissingAction</Code>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Message>Could not determine target service or action from request</Message>[39;49;00m[90m[39;49;00m...[0m
+[1m[31mE     [0m
+[1m[31mE     ...Full output truncated (3 lines hidden), use '-vv' to show[0m
+[31m[1m_____________ test_delete_subscription_definition_with_invalid_id ______________[0m
+[1m[31mtest_greengrass/test_greengrass_subscriptions.py[0m:290: in test_delete_subscription_definition_with_invalid_id
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mMessage[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mThat subscriptions definition does not exist.[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   assert '<?xml versio...rrorResponse>' == 'That subscri...es not exist.'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- That subscriptions definition does not exist.[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+   <Error>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Type>Sender</Type>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Code>MissingAction</Code>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Message>Could not determine target service or action from request</Message>[39;49;00m[90m[39;49;00m...[0m
+[1m[31mE     [0m
+[1m[31mE     ...Full output truncated (3 lines hidden), use '-vv' to show[0m
+[31m[1m_________________ test_create_subscription_definition_version __________________[0m
+[1m[31mtest_greengrass/test_greengrass_subscriptions.py[0m:308: in test_create_subscription_definition_version
+    [0msubscription_def_res = client.create_subscription_definition([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateSubscriptionDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>31958270-44a2-423e-b45c-59fe6078da6d</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_________ test_create_subscription_definition_version_with_invalid_id __________[0m
+[1m[31mtest_greengrass/test_greengrass_subscriptions.py[0m:354: in test_create_subscription_definition_version_with_invalid_id
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mMessage[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mThat subscriptions does not exist.[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   assert '<?xml versio...rrorResponse>' == 'That subscri...es not exist.'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- That subscriptions does not exist.[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+   <Error>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Type>Sender</Type>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Code>MissingAction</Code>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Message>Could not determine target service or action from request</Message>[39;49;00m[90m[39;49;00m...[0m
+[1m[31mE     [0m
+[1m[31mE     ...Full output truncated (3 lines hidden), use '-vv' to show[0m
+[31m[1m_______ test_create_subscription_definition_version_with_invalid_target ________[0m
+[1m[31mtest_greengrass/test_greengrass_subscriptions.py[0m:371: in test_create_subscription_definition_version_with_invalid_target
+    [0msubscription_def_res = client.create_subscription_definition([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateSubscriptionDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>1326e772-e70f-4f8b-b877-a6668e618cb8</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______ test_create_subscription_definition_version_with_invalid_source ________[0m
+[1m[31mtest_greengrass/test_greengrass_subscriptions.py[0m:411: in test_create_subscription_definition_version_with_invalid_source
+    [0msubscription_def_res = client.create_subscription_definition([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateSubscriptionDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>96dddb69-9a6a-45e5-9e44-9db92f9fc0df</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m__________________ test_list_subscription_definition_versions __________________[0m
+[1m[31mtest_greengrass/test_greengrass_subscriptions.py[0m:453: in test_list_subscription_definition_versions
+    [0mcreate_res = client.create_subscription_definition([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateSubscriptionDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>1e2f54a7-f1dc-430d-8427-66d5a705fd77</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m__________ test_list_subscription_definition_versions_with_invalid_id __________[0m
+[1m[31mtest_greengrass/test_greengrass_subscriptions.py[0m:482: in test_list_subscription_definition_versions_with_invalid_id
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mMessage[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mThat subscriptions definition does not exist.[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   assert '<?xml versio...rrorResponse>' == 'That subscri...es not exist.'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- That subscriptions definition does not exist.[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+   <Error>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Type>Sender</Type>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Code>MissingAction</Code>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Message>Could not determine target service or action from request</Message>[39;49;00m[90m[39;49;00m...[0m
+[1m[31mE     [0m
+[1m[31mE     ...Full output truncated (3 lines hidden), use '-vv' to show[0m
+[31m[1m___________________ test_get_subscription_definition_version ___________________[0m
+[1m[31mtest_greengrass/test_greengrass_subscriptions.py[0m:500: in test_get_subscription_definition_version
+    [0mcreate_res = client.create_subscription_definition([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateSubscriptionDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>3632b6ca-37b8-4de2-b75c-2b0a42651311</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________ test_get_subscription_definition_version_with_invalid_id ___________[0m
+[1m[31mtest_greengrass/test_greengrass_subscriptions.py[0m:532: in test_get_subscription_definition_version_with_invalid_id
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mMessage[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mThat subscriptions definition does not exist.[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   assert '<?xml versio...rrorResponse>' == 'That subscri...es not exist.'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- That subscriptions definition does not exist.[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+   <Error>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Type>Sender</Type>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Code>MissingAction</Code>[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+     <Message>Could not determine target service or action from request</Message>[39;49;00m[90m[39;49;00m...[0m
+[1m[31mE     [0m
+[1m[31mE     ...Full output truncated (3 lines hidden), use '-vv' to show[0m
+[31m[1m_______ test_get_subscription_definition_version_with_invalid_version_id _______[0m
+[1m[31mtest_greengrass/test_greengrass_subscriptions.py[0m:549: in test_get_subscription_definition_version_with_invalid_version_id
+    [0mcreate_res = client.create_subscription_definition([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateSubscriptionDefinition operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>3131fa34-8265-4f41-b8b9-1719e129cb1d</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[33m=============================== warnings summary ===============================[0m
+tests/test_greengrass/test_greengrass_core.py: 13 warnings
+tests/test_greengrass/test_greengrass_deployment.py: 11 warnings
+tests/test_greengrass/test_greengrass_device.py: 15 warnings
+tests/test_greengrass/test_greengrass_functions.py: 16 warnings
+tests/test_greengrass/test_greengrass_groups.py: 31 warnings
+tests/test_greengrass/test_greengrass_resource.py: 20 warnings
+tests/test_greengrass/test_greengrass_subscriptions.py: 23 warnings
+  /Users/lucas/.cache/fakecloud/moto/.venv/lib/python3.9/site-packages/boto3/compat.py:89: PythonDeprecationWarning: Boto3 will no longer support Python 3.9 starting April 29, 2026. To continue receiving service updates, bug fixes, and security updates please upgrade to Python 3.10 or later. More information can be found here: https://aws.amazon.com/blogs/developer/python-support-policy-updates-for-aws-sdks-and-tools/
+    warnings.warn(warning, PythonDeprecationWarning)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+[36m[1m=========================== short test summary info ============================[0m
+[31mFAILED[0m test_greengrass/test_greengrass_core.py::[1mtest_create_core_definition[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_core.py::[1mtest_list_core_definitions[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_core.py::[1mtest_get_core_definition[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_core.py::[1mtest_delete_core_definition[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_core.py::[1mtest_update_core_definition[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_core.py::[1mtest_update_core_definition_with_empty_name[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_core.py::[1mtest_update_core_definition_with_invalid_id[0m - assert '<?xml versio...rrorResponse>' == 'That cores d...es not exist.'
+[31mFAILED[0m test_greengrass/test_greengrass_core.py::[1mtest_create_core_definition_version[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_core.py::[1mtest_get_core_definition_version[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_core.py::[1mtest_get_core_definition_version_with_invalid_id[0m - assert '<?xml versio...rrorResponse>' == 'That cores d...es not exist.'
+[31mFAILED[0m test_greengrass/test_greengrass_core.py::[1mtest_get_core_definition_version_with_invalid_version_id[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_core.py::[1mtest_list_core_definition_version[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_core.py::[1mtest_list_core_definition_version_with_invalid_id[0m - assert '<?xml versio...rrorResponse>' == 'That cores d...es not exist.'
+[31mFAILED[0m test_greengrass/test_greengrass_deployment.py::[1mtest_create_deployment[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_deployment.py::[1mtest_re_deployment_with_no_deployment_id[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_deployment.py::[1mtest_re_deployment_with_invalid_deployment_id[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_deployment.py::[1mtest_create_deployment_with_no_core_group[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_deployment.py::[1mtest_create_deployment_with_invalid_group_id[0m - assert 400 == 404
+[31mFAILED[0m test_greengrass/test_greengrass_deployment.py::[1mtest_create_deployment_with_invalid_group_version_id[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_deployment.py::[1mtest_create_deployment_with_invalid_deployment_type[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_deployment.py::[1mtest_list_deployments[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_deployment.py::[1mtest_get_deployment_status[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_deployment.py::[1mtest_get_deployment_status_with_invalid_deployment_id[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_deployment.py::[1mtest_get_deployment_status_with_invalid_group_id[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_device.py::[1mtest_create_device_definition[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_device.py::[1mtest_list_device_definitions[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_device.py::[1mtest_get_device_definition[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_device.py::[1mtest_get_device_definition_with_invalid_id[0m - assert '<?xml versio...rrorResponse>' == 'That Device ...es not exist.'
+[31mFAILED[0m test_greengrass/test_greengrass_device.py::[1mtest_create_device_definition_version[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_device.py::[1mtest_create_device_definition_version_with_invalid_id[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_device.py::[1mtest_delete_device_definition[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_device.py::[1mtest_delete_device_definition_with_invalid_id[0m - assert '<?xml versio...rrorResponse>' == 'That devices...es not exist.'
+[31mFAILED[0m test_greengrass/test_greengrass_device.py::[1mtest_update_device_definition[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_device.py::[1mtest_update_device_definition_with_empty_name[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_device.py::[1mtest_update_device_definition_with_invalid_id[0m - assert '<?xml versio...rrorResponse>' == 'That devices...es not exist.'
+[31mFAILED[0m test_greengrass/test_greengrass_device.py::[1mtest_list_device_definition_versions[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_device.py::[1mtest_get_device_definition_version[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_device.py::[1mtest_get_device_definition_version_with_invalid_id[0m - assert '<?xml versio...rrorResponse>' == 'That devices...es not exist.'
+[31mFAILED[0m test_greengrass/test_greengrass_device.py::[1mtest_get_device_definition_version_with_invalid_version_id[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_functions.py::[1mtest_create_function_definition[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_functions.py::[1mtest_list_function_definitions[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_functions.py::[1mtest_get_function_definition[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_functions.py::[1mtest_get_function_definition_with_invalid_id[0m - assert '<?xml versio...rrorResponse>' == 'That Lambda ...es not exist.'
+[31mFAILED[0m test_greengrass/test_greengrass_functions.py::[1mtest_delete_function_definition[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_functions.py::[1mtest_delete_function_definition_with_invalid_id[0m - assert '<?xml versio...rrorResponse>' == 'That lambdas...es not exist.'
+[31mFAILED[0m test_greengrass/test_greengrass_functions.py::[1mtest_update_function_definition[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_functions.py::[1mtest_update_function_definition_with_empty_name[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_functions.py::[1mtest_update_function_definition_with_invalid_id[0m - assert '<?xml versio...rrorResponse>' == 'That lambdas...es not exist.'
+[31mFAILED[0m test_greengrass/test_greengrass_functions.py::[1mtest_create_function_definition_version[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_functions.py::[1mtest_create_function_definition_version_with_invalid_id[0m - assert '<?xml versio...rrorResponse>' == 'That lambdas does not exist.'
+[31mFAILED[0m test_greengrass/test_greengrass_functions.py::[1mtest_list_function_definition_versions[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_functions.py::[1mtest_list_function_definition_versions_with_invalid_id[0m - assert '<?xml versio...rrorResponse>' == 'That lambdas...es not exist.'
+[31mFAILED[0m test_greengrass/test_greengrass_functions.py::[1mtest_get_function_definition_version[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_functions.py::[1mtest_get_function_definition_version_with_invalid_id[0m - assert '<?xml versio...rrorResponse>' == 'That lambdas...es not exist.'
+[31mFAILED[0m test_greengrass/test_greengrass_functions.py::[1mtest_get_function_definition_version_with_invalid_version_id[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_groups.py::[1mtest_create_group[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_groups.py::[1mtest_list_groups[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_groups.py::[1mtest_get_group[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_groups.py::[1mtest_get_group_with_invalid_id[0m - assert '<?xml versio...rrorResponse>' == 'That Group D...es not exist.'
+[31mFAILED[0m test_greengrass/test_greengrass_groups.py::[1mtest_delete_group[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_groups.py::[1mtest_delete_group_with_invalid_id[0m - assert '<?xml versio...rrorResponse>' == 'That group d...es not exist.'
+[31mFAILED[0m test_greengrass/test_greengrass_groups.py::[1mtest_update_group[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_groups.py::[1mtest_update_group_with_empty_name[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_groups.py::[1mtest_update_group_with_invalid_id[0m - assert '<?xml versio...rrorResponse>' == 'That group d...es not exist.'
+[31mFAILED[0m test_greengrass/test_greengrass_groups.py::[1mtest_create_group_version[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_groups.py::[1mtest_create_group_version_with_invalid_id[0m - assert '<?xml versio...rrorResponse>' == 'That group does not exist.'
+[31mFAILED[0m test_greengrass/test_greengrass_groups.py::[1mtest_create_group_version_with_invalid_version_arn[CoreDefinitionVersionArn-123-Cores definition reference does not exist][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_groups.py::[1mtest_create_group_version_with_invalid_version_arn[CoreDefinitionVersionArn-arn:aws:greengrass:ap-northeast-1:944137583148:/greengrass/definition/cores/fc3b3e5b-f1ce-4639-88d3-3ad897d95b2a/versions/dd0f800c-246c-4973-82cf-45b109cbd99b-Cores definition reference does not exist][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_groups.py::[1mtest_create_group_version_with_invalid_version_arn[DeviceDefinitionVersionArn-123-Devices definition reference does not exist][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_groups.py::[1mtest_create_group_version_with_invalid_version_arn[DeviceDefinitionVersionArn-arn:aws:greengrass:ap-northeast-1:944137583148:/greengrass/definition/devices/fc3b3e5b-f1ce-4639-88d3-3ad897d95b2a/versions/dd0f800c-246c-4973-82cf-45b109cbd99b-Devices definition reference does not exist][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_groups.py::[1mtest_create_group_version_with_invalid_version_arn[FunctionDefinitionVersionArn-123-Lambda definition reference does not exist][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_groups.py::[1mtest_create_group_version_with_invalid_version_arn[FunctionDefinitionVersionArn-arn:aws:greengrass:ap-northeast-1:944137583148:/greengrass/definition/functions/fc3b3e5b-f1ce-4639-88d3-3ad897d95b2a/versions/dd0f800c-246c-4973-82cf-45b109cbd99b-Lambda definition reference does not exist][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_groups.py::[1mtest_create_group_version_with_invalid_version_arn[ResourceDefinitionVersionArn-123-Resource definition reference does not exist][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_groups.py::[1mtest_create_group_version_with_invalid_version_arn[ResourceDefinitionVersionArn-arn:aws:greengrass:ap-northeast-1:944137583148:/greengrass/definition/resources/fc3b3e5b-f1ce-4639-88d3-3ad897d95b2a/versions/dd0f800c-246c-4973-82cf-45b109cbd99b-Resource definition reference does not exist][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_groups.py::[1mtest_create_group_version_with_invalid_version_arn[SubscriptionDefinitionVersionArn-123-Subscription definition reference does not exist][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_groups.py::[1mtest_create_group_version_with_invalid_version_arn[SubscriptionDefinitionVersionArn-arn:aws:greengrass:ap-northeast-1:944137583148:/greengrass/definition/subscriptions/fc3b3e5b-f1ce-4639-88d3-3ad897d95b2a/versions/dd0f800c-246c-4973-82cf-45b109cbd99b-Subscription definition reference does not exist][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_groups.py::[1mtest_list_group_versions[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_groups.py::[1mtest_list_group_versions_with_invalid_id[0m - assert '<?xml versio...rrorResponse>' == 'That group d...es not exist.'
+[31mFAILED[0m test_greengrass/test_greengrass_groups.py::[1mtest_get_group_version[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_groups.py::[1mtest_get_group_version_with_invalid_id[0m - assert '<?xml versio...rrorResponse>' == 'That group d...es not exist.'
+[31mFAILED[0m test_greengrass/test_greengrass_groups.py::[1mtest_get_group_version_with_invalid_version_id[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_groups.py::[1mtest_associate_role_to_group[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the A...
+[31mFAILED[0m test_greengrass/test_greengrass_groups.py::[1mtest_get_associated_role[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the A...
+[31mFAILED[0m test_greengrass/test_greengrass_groups.py::[1mtest_get_associated_role_with_invalid_id[0m - assert '<?xml versio...rrorResponse>' == 'You need to ...oyment group.'
+[31mFAILED[0m test_greengrass/test_greengrass_groups.py::[1mtest_disassociate_role_from_group[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the A...
+[31mFAILED[0m test_greengrass/test_greengrass_groups.py::[1mtest_disassociate_role_from_group_with_none_exists_group_id[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the D...
+[31mFAILED[0m test_greengrass/test_greengrass_resource.py::[1mtest_create_resource_definition[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_resource.py::[1mtest_create_resource_definition_with_invalid_volume_resource[0m - assert '<?xml versio...rrorResponse>' == 'The resource... prohibited])'
+[31mFAILED[0m test_greengrass/test_greengrass_resource.py::[1mtest_create_resource_definition_with_invalid_local_device_resource[0m - assert '<?xml versio...rrorResponse>' == 'The resource...t: /foo/bar])'
+[31mFAILED[0m test_greengrass/test_greengrass_resource.py::[1mtest_create_resource_definition_version[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_resource.py::[1mtest_create_resources_definition_version_with_invalid_id[0m - assert '<?xml versio...rrorResponse>' == 'That resourc...es not exist.'
+[31mFAILED[0m test_greengrass/test_greengrass_resource.py::[1mtest_create_resources_definition_version_with_volume_resource[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_resource.py::[1mtest_create_resources_definition_version_with_invalid_local_device_resource[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_resource.py::[1mtest_list_resources[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_resource.py::[1mtest_get_resource_definition[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_resource.py::[1mtest_get_resource_definition_with_invalid_id[0m - assert '<?xml versio...rrorResponse>' == 'That Resourc...es not exist.'
+[31mFAILED[0m test_greengrass/test_greengrass_resource.py::[1mtest_delete_resource_definition[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_resource.py::[1mtest_delete_resource_definition_with_invalid_id[0m - assert '<?xml versio...rrorResponse>' == 'That resourc...es not exist.'
+[31mFAILED[0m test_greengrass/test_greengrass_resource.py::[1mtest_update_resource_definition[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_resource.py::[1mtest_update_device_definition_with_empty_name[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_resource.py::[1mtest_update_resource_definition_with_invalid_id[0m - assert '<?xml versio...rrorResponse>' == 'That resourc...es not exist.'
+[31mFAILED[0m test_greengrass/test_greengrass_resource.py::[1mtest_list_resource_definition_versions[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_resource.py::[1mtest_list_resource_definition_versions_with_invalid_id[0m - assert '<?xml versio...rrorResponse>' == 'That resourc...es not exist.'
+[31mFAILED[0m test_greengrass/test_greengrass_resource.py::[1mtest_get_resource_definition_version[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_resource.py::[1mtest_get_resource_definition_version_with_invalid_id[0m - assert '<?xml versio...rrorResponse>' == 'That resourc...es not exist.'
+[31mFAILED[0m test_greengrass/test_greengrass_resource.py::[1mtest_get_resource_definition_version_with_invalid_version_id[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_subscriptions.py::[1mtest_create_subscription_definition[cloud][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_subscriptions.py::[1mtest_create_subscription_definition[GGShadowService][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_subscriptions.py::[1mtest_create_subscription_definition[arn:aws:iot:ap-northeast-1:123456789012:thing/2ec8d399c34e1e3fe8da266559adcb7e47c989aab353bc0fc7d0f4bad66030ff][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_subscriptions.py::[1mtest_create_subscription_definition[arn:aws:lambda:ap-northeast-1:123456789012:function:test-func:v1][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_subscriptions.py::[1mtest_create_subscription_definition_with_invalid_target[0m - assert '<?xml versio...rrorResponse>' == "The subscrip...et is 'foo'])"
+[31mFAILED[0m test_greengrass/test_greengrass_subscriptions.py::[1mtest_create_subscription_definition_with_invalid_source[0m - assert '<?xml versio...rrorResponse>' == "The subscrip...ce is 'foo'])"
+[31mFAILED[0m test_greengrass/test_greengrass_subscriptions.py::[1mtest_list_subscription_definitions[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_subscriptions.py::[1mtest_get_subscription_definition[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_subscriptions.py::[1mtest_get_subscription_definition_with_invalid_id[0m - assert '<?xml versio...rrorResponse>' == 'That Subscri...es not exist.'
+[31mFAILED[0m test_greengrass/test_greengrass_subscriptions.py::[1mtest_delete_subscription_definition[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_subscriptions.py::[1mtest_update_subscription_definition[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_subscriptions.py::[1mtest_update_subscription_definition_with_empty_name[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_subscriptions.py::[1mtest_update_subscription_definition_with_invalid_id[0m - assert '<?xml versio...rrorResponse>' == 'That subscri...es not exist.'
+[31mFAILED[0m test_greengrass/test_greengrass_subscriptions.py::[1mtest_delete_subscription_definition_with_invalid_id[0m - assert '<?xml versio...rrorResponse>' == 'That subscri...es not exist.'
+[31mFAILED[0m test_greengrass/test_greengrass_subscriptions.py::[1mtest_create_subscription_definition_version[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_subscriptions.py::[1mtest_create_subscription_definition_version_with_invalid_id[0m - assert '<?xml versio...rrorResponse>' == 'That subscri...es not exist.'
+[31mFAILED[0m test_greengrass/test_greengrass_subscriptions.py::[1mtest_create_subscription_definition_version_with_invalid_target[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_subscriptions.py::[1mtest_create_subscription_definition_version_with_invalid_source[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_subscriptions.py::[1mtest_list_subscription_definition_versions[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_subscriptions.py::[1mtest_list_subscription_definition_versions_with_invalid_id[0m - assert '<?xml versio...rrorResponse>' == 'That subscri...es not exist.'
+[31mFAILED[0m test_greengrass/test_greengrass_subscriptions.py::[1mtest_get_subscription_definition_version[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_greengrass/test_greengrass_subscriptions.py::[1mtest_get_subscription_definition_version_with_invalid_id[0m - assert '<?xml versio...rrorResponse>' == 'That subscri...es not exist.'
+[31mFAILED[0m test_greengrass/test_greengrass_subscriptions.py::[1mtest_get_subscription_definition_version_with_invalid_version_id[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31m[31m[1m129 failed[0m, [33m4 skipped[0m, [33m129 warnings[0m[31m in 3.61s[0m[0m

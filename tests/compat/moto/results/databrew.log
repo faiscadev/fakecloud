@@ -1,0 +1,1511 @@
+[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31m [ 83%]
+[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31m                                                           [100%][0m
+=================================== FAILURES ===================================
+[31m[1m_________________________ test_dataset_list_when_empty _________________________[0m
+[1m[31mtest_databrew/test_databrew_datasets.py[0m:101: in test_dataset_list_when_empty
+    [0mresponse = client.list_datasets()[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the ListDatasets operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>285e8f89-bcf9-4820-8964-882cd9215ee0</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_____________________ test_list_datasets_with_max_results ______________________[0m
+[1m[31mtest_databrew/test_databrew_datasets.py[0m:110: in test_list_datasets_with_max_results
+    [0m_create_test_datasets(client, [94m4[39;49;00m)[90m[39;49;00m
+[1m[31mtest_databrew/test_databrew_datasets.py[0m:94: in _create_test_datasets
+    [0m_create_test_dataset(client)[90m[39;49;00m
+[1m[31mtest_databrew/test_databrew_datasets.py[0m:44: in _create_test_dataset
+    [0m[94mreturn[39;49;00m client.create_dataset([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateDataset operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>2d440d3c-a737-4b54-a447-296a7b79ebc0</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______________________ test_list_datasets_from_next_token ______________________[0m
+[1m[31mtest_databrew/test_databrew_datasets.py[0m:120: in test_list_datasets_from_next_token
+    [0m_create_test_datasets(client, [94m10[39;49;00m)[90m[39;49;00m
+[1m[31mtest_databrew/test_databrew_datasets.py[0m:94: in _create_test_datasets
+    [0m_create_test_dataset(client)[90m[39;49;00m
+[1m[31mtest_databrew/test_databrew_datasets.py[0m:44: in _create_test_dataset
+    [0m[94mreturn[39;49;00m client.create_dataset([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateDataset operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>b2a1af61-ccd1-46f1-89cb-5b4c7da24411</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______ test_list_datasets_with_max_results_greater_than_actual_results ________[0m
+[1m[31mtest_databrew/test_databrew_datasets.py[0m:129: in test_list_datasets_with_max_results_greater_than_actual_results
+    [0m_create_test_datasets(client, [94m4[39;49;00m)[90m[39;49;00m
+[1m[31mtest_databrew/test_databrew_datasets.py[0m:94: in _create_test_datasets
+    [0m_create_test_dataset(client)[90m[39;49;00m
+[1m[31mtest_databrew/test_databrew_datasets.py[0m:44: in _create_test_dataset
+    [0m[94mreturn[39;49;00m client.create_dataset([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateDataset operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>e9bee90d-d12d-4d34-8b7c-3a2ecaeafa64</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m____________________________ test_describe_dataset _____________________________[0m
+[1m[31mtest_databrew/test_databrew_datasets.py[0m:139: in test_describe_dataset
+    [0mresponse = _create_test_dataset(client)[90m[39;49;00m
+[1m[31mtest_databrew/test_databrew_datasets.py[0m:44: in _create_test_dataset
+    [0m[94mreturn[39;49;00m client.create_dataset([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateDataset operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>7477332d-6f5a-40b8-8bc6-f5d54335b66d</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m__________________ test_describe_dataset_that_does_not_exist ___________________[0m
+[1m[31mtest_databrew/test_databrew_datasets.py[0m:162: in test_describe_dataset_that_does_not_exist
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mResourceNotFoundException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'ResourceNotFoundException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ResourceNotFoundException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m___________________ test_create_dataset_that_already_exists ____________________[0m
+[1m[31mtest_databrew/test_databrew_datasets.py[0m:170: in test_create_dataset_that_already_exists
+    [0mresponse = _create_test_dataset(client)[90m[39;49;00m
+[1m[31mtest_databrew/test_databrew_datasets.py[0m:44: in _create_test_dataset
+    [0m[94mreturn[39;49;00m client.create_dataset([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateDataset operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>c7788937-e8ac-4676-aa06-37db6ffa27c9</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m__________________________ test_delete_dataset[name] ___________________________[0m
+[1m[31mtest_databrew/test_databrew_datasets.py[0m:183: in test_delete_dataset
+    [0mresponse = _create_test_dataset(client, dataset_name=name)[90m[39;49;00m
+[1m[31mtest_databrew/test_databrew_datasets.py[0m:44: in _create_test_dataset
+    [0m[94mreturn[39;49;00m client.create_dataset([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateDataset operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>131cc589-91d7-4963-a458-ed5b54b0b540</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_____________________ test_delete_dataset[name with space] _____________________[0m
+[1m[31mtest_databrew/test_databrew_datasets.py[0m:183: in test_delete_dataset
+    [0mresponse = _create_test_dataset(client, dataset_name=name)[90m[39;49;00m
+[1m[31mtest_databrew/test_databrew_datasets.py[0m:44: in _create_test_dataset
+    [0m[94mreturn[39;49;00m client.create_dataset([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateDataset operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>9b182d19-96d5-4741-9022-2a658bf8f57a</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m__________________________ test_update_dataset[name] ___________________________[0m
+[1m[31mtest_databrew/test_databrew_datasets.py[0m:213: in test_update_dataset
+    [0m_create_test_dataset(client, dataset_name=name)[90m[39;49;00m
+[1m[31mtest_databrew/test_databrew_datasets.py[0m:44: in _create_test_dataset
+    [0m[94mreturn[39;49;00m client.create_dataset([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateDataset operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>4c8b408b-1342-40fd-913f-06a37c7f2e06</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_____________________ test_update_dataset[name with space] _____________________[0m
+[1m[31mtest_databrew/test_databrew_datasets.py[0m:213: in test_update_dataset
+    [0m_create_test_dataset(client, dataset_name=name)[90m[39;49;00m
+[1m[31mtest_databrew/test_databrew_datasets.py[0m:44: in _create_test_dataset
+    [0m[94mreturn[39;49;00m client.create_dataset([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateDataset operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>6e8f2f65-c3d4-4fa2-a81b-78aa47b80fb3</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________________ test_update_dataset_that_does_not_exist ____________________[0m
+[1m[31mtest_databrew/test_databrew_datasets.py[0m:280: in test_update_dataset_that_does_not_exist
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mResourceNotFoundException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'ResourceNotFoundException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ResourceNotFoundException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m_________________ test_create_profile_job_that_already_exists __________________[0m
+[1m[31mtest_databrew/test_databrew_jobs.py[0m:76: in test_create_profile_job_that_already_exists
+    [0mresponse = _create_test_profile_job(client)[90m[39;49;00m
+[1m[31mtest_databrew/test_databrew_jobs.py[0m:32: in _create_test_profile_job
+    [0m[94mreturn[39;49;00m client.create_profile_job(**kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateProfileJob operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>edd08274-1f1f-45bd-85ae-eb051d22c62f</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m__________________ test_create_recipe_job_that_already_exists __________________[0m
+[1m[31mtest_databrew/test_databrew_jobs.py[0m:90: in test_create_recipe_job_that_already_exists
+    [0mresponse = _create_test_recipe_job(client)[90m[39;49;00m
+[1m[31mtest_databrew/test_databrew_jobs.py[0m:59: in _create_test_recipe_job
+    [0m[94mreturn[39;49;00m client.create_recipe_job(**kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateRecipeJob operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>eac5c071-d036-4a7f-92c2-750805b9564e</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_____________ test_create_recipe_job_with_invalid_encryption_mode ______________[0m
+[1m[31mtest_databrew/test_databrew_jobs.py[0m:107: in test_create_recipe_job_with_invalid_encryption_mode
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mValidationException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'ValidationException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ValidationException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m__________ test_create_recipe_job_with_invalid_log_subscription_value __________[0m
+[1m[31mtest_databrew/test_databrew_jobs.py[0m:122: in test_create_recipe_job_with_invalid_log_subscription_value
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mValidationException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'ValidationException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ValidationException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m_____________ test_create_recipe_job_with_same_name_as_profile_job _____________[0m
+[1m[31mtest_databrew/test_databrew_jobs.py[0m:134: in test_create_recipe_job_with_same_name_as_profile_job
+    [0mresponse = _create_test_profile_job(client)[90m[39;49;00m
+[1m[31mtest_databrew/test_databrew_jobs.py[0m:32: in _create_test_profile_job
+    [0m[94mreturn[39;49;00m client.create_profile_job(**kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateProfileJob operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>f37a5a41-70e1-4ce8-8440-1fd124a08e8f</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________________________ test_describe_recipe_job ___________________________[0m
+[1m[31mtest_databrew/test_databrew_jobs.py[0m:148: in test_describe_recipe_job
+    [0mresponse = _create_test_recipe_job(client)[90m[39;49;00m
+[1m[31mtest_databrew/test_databrew_jobs.py[0m:59: in _create_test_recipe_job
+    [0m[94mreturn[39;49;00m client.create_recipe_job(**kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateRecipeJob operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>84d7c767-3722-43d2-8de8-0e99b4be7943</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m____________________ test_describe_job_that_does_not_exist _____________________[0m
+[1m[31mtest_databrew/test_databrew_jobs.py[0m:166: in test_describe_job_that_does_not_exist
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mResourceNotFoundException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'ResourceNotFoundException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ResourceNotFoundException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m_______________________ test_describe_job_with_long_name _______________________[0m
+[1m[31mtest_databrew/test_databrew_jobs.py[0m:178: in test_describe_job_with_long_name
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mValidationException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'ValidationException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ValidationException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m________________________ test_update_profile_job[name] _________________________[0m
+[1m[31mtest_databrew/test_databrew_jobs.py[0m:192: in test_update_profile_job
+    [0mresponse = _create_test_profile_job(client, job_name=job_name)[90m[39;49;00m
+[1m[31mtest_databrew/test_databrew_jobs.py[0m:32: in _create_test_profile_job
+    [0m[94mreturn[39;49;00m client.create_profile_job(**kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateProfileJob operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>98149bfe-c549-499f-8071-cfa6ca6e657c</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________________ test_update_profile_job[name with space] ___________________[0m
+[1m[31mtest_databrew/test_databrew_jobs.py[0m:192: in test_update_profile_job
+    [0mresponse = _create_test_profile_job(client, job_name=job_name)[90m[39;49;00m
+[1m[31mtest_databrew/test_databrew_jobs.py[0m:32: in _create_test_profile_job
+    [0m[94mreturn[39;49;00m client.create_profile_job(**kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateProfileJob operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>d6c6bd67-efe6-4f77-b133-a6cd0984fc52</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_________________________ test_update_recipe_job[name] _________________________[0m
+[1m[31mtest_databrew/test_databrew_jobs.py[0m:213: in test_update_recipe_job
+    [0mresponse = _create_test_recipe_job(client, job_name=job_name)[90m[39;49;00m
+[1m[31mtest_databrew/test_databrew_jobs.py[0m:59: in _create_test_recipe_job
+    [0m[94mreturn[39;49;00m client.create_recipe_job(**kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateRecipeJob operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>bd08e6c3-71d0-4036-a7e0-514e3a6af4dd</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________________ test_update_recipe_job[name with space] ____________________[0m
+[1m[31mtest_databrew/test_databrew_jobs.py[0m:213: in test_update_recipe_job
+    [0mresponse = _create_test_recipe_job(client, job_name=job_name)[90m[39;49;00m
+[1m[31mtest_databrew/test_databrew_jobs.py[0m:59: in _create_test_recipe_job
+    [0m[94mreturn[39;49;00m client.create_recipe_job(**kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateRecipeJob operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>1a1dc767-6de6-4271-b0c5-9ada09e6dff9</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m____________________ test_update_profile_job_does_not_exist ____________________[0m
+[1m[31mtest_databrew/test_databrew_jobs.py[0m:235: in test_update_profile_job_does_not_exist
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mResourceNotFoundException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'ResourceNotFoundException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ResourceNotFoundException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m____________________ test_update_recipe_job_does_not_exist _____________________[0m
+[1m[31mtest_databrew/test_databrew_jobs.py[0m:247: in test_update_recipe_job_does_not_exist
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mResourceNotFoundException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'ResourceNotFoundException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ResourceNotFoundException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m____________________________ test_delete_job[name] _____________________________[0m
+[1m[31mtest_databrew/test_databrew_jobs.py[0m:258: in test_delete_job
+    [0m_create_test_recipe_job(client, job_name=job_name)[90m[39;49;00m
+[1m[31mtest_databrew/test_databrew_jobs.py[0m:59: in _create_test_recipe_job
+    [0m[94mreturn[39;49;00m client.create_recipe_job(**kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateRecipeJob operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>dbd71ca3-b961-4596-9056-30044e40d7a5</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________________ test_delete_job[name with space] _______________________[0m
+[1m[31mtest_databrew/test_databrew_jobs.py[0m:258: in test_delete_job
+    [0m_create_test_recipe_job(client, job_name=job_name)[90m[39;49;00m
+[1m[31mtest_databrew/test_databrew_jobs.py[0m:59: in _create_test_recipe_job
+    [0m[94mreturn[39;49;00m client.create_recipe_job(**kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateRecipeJob operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>5f97f656-6499-4cc8-9e11-e7c8c8d56162</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m________________________ test_delete_job_does_not_exist ________________________[0m
+[1m[31mtest_databrew/test_databrew_jobs.py[0m:281: in test_delete_job_does_not_exist
+    [0m[94massert[39;49;00m exc.value.response[[33m"[39;49;00m[33mResponseMetadata[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mHTTPStatusCode[39;49;00m[33m"[39;49;00m] == [94m404[39;49;00m[90m[39;49;00m
+[1m[31mE   assert 400 == 404[0m
+[31m[1m________________________ test_delete_job_with_long_name ________________________[0m
+[1m[31mtest_databrew/test_databrew_jobs.py[0m:295: in test_delete_job_with_long_name
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mValidationException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'ValidationException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ValidationException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m___________________________ test_job_list_when_empty ___________________________[0m
+[1m[31mtest_databrew/test_databrew_jobs.py[0m:307: in test_job_list_when_empty
+    [0mresponse = client.list_jobs()[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the ListJobs operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>aaddcd0c-8217-45d6-b2d1-bffa224878d1</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________________ test_list_jobs_with_max_results ________________________[0m
+[1m[31mtest_databrew/test_databrew_jobs.py[0m:316: in test_list_jobs_with_max_results
+    [0m_create_test_recipe_jobs(client, [94m4[39;49;00m)[90m[39;49;00m
+[1m[31mtest_databrew/test_databrew_jobs.py[0m:64: in _create_test_recipe_jobs
+    [0m_create_test_recipe_job(client, **kwargs)[90m[39;49;00m
+[1m[31mtest_databrew/test_databrew_jobs.py[0m:59: in _create_test_recipe_job
+    [0m[94mreturn[39;49;00m client.create_recipe_job(**kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateRecipeJob operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>3c96774e-81d2-4a40-b29f-9181c23f745d</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m________________________ test_list_jobs_from_next_token ________________________[0m
+[1m[31mtest_databrew/test_databrew_jobs.py[0m:326: in test_list_jobs_from_next_token
+    [0m_create_test_recipe_jobs(client, [94m10[39;49;00m)[90m[39;49;00m
+[1m[31mtest_databrew/test_databrew_jobs.py[0m:64: in _create_test_recipe_jobs
+    [0m_create_test_recipe_job(client, **kwargs)[90m[39;49;00m
+[1m[31mtest_databrew/test_databrew_jobs.py[0m:59: in _create_test_recipe_job
+    [0m[94mreturn[39;49;00m client.create_recipe_job(**kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateRecipeJob operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>d51dc332-9834-42d6-a543-497a8b82b9f8</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_________ test_list_jobs_with_max_results_greater_than_actual_results __________[0m
+[1m[31mtest_databrew/test_databrew_jobs.py[0m:336: in test_list_jobs_with_max_results_greater_than_actual_results
+    [0m_create_test_recipe_jobs(client, [94m4[39;49;00m)[90m[39;49;00m
+[1m[31mtest_databrew/test_databrew_jobs.py[0m:64: in _create_test_recipe_jobs
+    [0m_create_test_recipe_job(client, **kwargs)[90m[39;49;00m
+[1m[31mtest_databrew/test_databrew_jobs.py[0m:59: in _create_test_recipe_job
+    [0m[94mreturn[39;49;00m client.create_recipe_job(**kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateRecipeJob operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>764e2d3e-7e44-4abc-bfeb-ee67339bd99f</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______________________ test_list_jobs_recipe_and_profile _______________________[0m
+[1m[31mtest_databrew/test_databrew_jobs.py[0m:346: in test_list_jobs_recipe_and_profile
+    [0m_create_test_recipe_jobs(client, [94m4[39;49;00m)[90m[39;49;00m
+[1m[31mtest_databrew/test_databrew_jobs.py[0m:64: in _create_test_recipe_jobs
+    [0m_create_test_recipe_job(client, **kwargs)[90m[39;49;00m
+[1m[31mtest_databrew/test_databrew_jobs.py[0m:59: in _create_test_recipe_job
+    [0m[94mreturn[39;49;00m client.create_recipe_job(**kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateRecipeJob operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>5a3b3ab9-ef09-4387-b7d0-8326d4cc447d</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______________________ test_list_jobs_dataset_name_filter ______________________[0m
+[1m[31mtest_databrew/test_databrew_jobs.py[0m:357: in test_list_jobs_dataset_name_filter
+    [0m_create_test_recipe_jobs(client, [94m3[39;49;00m, dataset_name=[33m"[39;49;00m[33mTEST[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31mtest_databrew/test_databrew_jobs.py[0m:64: in _create_test_recipe_jobs
+    [0m_create_test_recipe_job(client, **kwargs)[90m[39;49;00m
+[1m[31mtest_databrew/test_databrew_jobs.py[0m:59: in _create_test_recipe_job
+    [0m[94mreturn[39;49;00m client.create_recipe_job(**kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateRecipeJob operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>0efdecea-ffb1-48a1-902a-590788ff1ac2</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______________________ test_list_jobs_project_name_filter ______________________[0m
+[1m[31mtest_databrew/test_databrew_jobs.py[0m:371: in test_list_jobs_project_name_filter
+    [0m_create_test_recipe_jobs(client, [94m3[39;49;00m, project_name=[33m"[39;49;00m[33mTEST_PROJECT[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31mtest_databrew/test_databrew_jobs.py[0m:64: in _create_test_recipe_jobs
+    [0m_create_test_recipe_job(client, **kwargs)[90m[39;49;00m
+[1m[31mtest_databrew/test_databrew_jobs.py[0m:59: in _create_test_recipe_job
+    [0m[94mreturn[39;49;00m client.create_recipe_job(**kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateRecipeJob operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>c2321244-d0d7-456b-9175-8a2199f53147</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_____________ test_list_jobs_dataset_name_and_project_name_filter ______________[0m
+[1m[31mtest_databrew/test_databrew_jobs.py[0m:384: in test_list_jobs_dataset_name_and_project_name_filter
+    [0m_create_test_recipe_jobs(client, [94m1[39;49;00m, dataset_name=[33m"[39;49;00m[33mTEST[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31mtest_databrew/test_databrew_jobs.py[0m:64: in _create_test_recipe_jobs
+    [0m_create_test_recipe_job(client, **kwargs)[90m[39;49;00m
+[1m[31mtest_databrew/test_databrew_jobs.py[0m:59: in _create_test_recipe_job
+    [0m[94mreturn[39;49;00m client.create_recipe_job(**kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateRecipeJob operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>9d70f4b3-32d6-4395-8a6e-f60f44eb1b9a</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_________________________ test_recipe_list_when_empty __________________________[0m
+[1m[31mtest_databrew/test_databrew_recipes.py[0m:57: in test_recipe_list_when_empty
+    [0mresponse = client.list_recipes()[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the ListRecipes operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>5adeb4a5-5d4c-43be-b492-6d64118c5bf4</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m____________________ test_recipe_list_with_invalid_version _____________________[0m
+[1m[31mtest_databrew/test_databrew_recipes.py[0m:70: in test_recipe_list_with_invalid_version
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mValidationException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'ValidationException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ValidationException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m______________________ test_list_recipes_with_max_results ______________________[0m
+[1m[31mtest_databrew/test_databrew_recipes.py[0m:84: in test_list_recipes_with_max_results
+    [0m_create_test_recipes(client, [94m4[39;49;00m)[90m[39;49;00m
+[1m[31mtest_databrew/test_databrew_recipes.py[0m:50: in _create_test_recipes
+    [0m_create_test_recipe(client)[90m[39;49;00m
+[1m[31mtest_databrew/test_databrew_recipes.py[0m:20: in _create_test_recipe
+    [0m[94mreturn[39;49;00m client.create_recipe([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateRecipe operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>92f95ceb-068f-4d62-a447-072589902848</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______________________ test_list_recipes_from_next_token _______________________[0m
+[1m[31mtest_databrew/test_databrew_recipes.py[0m:93: in test_list_recipes_from_next_token
+    [0m_create_test_recipes(client, [94m10[39;49;00m)[90m[39;49;00m
+[1m[31mtest_databrew/test_databrew_recipes.py[0m:50: in _create_test_recipes
+    [0m_create_test_recipe(client)[90m[39;49;00m
+[1m[31mtest_databrew/test_databrew_recipes.py[0m:20: in _create_test_recipe
+    [0m[94mreturn[39;49;00m client.create_recipe([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateRecipe operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>8995864a-d231-4a3b-b5ad-41f5a8a6ab78</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m________ test_list_recipes_with_max_results_greater_than_actual_results ________[0m
+[1m[31mtest_databrew/test_databrew_recipes.py[0m:104: in test_list_recipes_with_max_results_greater_than_actual_results
+    [0m_create_test_recipes(client, [94m4[39;49;00m)[90m[39;49;00m
+[1m[31mtest_databrew/test_databrew_recipes.py[0m:50: in _create_test_recipes
+    [0m_create_test_recipe(client)[90m[39;49;00m
+[1m[31mtest_databrew/test_databrew_recipes.py[0m:20: in _create_test_recipe
+    [0m[94mreturn[39;49;00m client.create_recipe([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateRecipe operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>ee057ba7-72f6-4069-bd75-72b3ab260325</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_____________________ test_list_recipe_versions_no_recipe ______________________[0m
+[1m[31mtest_databrew/test_databrew_recipes.py[0m:113: in test_list_recipe_versions_no_recipe
+    [0mresponse = client.list_recipe_versions(Name=recipe_name)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the ListRecipeVersions operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>9601407e-4118-48cf-8866-065e25419e0e</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________________ test_list_recipe_versions_none_published ___________________[0m
+[1m[31mtest_databrew/test_databrew_recipes.py[0m:120: in test_list_recipe_versions_none_published
+    [0mresponse = _create_test_recipe(client)[90m[39;49;00m
+[1m[31mtest_databrew/test_databrew_recipes.py[0m:20: in _create_test_recipe
+    [0m[94mreturn[39;49;00m client.create_recipe([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateRecipe operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>29fb4392-5b0e-4b8e-b983-0a375a7f584b</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________________ test_list_recipe_versions_one_published ____________________[0m
+[1m[31mtest_databrew/test_databrew_recipes.py[0m:129: in test_list_recipe_versions_one_published
+    [0mresponse = _create_test_recipe(client)[90m[39;49;00m
+[1m[31mtest_databrew/test_databrew_recipes.py[0m:20: in _create_test_recipe
+    [0m[94mreturn[39;49;00m client.create_recipe([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateRecipe operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>2aac4b94-43f8-41b2-8e0d-24199a6a31f9</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________________ test_list_recipe_versions_two_published ____________________[0m
+[1m[31mtest_databrew/test_databrew_recipes.py[0m:140: in test_list_recipe_versions_two_published
+    [0mresponse = _create_test_recipe(client)[90m[39;49;00m
+[1m[31mtest_databrew/test_databrew_recipes.py[0m:20: in _create_test_recipe
+    [0m[94mreturn[39;49;00m client.create_recipe([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateRecipe operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>d68bbc89-5ca3-4e50-ae38-794d5b16c646</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_____________________ test_describe_recipe_latest_working ______________________[0m
+[1m[31mtest_databrew/test_databrew_recipes.py[0m:153: in test_describe_recipe_latest_working
+    [0mresponse = _create_test_recipe(client)[90m[39;49;00m
+[1m[31mtest_databrew/test_databrew_recipes.py[0m:20: in _create_test_recipe
+    [0m[94mreturn[39;49;00m client.create_recipe([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateRecipe operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>55a42028-2441-4776-aaf8-443e53830c94</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_________________ test_create_recipe_with_description_and_tags _________________[0m
+[1m[31mtest_databrew/test_databrew_recipes.py[0m:171: in test_create_recipe_with_description_and_tags
+    [0mclient.create_recipe([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateRecipe operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>81d85e96-b72a-40f7-a531-347293dbe2a3</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________________ test_describe_recipe_with_version[name] ____________________[0m
+[1m[31mtest_databrew/test_databrew_recipes.py[0m:196: in test_describe_recipe_with_version
+    [0m_create_test_recipe(client, recipe_name=name)[90m[39;49;00m
+[1m[31mtest_databrew/test_databrew_recipes.py[0m:20: in _create_test_recipe
+    [0m[94mreturn[39;49;00m client.create_recipe([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateRecipe operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>21cff5c5-4c5f-47af-93d3-25d7e5e95b6d</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______________ test_describe_recipe_with_version[name with space] ______________[0m
+[1m[31mtest_databrew/test_databrew_recipes.py[0m:196: in test_describe_recipe_with_version
+    [0m_create_test_recipe(client, recipe_name=name)[90m[39;49;00m
+[1m[31mtest_databrew/test_databrew_recipes.py[0m:20: in _create_test_recipe
+    [0m[94mreturn[39;49;00m client.create_recipe([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateRecipe operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>da5e0534-9aca-45a3-b484-112568626526</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m____________________ test_describe_recipe_latest_published _____________________[0m
+[1m[31mtest_databrew/test_databrew_recipes.py[0m:208: in test_describe_recipe_latest_published
+    [0mresponse = _create_test_recipe(client)[90m[39;49;00m
+[1m[31mtest_databrew/test_databrew_recipes.py[0m:20: in _create_test_recipe
+    [0m[94mreturn[39;49;00m client.create_recipe([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateRecipe operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>31e747c5-0f8d-4cca-aace-d7f952d75131</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m________________ test_describe_recipe_implicit_latest_published ________________[0m
+[1m[31mtest_databrew/test_databrew_recipes.py[0m:223: in test_describe_recipe_implicit_latest_published
+    [0mresponse = _create_test_recipe(client)[90m[39;49;00m
+[1m[31mtest_databrew/test_databrew_recipes.py[0m:20: in _create_test_recipe
+    [0m[94mreturn[39;49;00m client.create_recipe([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateRecipe operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>956fac92-f941-4e73-ae39-38260a6f4e4b</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________________ test_describe_recipe_that_does_not_exist ___________________[0m
+[1m[31mtest_databrew/test_databrew_recipes.py[0m:240: in test_describe_recipe_that_does_not_exist
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mResourceNotFoundException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'ResourceNotFoundException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ResourceNotFoundException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m_____________________ test_describe_recipe_with_long_name ______________________[0m
+[1m[31mtest_databrew/test_databrew_recipes.py[0m:255: in test_describe_recipe_with_long_name
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mValidationException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'ValidationException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ValidationException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m____________________ test_describe_recipe_with_long_version ____________________[0m
+[1m[31mtest_databrew/test_databrew_recipes.py[0m:270: in test_describe_recipe_with_long_version
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mValidationException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'ValidationException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ValidationException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m__________________ test_describe_recipe_with_invalid_version ___________________[0m
+[1m[31mtest_databrew/test_databrew_recipes.py[0m:286: in test_describe_recipe_with_invalid_version
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mValidationException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'ValidationException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ValidationException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m___________________________ test_update_recipe[name] ___________________________[0m
+[1m[31mtest_databrew/test_databrew_recipes.py[0m:295: in test_update_recipe
+    [0m_create_test_recipe(client, recipe_name=name)[90m[39;49;00m
+[1m[31mtest_databrew/test_databrew_recipes.py[0m:20: in _create_test_recipe
+    [0m[94mreturn[39;49;00m client.create_recipe([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateRecipe operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>12a029ba-4352-4883-9af4-72d5cee13596</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_____________________ test_update_recipe[name with space] ______________________[0m
+[1m[31mtest_databrew/test_databrew_recipes.py[0m:295: in test_update_recipe
+    [0m_create_test_recipe(client, recipe_name=name)[90m[39;49;00m
+[1m[31mtest_databrew/test_databrew_recipes.py[0m:20: in _create_test_recipe
+    [0m[94mreturn[39;49;00m client.create_recipe([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateRecipe operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>611df656-5df6-40b3-b2b2-8f82c32a14e7</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m________________________ test_update_recipe_description ________________________[0m
+[1m[31mtest_databrew/test_databrew_recipes.py[0m:335: in test_update_recipe_description
+    [0mresponse = _create_test_recipe(client)[90m[39;49;00m
+[1m[31mtest_databrew/test_databrew_recipes.py[0m:20: in _create_test_recipe
+    [0m[94mreturn[39;49;00m client.create_recipe([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateRecipe operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>a6c57dce-8cbb-4283-ae3a-18ad511f88c9</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m__________________________ test_update_recipe_invalid __________________________[0m
+[1m[31mtest_databrew/test_databrew_recipes.py[0m:360: in test_update_recipe_invalid
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mResourceNotFoundException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'ResourceNotFoundException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ResourceNotFoundException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m____________________ test_create_recipe_that_already_exists ____________________[0m
+[1m[31mtest_databrew/test_databrew_recipes.py[0m:369: in test_create_recipe_that_already_exists
+    [0mresponse = _create_test_recipe(client)[90m[39;49;00m
+[1m[31mtest_databrew/test_databrew_recipes.py[0m:20: in _create_test_recipe
+    [0m[94mreturn[39;49;00m client.create_recipe([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateRecipe operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>ea13e7a8-a825-4454-858d-329e56cd7de1</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m__________________________ test_publish_recipe[name] ___________________________[0m
+[1m[31mtest_databrew/test_databrew_recipes.py[0m:384: in test_publish_recipe
+    [0m_create_test_recipe(client, recipe_name=recipe_name)[90m[39;49;00m
+[1m[31mtest_databrew/test_databrew_recipes.py[0m:20: in _create_test_recipe
+    [0m[94mreturn[39;49;00m client.create_recipe([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateRecipe operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>6106ed82-688a-4959-bbd0-5fd7573b64b0</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_____________________ test_publish_recipe[name with space] _____________________[0m
+[1m[31mtest_databrew/test_databrew_recipes.py[0m:384: in test_publish_recipe
+    [0m_create_test_recipe(client, recipe_name=recipe_name)[90m[39;49;00m
+[1m[31mtest_databrew/test_databrew_recipes.py[0m:20: in _create_test_recipe
+    [0m[94mreturn[39;49;00m client.create_recipe([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateRecipe operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>37f19bee-12b4-4f17-9ce4-7d7b6952b7bc</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________________ test_publish_recipe_that_does_not_exist ____________________[0m
+[1m[31mtest_databrew/test_databrew_recipes.py[0m:436: in test_publish_recipe_that_does_not_exist
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mResourceNotFoundException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'ResourceNotFoundException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ResourceNotFoundException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m________________________ test_publish_long_recipe_name _________________________[0m
+[1m[31mtest_databrew/test_databrew_recipes.py[0m:448: in test_publish_long_recipe_name
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mValidationException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'ValidationException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ValidationException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m_______________________ test_delete_recipe_version[name] _______________________[0m
+[1m[31mtest_databrew/test_databrew_recipes.py[0m:462: in test_delete_recipe_version
+    [0m_create_test_recipe(client, recipe_name=recipe_name)[90m[39;49;00m
+[1m[31mtest_databrew/test_databrew_recipes.py[0m:20: in _create_test_recipe
+    [0m[94mreturn[39;49;00m client.create_recipe([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateRecipe operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>767fa10c-89c0-4ea4-ad25-8e5feeb6ba97</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_________________ test_delete_recipe_version[name with space] __________________[0m
+[1m[31mtest_databrew/test_databrew_recipes.py[0m:462: in test_delete_recipe_version
+    [0m_create_test_recipe(client, recipe_name=recipe_name)[90m[39;49;00m
+[1m[31mtest_databrew/test_databrew_recipes.py[0m:20: in _create_test_recipe
+    [0m[94mreturn[39;49;00m client.create_recipe([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateRecipe operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>d83e6f27-c80e-4cf8-a94f-1f799347334d</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_____________________ test_delete_recipe_version_published _____________________[0m
+[1m[31mtest_databrew/test_databrew_recipes.py[0m:475: in test_delete_recipe_version_published
+    [0mresponse = _create_test_recipe(client)[90m[39;49;00m
+[1m[31mtest_databrew/test_databrew_recipes.py[0m:20: in _create_test_recipe
+    [0m[94mreturn[39;49;00m client.create_recipe([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateRecipe operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>8c9d9577-8766-4c76-8bc6-89fac7925a52</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________ test_delete_recipe_version_latest_working_after_publish ____________[0m
+[1m[31mtest_databrew/test_databrew_recipes.py[0m:491: in test_delete_recipe_version_latest_working_after_publish
+    [0mresponse = _create_test_recipe(client)[90m[39;49;00m
+[1m[31mtest_databrew/test_databrew_recipes.py[0m:20: in _create_test_recipe
+    [0m[94mreturn[39;49;00m client.create_recipe([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateRecipe operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>e0ecaee6-b093-4305-9d5b-504f3303b096</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______ test_delete_recipe_version_latest_working_numeric_after_publish ________[0m
+[1m[31mtest_databrew/test_databrew_recipes.py[0m:507: in test_delete_recipe_version_latest_working_numeric_after_publish
+    [0mresponse = _create_test_recipe(client)[90m[39;49;00m
+[1m[31mtest_databrew/test_databrew_recipes.py[0m:20: in _create_test_recipe
+    [0m[94mreturn[39;49;00m client.create_recipe([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateRecipe operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>0f2dea1c-a257-48ef-814b-3f90d9f26edc</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______________ test_delete_recipe_version_invalid_version_string _______________[0m
+[1m[31mtest_databrew/test_databrew_recipes.py[0m:521: in test_delete_recipe_version_invalid_version_string
+    [0mresponse = _create_test_recipe(client)[90m[39;49;00m
+[1m[31mtest_databrew/test_databrew_recipes.py[0m:20: in _create_test_recipe
+    [0m[94mreturn[39;49;00m client.create_recipe([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateRecipe operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>0e56f8be-1e9c-4c8e-8deb-d062990ac19c</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________ test_delete_recipe_version_latest_published_not_allowed ____________[0m
+[1m[31mtest_databrew/test_databrew_recipes.py[0m:538: in test_delete_recipe_version_latest_published_not_allowed
+    [0mresponse = _create_test_recipe(client)[90m[39;49;00m
+[1m[31mtest_databrew/test_databrew_recipes.py[0m:20: in _create_test_recipe
+    [0m[94mreturn[39;49;00m client.create_recipe([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateRecipe operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>4af837fd-c611-4c4f-8302-22d12bf627d7</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______________ test_delete_recipe_version_invalid_version_length _______________[0m
+[1m[31mtest_databrew/test_databrew_recipes.py[0m:554: in test_delete_recipe_version_invalid_version_length
+    [0mresponse = _create_test_recipe(client)[90m[39;49;00m
+[1m[31mtest_databrew/test_databrew_recipes.py[0m:20: in _create_test_recipe
+    [0m[94mreturn[39;49;00m client.create_recipe([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateRecipe operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>c69a407f-6d04-42ce-a51d-fff993a809d3</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m__________________ test_delete_recipe_version_unknown_recipe ___________________[0m
+[1m[31mtest_databrew/test_databrew_recipes.py[0m:575: in test_delete_recipe_version_unknown_recipe
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mResourceNotFoundException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'ResourceNotFoundException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ResourceNotFoundException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m__________________ test_delete_recipe_version_unknown_version __________________[0m
+[1m[31mtest_databrew/test_databrew_recipes.py[0m:583: in test_delete_recipe_version_unknown_version
+    [0mresponse = _create_test_recipe(client)[90m[39;49;00m
+[1m[31mtest_databrew/test_databrew_recipes.py[0m:20: in _create_test_recipe
+    [0m[94mreturn[39;49;00m client.create_recipe([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateRecipe operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>3b9823bb-af08-42f1-84ac-91e729e47e09</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_________________________ test_ruleset_list_when_empty _________________________[0m
+[1m[31mtest_databrew/test_databrew_rulesets.py[0m:47: in test_ruleset_list_when_empty
+    [0mresponse = client.list_rulesets()[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the ListRulesets operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>b485e613-2977-4667-9da4-ce4902882165</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______________________ test_list_ruleset_with_max_results ______________________[0m
+[1m[31mtest_databrew/test_databrew_rulesets.py[0m:56: in test_list_ruleset_with_max_results
+    [0m_create_test_rulesets(client, [94m4[39;49;00m)[90m[39;49;00m
+[1m[31mtest_databrew/test_databrew_rulesets.py[0m:40: in _create_test_rulesets
+    [0m_create_test_ruleset(client)[90m[39;49;00m
+[1m[31mtest_databrew/test_databrew_rulesets.py[0m:18: in _create_test_ruleset
+    [0m[94mreturn[39;49;00m client.create_ruleset([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateRuleset operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>12252df7-7aa7-4038-94c5-45ea3a023e4d</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______________________ test_list_rulesets_from_next_token ______________________[0m
+[1m[31mtest_databrew/test_databrew_rulesets.py[0m:65: in test_list_rulesets_from_next_token
+    [0m_create_test_rulesets(client, [94m10[39;49;00m)[90m[39;49;00m
+[1m[31mtest_databrew/test_databrew_rulesets.py[0m:40: in _create_test_rulesets
+    [0m_create_test_ruleset(client)[90m[39;49;00m
+[1m[31mtest_databrew/test_databrew_rulesets.py[0m:18: in _create_test_ruleset
+    [0m[94mreturn[39;49;00m client.create_ruleset([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateRuleset operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>95940746-98c3-451f-94ef-04dfb716ea72</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______ test_list_rulesets_with_max_results_greater_than_actual_results ________[0m
+[1m[31mtest_databrew/test_databrew_rulesets.py[0m:74: in test_list_rulesets_with_max_results_greater_than_actual_results
+    [0m_create_test_rulesets(client, [94m4[39;49;00m)[90m[39;49;00m
+[1m[31mtest_databrew/test_databrew_rulesets.py[0m:40: in _create_test_rulesets
+    [0m_create_test_ruleset(client)[90m[39;49;00m
+[1m[31mtest_databrew/test_databrew_rulesets.py[0m:18: in _create_test_ruleset
+    [0m[94mreturn[39;49;00m client.create_ruleset([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateRuleset operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>026b341d-5d37-4332-8818-2090eeb83355</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m____________________________ test_describe_ruleset _____________________________[0m
+[1m[31mtest_databrew/test_databrew_rulesets.py[0m:82: in test_describe_ruleset
+    [0mresponse = _create_test_ruleset(client)[90m[39;49;00m
+[1m[31mtest_databrew/test_databrew_rulesets.py[0m:18: in _create_test_ruleset
+    [0m[94mreturn[39;49;00m client.create_ruleset([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateRuleset operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>9ff02491-c115-4656-83fa-705083015e85</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m__________________ test_describe_ruleset_that_does_not_exist ___________________[0m
+[1m[31mtest_databrew/test_databrew_rulesets.py[0m:98: in test_describe_ruleset_that_does_not_exist
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mEntityNotFoundException[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert '400' == 'EntityNotFoundException'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- EntityNotFoundException[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ 400[39;49;00m[90m[39;49;00m[0m
+[31m[1m___________________ test_create_ruleset_that_already_exists ____________________[0m
+[1m[31mtest_databrew/test_databrew_rulesets.py[0m:106: in test_create_ruleset_that_already_exists
+    [0mresponse = _create_test_ruleset(client)[90m[39;49;00m
+[1m[31mtest_databrew/test_databrew_rulesets.py[0m:18: in _create_test_ruleset
+    [0m[94mreturn[39;49;00m client.create_ruleset([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateRuleset operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>f8200f92-8096-4755-942f-fe352e788daa</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_____________________________ test_delete_ruleset ______________________________[0m
+[1m[31mtest_databrew/test_databrew_rulesets.py[0m:118: in test_delete_ruleset
+    [0mresponse = _create_test_ruleset(client)[90m[39;49;00m
+[1m[31mtest_databrew/test_databrew_rulesets.py[0m:18: in _create_test_ruleset
+    [0m[94mreturn[39;49;00m client.create_ruleset([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateRuleset operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>0d978fff-7480-4379-a8e9-3fc08753d90a</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m__________________________ test_update_ruleset[name] ___________________________[0m
+[1m[31mtest_databrew/test_databrew_rulesets.py[0m:150: in test_update_ruleset
+    [0m_create_test_ruleset(client, ruleset_name=name)[90m[39;49;00m
+[1m[31mtest_databrew/test_databrew_rulesets.py[0m:18: in _create_test_ruleset
+    [0m[94mreturn[39;49;00m client.create_ruleset([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateRuleset operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>2dfc5a34-024b-4bc7-9142-948484d019cd</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_____________________ test_update_ruleset[name with space] _____________________[0m
+[1m[31mtest_databrew/test_databrew_rulesets.py[0m:150: in test_update_ruleset
+    [0m_create_test_ruleset(client, ruleset_name=name)[90m[39;49;00m
+[1m[31mtest_databrew/test_databrew_rulesets.py[0m:18: in _create_test_ruleset
+    [0m[94mreturn[39;49;00m client.create_ruleset([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateRuleset operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>ac7fc473-1233-4f94-bb5a-0a68dbbf4a2a</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[33m=============================== warnings summary ===============================[0m
+tests/test_databrew/test_databrew_datasets.py: 12 warnings
+tests/test_databrew/test_databrew_jobs.py: 26 warnings
+tests/test_databrew/test_databrew_recipes.py: 38 warnings
+tests/test_databrew/test_databrew_rulesets.py: 10 warnings
+  /Users/lucas/.cache/fakecloud/moto/.venv/lib/python3.9/site-packages/boto3/compat.py:89: PythonDeprecationWarning: Boto3 will no longer support Python 3.9 starting April 29, 2026. To continue receiving service updates, bug fixes, and security updates please upgrade to Python 3.10 or later. More information can be found here: https://aws.amazon.com/blogs/developer/python-support-policy-updates-for-aws-sdks-and-tools/
+    warnings.warn(warning, PythonDeprecationWarning)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+[36m[1m=========================== short test summary info ============================[0m
+[31mFAILED[0m test_databrew/test_databrew_datasets.py::[1mtest_dataset_list_when_empty[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the L...
+[31mFAILED[0m test_databrew/test_databrew_datasets.py::[1mtest_list_datasets_with_max_results[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_databrew/test_databrew_datasets.py::[1mtest_list_datasets_from_next_token[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_databrew/test_databrew_datasets.py::[1mtest_list_datasets_with_max_results_greater_than_actual_results[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_databrew/test_databrew_datasets.py::[1mtest_describe_dataset[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_databrew/test_databrew_datasets.py::[1mtest_describe_dataset_that_does_not_exist[0m - AssertionError: assert '400' == 'ResourceNotFoundException'
+[31mFAILED[0m test_databrew/test_databrew_datasets.py::[1mtest_create_dataset_that_already_exists[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_databrew/test_databrew_datasets.py::[1mtest_delete_dataset[name][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_databrew/test_databrew_datasets.py::[1mtest_delete_dataset[name with space][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_databrew/test_databrew_datasets.py::[1mtest_update_dataset[name][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_databrew/test_databrew_datasets.py::[1mtest_update_dataset[name with space][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_databrew/test_databrew_datasets.py::[1mtest_update_dataset_that_does_not_exist[0m - AssertionError: assert '400' == 'ResourceNotFoundException'
+[31mFAILED[0m test_databrew/test_databrew_jobs.py::[1mtest_create_profile_job_that_already_exists[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_databrew/test_databrew_jobs.py::[1mtest_create_recipe_job_that_already_exists[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_databrew/test_databrew_jobs.py::[1mtest_create_recipe_job_with_invalid_encryption_mode[0m - AssertionError: assert '400' == 'ValidationException'
+[31mFAILED[0m test_databrew/test_databrew_jobs.py::[1mtest_create_recipe_job_with_invalid_log_subscription_value[0m - AssertionError: assert '400' == 'ValidationException'
+[31mFAILED[0m test_databrew/test_databrew_jobs.py::[1mtest_create_recipe_job_with_same_name_as_profile_job[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_databrew/test_databrew_jobs.py::[1mtest_describe_recipe_job[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_databrew/test_databrew_jobs.py::[1mtest_describe_job_that_does_not_exist[0m - AssertionError: assert '400' == 'ResourceNotFoundException'
+[31mFAILED[0m test_databrew/test_databrew_jobs.py::[1mtest_describe_job_with_long_name[0m - AssertionError: assert '400' == 'ValidationException'
+[31mFAILED[0m test_databrew/test_databrew_jobs.py::[1mtest_update_profile_job[name][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_databrew/test_databrew_jobs.py::[1mtest_update_profile_job[name with space][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_databrew/test_databrew_jobs.py::[1mtest_update_recipe_job[name][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_databrew/test_databrew_jobs.py::[1mtest_update_recipe_job[name with space][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_databrew/test_databrew_jobs.py::[1mtest_update_profile_job_does_not_exist[0m - AssertionError: assert '400' == 'ResourceNotFoundException'
+[31mFAILED[0m test_databrew/test_databrew_jobs.py::[1mtest_update_recipe_job_does_not_exist[0m - AssertionError: assert '400' == 'ResourceNotFoundException'
+[31mFAILED[0m test_databrew/test_databrew_jobs.py::[1mtest_delete_job[name][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_databrew/test_databrew_jobs.py::[1mtest_delete_job[name with space][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_databrew/test_databrew_jobs.py::[1mtest_delete_job_does_not_exist[0m - assert 400 == 404
+[31mFAILED[0m test_databrew/test_databrew_jobs.py::[1mtest_delete_job_with_long_name[0m - AssertionError: assert '400' == 'ValidationException'
+[31mFAILED[0m test_databrew/test_databrew_jobs.py::[1mtest_job_list_when_empty[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the L...
+[31mFAILED[0m test_databrew/test_databrew_jobs.py::[1mtest_list_jobs_with_max_results[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_databrew/test_databrew_jobs.py::[1mtest_list_jobs_from_next_token[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_databrew/test_databrew_jobs.py::[1mtest_list_jobs_with_max_results_greater_than_actual_results[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_databrew/test_databrew_jobs.py::[1mtest_list_jobs_recipe_and_profile[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_databrew/test_databrew_jobs.py::[1mtest_list_jobs_dataset_name_filter[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_databrew/test_databrew_jobs.py::[1mtest_list_jobs_project_name_filter[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_databrew/test_databrew_jobs.py::[1mtest_list_jobs_dataset_name_and_project_name_filter[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_databrew/test_databrew_recipes.py::[1mtest_recipe_list_when_empty[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the L...
+[31mFAILED[0m test_databrew/test_databrew_recipes.py::[1mtest_recipe_list_with_invalid_version[0m - AssertionError: assert '400' == 'ValidationException'
+[31mFAILED[0m test_databrew/test_databrew_recipes.py::[1mtest_list_recipes_with_max_results[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_databrew/test_databrew_recipes.py::[1mtest_list_recipes_from_next_token[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_databrew/test_databrew_recipes.py::[1mtest_list_recipes_with_max_results_greater_than_actual_results[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_databrew/test_databrew_recipes.py::[1mtest_list_recipe_versions_no_recipe[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the L...
+[31mFAILED[0m test_databrew/test_databrew_recipes.py::[1mtest_list_recipe_versions_none_published[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_databrew/test_databrew_recipes.py::[1mtest_list_recipe_versions_one_published[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_databrew/test_databrew_recipes.py::[1mtest_list_recipe_versions_two_published[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_databrew/test_databrew_recipes.py::[1mtest_describe_recipe_latest_working[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_databrew/test_databrew_recipes.py::[1mtest_create_recipe_with_description_and_tags[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_databrew/test_databrew_recipes.py::[1mtest_describe_recipe_with_version[name][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_databrew/test_databrew_recipes.py::[1mtest_describe_recipe_with_version[name with space][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_databrew/test_databrew_recipes.py::[1mtest_describe_recipe_latest_published[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_databrew/test_databrew_recipes.py::[1mtest_describe_recipe_implicit_latest_published[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_databrew/test_databrew_recipes.py::[1mtest_describe_recipe_that_does_not_exist[0m - AssertionError: assert '400' == 'ResourceNotFoundException'
+[31mFAILED[0m test_databrew/test_databrew_recipes.py::[1mtest_describe_recipe_with_long_name[0m - AssertionError: assert '400' == 'ValidationException'
+[31mFAILED[0m test_databrew/test_databrew_recipes.py::[1mtest_describe_recipe_with_long_version[0m - AssertionError: assert '400' == 'ValidationException'
+[31mFAILED[0m test_databrew/test_databrew_recipes.py::[1mtest_describe_recipe_with_invalid_version[0m - AssertionError: assert '400' == 'ValidationException'
+[31mFAILED[0m test_databrew/test_databrew_recipes.py::[1mtest_update_recipe[name][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_databrew/test_databrew_recipes.py::[1mtest_update_recipe[name with space][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_databrew/test_databrew_recipes.py::[1mtest_update_recipe_description[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_databrew/test_databrew_recipes.py::[1mtest_update_recipe_invalid[0m - AssertionError: assert '400' == 'ResourceNotFoundException'
+[31mFAILED[0m test_databrew/test_databrew_recipes.py::[1mtest_create_recipe_that_already_exists[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_databrew/test_databrew_recipes.py::[1mtest_publish_recipe[name][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_databrew/test_databrew_recipes.py::[1mtest_publish_recipe[name with space][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_databrew/test_databrew_recipes.py::[1mtest_publish_recipe_that_does_not_exist[0m - AssertionError: assert '400' == 'ResourceNotFoundException'
+[31mFAILED[0m test_databrew/test_databrew_recipes.py::[1mtest_publish_long_recipe_name[0m - AssertionError: assert '400' == 'ValidationException'
+[31mFAILED[0m test_databrew/test_databrew_recipes.py::[1mtest_delete_recipe_version[name][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_databrew/test_databrew_recipes.py::[1mtest_delete_recipe_version[name with space][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_databrew/test_databrew_recipes.py::[1mtest_delete_recipe_version_published[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_databrew/test_databrew_recipes.py::[1mtest_delete_recipe_version_latest_working_after_publish[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_databrew/test_databrew_recipes.py::[1mtest_delete_recipe_version_latest_working_numeric_after_publish[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_databrew/test_databrew_recipes.py::[1mtest_delete_recipe_version_invalid_version_string[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_databrew/test_databrew_recipes.py::[1mtest_delete_recipe_version_latest_published_not_allowed[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_databrew/test_databrew_recipes.py::[1mtest_delete_recipe_version_invalid_version_length[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_databrew/test_databrew_recipes.py::[1mtest_delete_recipe_version_unknown_recipe[0m - AssertionError: assert '400' == 'ResourceNotFoundException'
+[31mFAILED[0m test_databrew/test_databrew_recipes.py::[1mtest_delete_recipe_version_unknown_version[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_databrew/test_databrew_rulesets.py::[1mtest_ruleset_list_when_empty[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the L...
+[31mFAILED[0m test_databrew/test_databrew_rulesets.py::[1mtest_list_ruleset_with_max_results[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_databrew/test_databrew_rulesets.py::[1mtest_list_rulesets_from_next_token[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_databrew/test_databrew_rulesets.py::[1mtest_list_rulesets_with_max_results_greater_than_actual_results[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_databrew/test_databrew_rulesets.py::[1mtest_describe_ruleset[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_databrew/test_databrew_rulesets.py::[1mtest_describe_ruleset_that_does_not_exist[0m - AssertionError: assert '400' == 'EntityNotFoundException'
+[31mFAILED[0m test_databrew/test_databrew_rulesets.py::[1mtest_create_ruleset_that_already_exists[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_databrew/test_databrew_rulesets.py::[1mtest_delete_ruleset[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_databrew/test_databrew_rulesets.py::[1mtest_update_ruleset[name][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_databrew/test_databrew_rulesets.py::[1mtest_update_ruleset[name with space][0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31m[31m[1m86 failed[0m, [33m86 warnings[0m[31m in 2.47s[0m[0m

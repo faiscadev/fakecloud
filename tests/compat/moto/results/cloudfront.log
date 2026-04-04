@@ -1,0 +1,919 @@
+[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31m [ 84%]
+[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31m                                                            [100%][0m
+=================================== FAILURES ===================================
+[31m[1m___________________________ test_update_distribution ___________________________[0m
+[1m[31mtest_cloudfront/test_cloudfront.py[0m:20: in test_update_distribution
+    [0mdist = client.create_distribution(DistributionConfig=config)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateDistribution operation: Could not determine target service or action from request[0m
+[31m[1m___________________ test_update_distribution_no_such_distId ____________________[0m
+[1m[31mtest_cloudfront/test_cloudfront.py[0m:135: in test_update_distribution_no_such_distId
+    [0mdist = client.create_distribution(DistributionConfig=config)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateDistribution operation: Could not determine target service or action from request[0m
+[31m[1m___________________ test_update_distribution_IfMatch_not_set ___________________[0m
+[1m[31mtest_cloudfront/test_cloudfront.py[0m:163: in test_update_distribution_IfMatch_not_set
+    [0mdist = client.create_distribution(DistributionConfig=config)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateDistribution operation: Could not determine target service or action from request[0m
+[31m[1m_______________________ test_update_default_root_object ________________________[0m
+[1m[31mtest_cloudfront/test_cloudfront.py[0m:190: in test_update_default_root_object
+    [0mdist = client.create_distribution(DistributionConfig=config)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateDistribution operation: Could not determine target service or action from request[0m
+[31m[1m___________________ test_update_distribution_applies_changes ___________________[0m
+[1m[31mtest_cloudfront/test_cloudfront.py[0m:215: in test_update_distribution_applies_changes
+    [0mdist = client.create_distribution(DistributionConfig=config)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateDistribution operation: Could not determine target service or action from request[0m
+[31m[1m___________________ test_update_distribution_trusted_signers ___________________[0m
+[1m[31mtest_cloudfront/test_cloudfront.py[0m:247: in test_update_distribution_trusted_signers
+    [0mdist = client.create_distribution(DistributionConfig=config)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateDistribution operation: Could not determine target service or action from request[0m
+[31m[1m______________________ test_create_distribution_with_tags ______________________[0m
+[1m[31mtest_cloudfront/test_cloudfront_dist_tags.py[0m:15: in test_create_distribution_with_tags
+    [0mresp = client.create_distribution_with_tags(DistributionConfigWithTags=config)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateDistributionWithTags operation: Could not determine target service or action from request[0m
+[31m[1m_______________ test_create_distribution_with_tags_only_one_tag ________________[0m
+[1m[31mtest_cloudfront/test_cloudfront_dist_tags.py[0m:30: in test_create_distribution_with_tags_only_one_tag
+    [0mresp = client.create_distribution_with_tags(DistributionConfigWithTags=config)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateDistributionWithTags operation: Could not determine target service or action from request[0m
+[31m[1m__________________ test_tag_resource_on_existing_distribution __________________[0m
+[1m[31mtest_cloudfront/test_cloudfront_dist_tags.py[0m:42: in test_tag_resource_on_existing_distribution
+    [0mresp = client.create_distribution(DistributionConfig=config)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateDistribution operation: Could not determine target service or action from request[0m
+[31m[1m_________________ test_untag_resource_on_existing_distribution _________________[0m
+[1m[31mtest_cloudfront/test_cloudfront_dist_tags.py[0m:62: in test_untag_resource_on_existing_distribution
+    [0mresp = client.create_distribution(DistributionConfig=config)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateDistribution operation: Could not determine target service or action from request[0m
+[31m[1m______________ test_create_distribution_s3_minimum[us-west-1-aws] ______________[0m
+[1m[31mtest_cloudfront/test_cloudfront_distributions.py[0m:19: in test_create_distribution_s3_minimum
+    [0mdist = client.create_distribution(DistributionConfig=config)[[33m"[39;49;00m[33mDistribution[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateDistribution operation: Could not determine target service or action from request[0m
+[31m[1m____________ test_create_distribution_s3_minimum[cn-north-1-aws-cn] ____________[0m
+[1m[31mtest_cloudfront/test_cloudfront_distributions.py[0m:19: in test_create_distribution_s3_minimum
+    [0mdist = client.create_distribution(DistributionConfig=config)[[33m"[39;49;00m[33mDistribution[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateDistribution operation: Could not determine target service or action from request[0m
+[31m[1m____________________ test_create_distribution_with_logging _____________________[0m
+[1m[31mtest_cloudfront/test_cloudfront_distributions.py[0m:139: in test_create_distribution_with_logging
+    [0mresp = client.create_distribution(DistributionConfig=config)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateDistribution operation: Could not determine target service or action from request[0m
+[31m[1m____________________ test_create_distribution_with_web_acl _____________________[0m
+[1m[31mtest_cloudfront/test_cloudfront_distributions.py[0m:156: in test_create_distribution_with_web_acl
+    [0mresp = client.create_distribution(DistributionConfig=config)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateDistribution operation: Could not determine target service or action from request[0m
+[31m[1m_ test_create_distribution_with_field_level_encryption_and_real_time_log_config_arn _[0m
+[1m[31mtest_cloudfront/test_cloudfront_distributions.py[0m:170: in test_create_distribution_with_field_level_encryption_and_real_time_log_config_arn
+    [0mresp = client.create_distribution(DistributionConfig=config)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateDistribution operation: Could not determine target service or action from request[0m
+[31m[1m_________________ test_create_distribution_with_georestriction _________________[0m
+[1m[31mtest_cloudfront/test_cloudfront_distributions.py[0m:191: in test_create_distribution_with_georestriction
+    [0mresp = client.create_distribution(DistributionConfig=config)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateDistribution operation: Could not determine target service or action from request[0m
+[31m[1m________________ test_create_distribution_with_allowed_methods _________________[0m
+[1m[31mtest_cloudfront/test_cloudfront_distributions.py[0m:214: in test_create_distribution_with_allowed_methods
+    [0mdist = client.create_distribution(DistributionConfig=config)[[33m"[39;49;00m[33mDistribution[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateDistribution operation: Could not determine target service or action from request[0m
+[31m[1m____________________ test_create_distribution_with_origins _____________________[0m
+[1m[31mtest_cloudfront/test_cloudfront_distributions.py[0m:239: in test_create_distribution_with_origins
+    [0mdist = client.create_distribution(DistributionConfig=config)[[33m"[39;49;00m[33mDistribution[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateDistribution operation: Could not determine target service or action from request[0m
+[31m[1m_______________ test_create_distribution_with_custom_headers[1] ________________[0m
+[1m[31mtest_cloudfront/test_cloudfront_distributions.py[0m:261: in test_create_distribution_with_custom_headers
+    [0mdist = client.create_distribution(DistributionConfig=config)[[33m"[39;49;00m[33mDistribution[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateDistribution operation: Could not determine target service or action from request[0m
+[31m[1m_______________ test_create_distribution_with_custom_headers[2] ________________[0m
+[1m[31mtest_cloudfront/test_cloudfront_distributions.py[0m:261: in test_create_distribution_with_custom_headers
+    [0mdist = client.create_distribution(DistributionConfig=config)[[33m"[39;49;00m[33mDistribution[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateDistribution operation: Could not determine target service or action from request[0m
+[31m[1m_ test_create_distribution_with_additional_fields[aliases0-True-True-True-True] _[0m
+[1m[31mtest_cloudfront/test_cloudfront_distributions.py[0m:291: in test_create_distribution_with_additional_fields
+    [0mresp = client.create_distribution(DistributionConfig=config)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateDistribution operation: Could not determine target service or action from request[0m
+[31m[1m_ test_create_distribution_with_additional_fields[aliases0-True-True-True-False] _[0m
+[1m[31mtest_cloudfront/test_cloudfront_distributions.py[0m:291: in test_create_distribution_with_additional_fields
+    [0mresp = client.create_distribution(DistributionConfig=config)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateDistribution operation: Could not determine target service or action from request[0m
+[31m[1m_ test_create_distribution_with_additional_fields[aliases0-True-True-False-True] _[0m
+[1m[31mtest_cloudfront/test_cloudfront_distributions.py[0m:291: in test_create_distribution_with_additional_fields
+    [0mresp = client.create_distribution(DistributionConfig=config)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateDistribution operation: Could not determine target service or action from request[0m
+[31m[1m_ test_create_distribution_with_additional_fields[aliases0-True-True-False-False] _[0m
+[1m[31mtest_cloudfront/test_cloudfront_distributions.py[0m:291: in test_create_distribution_with_additional_fields
+    [0mresp = client.create_distribution(DistributionConfig=config)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateDistribution operation: Could not determine target service or action from request[0m
+[31m[1m_ test_create_distribution_with_additional_fields[aliases0-True-False-True-True] _[0m
+[1m[31mtest_cloudfront/test_cloudfront_distributions.py[0m:291: in test_create_distribution_with_additional_fields
+    [0mresp = client.create_distribution(DistributionConfig=config)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateDistribution operation: Could not determine target service or action from request[0m
+[31m[1m_ test_create_distribution_with_additional_fields[aliases0-True-False-True-False] _[0m
+[1m[31mtest_cloudfront/test_cloudfront_distributions.py[0m:291: in test_create_distribution_with_additional_fields
+    [0mresp = client.create_distribution(DistributionConfig=config)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateDistribution operation: Could not determine target service or action from request[0m
+[31m[1m_ test_create_distribution_with_additional_fields[aliases0-True-False-False-True] _[0m
+[1m[31mtest_cloudfront/test_cloudfront_distributions.py[0m:291: in test_create_distribution_with_additional_fields
+    [0mresp = client.create_distribution(DistributionConfig=config)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateDistribution operation: Could not determine target service or action from request[0m
+[31m[1m_ test_create_distribution_with_additional_fields[aliases0-True-False-False-False] _[0m
+[1m[31mtest_cloudfront/test_cloudfront_distributions.py[0m:291: in test_create_distribution_with_additional_fields
+    [0mresp = client.create_distribution(DistributionConfig=config)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateDistribution operation: Could not determine target service or action from request[0m
+[31m[1m_ test_create_distribution_with_additional_fields[aliases0-False-True-True-True] _[0m
+[1m[31mtest_cloudfront/test_cloudfront_distributions.py[0m:291: in test_create_distribution_with_additional_fields
+    [0mresp = client.create_distribution(DistributionConfig=config)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateDistribution operation: Could not determine target service or action from request[0m
+[31m[1m_ test_create_distribution_with_additional_fields[aliases0-False-True-True-False] _[0m
+[1m[31mtest_cloudfront/test_cloudfront_distributions.py[0m:291: in test_create_distribution_with_additional_fields
+    [0mresp = client.create_distribution(DistributionConfig=config)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateDistribution operation: Could not determine target service or action from request[0m
+[31m[1m_ test_create_distribution_with_additional_fields[aliases0-False-True-False-True] _[0m
+[1m[31mtest_cloudfront/test_cloudfront_distributions.py[0m:291: in test_create_distribution_with_additional_fields
+    [0mresp = client.create_distribution(DistributionConfig=config)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateDistribution operation: Could not determine target service or action from request[0m
+[31m[1m_ test_create_distribution_with_additional_fields[aliases0-False-True-False-False] _[0m
+[1m[31mtest_cloudfront/test_cloudfront_distributions.py[0m:291: in test_create_distribution_with_additional_fields
+    [0mresp = client.create_distribution(DistributionConfig=config)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateDistribution operation: Could not determine target service or action from request[0m
+[31m[1m_ test_create_distribution_with_additional_fields[aliases0-False-False-True-True] _[0m
+[1m[31mtest_cloudfront/test_cloudfront_distributions.py[0m:291: in test_create_distribution_with_additional_fields
+    [0mresp = client.create_distribution(DistributionConfig=config)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateDistribution operation: Could not determine target service or action from request[0m
+[31m[1m_ test_create_distribution_with_additional_fields[aliases0-False-False-True-False] _[0m
+[1m[31mtest_cloudfront/test_cloudfront_distributions.py[0m:291: in test_create_distribution_with_additional_fields
+    [0mresp = client.create_distribution(DistributionConfig=config)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateDistribution operation: Could not determine target service or action from request[0m
+[31m[1m_ test_create_distribution_with_additional_fields[aliases0-False-False-False-True] _[0m
+[1m[31mtest_cloudfront/test_cloudfront_distributions.py[0m:291: in test_create_distribution_with_additional_fields
+    [0mresp = client.create_distribution(DistributionConfig=config)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateDistribution operation: Could not determine target service or action from request[0m
+[31m[1m_ test_create_distribution_with_additional_fields[aliases0-False-False-False-False] _[0m
+[1m[31mtest_cloudfront/test_cloudfront_distributions.py[0m:291: in test_create_distribution_with_additional_fields
+    [0mresp = client.create_distribution(DistributionConfig=config)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateDistribution operation: Could not determine target service or action from request[0m
+[31m[1m_ test_create_distribution_with_additional_fields[aliases1-True-True-True-True] _[0m
+[1m[31mtest_cloudfront/test_cloudfront_distributions.py[0m:291: in test_create_distribution_with_additional_fields
+    [0mresp = client.create_distribution(DistributionConfig=config)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateDistribution operation: Could not determine target service or action from request[0m
+[31m[1m_ test_create_distribution_with_additional_fields[aliases1-True-True-True-False] _[0m
+[1m[31mtest_cloudfront/test_cloudfront_distributions.py[0m:291: in test_create_distribution_with_additional_fields
+    [0mresp = client.create_distribution(DistributionConfig=config)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateDistribution operation: Could not determine target service or action from request[0m
+[31m[1m_ test_create_distribution_with_additional_fields[aliases1-True-True-False-True] _[0m
+[1m[31mtest_cloudfront/test_cloudfront_distributions.py[0m:291: in test_create_distribution_with_additional_fields
+    [0mresp = client.create_distribution(DistributionConfig=config)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateDistribution operation: Could not determine target service or action from request[0m
+[31m[1m_ test_create_distribution_with_additional_fields[aliases1-True-True-False-False] _[0m
+[1m[31mtest_cloudfront/test_cloudfront_distributions.py[0m:291: in test_create_distribution_with_additional_fields
+    [0mresp = client.create_distribution(DistributionConfig=config)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateDistribution operation: Could not determine target service or action from request[0m
+[31m[1m_ test_create_distribution_with_additional_fields[aliases1-True-False-True-True] _[0m
+[1m[31mtest_cloudfront/test_cloudfront_distributions.py[0m:291: in test_create_distribution_with_additional_fields
+    [0mresp = client.create_distribution(DistributionConfig=config)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateDistribution operation: Could not determine target service or action from request[0m
+[31m[1m_ test_create_distribution_with_additional_fields[aliases1-True-False-True-False] _[0m
+[1m[31mtest_cloudfront/test_cloudfront_distributions.py[0m:291: in test_create_distribution_with_additional_fields
+    [0mresp = client.create_distribution(DistributionConfig=config)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateDistribution operation: Could not determine target service or action from request[0m
+[31m[1m_ test_create_distribution_with_additional_fields[aliases1-True-False-False-True] _[0m
+[1m[31mtest_cloudfront/test_cloudfront_distributions.py[0m:291: in test_create_distribution_with_additional_fields
+    [0mresp = client.create_distribution(DistributionConfig=config)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateDistribution operation: Could not determine target service or action from request[0m
+[31m[1m_ test_create_distribution_with_additional_fields[aliases1-True-False-False-False] _[0m
+[1m[31mtest_cloudfront/test_cloudfront_distributions.py[0m:291: in test_create_distribution_with_additional_fields
+    [0mresp = client.create_distribution(DistributionConfig=config)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateDistribution operation: Could not determine target service or action from request[0m
+[31m[1m_ test_create_distribution_with_additional_fields[aliases1-False-True-True-True] _[0m
+[1m[31mtest_cloudfront/test_cloudfront_distributions.py[0m:291: in test_create_distribution_with_additional_fields
+    [0mresp = client.create_distribution(DistributionConfig=config)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateDistribution operation: Could not determine target service or action from request[0m
+[31m[1m_ test_create_distribution_with_additional_fields[aliases1-False-True-True-False] _[0m
+[1m[31mtest_cloudfront/test_cloudfront_distributions.py[0m:291: in test_create_distribution_with_additional_fields
+    [0mresp = client.create_distribution(DistributionConfig=config)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateDistribution operation: Could not determine target service or action from request[0m
+[31m[1m_ test_create_distribution_with_additional_fields[aliases1-False-True-False-True] _[0m
+[1m[31mtest_cloudfront/test_cloudfront_distributions.py[0m:291: in test_create_distribution_with_additional_fields
+    [0mresp = client.create_distribution(DistributionConfig=config)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateDistribution operation: Could not determine target service or action from request[0m
+[31m[1m_ test_create_distribution_with_additional_fields[aliases1-False-True-False-False] _[0m
+[1m[31mtest_cloudfront/test_cloudfront_distributions.py[0m:291: in test_create_distribution_with_additional_fields
+    [0mresp = client.create_distribution(DistributionConfig=config)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateDistribution operation: Could not determine target service or action from request[0m
+[31m[1m_ test_create_distribution_with_additional_fields[aliases1-False-False-True-True] _[0m
+[1m[31mtest_cloudfront/test_cloudfront_distributions.py[0m:291: in test_create_distribution_with_additional_fields
+    [0mresp = client.create_distribution(DistributionConfig=config)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateDistribution operation: Could not determine target service or action from request[0m
+[31m[1m_ test_create_distribution_with_additional_fields[aliases1-False-False-True-False] _[0m
+[1m[31mtest_cloudfront/test_cloudfront_distributions.py[0m:291: in test_create_distribution_with_additional_fields
+    [0mresp = client.create_distribution(DistributionConfig=config)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateDistribution operation: Could not determine target service or action from request[0m
+[31m[1m_ test_create_distribution_with_additional_fields[aliases1-False-False-False-True] _[0m
+[1m[31mtest_cloudfront/test_cloudfront_distributions.py[0m:291: in test_create_distribution_with_additional_fields
+    [0mresp = client.create_distribution(DistributionConfig=config)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateDistribution operation: Could not determine target service or action from request[0m
+[31m[1m_ test_create_distribution_with_additional_fields[aliases1-False-False-False-False] _[0m
+[1m[31mtest_cloudfront/test_cloudfront_distributions.py[0m:291: in test_create_distribution_with_additional_fields
+    [0mresp = client.create_distribution(DistributionConfig=config)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateDistribution operation: Could not determine target service or action from request[0m
+[31m[1m____________________ test_create_distribution_returns_etag _____________________[0m
+[1m[31mtest_cloudfront/test_cloudfront_distributions.py[0m:314: in test_create_distribution_returns_etag
+    [0mresp = client.create_distribution(DistributionConfig=config)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateDistribution operation: Could not determine target service or action from request[0m
+[31m[1m____________ test_create_distribution_needs_unique_caller_reference ____________[0m
+[1m[31mtest_cloudfront/test_cloudfront_distributions.py[0m:331: in test_create_distribution_needs_unique_caller_reference
+    [0mdist1 = client.create_distribution(DistributionConfig=config)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateDistribution operation: Could not determine target service or action from request[0m
+[31m[1m__________ test_get_distribution_config_with_unknown_distribution_id ___________[0m
+[1m[31mtest_cloudfront/test_cloudfront_distributions.py[0m:362: in test_get_distribution_config_with_unknown_distribution_id
+    [0m[94massert[39;49;00m metadata[[33m"[39;49;00m[33mHTTPStatusCode[39;49;00m[33m"[39;49;00m] == [94m404[39;49;00m[90m[39;49;00m
+[1m[31mE   assert 400 == 404[0m
+[31m[1m____________ test_get_distribution_config_with_mismatched_originid _____________[0m
+[1m[31mtest_cloudfront/test_cloudfront_distributions.py[0m:389: in test_get_distribution_config_with_mismatched_originid
+    [0m[94massert[39;49;00m metadata[[33m"[39;49;00m[33mHTTPStatusCode[39;49;00m[33m"[39;49;00m] == [94m404[39;49;00m[90m[39;49;00m
+[1m[31mE   assert 400 == 404[0m
+[31m[1m_______________ test_create_distribution_with_invalid_s3_bucket ________________[0m
+[1m[31mtest_cloudfront/test_cloudfront_distributions.py[0m:427: in test_create_distribution_with_invalid_s3_bucket
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mInvalidArgument[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'MissingAction' == 'InvalidArgument'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- InvalidArgument[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ MissingAction[39;49;00m[90m[39;49;00m[0m
+[31m[1m____________ test_create_distribution_custom_config[ssl_protocols0] ____________[0m
+[1m[31mtest_cloudfront/test_cloudfront_distributions.py[0m:440: in test_create_distribution_custom_config
+    [0mdist = client.create_distribution(DistributionConfig=config)[[33m"[39;49;00m[33mDistribution[39;49;00m[33m"[39;49;00m][[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateDistribution operation: Could not determine target service or action from request[0m
+[31m[1m____________ test_create_distribution_custom_config[ssl_protocols1] ____________[0m
+[1m[31mtest_cloudfront/test_cloudfront_distributions.py[0m:440: in test_create_distribution_custom_config
+    [0mdist = client.create_distribution(DistributionConfig=config)[[33m"[39;49;00m[33mDistribution[39;49;00m[33m"[39;49;00m][[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateDistribution operation: Could not determine target service or action from request[0m
+[31m[1m________________ test_create_distribution_minimal_custom_config ________________[0m
+[1m[31mtest_cloudfront/test_cloudfront_distributions.py[0m:462: in test_create_distribution_minimal_custom_config
+    [0mdist = client.create_distribution(DistributionConfig=config)[[33m"[39;49;00m[33mDistribution[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateDistribution operation: Could not determine target service or action from request[0m
+[31m[1m_____________________ test_list_distributions_without_any ______________________[0m
+[1m[31mtest_cloudfront/test_cloudfront_distributions.py[0m:483: in test_list_distributions_without_any
+    [0mdlist = client.list_distributions()[[33m"[39;49;00m[33mDistributionList[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the ListDistributions operation: Could not determine target service or action from request[0m
+[31m[1m___________________________ test_list_distributions ____________________________[0m
+[1m[31mtest_cloudfront/test_cloudfront_distributions.py[0m:496: in test_list_distributions
+    [0mdist1 = client.create_distribution(DistributionConfig=config)[[33m"[39;49;00m[33mDistribution[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateDistribution operation: Could not determine target service or action from request[0m
+[31m[1m____________________________ test_get_distribution _____________________________[0m
+[1m[31mtest_cloudfront/test_cloudfront_distributions.py[0m:521: in test_get_distribution
+    [0mdist = client.create_distribution(DistributionConfig=config)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateDistribution operation: Could not determine target service or action from request[0m
+[31m[1m________________________ test_get_unknown_distribution _________________________[0m
+[1m[31mtest_cloudfront/test_cloudfront_distributions.py[0m:546: in test_get_unknown_distribution
+    [0m[94massert[39;49;00m metadata[[33m"[39;49;00m[33mHTTPStatusCode[39;49;00m[33m"[39;49;00m] == [94m404[39;49;00m[90m[39;49;00m
+[1m[31mE   assert 400 == 404[0m
+[31m[1m_______________________ test_delete_unknown_distribution _______________________[0m
+[1m[31mtest_cloudfront/test_cloudfront_distributions.py[0m:560: in test_delete_unknown_distribution
+    [0m[94massert[39;49;00m metadata[[33m"[39;49;00m[33mHTTPStatusCode[39;49;00m[33m"[39;49;00m] == [94m404[39;49;00m[90m[39;49;00m
+[1m[31mE   assert 400 == 404[0m
+[31m[1m___________________ test_delete_distribution_without_ifmatch ___________________[0m
+[1m[31mtest_cloudfront/test_cloudfront_distributions.py[0m:577: in test_delete_distribution_without_ifmatch
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mInvalidIfMatchVersion[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'MissingAction' == 'InvalidIfMatchVersion'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- InvalidIfMatchVersion[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ MissingAction[39;49;00m[90m[39;49;00m[0m
+[31m[1m_____________________ test_delete_distribution_random_etag _____________________[0m
+[1m[31mtest_cloudfront/test_cloudfront_distributions.py[0m:594: in test_delete_distribution_random_etag
+    [0mdist1 = client.create_distribution(DistributionConfig=config)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateDistribution operation: Could not determine target service or action from request[0m
+[31m[1m_________________________ test_get_distribution_config _________________________[0m
+[1m[31mtest_cloudfront/test_cloudfront_distributions.py[0m:611: in test_get_distribution_config
+    [0mdist = client.create_distribution(DistributionConfig=config)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateDistribution operation: Could not determine target service or action from request[0m
+[31m[1m__________________________ test_add_new_gateway_basic __________________________[0m
+[1m[31mtest_cloudfront/test_cloudfront_distributions.py[0m:697: in test_add_new_gateway_basic
+    [0mdistribution_id = cloudfront_client_mock.create_distribution([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateDistribution operation: Could not determine target service or action from request[0m
+[31m[1m__________________________ test_rgtapi_get_tag_values __________________________[0m
+[1m[31mtest_cloudfront/test_cloudfront_integration.py[0m:14: in test_rgtapi_get_tag_values
+    [0mclient.create_distribution_with_tags([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateDistributionWithTags operation: Could not determine target service or action from request[0m
+[31m[1m__________________________ test_rgtapi_tag_resources ___________________________[0m
+[1m[31mtest_cloudfront/test_cloudfront_integration.py[0m:34: in test_rgtapi_tag_resources
+    [0mdist = client.create_distribution_with_tags([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateDistributionWithTags operation: Could not determine target service or action from request[0m
+[31m[1m_________________________ test_rgtapi_untag_resources __________________________[0m
+[1m[31mtest_cloudfront/test_cloudfront_integration.py[0m:56: in test_rgtapi_untag_resources
+    [0mdist = client.create_distribution_with_tags([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateDistributionWithTags operation: Could not determine target service or action from request[0m
+[31m[1m__________________ test_create_invalidation_with_single_path ___________________[0m
+[1m[31mtest_cloudfront/test_cloudfront_invalidation.py[0m:14: in test_create_invalidation_with_single_path
+    [0mresp = client.create_distribution(DistributionConfig=config)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateDistribution operation: Could not determine target service or action from request[0m
+[31m[1m_________________ test_create_invalidation_with_multiple_paths _________________[0m
+[1m[31mtest_cloudfront/test_cloudfront_invalidation.py[0m:41: in test_create_invalidation_with_multiple_paths
+    [0mresp = client.create_distribution(DistributionConfig=config)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateDistribution operation: Could not determine target service or action from request[0m
+[31m[1m___________________________ test_list_invalidations ____________________________[0m
+[1m[31mtest_cloudfront/test_cloudfront_invalidation.py[0m:68: in test_list_invalidations
+    [0mresp = client.create_distribution(DistributionConfig=config)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateDistribution operation: Could not determine target service or action from request[0m
+[31m[1m_____________________ test_list_invalidations__no_entries ______________________[0m
+[1m[31mtest_cloudfront/test_cloudfront_invalidation.py[0m:95: in test_list_invalidations__no_entries
+    [0mresp = client.list_invalidations(DistributionId=[33m"[39;49;00m[33mSPAM[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the ListInvalidations operation: Could not determine target service or action from request[0m
+[31m[1m____________________________ test_get_invalidation _____________________________[0m
+[1m[31mtest_cloudfront/test_cloudfront_invalidation.py[0m:108: in test_get_invalidation
+    [0mresp = client.create_distribution(DistributionConfig=config)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateDistribution operation: Could not determine target service or action from request[0m
+[31m[1m_____________________ test_get_invalidation_dist_not_found _____________________[0m
+[1m[31mtest_cloudfront/test_cloudfront_invalidation.py[0m:135: in test_get_invalidation_dist_not_found
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mNoSuchDistribution[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'MissingAction' == 'NoSuchDistribution'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- NoSuchDistribution[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ MissingAction[39;49;00m[90m[39;49;00m[0m
+[31m[1m______________________ test_get_invalidation_id_not_found ______________________[0m
+[1m[31mtest_cloudfront/test_cloudfront_invalidation.py[0m:143: in test_get_invalidation_id_not_found
+    [0mresp = client.create_distribution(DistributionConfig=config)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateDistribution operation: Could not determine target service or action from request[0m
+[31m[1m____________________________ test_create_public_key ____________________________[0m
+[1m[31mtest_cloudfront/test_cloudfront_keys.py[0m:31: in test_create_public_key
+    [0mresp = client.create_public_key(PublicKeyConfig=public_key_config)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreatePublicKey operation: Could not determine target service or action from request[0m
+[31m[1m____________________________ test_list_public_keys _____________________________[0m
+[1m[31mtest_cloudfront/test_cloudfront_keys.py[0m:60: in test_list_public_keys
+    [0mkey_list = client.list_public_keys()[[33m"[39;49;00m[33mPublicKeyList[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the ListPublicKeys operation: Could not determine target service or action from request[0m
+[31m[1m_________________________ test_create_public_key_group _________________________[0m
+[1m[31mtest_cloudfront/test_cloudfront_keys.py[0m:90: in test_create_public_key_group
+    [0mkey_id1 = client.create_public_key([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreatePublicKey operation: Could not determine target service or action from request[0m
+[31m[1m___________________ test_create_distribution_with_key_groups ___________________[0m
+[1m[31mtest_cloudfront/test_cloudfront_keys.py[0m:128: in test_create_distribution_with_key_groups
+    [0mkey_id1 = client.create_public_key([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreatePublicKey operation: Could not determine target service or action from request[0m
+[31m[1m______________________ test_create_origin_access_control _______________________[0m
+[1m[31mtest_cloudfront/test_cloudfront_oac.py[0m:12: in test_create_origin_access_control
+    [0moac_list = cf.list_origin_access_controls()[[33m"[39;49;00m[33mOriginAccessControlList[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the ListOriginAccessControls operation: Could not determine target service or action from request[0m
+[31m[1m______________________ test_update_origin_access_control _______________________[0m
+[1m[31mtest_cloudfront/test_cloudfront_oac.py[0m:59: in test_update_origin_access_control
+    [0mresp = cf.create_origin_access_control(OriginAccessControlConfig=oac_input)[[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateOriginAccessControl operation: Could not determine target service or action from request[0m
+[33m=============================== warnings summary ===============================[0m
+tests/test_cloudfront/test_cloudfront.py: 6 warnings
+tests/test_cloudfront/test_cloudfront_dist_tags.py: 4 warnings
+tests/test_cloudfront/test_cloudfront_distributions.py: 59 warnings
+tests/test_cloudfront/test_cloudfront_integration.py: 3 warnings
+tests/test_cloudfront/test_cloudfront_invalidation.py: 7 warnings
+tests/test_cloudfront/test_cloudfront_keys.py: 4 warnings
+tests/test_cloudfront/test_cloudfront_oac.py: 2 warnings
+  /Users/lucas/.cache/fakecloud/moto/.venv/lib/python3.9/site-packages/boto3/compat.py:89: PythonDeprecationWarning: Boto3 will no longer support Python 3.9 starting April 29, 2026. To continue receiving service updates, bug fixes, and security updates please upgrade to Python 3.10 or later. More information can be found here: https://aws.amazon.com/blogs/developer/python-support-policy-updates-for-aws-sdks-and-tools/
+    warnings.warn(warning, PythonDeprecationWarning)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+[36m[1m=========================== short test summary info ============================[0m
+[31mFAILED[0m test_cloudfront/test_cloudfront.py::[1mtest_update_distribution[0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_cloudfront/test_cloudfront.py::[1mtest_update_distribution_no_such_distId[0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_cloudfront/test_cloudfront.py::[1mtest_update_distribution_IfMatch_not_set[0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_cloudfront/test_cloudfront.py::[1mtest_update_default_root_object[0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_cloudfront/test_cloudfront.py::[1mtest_update_distribution_applies_changes[0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_cloudfront/test_cloudfront.py::[1mtest_update_distribution_trusted_signers[0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_cloudfront/test_cloudfront_dist_tags.py::[1mtest_create_distribution_with_tags[0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_cloudfront/test_cloudfront_dist_tags.py::[1mtest_create_distribution_with_tags_only_one_tag[0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_cloudfront/test_cloudfront_dist_tags.py::[1mtest_tag_resource_on_existing_distribution[0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_cloudfront/test_cloudfront_dist_tags.py::[1mtest_untag_resource_on_existing_distribution[0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_cloudfront/test_cloudfront_distributions.py::[1mtest_create_distribution_s3_minimum[us-west-1-aws][0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_cloudfront/test_cloudfront_distributions.py::[1mtest_create_distribution_s3_minimum[cn-north-1-aws-cn][0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_cloudfront/test_cloudfront_distributions.py::[1mtest_create_distribution_with_logging[0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_cloudfront/test_cloudfront_distributions.py::[1mtest_create_distribution_with_web_acl[0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_cloudfront/test_cloudfront_distributions.py::[1mtest_create_distribution_with_field_level_encryption_and_real_time_log_config_arn[0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_cloudfront/test_cloudfront_distributions.py::[1mtest_create_distribution_with_georestriction[0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_cloudfront/test_cloudfront_distributions.py::[1mtest_create_distribution_with_allowed_methods[0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_cloudfront/test_cloudfront_distributions.py::[1mtest_create_distribution_with_origins[0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_cloudfront/test_cloudfront_distributions.py::[1mtest_create_distribution_with_custom_headers[1][0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_cloudfront/test_cloudfront_distributions.py::[1mtest_create_distribution_with_custom_headers[2][0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_cloudfront/test_cloudfront_distributions.py::[1mtest_create_distribution_with_additional_fields[aliases0-True-True-True-True][0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_cloudfront/test_cloudfront_distributions.py::[1mtest_create_distribution_with_additional_fields[aliases0-True-True-True-False][0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_cloudfront/test_cloudfront_distributions.py::[1mtest_create_distribution_with_additional_fields[aliases0-True-True-False-True][0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_cloudfront/test_cloudfront_distributions.py::[1mtest_create_distribution_with_additional_fields[aliases0-True-True-False-False][0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_cloudfront/test_cloudfront_distributions.py::[1mtest_create_distribution_with_additional_fields[aliases0-True-False-True-True][0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_cloudfront/test_cloudfront_distributions.py::[1mtest_create_distribution_with_additional_fields[aliases0-True-False-True-False][0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_cloudfront/test_cloudfront_distributions.py::[1mtest_create_distribution_with_additional_fields[aliases0-True-False-False-True][0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_cloudfront/test_cloudfront_distributions.py::[1mtest_create_distribution_with_additional_fields[aliases0-True-False-False-False][0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_cloudfront/test_cloudfront_distributions.py::[1mtest_create_distribution_with_additional_fields[aliases0-False-True-True-True][0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_cloudfront/test_cloudfront_distributions.py::[1mtest_create_distribution_with_additional_fields[aliases0-False-True-True-False][0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_cloudfront/test_cloudfront_distributions.py::[1mtest_create_distribution_with_additional_fields[aliases0-False-True-False-True][0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_cloudfront/test_cloudfront_distributions.py::[1mtest_create_distribution_with_additional_fields[aliases0-False-True-False-False][0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_cloudfront/test_cloudfront_distributions.py::[1mtest_create_distribution_with_additional_fields[aliases0-False-False-True-True][0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_cloudfront/test_cloudfront_distributions.py::[1mtest_create_distribution_with_additional_fields[aliases0-False-False-True-False][0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_cloudfront/test_cloudfront_distributions.py::[1mtest_create_distribution_with_additional_fields[aliases0-False-False-False-True][0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_cloudfront/test_cloudfront_distributions.py::[1mtest_create_distribution_with_additional_fields[aliases0-False-False-False-False][0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_cloudfront/test_cloudfront_distributions.py::[1mtest_create_distribution_with_additional_fields[aliases1-True-True-True-True][0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_cloudfront/test_cloudfront_distributions.py::[1mtest_create_distribution_with_additional_fields[aliases1-True-True-True-False][0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_cloudfront/test_cloudfront_distributions.py::[1mtest_create_distribution_with_additional_fields[aliases1-True-True-False-True][0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_cloudfront/test_cloudfront_distributions.py::[1mtest_create_distribution_with_additional_fields[aliases1-True-True-False-False][0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_cloudfront/test_cloudfront_distributions.py::[1mtest_create_distribution_with_additional_fields[aliases1-True-False-True-True][0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_cloudfront/test_cloudfront_distributions.py::[1mtest_create_distribution_with_additional_fields[aliases1-True-False-True-False][0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_cloudfront/test_cloudfront_distributions.py::[1mtest_create_distribution_with_additional_fields[aliases1-True-False-False-True][0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_cloudfront/test_cloudfront_distributions.py::[1mtest_create_distribution_with_additional_fields[aliases1-True-False-False-False][0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_cloudfront/test_cloudfront_distributions.py::[1mtest_create_distribution_with_additional_fields[aliases1-False-True-True-True][0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_cloudfront/test_cloudfront_distributions.py::[1mtest_create_distribution_with_additional_fields[aliases1-False-True-True-False][0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_cloudfront/test_cloudfront_distributions.py::[1mtest_create_distribution_with_additional_fields[aliases1-False-True-False-True][0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_cloudfront/test_cloudfront_distributions.py::[1mtest_create_distribution_with_additional_fields[aliases1-False-True-False-False][0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_cloudfront/test_cloudfront_distributions.py::[1mtest_create_distribution_with_additional_fields[aliases1-False-False-True-True][0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_cloudfront/test_cloudfront_distributions.py::[1mtest_create_distribution_with_additional_fields[aliases1-False-False-True-False][0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_cloudfront/test_cloudfront_distributions.py::[1mtest_create_distribution_with_additional_fields[aliases1-False-False-False-True][0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_cloudfront/test_cloudfront_distributions.py::[1mtest_create_distribution_with_additional_fields[aliases1-False-False-False-False][0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_cloudfront/test_cloudfront_distributions.py::[1mtest_create_distribution_returns_etag[0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_cloudfront/test_cloudfront_distributions.py::[1mtest_create_distribution_needs_unique_caller_reference[0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_cloudfront/test_cloudfront_distributions.py::[1mtest_get_distribution_config_with_unknown_distribution_id[0m - assert 400 == 404
+[31mFAILED[0m test_cloudfront/test_cloudfront_distributions.py::[1mtest_get_distribution_config_with_mismatched_originid[0m - assert 400 == 404
+[31mFAILED[0m test_cloudfront/test_cloudfront_distributions.py::[1mtest_create_distribution_with_invalid_s3_bucket[0m - AssertionError: assert 'MissingAction' == 'InvalidArgument'
+[31mFAILED[0m test_cloudfront/test_cloudfront_distributions.py::[1mtest_create_distribution_custom_config[ssl_protocols0][0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_cloudfront/test_cloudfront_distributions.py::[1mtest_create_distribution_custom_config[ssl_protocols1][0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_cloudfront/test_cloudfront_distributions.py::[1mtest_create_distribution_minimal_custom_config[0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_cloudfront/test_cloudfront_distributions.py::[1mtest_list_distributions_without_any[0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_cloudfront/test_cloudfront_distributions.py::[1mtest_list_distributions[0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_cloudfront/test_cloudfront_distributions.py::[1mtest_get_distribution[0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_cloudfront/test_cloudfront_distributions.py::[1mtest_get_unknown_distribution[0m - assert 400 == 404
+[31mFAILED[0m test_cloudfront/test_cloudfront_distributions.py::[1mtest_delete_unknown_distribution[0m - assert 400 == 404
+[31mFAILED[0m test_cloudfront/test_cloudfront_distributions.py::[1mtest_delete_distribution_without_ifmatch[0m - AssertionError: assert 'MissingAction' == 'InvalidIfMatchVersion'
+[31mFAILED[0m test_cloudfront/test_cloudfront_distributions.py::[1mtest_delete_distribution_random_etag[0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_cloudfront/test_cloudfront_distributions.py::[1mtest_get_distribution_config[0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_cloudfront/test_cloudfront_distributions.py::[1mtest_add_new_gateway_basic[0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_cloudfront/test_cloudfront_integration.py::[1mtest_rgtapi_get_tag_values[0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_cloudfront/test_cloudfront_integration.py::[1mtest_rgtapi_tag_resources[0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_cloudfront/test_cloudfront_integration.py::[1mtest_rgtapi_untag_resources[0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_cloudfront/test_cloudfront_invalidation.py::[1mtest_create_invalidation_with_single_path[0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_cloudfront/test_cloudfront_invalidation.py::[1mtest_create_invalidation_with_multiple_paths[0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_cloudfront/test_cloudfront_invalidation.py::[1mtest_list_invalidations[0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_cloudfront/test_cloudfront_invalidation.py::[1mtest_list_invalidations__no_entries[0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_cloudfront/test_cloudfront_invalidation.py::[1mtest_get_invalidation[0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_cloudfront/test_cloudfront_invalidation.py::[1mtest_get_invalidation_dist_not_found[0m - AssertionError: assert 'MissingAction' == 'NoSuchDistribution'
+[31mFAILED[0m test_cloudfront/test_cloudfront_invalidation.py::[1mtest_get_invalidation_id_not_found[0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_cloudfront/test_cloudfront_keys.py::[1mtest_create_public_key[0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_cloudfront/test_cloudfront_keys.py::[1mtest_list_public_keys[0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_cloudfront/test_cloudfront_keys.py::[1mtest_create_public_key_group[0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_cloudfront/test_cloudfront_keys.py::[1mtest_create_distribution_with_key_groups[0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_cloudfront/test_cloudfront_oac.py::[1mtest_create_origin_access_control[0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_cloudfront/test_cloudfront_oac.py::[1mtest_update_origin_access_control[0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31m[31m[1m85 failed[0m, [33m85 warnings[0m[31m in 3.01s[0m[0m

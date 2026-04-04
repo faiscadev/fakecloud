@@ -1,0 +1,961 @@
+[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31m           [100%][0m
+=================================== FAILURES ===================================
+[31m[1m_______________ TestDynamoDBTagging.test_get_resources_dynamodb ________________[0m
+[1m[31mtest_resourcegroupstaggingapi/test_resourcegroupstagging_dynamodb.py[0m:16: in setUp
+    [0mtable = [96mself[39;49;00m.dynamodb.create_table([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateTable operation: Service 'dynamodb' is not available[0m
+[31m[1m_______________ TestDynamoDBTagging.test_tag_resources_dynamodb ________________[0m
+[1m[31mtest_resourcegroupstaggingapi/test_resourcegroupstagging_dynamodb.py[0m:16: in setUp
+    [0mtable = [96mself[39;49;00m.dynamodb.create_table([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateTable operation: Service 'dynamodb' is not available[0m
+[31m[1m________________________________ test_firehose _________________________________[0m
+[1m[31mtest_resourcegroupstaggingapi/test_resourcegroupstagging_firehose.py[0m:11: in test_firehose
+    [0mclient.create_delivery_stream([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateDeliveryStream operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>99280e7f-0f95-4267-897b-3365503a9a82</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________________ test_firehose_no_tags_or_filters _______________________[0m
+[1m[31mtest_resourcegroupstaggingapi/test_resourcegroupstagging_firehose.py[0m:34: in test_firehose_no_tags_or_filters
+    [0mclient.create_delivery_stream([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateDeliveryStream operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>d0b87651-e5b6-4c13-9f85-7a0cd9745959</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m________________________________ test_glue_jobs ________________________________[0m
+[1m[31mtest_resourcegroupstaggingapi/test_resourcegroupstagging_glue.py[0m:14: in test_glue_jobs
+    [0mjob_name = glue.create_job([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateJob operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>83b6fe96-dfaa-4ce5-b0c7-67a487838c86</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________________ TestLogsTagging.test_get_resources_logs ____________________[0m
+[1m[31mtest_resourcegroupstaggingapi/test_resourcegroupstagging_logs.py[0m:16: in setUp
+    [0m[96mself[39;49;00m.logs.create_log_group(logGroupName=[33mf[39;49;00m[33m"[39;49;00m[33mtest[39;49;00m[33m{[39;49;00mi[33m}[39;49;00m[33m"[39;49;00m, tags={[33m"[39;49;00m[33mkey1[39;49;00m[33m"[39;49;00m: [33m"[39;49;00m[33mval1[39;49;00m[33m"[39;49;00m})[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateLogGroup operation: Service 'logs' is not available[0m
+[31m[1m___________________ TestLogsTagging.test_tag_resources_logs ____________________[0m
+[1m[31mtest_resourcegroupstaggingapi/test_resourcegroupstagging_logs.py[0m:16: in setUp
+    [0m[96mself[39;49;00m.logs.create_log_group(logGroupName=[33mf[39;49;00m[33m"[39;49;00m[33mtest[39;49;00m[33m{[39;49;00mi[33m}[39;49;00m[33m"[39;49;00m, tags={[33m"[39;49;00m[33mkey1[39;49;00m[33m"[39;49;00m: [33m"[39;49;00m[33mval1[39;49;00m[33m"[39;49;00m})[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateLogGroup operation: Service 'logs' is not available[0m
+[31m[1m____________________ TestRdsTagging.test_get_resources_rds _____________________[0m
+[1m[31mtest_resourcegroupstaggingapi/test_resourcegroupstagging_rds.py[0m:16: in setUp
+    [0mdatabase = [96mself[39;49;00m.rds.create_db_instance([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateDBInstance operation: Service 'rds' is not available[0m
+[31m[1m____________________ TestRdsTagging.test_tag_resources_rds _____________________[0m
+[1m[31mtest_resourcegroupstaggingapi/test_resourcegroupstagging_rds.py[0m:16: in setUp
+    [0mdatabase = [96mself[39;49;00m.rds.create_db_instance([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateDBInstance operation: Service 'rds' is not available[0m
+[31m[1m___________________ TestRdsTagging.test_untag_resources_rds ____________________[0m
+[1m[31mtest_resourcegroupstaggingapi/test_resourcegroupstagging_rds.py[0m:16: in setUp
+    [0mdatabase = [96mself[39;49;00m.rds.create_db_instance([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateDBInstance operation: Service 'rds' is not available[0m
+[31m[1m______________________ test_get_resources_cloudformation _______________________[0m
+[1m[31mtest_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py[0m:22: in test_get_resources_cloudformation
+    [0mstack_one = cf_client.create_stack([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateStack operation: Service 'cloudformation' is not available[0m
+[31m[1m____________________________ test_get_resources_acm ____________________________[0m
+[1m[31mtest_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py[0m:72: in test_get_resources_acm
+    [0mcert_blue = client.request_certificate([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the RequestCertificate operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>774f7ee2-57d2-4568-a49a-9c098f678b40</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m__________________________ test_get_resources_backup ___________________________[0m
+[1m[31mtest_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py[0m:114: in test_get_resources_backup
+    [0mbackup.create_backup_vault([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateBackupVault operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>544c38c0-ca96-4b67-a8bc-6b0d6aa277c0</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________________ test_get_resources_dms_endpoint ________________________[0m
+[1m[31mtest_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py[0m:139: in test_get_resources_dms_endpoint
+    [0mendpoint = client.create_endpoint([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateEndpoint operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>7fdf9dc2-0907-449b-a1a3-860b21c80a19</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_________________ test_get_resources_dms_replication_instance __________________[0m
+[1m[31mtest_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py[0m:159: in test_get_resources_dms_replication_instance
+    [0mreplication_instance = client.create_replication_instance([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateReplicationInstance operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>e41e234d-dbbe-4546-a867-451c58c727f3</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m____________________________ test_get_resources_ecs ____________________________[0m
+[1m[31mtest_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py[0m:183: in test_get_resources_ecs
+    [0mclient.create_cluster([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateCluster operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>e5c6a16c-ec14-4aea-a18b-bbf61c22c7dc</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m____________________________ test_get_resources_ec2 ____________________________[0m
+[1m[31mtest_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py[0m:349: in test_get_resources_ec2
+    [0minstances = client.run_instances([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the RunInstances operation: Service 'ec2' is not available[0m
+[31m[1m__________________________ test_get_resources_ec2_vpc __________________________[0m
+[1m[31mtest_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py[0m:402: in test_get_resources_ec2_vpc
+    [0mvpc = ec2.create_vpc(CidrBlock=[33m"[39;49;00m[33m10.0.0.0/16[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/boto3/resources/factory.py[0m:581: in do_action
+    [0mresponse = action([96mself[39;49;00m, *args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/boto3/resources/action.py[0m:88: in __call__
+    [0mresponse = [96mgetattr[39;49;00m(parent.meta.client, operation_name)(*args, **params)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m____________________________ test_get_tag_keys_ec2 _____________________________[0m
+[1m[31mtest_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py[0m:435: in test_get_tag_keys_ec2
+    [0mclient.run_instances([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the RunInstances operation: Service 'ec2' is not available[0m
+[31m[1m___________________________ test_get_tag_values_ec2 ____________________________[0m
+[1m[31mtest_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py[0m:469: in test_get_tag_values_ec2
+    [0mclient.run_instances([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the RunInstances operation: Service 'ec2' is not available[0m
+[31m[1m________________________ test_get_tag_values_event_bus _________________________[0m
+[1m[31mtest_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py[0m:528: in test_get_tag_values_event_bus
+    [0mresp = rtapi.get_resources(ResourceTypeFilters=[[33m"[39;49;00m[33mevents:event-bus[39;49;00m[33m"[39;49;00m])[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the GetResources operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>69eca117-049b-4381-ab5f-a37b39dde127</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________________ test_get_tag_values_lexv2_models _______________________[0m
+[1m[31mtest_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py[0m:542: in test_get_tag_values_lexv2_models
+    [0mbot = client.create_bot([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateBot operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>e3279c66-538e-4c3e-a6e2-2f56f7a767a4</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m________________________ test_get_tag_values_cloudwatch ________________________[0m
+[1m[31mtest_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py[0m:587: in test_get_tag_values_cloudwatch
+    [0mcloudwatch.put_metric_alarm([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the PutMetricAlarm operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>a0d95f6f-06cb-4ba8-839d-482df3d1fe5d</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________________________ test_get_resources_sesv2 ___________________________[0m
+[1m[31mtest_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py[0m:643: in test_get_resources_sesv2
+    [0msesv2.create_contact_list([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateContactList operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>a47f5d6d-5900-4d98-b8e9-1277afd3aae4</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________________________ test_tag_sesv2_resources ___________________________[0m
+[1m[31mtest_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py[0m:703: in test_tag_sesv2_resources
+    [0msesv2.create_contact_list(ContactListName=[33m"[39;49;00m[33mcontact-list-no-tags[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateContactList operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>9c705179-a4f6-45d0-8006-20422740a175</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m__________________________ test_untag_sesv2_resources __________________________[0m
+[1m[31mtest_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py[0m:730: in test_untag_sesv2_resources
+    [0msesv2.create_contact_list([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateContactList operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>92c069ab-6a93-40b6-90d7-a6642ae56912</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________________________ test_get_many_resources ____________________________[0m
+[1m[31mtest_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py[0m:763: in test_get_many_resources
+    [0msecurity_group = ec2.create_security_group([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/boto3/resources/factory.py[0m:581: in do_action
+    [0mresponse = action([96mself[39;49;00m, *args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/boto3/resources/action.py[0m:88: in __call__
+    [0mresponse = [96mgetattr[39;49;00m(parent.meta.client, operation_name)(*args, **params)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateSecurityGroup operation: Service 'ec2' is not available[0m
+[31m[1m_______________________ test_get_resources_target_group ________________________[0m
+[1m[31mtest_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py[0m:826: in test_get_resources_target_group
+    [0mvpc = ec2.create_vpc(CidrBlock=[33m"[39;49;00m[33m172.28.7.0/24[39;49;00m[33m"[39;49;00m, InstanceTenancy=[33m"[39;49;00m[33mdefault[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/boto3/resources/factory.py[0m:581: in do_action
+    [0mresponse = action([96mself[39;49;00m, *args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/boto3/resources/action.py[0m:88: in __call__
+    [0mresponse = [96mgetattr[39;49;00m(parent.meta.client, operation_name)(*args, **params)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m__________________________ test_get_resources_s3[s3] ___________________________[0m
+[1m[31mtest_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py[0m:872: in test_get_resources_s3
+    [0ms3_client.create_bucket([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateBucket operation: Could not determine target service or action from request[0m
+[31m[1m_______________________ test_get_resources_s3[s3:bucket] _______________________[0m
+[1m[31mtest_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py[0m:872: in test_get_resources_s3
+    [0ms3_client.create_bucket([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (MissingAction) when calling the CreateBucket operation: Could not determine target service or action from request[0m
+[31m[1m__________________________ test_multiple_tag_filters ___________________________[0m
+[1m[31mtest_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py[0m:904: in test_multiple_tag_filters
+    [0mresp = client.run_instances([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the RunInstances operation: Service 'ec2' is not available[0m
+[31m[1m__________________________ test_get_resources_lambda ___________________________[0m
+[1m[31mtest_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py[0m:980: in test_get_resources_lambda
+    [0mclient.create_function([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateFunction operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>6553a0cf-9ef9-4e44-8b67-1deb1ba78d60</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m__________________________ test_tag_resources_lambda ___________________________[0m
+[1m[31mtest_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py[0m:1068: in test_tag_resources_lambda
+    [0mfunc = client.create_function([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateFunction operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>0fca8baf-dca1-496f-a1ab-c400801808e0</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_________________________ test_untag_resources_lambda __________________________[0m
+[1m[31mtest_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py[0m:1114: in test_untag_resources_lambda
+    [0mfunc = client.create_function([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateFunction operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>8c93fbc9-cb81-4733-9073-3c3c2d738db0</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m____________________________ test_get_resources_sqs ____________________________[0m
+[1m[31mtest_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py[0m:1157: in test_get_resources_sqs
+    [0mresp = rtapi.get_resources(ResourceTypeFilters=[[33m"[39;49;00m[33msqs[39;49;00m[33m"[39;49;00m])[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the GetResources operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>c20cb791-45f6-4893-a00c-d664da1dcf23</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m____________________________ test_get_resources_sns ____________________________[0m
+[1m[31mtest_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py[0m:1187: in test_get_resources_sns
+    [0mresp = rtapi.get_resources(ResourceTypeFilters=[[33m"[39;49;00m[33msns[39;49;00m[33m"[39;49;00m])[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the GetResources operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>3d4fcbce-a0b4-47a6-a4aa-a13f6898fc7e</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m____________________________ test_get_resources_ssm ____________________________[0m
+[1m[31mtest_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py[0m:1208: in test_get_resources_ssm
+    [0mssm.create_document([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (InvalidAction) when calling the CreateDocument operation: action CreateDocument not implemented for service ssm[0m
+[31m[1m____________________ test_tag_resources_for_unknown_service ____________________[0m
+[1m[31mtest_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py[0m:1262: in test_tag_resources_for_unknown_service
+    [0mmissing_resources = rtapi.tag_resources([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the TagResources operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>298278eb-a412-44e2-a793-a959a6872a7c</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________________ test_untag_resources_for_unknown_service ___________________[0m
+[1m[31mtest_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py[0m:1276: in test_untag_resources_for_unknown_service
+    [0mmissing_resources = rtapi.untag_resources([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the UntagResources operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>406a0b77-108c-4f6f-a821-0c97b58ac472</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________ test_get_resources_elasticbeanstalk_environment ________________[0m
+[1m[31mtest_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py[0m:1293: in test_get_resources_elasticbeanstalk_environment
+    [0mclient.create_application(ApplicationName=app_name)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateApplication operation: Service 'elasticbeanstalk' is not available[0m
+[31m[1m____________________________ test_get_resources_elb ____________________________[0m
+[1m[31mtest_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py[0m:1334: in test_get_resources_elb
+    [0mclient.create_load_balancer([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateLoadBalancer operation: Service 'elasticloadbalancing' is not available[0m
+[31m[1m_____________________ test_get_resources_sagemaker_cluster _____________________[0m
+[1m[31mtest_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py[0m:1382: in test_get_resources_sagemaker_cluster
+    [0msagemaker.create_cluster([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateCluster operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>8bf4a61b-a1fb-43be-aeae-41aea4519103</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m____________________ test_get_resources_sagemaker_automljob ____________________[0m
+[1m[31mtest_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py[0m:1433: in test_get_resources_sagemaker_automljob
+    [0msagemaker.create_auto_ml_job_v2([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateAutoMLJobV2 operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>a106947e-c030-484a-9790-21f2261f66a4</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_________________________ test_tag_resources_sagemaker _________________________[0m
+[1m[31mtest_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py[0m:1474: in test_tag_resources_sagemaker
+    [0mresp = sagemaker.create_cluster([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateCluster operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>1a0dccff-4665-4be7-841c-350e4d65d256</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m____________________________ test_get_resources_efs ____________________________[0m
+[1m[31mtest_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py[0m:1509: in test_get_resources_efs
+    [0mfs_one = efs.create_file_system([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateFileSystem operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>f65c05eb-03d7-44b0-a2ab-d6892e8a7073</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m____________________________ test_tag_resources_efs ____________________________[0m
+[1m[31mtest_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py[0m:1567: in test_tag_resources_efs
+    [0mfs = efs.create_file_system([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateFileSystem operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>bc72db2b-e1e7-4e92-a70d-1c23d59d699d</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m___________________________ test_untag_resources_efs ___________________________[0m
+[1m[31mtest_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py[0m:1604: in test_untag_resources_efs
+    [0mfs = efs.create_file_system([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateFileSystem operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>ab08f767-5d11-4003-878d-2afe94365133</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m________________________ test_tag_resources_quicksight _________________________[0m
+[1m[31mtest_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py[0m:1651: in test_tag_resources_quicksight
+    [0mds = client.create_data_source([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateDataSource operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>8b306df6-7da4-43e9-ba2b-e4c6c29feac3</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m________________________ test_get_resources_quicksight _________________________[0m
+[1m[31mtest_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py[0m:1679: in test_get_resources_quicksight
+    [0mclient.create_data_set([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateDataSet operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>672e23de-96d3-4384-96db-3e3611da115e</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________________ test_untag_resources_quicksight ________________________[0m
+[1m[31mtest_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py[0m:1718: in test_untag_resources_quicksight
+    [0muser = qs.register_user([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the RegisterUser operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>11a22d00-d1f3-4814-8b69-586ee37169d4</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m_______________________ test_get_resources_stepfunction ________________________[0m
+[1m[31mtest_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py[0m:1784: in test_get_resources_stepfunction
+    [0mclient.create_state_machine([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreateStateMachine operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>2d9bf4e8-29a9-440d-bbd9-e151b7c505d7</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______________ test_get_resources_secretsmanager[secretsmanager] _______________[0m
+[1m[31mtest_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py[0m:1832: in test_get_resources_secretsmanager
+    [0msecretsmanager_client.create_secret([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateSecret operation: Service 'secretsmanager' is not available[0m
+[31m[1m___________ test_get_resources_secretsmanager[secretsmanager:secret] ___________[0m
+[1m[31mtest_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py[0m:1832: in test_get_resources_secretsmanager
+    [0msecretsmanager_client.create_secret([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateSecret operation: Service 'secretsmanager' is not available[0m
+[31m[1m________________________ test_get_resources_elasticache ________________________[0m
+[1m[31mtest_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py[0m:1860: in test_get_resources_elasticache
+    [0mcluster = elc.create_cache_cluster([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateCacheCluster operation: Service 'elasticache' is not available[0m
+[31m[1m________________________ test_tag_resources_elasticache ________________________[0m
+[1m[31mtest_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py[0m:1942: in test_tag_resources_elasticache
+    [0mcluster = elc.create_cache_cluster([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateCacheCluster operation: Service 'elasticache' is not available[0m
+[31m[1m_______________________ test_untag_resources_elasticache _______________________[0m
+[1m[31mtest_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py[0m:2004: in test_untag_resources_elasticache
+    [0mcluster = elc.create_cache_cluster([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateCacheCluster operation: Service 'elasticache' is not available[0m
+[31m[1m____________________________ test_get_resources_kms ____________________________[0m
+[1m[31mtest_resourcegroupstaggingapi/test_resourcegroupstaggingapi_kms.py[0m:11: in test_get_resources_kms
+    [0mkey = kms_client.create_key([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateKey operation: Service 'kms' is not available[0m
+[31m[1m________________________ test_get_resources_workspaces _________________________[0m
+[1m[31mtest_resourcegroupstaggingapi/test_resourcegroupstaggingapi_workspaces.py[0m:19: in test_get_resources_workspaces
+    [0mdirectory_id = create_directory()[90m[39;49;00m
+[1m[31mtest_resourcegroupstaggingapi/test_resourcegroupstaggingapi_workspaces.py[0m:10: in create_directory
+    [0mdirectory_id = create_test_directory(ds_client, ec2_client)[90m[39;49;00m
+[1m[31mtest_ds/test_ds_simple_ad_directory.py[0m:33: in create_test_directory
+    [0mgood_vpc_id = create_vpc(ec2_client)[90m[39;49;00m
+[1m[31mtest_ds/test_ds_simple_ad_directory.py[0m:13: in create_vpc
+    [0m[94mreturn[39;49;00m ec2_client.create_vpc(CidrBlock=[33m"[39;49;00m[33m10.0.0.0/16[39;49;00m[33m"[39;49;00m)[[33m"[39;49;00m[33mVpc[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mVpcId[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m___________________ test_get_resources_workspace_directories ___________________[0m
+[1m[31mtest_resourcegroupstaggingapi/test_resourcegroupstaggingapi_workspaces.py[0m:64: in test_get_resources_workspace_directories
+    [0mdirectory_id = create_directory()[90m[39;49;00m
+[1m[31mtest_resourcegroupstaggingapi/test_resourcegroupstaggingapi_workspaces.py[0m:10: in create_directory
+    [0mdirectory_id = create_test_directory(ds_client, ec2_client)[90m[39;49;00m
+[1m[31mtest_ds/test_ds_simple_ad_directory.py[0m:33: in create_test_directory
+    [0mgood_vpc_id = create_vpc(ec2_client)[90m[39;49;00m
+[1m[31mtest_ds/test_ds_simple_ad_directory.py[0m:13: in create_vpc
+    [0m[94mreturn[39;49;00m ec2_client.create_vpc(CidrBlock=[33m"[39;49;00m[33m10.0.0.0/16[39;49;00m[33m"[39;49;00m)[[33m"[39;49;00m[33mVpc[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mVpcId[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m_____________________ test_get_resources_workspace_images ______________________[0m
+[1m[31mtest_resourcegroupstaggingapi/test_resourcegroupstaggingapi_workspaces.py[0m:90: in test_get_resources_workspace_images
+    [0mdirectory_id = create_directory()[90m[39;49;00m
+[1m[31mtest_resourcegroupstaggingapi/test_resourcegroupstaggingapi_workspaces.py[0m:10: in create_directory
+    [0mdirectory_id = create_test_directory(ds_client, ec2_client)[90m[39;49;00m
+[1m[31mtest_ds/test_ds_simple_ad_directory.py[0m:33: in create_test_directory
+    [0mgood_vpc_id = create_vpc(ec2_client)[90m[39;49;00m
+[1m[31mtest_ds/test_ds_simple_ad_directory.py[0m:13: in create_vpc
+    [0m[94mreturn[39;49;00m ec2_client.create_vpc(CidrBlock=[33m"[39;49;00m[33m10.0.0.0/16[39;49;00m[33m"[39;49;00m)[[33m"[39;49;00m[33mVpc[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mVpcId[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m_______________________ test_get_resources_workspacesweb _______________________[0m
+[1m[31mtest_resourcegroupstaggingapi/test_resourcegroupstaggingapi_workspacesweb.py[0m:11: in test_get_resources_workspacesweb
+    [0marn = ww_client.create_portal([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the CreatePortal operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>88aa1104-707c-4593-a07d-13ece42fd99a</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[31m[1m______________ test_get_resources_workspacesweb_in_unknown_region ______________[0m
+[1m[31mtest_resourcegroupstaggingapi/test_resourcegroupstaggingapi_workspacesweb.py[0m:59: in test_get_resources_workspacesweb_in_unknown_region
+    [0mresp = rtapi.get_resources(ResourceTypeFilters=[[33m"[39;49;00m[33mworkspaces-web[39;49;00m[33m"[39;49;00m])[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (400) when calling the GetResources operation: <?xml version="1.0" encoding="UTF-8"?><ErrorResponse>[0m
+[1m[31mE     <Error>[0m
+[1m[31mE       <Type>Sender</Type>[0m
+[1m[31mE       <Code>MissingAction</Code>[0m
+[1m[31mE       <Message>Could not determine target service or action from request</Message>[0m
+[1m[31mE     </Error>[0m
+[1m[31mE     <RequestId>c2c8f7e5-3e55-402e-80a8-9b70d99e8359</RequestId>[0m
+[1m[31mE   </ErrorResponse>[0m
+[33m=============================== warnings summary ===============================[0m
+tests/test_resourcegroupstaggingapi/test_resourcegroupstagging_dynamodb.py: 2 warnings
+tests/test_resourcegroupstaggingapi/test_resourcegroupstagging_firehose.py: 2 warnings
+tests/test_resourcegroupstaggingapi/test_resourcegroupstagging_glue.py: 1 warning
+tests/test_resourcegroupstaggingapi/test_resourcegroupstagging_logs.py: 2 warnings
+tests/test_resourcegroupstaggingapi/test_resourcegroupstagging_rds.py: 3 warnings
+tests/test_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py: 46 warnings
+tests/test_resourcegroupstaggingapi/test_resourcegroupstaggingapi_kms.py: 1 warning
+tests/test_resourcegroupstaggingapi/test_resourcegroupstaggingapi_workspaces.py: 3 warnings
+tests/test_resourcegroupstaggingapi/test_resourcegroupstaggingapi_workspacesweb.py: 2 warnings
+  /Users/lucas/.cache/fakecloud/moto/.venv/lib/python3.9/site-packages/boto3/compat.py:89: PythonDeprecationWarning: Boto3 will no longer support Python 3.9 starting April 29, 2026. To continue receiving service updates, bug fixes, and security updates please upgrade to Python 3.10 or later. More information can be found here: https://aws.amazon.com/blogs/developer/python-support-policy-updates-for-aws-sdks-and-tools/
+    warnings.warn(warning, PythonDeprecationWarning)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+[36m[1m=========================== short test summary info ============================[0m
+[31mFAILED[0m test_resourcegroupstaggingapi/test_resourcegroupstagging_dynamodb.py::[1mTestDynamoDBTagging::test_get_resources_dynamodb[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_resourcegroupstaggingapi/test_resourcegroupstagging_dynamodb.py::[1mTestDynamoDBTagging::test_tag_resources_dynamodb[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_resourcegroupstaggingapi/test_resourcegroupstagging_firehose.py::[1mtest_firehose[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_resourcegroupstaggingapi/test_resourcegroupstagging_firehose.py::[1mtest_firehose_no_tags_or_filters[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_resourcegroupstaggingapi/test_resourcegroupstagging_glue.py::[1mtest_glue_jobs[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_resourcegroupstaggingapi/test_resourcegroupstagging_logs.py::[1mTestLogsTagging::test_get_resources_logs[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_resourcegroupstaggingapi/test_resourcegroupstagging_logs.py::[1mTestLogsTagging::test_tag_resources_logs[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_resourcegroupstaggingapi/test_resourcegroupstagging_rds.py::[1mTestRdsTagging::test_get_resources_rds[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_resourcegroupstaggingapi/test_resourcegroupstagging_rds.py::[1mTestRdsTagging::test_tag_resources_rds[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_resourcegroupstaggingapi/test_resourcegroupstagging_rds.py::[1mTestRdsTagging::test_untag_resources_rds[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py::[1mtest_get_resources_cloudformation[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py::[1mtest_get_resources_acm[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the R...
+[31mFAILED[0m test_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py::[1mtest_get_resources_backup[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py::[1mtest_get_resources_dms_endpoint[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py::[1mtest_get_resources_dms_replication_instance[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py::[1mtest_get_resources_ecs[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py::[1mtest_get_resources_ec2[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py::[1mtest_get_resources_ec2_vpc[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py::[1mtest_get_tag_keys_ec2[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py::[1mtest_get_tag_values_ec2[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py::[1mtest_get_tag_values_event_bus[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the G...
+[31mFAILED[0m test_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py::[1mtest_get_tag_values_lexv2_models[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py::[1mtest_get_tag_values_cloudwatch[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the P...
+[31mFAILED[0m test_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py::[1mtest_get_resources_sesv2[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py::[1mtest_tag_sesv2_resources[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py::[1mtest_untag_sesv2_resources[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py::[1mtest_get_many_resources[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py::[1mtest_get_resources_target_group[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py::[1mtest_get_resources_s3[s3][0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py::[1mtest_get_resources_s3[s3:bucket][0m - botocore.exceptions.ClientError: An error occurred (MissingAction) when cal...
+[31mFAILED[0m test_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py::[1mtest_multiple_tag_filters[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py::[1mtest_get_resources_lambda[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py::[1mtest_tag_resources_lambda[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py::[1mtest_untag_resources_lambda[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py::[1mtest_get_resources_sqs[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the G...
+[31mFAILED[0m test_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py::[1mtest_get_resources_sns[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the G...
+[31mFAILED[0m test_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py::[1mtest_get_resources_ssm[0m - botocore.exceptions.ClientError: An error occurred (InvalidAction) when cal...
+[31mFAILED[0m test_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py::[1mtest_tag_resources_for_unknown_service[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the T...
+[31mFAILED[0m test_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py::[1mtest_untag_resources_for_unknown_service[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the U...
+[31mFAILED[0m test_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py::[1mtest_get_resources_elasticbeanstalk_environment[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py::[1mtest_get_resources_elb[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py::[1mtest_get_resources_sagemaker_cluster[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py::[1mtest_get_resources_sagemaker_automljob[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py::[1mtest_tag_resources_sagemaker[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py::[1mtest_get_resources_efs[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py::[1mtest_tag_resources_efs[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py::[1mtest_untag_resources_efs[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py::[1mtest_tag_resources_quicksight[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py::[1mtest_get_resources_quicksight[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py::[1mtest_untag_resources_quicksight[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the R...
+[31mFAILED[0m test_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py::[1mtest_get_resources_stepfunction[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py::[1mtest_get_resources_secretsmanager[secretsmanager][0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py::[1mtest_get_resources_secretsmanager[secretsmanager:secret][0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py::[1mtest_get_resources_elasticache[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py::[1mtest_tag_resources_elasticache[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_resourcegroupstaggingapi/test_resourcegroupstaggingapi.py::[1mtest_untag_resources_elasticache[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_resourcegroupstaggingapi/test_resourcegroupstaggingapi_kms.py::[1mtest_get_resources_kms[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_resourcegroupstaggingapi/test_resourcegroupstaggingapi_workspaces.py::[1mtest_get_resources_workspaces[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_resourcegroupstaggingapi/test_resourcegroupstaggingapi_workspaces.py::[1mtest_get_resources_workspace_directories[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_resourcegroupstaggingapi/test_resourcegroupstaggingapi_workspaces.py::[1mtest_get_resources_workspace_images[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_resourcegroupstaggingapi/test_resourcegroupstaggingapi_workspacesweb.py::[1mtest_get_resources_workspacesweb[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the C...
+[31mFAILED[0m test_resourcegroupstaggingapi/test_resourcegroupstaggingapi_workspacesweb.py::[1mtest_get_resources_workspacesweb_in_unknown_region[0m - botocore.exceptions.ClientError: An error occurred (400) when calling the G...
+[31m[31m[1m62 failed[0m, [33m62 warnings[0m[31m in 3.70s[0m[0m

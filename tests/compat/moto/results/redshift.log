@@ -1,0 +1,778 @@
+[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31mF[0m[31m [100%][0m
+=================================== FAILURES ===================================
+[31m[1m_____________________________ test_create_cluster ______________________________[0m
+[1m[31mtest_redshift/test_redshift.py[0m:17: in test_create_cluster
+    [0mresponse = client.create_cluster([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateCluster operation: Service 'redshift' is not available[0m
+[31m[1m____________ test_create_cluster_with_enhanced_vpc_routing_enabled _____________[0m
+[1m[31mtest_redshift/test_redshift.py[0m:57: in test_create_cluster_with_enhanced_vpc_routing_enabled
+    [0mresponse = client.create_cluster([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateCluster operation: Service 'redshift' is not available[0m
+[31m[1m_______________ test_create_and_describe_cluster_with_kms_key_id _______________[0m
+[1m[31mtest_redshift/test_redshift.py[0m:79: in test_create_and_describe_cluster_with_kms_key_id
+    [0mresponse = client.create_cluster([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateCluster operation: Service 'redshift' is not available[0m
+[31m[1m_______________________ test_create_snapshot_copy_grant ________________________[0m
+[1m[31mtest_redshift/test_redshift.py[0m:101: in test_create_snapshot_copy_grant
+    [0mgrants = client.create_snapshot_copy_grant([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateSnapshotCopyGrant operation: Service 'redshift' is not available[0m
+[31m[1m____________________ test_create_many_snapshot_copy_grants _____________________[0m
+[1m[31mtest_redshift/test_redshift.py[0m:118: in test_create_many_snapshot_copy_grants
+    [0mclient.create_snapshot_copy_grant([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateSnapshotCopyGrant operation: Service 'redshift' is not available[0m
+[31m[1m_________________________ test_no_snapshot_copy_grants _________________________[0m
+[1m[31mtest_redshift/test_redshift.py[0m:128: in test_no_snapshot_copy_grants
+    [0mresponse = client.describe_snapshot_copy_grants()[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the DescribeSnapshotCopyGrants operation: Service 'redshift' is not available[0m
+[31m[1m______________________ test_create_cluster_all_attributes ______________________[0m
+[1m[31mtest_redshift/test_redshift.py[0m:142: in test_create_cluster_all_attributes
+    [0mcluster_response = client.create_cluster([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateCluster operation: Service 'redshift' is not available[0m
+[31m[1m_______________________ test_create_single_node_cluster ________________________[0m
+[1m[31mtest_redshift/test_redshift.py[0m:223: in test_create_single_node_cluster
+    [0mcluster = client.create_cluster([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateCluster operation: Service 'redshift' is not available[0m
+[31m[1m_____________________ test_create_cluster_in_subnet_group ______________________[0m
+[1m[31mtest_redshift/test_redshift.py[0m:247: in test_create_cluster_in_subnet_group
+    [0mvpc = ec2.create_vpc(CidrBlock=[33m"[39;49;00m[33m10.0.0.0/16[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/boto3/resources/factory.py[0m:581: in do_action
+    [0mresponse = action([96mself[39;49;00m, *args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/boto3/resources/action.py[0m:88: in __call__
+    [0mresponse = [96mgetattr[39;49;00m(parent.meta.client, operation_name)(*args, **params)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m___________________ test_create_cluster_with_security_group ____________________[0m
+[1m[31mtest_redshift/test_redshift.py[0m:272: in test_create_cluster_with_security_group
+    [0mclient.create_cluster_security_group([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateClusterSecurityGroup operation: Service 'redshift' is not available[0m
+[31m[1m_________________ test_create_cluster_with_vpc_security_groups _________________[0m
+[1m[31mtest_redshift/test_redshift.py[0m:300: in test_create_cluster_with_vpc_security_groups
+    [0mvpc = ec2.create_vpc(CidrBlock=[33m"[39;49;00m[33m10.0.0.0/16[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/boto3/resources/factory.py[0m:581: in do_action
+    [0mresponse = action([96mself[39;49;00m, *args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/boto3/resources/action.py[0m:88: in __call__
+    [0mresponse = [96mgetattr[39;49;00m(parent.meta.client, operation_name)(*args, **params)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m______________________ test_create_cluster_with_iam_roles ______________________[0m
+[1m[31mtest_redshift/test_redshift.py[0m:324: in test_create_cluster_with_iam_roles
+    [0mclient.create_cluster([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateCluster operation: Service 'redshift' is not available[0m
+[31m[1m_____________________ test_describe_default_cluster_params _____________________[0m
+[1m[31mtest_redshift/test_redshift.py[0m:343: in test_describe_default_cluster_params
+    [0mresponse = client.describe_default_cluster_parameters([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the DescribeDefaultClusterParameters operation: Service 'redshift' is not available[0m
+[31m[1m_________________________ test_describe_cluster_params _________________________[0m
+[1m[31mtest_redshift/test_redshift.py[0m:367: in test_describe_cluster_params
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mClusterParameterGroupNotFound[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'UnknownService' == 'ClusterParam...GroupNotFound'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ClusterParameterGroupNotFound[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ UnknownService[39;49;00m[90m[39;49;00m[0m
+[31m[1m___________________ test_create_cluster_with_parameter_group ___________________[0m
+[1m[31mtest_redshift/test_redshift.py[0m:390: in test_create_cluster_with_parameter_group
+    [0mgroup = client.create_cluster_parameter_group([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateClusterParameterGroup operation: Service 'redshift' is not available[0m
+[31m[1m______________________ test_describe_non_existent_cluster ______________________[0m
+[1m[31mtest_redshift/test_redshift.py[0m:429: in test_describe_non_existent_cluster
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mClusterNotFound[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'UnknownService' == 'ClusterNotFound'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ClusterNotFound[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ UnknownService[39;49;00m[90m[39;49;00m[0m
+[31m[1m_________________ test_describe_clusters_with_tag_keys_filter __________________[0m
+[1m[31mtest_redshift/test_redshift.py[0m:437: in test_describe_clusters_with_tag_keys_filter
+    [0mclient.create_cluster([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateCluster operation: Service 'redshift' is not available[0m
+[31m[1m_______________________ test_modify_cluster_vpc_routing ________________________[0m
+[1m[31mtest_redshift/test_redshift.py[0m:467: in test_modify_cluster_vpc_routing
+    [0mclient.create_cluster([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateCluster operation: Service 'redshift' is not available[0m
+[31m[1m_____________________________ test_modify_cluster ______________________________[0m
+[1m[31mtest_redshift/test_redshift.py[0m:520: in test_modify_cluster
+    [0mclient.create_cluster_security_group([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateClusterSecurityGroup operation: Service 'redshift' is not available[0m
+[31m[1m_______________________ test_create_cluster_subnet_group _______________________[0m
+[1m[31mtest_redshift/test_redshift.py[0m:574: in test_create_cluster_subnet_group
+    [0mvpc = ec2.create_vpc(CidrBlock=[33m"[39;49;00m[33m10.0.0.0/16[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/boto3/resources/factory.py[0m:581: in do_action
+    [0mresponse = action([96mself[39;49;00m, *args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/boto3/resources/action.py[0m:88: in __call__
+    [0mresponse = [96mgetattr[39;49;00m(parent.meta.client, operation_name)(*args, **params)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m____________________ test_authorize_security_group_ingress _____________________[0m
+[1m[31mtest_redshift/test_redshift.py[0m:602: in test_authorize_security_group_ingress
+    [0mclient.create_cluster([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateCluster operation: Service 'redshift' is not available[0m
+[31m[1m___________________ test_create_invalid_cluster_subnet_group ___________________[0m
+[1m[31mtest_redshift/test_redshift.py[0m:658: in test_create_invalid_cluster_subnet_group
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mInvalidSubnet[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'UnknownService' == 'InvalidSubnet'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- InvalidSubnet[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ UnknownService[39;49;00m[90m[39;49;00m[0m
+[31m[1m___________________ test_describe_non_existent_subnet_group ____________________[0m
+[1m[31mtest_redshift/test_redshift.py[0m:668: in test_describe_non_existent_subnet_group
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mClusterSubnetGroupNotFoundFault[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'UnknownService' == 'ClusterSubne...NotFoundFault'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ClusterSubnetGroupNotFoundFault[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ UnknownService[39;49;00m[90m[39;49;00m[0m
+[31m[1m_______________________ test_delete_cluster_subnet_group _______________________[0m
+[1m[31mtest_redshift/test_redshift.py[0m:675: in test_delete_cluster_subnet_group
+    [0mvpc = ec2.create_vpc(CidrBlock=[33m"[39;49;00m[33m10.0.0.0/16[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/boto3/resources/factory.py[0m:581: in do_action
+    [0mresponse = action([96mself[39;49;00m, *args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/boto3/resources/action.py[0m:88: in __call__
+    [0mresponse = [96mgetattr[39;49;00m(parent.meta.client, operation_name)(*args, **params)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m______________________ test_create_cluster_security_group ______________________[0m
+[1m[31mtest_redshift/test_redshift.py[0m:703: in test_create_cluster_security_group
+    [0mgroup = client.create_cluster_security_group([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateClusterSecurityGroup operation: Service 'redshift' is not available[0m
+[31m[1m__________________ test_describe_non_existent_security_group ___________________[0m
+[1m[31mtest_redshift/test_redshift.py[0m:733: in test_describe_non_existent_security_group
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mClusterSecurityGroupNotFound[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'UnknownService' == 'ClusterSecurityGroupNotFound'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ClusterSecurityGroupNotFound[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ UnknownService[39;49;00m[90m[39;49;00m[0m
+[31m[1m______________________ test_delete_cluster_security_group ______________________[0m
+[1m[31mtest_redshift/test_redshift.py[0m:740: in test_delete_cluster_security_group
+    [0mclient.create_cluster_security_group([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateClusterSecurityGroup operation: Service 'redshift' is not available[0m
+[31m[1m_____________________ test_create_cluster_parameter_group ______________________[0m
+[1m[31mtest_redshift/test_redshift.py[0m:766: in test_create_cluster_parameter_group
+    [0mgroup = client.create_cluster_parameter_group([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateClusterParameterGroup operation: Service 'redshift' is not available[0m
+[31m[1m__________________ test_describe_non_existent_parameter_group __________________[0m
+[1m[31mtest_redshift/test_redshift.py[0m:794: in test_describe_non_existent_parameter_group
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mClusterParameterGroupNotFound[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'UnknownService' == 'ClusterParam...GroupNotFound'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ClusterParameterGroupNotFound[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ UnknownService[39;49;00m[90m[39;49;00m[0m
+[31m[1m_________________________ test_delete_parameter_group __________________________[0m
+[1m[31mtest_redshift/test_redshift.py[0m:801: in test_delete_parameter_group
+    [0mclient.create_cluster_parameter_group([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateClusterParameterGroup operation: Service 'redshift' is not available[0m
+[31m[1m_____________ test_create_cluster_snapshot_of_non_existent_cluster _____________[0m
+[1m[31mtest_redshift/test_redshift.py[0m:831: in test_create_cluster_snapshot_of_non_existent_cluster
+    [0m[94massert[39;49;00m client_err.value.response[[33m"[39;49;00m[33mError[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mMessage[39;49;00m[33m"[39;49;00m] == ([90m[39;49;00m
+[1m[31mE   assert "Service 'red...not available" == 'Cluster non-...id not found.'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- Cluster non-existent-cluster-id not found.[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ Service 'redshift' is not available[39;49;00m[90m[39;49;00m[0m
+[31m[1m_________________ test_automated_snapshot_on_cluster_creation __________________[0m
+[1m[31mtest_redshift/test_redshift.py[0m:841: in test_automated_snapshot_on_cluster_creation
+    [0mcluster_response = client.create_cluster([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateCluster operation: Service 'redshift' is not available[0m
+[31m[1m________________________ test_delete_automated_snapshot ________________________[0m
+[1m[31mtest_redshift/test_redshift.py[0m:868: in test_delete_automated_snapshot
+    [0mcluster_response = client.create_cluster([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateCluster operation: Service 'redshift' is not available[0m
+[31m[1m______________ test_presence_automated_snapshot_on_cluster_delete ______________[0m
+[1m[31mtest_redshift/test_redshift.py[0m:896: in test_presence_automated_snapshot_on_cluster_delete
+    [0mclient.create_cluster([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateCluster operation: Service 'redshift' is not available[0m
+[31m[1m______________________ test_describe_snapshot_with_filter ______________________[0m
+[1m[31mtest_redshift/test_redshift.py[0m:925: in test_describe_snapshot_with_filter
+    [0mcluster_response = client.create_cluster([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateCluster operation: Service 'redshift' is not available[0m
+[31m[1m_________________ test_create_cluster_from_automated_snapshot __________________[0m
+[1m[31mtest_redshift/test_redshift.py[0m:986: in test_create_cluster_from_automated_snapshot
+    [0mclient.create_cluster([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateCluster operation: Service 'redshift' is not available[0m
+[31m[1m_________________________ test_create_cluster_snapshot _________________________[0m
+[1m[31mtest_redshift/test_redshift.py[0m:1033: in test_create_cluster_snapshot
+    [0mcluster_response = client.create_cluster([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateCluster operation: Service 'redshift' is not available[0m
+[31m[1m_______________________ test_describe_cluster_snapshots ________________________[0m
+[1m[31mtest_redshift/test_redshift.py[0m:1064: in test_describe_cluster_snapshots
+    [0mclient.create_cluster([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateCluster operation: Service 'redshift' is not available[0m
+[31m[1m_______________ test_describe_cluster_snapshots_not_found_error ________________[0m
+[1m[31mtest_redshift/test_redshift.py[0m:1113: in test_describe_cluster_snapshots_not_found_error
+    [0mresp = client.describe_cluster_snapshots(ClusterIdentifier=cluster_identifier)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the DescribeClusterSnapshots operation: Service 'redshift' is not available[0m
+[31m[1m_________________________ test_delete_cluster_snapshot _________________________[0m
+[1m[31mtest_redshift/test_redshift.py[0m:1129: in test_delete_cluster_snapshot
+    [0mclient.create_cluster([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateCluster operation: Service 'redshift' is not available[0m
+[31m[1m_____________________ test_cluster_snapshot_already_exists _____________________[0m
+[1m[31mtest_redshift/test_redshift.py[0m:1167: in test_cluster_snapshot_already_exists
+    [0mclient.create_cluster([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateCluster operation: Service 'redshift' is not available[0m
+[31m[1m______________________ test_create_cluster_from_snapshot _______________________[0m
+[1m[31mtest_redshift/test_redshift.py[0m:1197: in test_create_cluster_from_snapshot
+    [0mclient.create_cluster([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateCluster operation: Service 'redshift' is not available[0m
+[31m[1m_______________ test_create_cluster_with_node_type_from_snapshot _______________[0m
+[1m[31mtest_redshift/test_redshift.py[0m:1240: in test_create_cluster_with_node_type_from_snapshot
+    [0mclient.create_cluster([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateCluster operation: Service 'redshift' is not available[0m
+[31m[1m________________ test_create_cluster_from_snapshot_with_waiter _________________[0m
+[1m[31mtest_redshift/test_redshift.py[0m:1285: in test_create_cluster_from_snapshot_with_waiter
+    [0mclient.create_cluster([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateCluster operation: Service 'redshift' is not available[0m
+[31m[1m________________ test_create_cluster_from_non_existent_snapshot ________________[0m
+[1m[31mtest_redshift/test_redshift.py[0m:1324: in test_create_cluster_from_non_existent_snapshot
+    [0m[94massert[39;49;00m client_err.value.response[[33m"[39;49;00m[33mError[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mMessage[39;49;00m[33m"[39;49;00m] == ([90m[39;49;00m
+[1m[31mE   assert "Service 'red...not available" == 'Snapshot non...ot not found.'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- Snapshot non-existent-snapshot not found.[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ Service 'redshift' is not available[39;49;00m[90m[39;49;00m[0m
+[31m[1m______________________ test_create_cluster_status_update _______________________[0m
+[1m[31mtest_redshift/test_redshift.py[0m:1334: in test_create_cluster_status_update
+    [0mresponse = client.create_cluster([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateCluster operation: Service 'redshift' is not available[0m
+[31m[1m____________________ test_describe_tags_with_resource_type _____________________[0m
+[1m[31mtest_redshift/test_redshift.py[0m:1362: in test_describe_tags_with_resource_type
+    [0mclient.create_cluster([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateCluster operation: Service 'redshift' is not available[0m
+[31m[1m______ test_describe_tags_cannot_specify_resource_type_and_resource_name _______[0m
+[1m[31mtest_redshift/test_redshift.py[0m:1402: in test_describe_tags_cannot_specify_resource_type_and_resource_name
+    [0m[94massert[39;49;00m ([90m[39;49;00m
+[1m[31mE   assert 'using either an ARN or a resource type' in "Service 'redshift' is not available"[0m
+[31m[1m____________________ test_describe_tags_with_resource_name _____________________[0m
+[1m[31mtest_redshift/test_redshift.py[0m:1423: in test_describe_tags_with_resource_name
+    [0mclient.create_cluster([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateCluster operation: Service 'redshift' is not available[0m
+[31m[1m_______________________________ test_create_tags _______________________________[0m
+[1m[31mtest_redshift/test_redshift.py[0m:1471: in test_create_tags
+    [0mclient.create_cluster([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateCluster operation: Service 'redshift' is not available[0m
+[31m[1m_______________________________ test_delete_tags _______________________________[0m
+[1m[31mtest_redshift/test_redshift.py[0m:1501: in test_delete_tags
+    [0mclient.create_cluster([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateCluster operation: Service 'redshift' is not available[0m
+[31m[1m____________________ test_describe_tags_all_resource_types _____________________[0m
+[1m[31mtest_redshift/test_redshift.py[0m:1524: in test_describe_tags_all_resource_types
+    [0mvpc = ec2.create_vpc(CidrBlock=[33m"[39;49;00m[33m10.0.0.0/16[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/boto3/resources/factory.py[0m:581: in do_action
+    [0mresponse = action([96mself[39;49;00m, *args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/boto3/resources/action.py[0m:88: in __call__
+    [0mresponse = [96mgetattr[39;49;00m(parent.meta.client, operation_name)(*args, **params)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateVpc operation: Service 'ec2' is not available[0m
+[31m[1m_____________________ test_tagged_resource_not_found_error _____________________[0m
+[1m[31mtest_redshift/test_redshift.py[0m:1581: in test_tagged_resource_not_found_error
+    [0m[94massert[39;49;00m client_err.value.response[[33m"[39;49;00m[33mError[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mMessage[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mcluster (fake) not found.[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   assert "Service 'red...not available" == 'cluster (fake) not found.'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- cluster (fake) not found.[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ Service 'redshift' is not available[39;49;00m[90m[39;49;00m[0m
+[31m[1m__________________________ test_enable_snapshot_copy ___________________________[0m
+[1m[31mtest_redshift/test_redshift.py[0m:1607: in test_enable_snapshot_copy
+    [0mclient.create_cluster([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateCluster operation: Service 'redshift' is not available[0m
+[31m[1m____________________ test_enable_snapshot_copy_unencrypted _____________________[0m
+[1m[31mtest_redshift/test_redshift.py[0m:1651: in test_enable_snapshot_copy_unencrypted
+    [0mclient.create_cluster([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateCluster operation: Service 'redshift' is not available[0m
+[31m[1m__________________________ test_disable_snapshot_copy __________________________[0m
+[1m[31mtest_redshift/test_redshift.py[0m:1669: in test_disable_snapshot_copy
+    [0mclient.create_cluster([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateCluster operation: Service 'redshift' is not available[0m
+[31m[1m__________________ test_modify_snapshot_copy_retention_period __________________[0m
+[1m[31mtest_redshift/test_redshift.py[0m:1691: in test_modify_snapshot_copy_retention_period
+    [0mclient.create_cluster([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateCluster operation: Service 'redshift' is not available[0m
+[31m[1m_____________________ test_create_duplicate_cluster_fails ______________________[0m
+[1m[31mtest_redshift/test_redshift.py[0m:1724: in test_create_duplicate_cluster_fails
+    [0mclient.create_cluster(**kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateCluster operation: Service 'redshift' is not available[0m
+[31m[1m___________________ test_delete_cluster_with_final_snapshot ____________________[0m
+[1m[31mtest_redshift/test_redshift.py[0m:1736: in test_delete_cluster_with_final_snapshot
+    [0m[94massert[39;49;00m ex.value.response[[33m"[39;49;00m[33mError[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mClusterNotFound[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'UnknownService' == 'ClusterNotFound'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ClusterNotFound[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ UnknownService[39;49;00m[90m[39;49;00m[0m
+[31m[1m__________________ test_delete_cluster_without_final_snapshot __________________[0m
+[1m[31mtest_redshift/test_redshift.py[0m:1780: in test_delete_cluster_without_final_snapshot
+    [0mclient.create_cluster([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateCluster operation: Service 'redshift' is not available[0m
+[31m[1m_____________________________ test_resize_cluster ______________________________[0m
+[1m[31mtest_redshift/test_redshift.py[0m:1830: in test_resize_cluster
+    [0mresp = client.create_cluster([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateCluster operation: Service 'redshift' is not available[0m
+[31m[1m__________ test_get_cluster_credentials_non_existent_cluster_and_user __________[0m
+[1m[31mtest_redshift/test_redshift.py[0m:1877: in test_get_cluster_credentials_non_existent_cluster_and_user
+    [0m[94massert[39;49;00m ex.value.response[[33m"[39;49;00m[33mError[39;49;00m[33m"[39;49;00m][[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mClusterNotFound[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'UnknownService' == 'ClusterNotFound'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ClusterNotFound[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ UnknownService[39;49;00m[90m[39;49;00m[0m
+[31m[1m________________ test_get_cluster_credentials_invalid_duration _________________[0m
+[1m[31mtest_redshift/test_redshift.py[0m:1886: in test_get_cluster_credentials_invalid_duration
+    [0mclient.create_cluster([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateCluster operation: Service 'redshift' is not available[0m
+[31m[1m_________________________ test_get_cluster_credentials _________________________[0m
+[1m[31mtest_redshift/test_redshift.py[0m:1922: in test_get_cluster_credentials
+    [0mclient.create_cluster([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateCluster operation: Service 'redshift' is not available[0m
+[31m[1m______________________________ test_pause_cluster ______________________________[0m
+[1m[31mtest_redshift/test_redshift.py[0m:1964: in test_pause_cluster
+    [0mresponse = client.create_cluster([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateCluster operation: Service 'redshift' is not available[0m
+[31m[1m__________________________ test_pause_unknown_cluster __________________________[0m
+[1m[31mtest_redshift/test_redshift.py[0m:1993: in test_pause_unknown_cluster
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mClusterNotFound[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'UnknownService' == 'ClusterNotFound'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ClusterNotFound[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ UnknownService[39;49;00m[90m[39;49;00m[0m
+[31m[1m_____________________________ test_resume_cluster ______________________________[0m
+[1m[31mtest_redshift/test_redshift.py[0m:2000: in test_resume_cluster
+    [0mclient.create_cluster([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateCluster operation: Service 'redshift' is not available[0m
+[31m[1m_________________________ test_resume_unknown_cluster __________________________[0m
+[1m[31mtest_redshift/test_redshift.py[0m:2028: in test_resume_unknown_cluster
+    [0m[94massert[39;49;00m err[[33m"[39;49;00m[33mCode[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33mClusterNotFound[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE   AssertionError: assert 'UnknownService' == 'ClusterNotFound'[0m
+[1m[31mE     [0m
+[1m[31mE     [0m[91m- ClusterNotFound[39;49;00m[90m[39;49;00m[0m
+[1m[31mE     [92m+ UnknownService[39;49;00m[90m[39;49;00m[0m
+[31m[1m_____________________________ test_enable_logging ______________________________[0m
+[1m[31mtest_redshift/test_redshift.py[0m:2035: in test_enable_logging
+    [0mclient.create_cluster([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateCluster operation: Service 'redshift' is not available[0m
+[31m[1m_____________________________ test_disable_logging _____________________________[0m
+[1m[31mtest_redshift/test_redshift.py[0m:2052: in test_disable_logging
+    [0mclient.create_cluster([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateCluster operation: Service 'redshift' is not available[0m
+[31m[1m_________________________ test_describe_logging_status _________________________[0m
+[1m[31mtest_redshift/test_redshift.py[0m:2071: in test_describe_logging_status
+    [0mclient.create_cluster([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateCluster operation: Service 'redshift' is not available[0m
+[31m[1m_____________________________ test_redshift_stack ______________________________[0m
+[1m[31mtest_redshift/test_redshift_cloudformation.py[0m:15: in test_redshift_stack
+    [0mcf.create_stack([90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:602: in _api_call
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m._make_api_call(operation_name, kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/context.py[0m:123: in wrapper
+    [0m[94mreturn[39;49;00m func(*args, **kwargs)[90m[39;49;00m
+[1m[31m../.venv/lib/python3.9/site-packages/botocore/client.py[0m:1078: in _make_api_call
+    [0m[94mraise[39;49;00m error_class(parsed_response, operation_name)[90m[39;49;00m
+[1m[31mE   botocore.exceptions.ClientError: An error occurred (UnknownService) when calling the CreateStack operation: Service 'cloudformation' is not available[0m
+[33m=============================== warnings summary ===============================[0m
+tests/test_redshift/test_redshift.py: 71 warnings
+tests/test_redshift/test_redshift_cloudformation.py: 1 warning
+  /Users/lucas/.cache/fakecloud/moto/.venv/lib/python3.9/site-packages/boto3/compat.py:89: PythonDeprecationWarning: Boto3 will no longer support Python 3.9 starting April 29, 2026. To continue receiving service updates, bug fixes, and security updates please upgrade to Python 3.10 or later. More information can be found here: https://aws.amazon.com/blogs/developer/python-support-policy-updates-for-aws-sdks-and-tools/
+    warnings.warn(warning, PythonDeprecationWarning)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+[36m[1m=========================== short test summary info ============================[0m
+[31mFAILED[0m test_redshift/test_redshift.py::[1mtest_create_cluster[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_redshift/test_redshift.py::[1mtest_create_cluster_with_enhanced_vpc_routing_enabled[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_redshift/test_redshift.py::[1mtest_create_and_describe_cluster_with_kms_key_id[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_redshift/test_redshift.py::[1mtest_create_snapshot_copy_grant[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_redshift/test_redshift.py::[1mtest_create_many_snapshot_copy_grants[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_redshift/test_redshift.py::[1mtest_no_snapshot_copy_grants[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_redshift/test_redshift.py::[1mtest_create_cluster_all_attributes[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_redshift/test_redshift.py::[1mtest_create_single_node_cluster[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_redshift/test_redshift.py::[1mtest_create_cluster_in_subnet_group[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_redshift/test_redshift.py::[1mtest_create_cluster_with_security_group[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_redshift/test_redshift.py::[1mtest_create_cluster_with_vpc_security_groups[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_redshift/test_redshift.py::[1mtest_create_cluster_with_iam_roles[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_redshift/test_redshift.py::[1mtest_describe_default_cluster_params[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_redshift/test_redshift.py::[1mtest_describe_cluster_params[0m - AssertionError: assert 'UnknownService' == 'ClusterParam...GroupNotFound'
+[31mFAILED[0m test_redshift/test_redshift.py::[1mtest_create_cluster_with_parameter_group[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_redshift/test_redshift.py::[1mtest_describe_non_existent_cluster[0m - AssertionError: assert 'UnknownService' == 'ClusterNotFound'
+[31mFAILED[0m test_redshift/test_redshift.py::[1mtest_describe_clusters_with_tag_keys_filter[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_redshift/test_redshift.py::[1mtest_modify_cluster_vpc_routing[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_redshift/test_redshift.py::[1mtest_modify_cluster[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_redshift/test_redshift.py::[1mtest_create_cluster_subnet_group[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_redshift/test_redshift.py::[1mtest_authorize_security_group_ingress[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_redshift/test_redshift.py::[1mtest_create_invalid_cluster_subnet_group[0m - AssertionError: assert 'UnknownService' == 'InvalidSubnet'
+[31mFAILED[0m test_redshift/test_redshift.py::[1mtest_describe_non_existent_subnet_group[0m - AssertionError: assert 'UnknownService' == 'ClusterSubne...NotFoundFault'
+[31mFAILED[0m test_redshift/test_redshift.py::[1mtest_delete_cluster_subnet_group[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_redshift/test_redshift.py::[1mtest_create_cluster_security_group[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_redshift/test_redshift.py::[1mtest_describe_non_existent_security_group[0m - AssertionError: assert 'UnknownService' == 'ClusterSecurityGroupNotFound'
+[31mFAILED[0m test_redshift/test_redshift.py::[1mtest_delete_cluster_security_group[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_redshift/test_redshift.py::[1mtest_create_cluster_parameter_group[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_redshift/test_redshift.py::[1mtest_describe_non_existent_parameter_group[0m - AssertionError: assert 'UnknownService' == 'ClusterParam...GroupNotFound'
+[31mFAILED[0m test_redshift/test_redshift.py::[1mtest_delete_parameter_group[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_redshift/test_redshift.py::[1mtest_create_cluster_snapshot_of_non_existent_cluster[0m - assert "Service 'red...not available" == 'Cluster non-...id not found.'
+[31mFAILED[0m test_redshift/test_redshift.py::[1mtest_automated_snapshot_on_cluster_creation[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_redshift/test_redshift.py::[1mtest_delete_automated_snapshot[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_redshift/test_redshift.py::[1mtest_presence_automated_snapshot_on_cluster_delete[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_redshift/test_redshift.py::[1mtest_describe_snapshot_with_filter[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_redshift/test_redshift.py::[1mtest_create_cluster_from_automated_snapshot[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_redshift/test_redshift.py::[1mtest_create_cluster_snapshot[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_redshift/test_redshift.py::[1mtest_describe_cluster_snapshots[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_redshift/test_redshift.py::[1mtest_describe_cluster_snapshots_not_found_error[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_redshift/test_redshift.py::[1mtest_delete_cluster_snapshot[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_redshift/test_redshift.py::[1mtest_cluster_snapshot_already_exists[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_redshift/test_redshift.py::[1mtest_create_cluster_from_snapshot[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_redshift/test_redshift.py::[1mtest_create_cluster_with_node_type_from_snapshot[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_redshift/test_redshift.py::[1mtest_create_cluster_from_snapshot_with_waiter[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_redshift/test_redshift.py::[1mtest_create_cluster_from_non_existent_snapshot[0m - assert "Service 'red...not available" == 'Snapshot non...ot not found.'
+[31mFAILED[0m test_redshift/test_redshift.py::[1mtest_create_cluster_status_update[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_redshift/test_redshift.py::[1mtest_describe_tags_with_resource_type[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_redshift/test_redshift.py::[1mtest_describe_tags_cannot_specify_resource_type_and_resource_name[0m - assert 'using either an ARN or a resource type' in "Service 'redshift' is n...
+[31mFAILED[0m test_redshift/test_redshift.py::[1mtest_describe_tags_with_resource_name[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_redshift/test_redshift.py::[1mtest_create_tags[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_redshift/test_redshift.py::[1mtest_delete_tags[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_redshift/test_redshift.py::[1mtest_describe_tags_all_resource_types[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_redshift/test_redshift.py::[1mtest_tagged_resource_not_found_error[0m - assert "Service 'red...not available" == 'cluster (fake) not found.'
+[31mFAILED[0m test_redshift/test_redshift.py::[1mtest_enable_snapshot_copy[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_redshift/test_redshift.py::[1mtest_enable_snapshot_copy_unencrypted[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_redshift/test_redshift.py::[1mtest_disable_snapshot_copy[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_redshift/test_redshift.py::[1mtest_modify_snapshot_copy_retention_period[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_redshift/test_redshift.py::[1mtest_create_duplicate_cluster_fails[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_redshift/test_redshift.py::[1mtest_delete_cluster_with_final_snapshot[0m - AssertionError: assert 'UnknownService' == 'ClusterNotFound'
+[31mFAILED[0m test_redshift/test_redshift.py::[1mtest_delete_cluster_without_final_snapshot[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_redshift/test_redshift.py::[1mtest_resize_cluster[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_redshift/test_redshift.py::[1mtest_get_cluster_credentials_non_existent_cluster_and_user[0m - AssertionError: assert 'UnknownService' == 'ClusterNotFound'
+[31mFAILED[0m test_redshift/test_redshift.py::[1mtest_get_cluster_credentials_invalid_duration[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_redshift/test_redshift.py::[1mtest_get_cluster_credentials[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_redshift/test_redshift.py::[1mtest_pause_cluster[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_redshift/test_redshift.py::[1mtest_pause_unknown_cluster[0m - AssertionError: assert 'UnknownService' == 'ClusterNotFound'
+[31mFAILED[0m test_redshift/test_redshift.py::[1mtest_resume_cluster[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_redshift/test_redshift.py::[1mtest_resume_unknown_cluster[0m - AssertionError: assert 'UnknownService' == 'ClusterNotFound'
+[31mFAILED[0m test_redshift/test_redshift.py::[1mtest_enable_logging[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_redshift/test_redshift.py::[1mtest_disable_logging[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_redshift/test_redshift.py::[1mtest_describe_logging_status[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31mFAILED[0m test_redshift/test_redshift_cloudformation.py::[1mtest_redshift_stack[0m - botocore.exceptions.ClientError: An error occurred (UnknownService) when ca...
+[31m[31m[1m72 failed[0m, [33m72 warnings[0m[31m in 3.46s[0m[0m
