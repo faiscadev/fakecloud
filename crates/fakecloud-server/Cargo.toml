@@ -1,0 +1,27 @@
+[package]
+name = "fakecloud-server"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+version.workspace = true
+
+[[bin]]
+name = "fakecloud-server"
+path = "src/main.rs"
+
+[dependencies]
+fakecloud-core = { workspace = true }
+fakecloud-aws = { workspace = true }
+fakecloud-sqs = { workspace = true }
+fakecloud-sns = { workspace = true }
+fakecloud-eventbridge = { workspace = true }
+fakecloud-iam = { workspace = true }
+fakecloud-ssm = { workspace = true }
+axum = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+tokio = { workspace = true }
+toml = { workspace = true }
+tower-http = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

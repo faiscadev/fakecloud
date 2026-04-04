@@ -1,0 +1,171 @@
+use bytes::Bytes;
+use http::HeaderMap;
+use std::collections::HashMap;
+
+/// The wire protocol used by an AWS service.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AwsProtocol {
+    /// Query protocol: form-encoded body, Action param, XML response.
+    /// Used by: SQS, SNS, IAM, STS, SES.
+    Query,
+    /// JSON protocol: JSON body, X-Amz-Target header, JSON response.
+    /// Used by: SSM, EventBridge, DynamoDB, SecretsManager, KMS, CloudWatch Logs.
+    Json,
+}
+
+/// Detected service name and action from an incoming HTTP request.
+#[derive(Debug)]
+pub struct DetectedRequest {
+    pub service: String,
+    pub action: String,
+    pub protocol: AwsProtocol,
+}
+
+/// Detect the target service and action from HTTP request components.
+pub fn detect_service(
+    headers: &HeaderMap,
+    query_params: &HashMap<String, String>,
+    body: &Bytes,
+) -> Option<DetectedRequest> {
+    // 1. Check X-Amz-Target header (JSON protocol)
+    if let Some(target) = headers.get("x-amz-target").and_then(|v| v.to_str().ok()) {
+        return parse_amz_target(target);
+    }
+
+    // 2. Check for Query protocol (Action parameter in query string or form body)
+    if let Some(action) = query_params.get("Action") {
+        // Service from SigV4 Authorization header
+        let service = extract_service_from_auth(headers)?;
+        return Some(DetectedRequest {
+            service,
+            action: action.clone(),
+            protocol: AwsProtocol::Query,
+        });
+    }
+
+    // 3. Try form-encoded body
+    {
+        let form_params = decode_form_urlencoded(body);
+
+        if let Some(action) = form_params.get("Action") {
+            let service = extract_service_from_auth(headers)?;
+            return Some(DetectedRequest {
+                service,
+                action: action.clone(),
+                protocol: AwsProtocol::Query,
+            });
+        }
+    }
+
+    // 4. Fallback: try to get service from auth header alone
+    // (for services that use POST with JSON but no X-Amz-Target — unlikely for Phase 1)
+    None
+}
+
+/// Parse `X-Amz-Target: AWSEvents.PutEvents` -> service=events, action=PutEvents
+/// Parse `X-Amz-Target: AmazonSSM.GetParameter` -> service=ssm, action=GetParameter
+fn parse_amz_target(target: &str) -> Option<DetectedRequest> {
+    let (prefix, action) = target.rsplit_once('.')?;
+
+    let service = match prefix {
+        "AWSEvents" => "events",
+        "AmazonSSM" => "ssm",
+        "DynamoDB_20120810" => "dynamodb",
+        "Logs_20140328" => "logs",
+        s if s.starts_with("secretsmanager") => "secretsmanager",
+        s if s.starts_with("TrentService") => "kms",
+        _ => return None,
+    };
+
+    Some(DetectedRequest {
+        service: service.to_string(),
+        action: action.to_string(),
+        protocol: AwsProtocol::Json,
+    })
+}
+
+/// Extract service name from the SigV4 Authorization header credential scope.
+fn extract_service_from_auth(headers: &HeaderMap) -> Option<String> {
+    let auth = headers.get("authorization")?.to_str().ok()?;
+    let info = fakecloud_aws::sigv4::parse_sigv4(auth)?;
+    Some(info.service)
+}
+
+/// Parse form-encoded body into key-value pairs.
+pub fn parse_query_body(body: &Bytes) -> HashMap<String, String> {
+    decode_form_urlencoded(body)
+}
+
+fn decode_form_urlencoded(input: &[u8]) -> HashMap<String, String> {
+    let s = std::str::from_utf8(input).unwrap_or("");
+    let mut result = HashMap::new();
+    for pair in s.split('&') {
+        if pair.is_empty() {
+            continue;
+        }
+        let (key, value) = match pair.find('=') {
+            Some(pos) => (&pair[..pos], &pair[pos + 1..]),
+            None => (pair, ""),
+        };
+        result.insert(url_decode(key), url_decode(value));
+    }
+    result
+}
+
+fn url_decode(input: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+    let mut bytes = input.bytes();
+    while let Some(b) = bytes.next() {
+        match b {
+            b'+' => result.push(' '),
+            b'%' => {
+                let high = bytes.next().and_then(from_hex);
+                let low = bytes.next().and_then(from_hex);
+                if let (Some(h), Some(l)) = (high, low) {
+                    result.push((h << 4 | l) as char);
+                }
+            }
+            _ => result.push(b as char),
+        }
+    }
+    result
+}
+
+fn from_hex(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_amz_target_events() {
+        let result = parse_amz_target("AWSEvents.PutEvents").unwrap();
+        assert_eq!(result.service, "events");
+        assert_eq!(result.action, "PutEvents");
+        assert_eq!(result.protocol, AwsProtocol::Json);
+    }
+
+    #[test]
+    fn parse_amz_target_ssm() {
+        let result = parse_amz_target("AmazonSSM.GetParameter").unwrap();
+        assert_eq!(result.service, "ssm");
+        assert_eq!(result.action, "GetParameter");
+    }
+
+    #[test]
+    fn parse_query_body_basic() {
+        let body = Bytes::from(
+            "Action=SendMessage&QueueUrl=http%3A%2F%2Flocalhost%3A4566%2Fqueue&MessageBody=hello",
+        );
+        let params = parse_query_body(&body);
+        assert_eq!(params.get("Action").unwrap(), "SendMessage");
+        assert_eq!(params.get("MessageBody").unwrap(), "hello");
+    }
+}

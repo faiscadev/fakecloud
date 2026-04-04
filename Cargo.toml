@@ -1,0 +1,53 @@
+[workspace]
+members = [
+    "crates/fakecloud-server",
+    "crates/fakecloud-core",
+    "crates/fakecloud-aws",
+    "crates/fakecloud-sqs",
+    "crates/fakecloud-sns",
+    "crates/fakecloud-eventbridge",
+    "crates/fakecloud-iam",
+    "crates/fakecloud-ssm",
+    "crates/fakecloud-e2e",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/faiscadev/fakecloud"
+homepage = "https://fakecloud.dev"
+rust-version = "1.85"
+version = "0.1.0"
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+axum = "0.8"
+hyper = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+quick-xml = { version = "0.37", features = ["serialize"] }
+thiserror = "2"
+clap = { version = "4", features = ["derive", "env"] }
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+bytes = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+toml = "0.8"
+percent-encoding = "2"
+base64 = "0.22"
+http = "1"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace"] }
+async-trait = "0.1"
+parking_lot = "0.12"
+
+# Internal crates
+fakecloud-core = { path = "crates/fakecloud-core" }
+fakecloud-aws = { path = "crates/fakecloud-aws" }
+fakecloud-sqs = { path = "crates/fakecloud-sqs" }
+fakecloud-sns = { path = "crates/fakecloud-sns" }
+fakecloud-eventbridge = { path = "crates/fakecloud-eventbridge" }
+fakecloud-iam = { path = "crates/fakecloud-iam" }
+fakecloud-ssm = { path = "crates/fakecloud-ssm" }

@@ -1,0 +1,22 @@
+[package]
+name = "fakecloud-e2e"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+version.workspace = true
+publish = false
+
+[dependencies]
+
+[dev-dependencies]
+tokio = { workspace = true }
+serde_json = { workspace = true }
+aws-config = "1"
+aws-sdk-sqs = "1"
+aws-sdk-sns = "1"
+aws-sdk-eventbridge = "1"
+aws-sdk-iam = "1"
+aws-sdk-sts = "1"
+aws-sdk-ssm = "1"
+aws-credential-types = "1"
+aws-types = "1"

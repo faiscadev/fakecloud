@@ -1,0 +1,187 @@
+use std::net::TcpListener;
+use std::process::{Child, Command, Output, Stdio};
+use std::time::Duration;
+
+use aws_config::BehaviorVersion;
+use aws_credential_types::Credentials;
+use aws_types::region::Region;
+
+/// A test server that spawns fakecloud-server on a random port.
+#[allow(dead_code)]
+pub struct TestServer {
+    child: Option<Child>,
+    port: u16,
+    endpoint: String,
+}
+
+#[allow(dead_code)]
+impl TestServer {
+    /// Start a new FakeCloud server on a random available port.
+    pub async fn start() -> Self {
+        let port = find_available_port();
+        let endpoint = format!("http://127.0.0.1:{port}");
+
+        let bin = find_binary();
+
+        let child = Command::new(bin)
+            .arg("--addr")
+            .arg(format!("127.0.0.1:{port}"))
+            .arg("--log-level")
+            .arg("warn")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("failed to start fakecloud-server");
+
+        // Wait for server to be ready
+        wait_for_port(port).await;
+
+        Self {
+            child: Some(child),
+            port,
+            endpoint,
+        }
+    }
+
+    pub fn endpoint(&self) -> &str {
+        &self.endpoint
+    }
+
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+
+    /// Create a shared AWS SDK config pointing at this test server.
+    pub async fn aws_config(&self) -> aws_config::SdkConfig {
+        aws_config::defaults(BehaviorVersion::latest())
+            .endpoint_url(self.endpoint())
+            .region(Region::new("us-east-1"))
+            .credentials_provider(Credentials::new(
+                "AKIAIOSFODNN7EXAMPLE",
+                "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+                None,
+                None,
+                "test",
+            ))
+            .load()
+            .await
+    }
+
+    /// Create an SQS client.
+    pub async fn sqs_client(&self) -> aws_sdk_sqs::Client {
+        aws_sdk_sqs::Client::new(&self.aws_config().await)
+    }
+
+    /// Create an SNS client.
+    pub async fn sns_client(&self) -> aws_sdk_sns::Client {
+        aws_sdk_sns::Client::new(&self.aws_config().await)
+    }
+
+    /// Create an EventBridge client.
+    pub async fn eventbridge_client(&self) -> aws_sdk_eventbridge::Client {
+        aws_sdk_eventbridge::Client::new(&self.aws_config().await)
+    }
+
+    /// Create an IAM client.
+    pub async fn iam_client(&self) -> aws_sdk_iam::Client {
+        aws_sdk_iam::Client::new(&self.aws_config().await)
+    }
+
+    /// Create an STS client.
+    pub async fn sts_client(&self) -> aws_sdk_sts::Client {
+        aws_sdk_sts::Client::new(&self.aws_config().await)
+    }
+
+    /// Create an SSM client.
+    pub async fn ssm_client(&self) -> aws_sdk_ssm::Client {
+        aws_sdk_ssm::Client::new(&self.aws_config().await)
+    }
+
+    /// Run an AWS CLI command against this test server.
+    pub async fn aws_cli(&self, args: &[&str]) -> CliOutput {
+        let output = Command::new("aws")
+            .args(args)
+            .arg("--endpoint-url")
+            .arg(self.endpoint())
+            .arg("--region")
+            .arg("us-east-1")
+            .arg("--no-sign-request")
+            .env("AWS_ACCESS_KEY_ID", "test")
+            .env("AWS_SECRET_ACCESS_KEY", "test")
+            .env("AWS_DEFAULT_REGION", "us-east-1")
+            .output()
+            .expect("failed to run aws cli");
+
+        CliOutput(output)
+    }
+}
+
+impl Drop for TestServer {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+/// Output from an AWS CLI invocation.
+pub struct CliOutput(Output);
+
+#[allow(dead_code)]
+impl CliOutput {
+    pub fn success(&self) -> bool {
+        self.0.status.success()
+    }
+
+    pub fn stdout_text(&self) -> String {
+        String::from_utf8_lossy(&self.0.stdout).to_string()
+    }
+
+    pub fn stderr_text(&self) -> String {
+        String::from_utf8_lossy(&self.0.stderr).to_string()
+    }
+
+    pub fn stdout_json(&self) -> serde_json::Value {
+        serde_json::from_slice(&self.0.stdout).unwrap_or(serde_json::Value::Null)
+    }
+}
+
+fn find_available_port() -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind to random port");
+    listener.local_addr().unwrap().port()
+}
+
+fn find_binary() -> String {
+    let debug_path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../target/debug/fakecloud-server"
+    );
+    let release_path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../target/release/fakecloud-server"
+    );
+
+    if std::path::Path::new(debug_path).exists() {
+        return debug_path.to_string();
+    }
+    if std::path::Path::new(release_path).exists() {
+        return release_path.to_string();
+    }
+
+    panic!(
+        "fakecloud-server binary not found. Run `cargo build` first.\n\
+         Looked in:\n  {debug_path}\n  {release_path}"
+    );
+}
+
+async fn wait_for_port(port: u16) {
+    let addr = format!("127.0.0.1:{port}");
+    for _ in 0..50 {
+        if std::net::TcpStream::connect(&addr).is_ok() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("fakecloud-server did not start within 5 seconds on port {port}");
+}
