@@ -659,6 +659,7 @@ impl SnsService {
         Ok(xml_resp(
             &format!(
                 r#"<TagResourceResponse xmlns="http://sns.amazonaws.com/doc/2010-03-31/">
+  <TagResourceResult/>
   <ResponseMetadata>
     <RequestId>{}</RequestId>
   </ResponseMetadata>
@@ -685,6 +686,7 @@ impl SnsService {
         Ok(xml_resp(
             &format!(
                 r#"<UntagResourceResponse xmlns="http://sns.amazonaws.com/doc/2010-03-31/">
+  <UntagResourceResult/>
   <ResponseMetadata>
     <RequestId>{}</RequestId>
   </ResponseMetadata>
