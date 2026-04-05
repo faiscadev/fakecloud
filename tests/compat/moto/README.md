@@ -8,8 +8,8 @@ Run [Moto](https://github.com/getmoto/moto)'s full test suite against FakeCloud 
 # Run all moto tests (takes a while)
 ./tests/compat/moto/run.sh
 
-# Run only our implemented services (sqs, sns, events, iam, sts, ssm)
-./tests/compat/moto/run.sh --quick
+# Run only our implemented services
+./tests/compat/moto/run.sh --implemented
 
 # Run specific services
 ./tests/compat/moto/run.sh sqs sns

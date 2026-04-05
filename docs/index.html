@@ -258,7 +258,7 @@
     <h2 class="section-title">Why FakeCloud?</h2>
     <div class="why-box">
       <p>
-        LocalStack killed their free Community Edition. Developers who just need SQS, SNS, and EventBridge for local testing are now stuck paying or shimming around broken alternatives.
+        LocalStack killed their free Community Edition. Developers who just need S3, SQS, SNS, and EventBridge for local testing are now stuck paying or shimming around broken alternatives.
       </p>
       <p style="margin-top: 16px;">
         <strong>FakeCloud is the fix.</strong> A fast, lightweight emulator for the AWS services you actually use in local dev. No login, no license key, no cloud account. Just run it and point your SDK at localhost.
@@ -284,12 +284,12 @@
       </div>
       <div class="feature">
         <div class="label">Coverage</div>
-        <h3>5 AWS services</h3>
-        <p>SQS, SNS, EventBridge, SSM Parameter Store, and IAM/STS stubs. The services local dev actually needs.</p>
+        <h3>6 AWS services</h3>
+        <p>S3, SQS, SNS, EventBridge, SSM Parameter Store, and IAM/STS. The services local dev actually needs.</p>
       </div>
       <div class="feature">
         <div class="label">Tested</div>
-        <h3>86 tests</h3>
+        <h3>96 tests</h3>
         <p>Unit and end-to-end tests using official AWS SDKs and CLI.</p>
       </div>
       <div class="feature">
@@ -391,6 +391,10 @@
     <p class="section-sub">Every emulated API is tested against the official AWS SDK.</p>
     <div class="services-grid">
       <div class="service">
+        <div class="name">S3</div>
+        <div class="proto">REST protocol &middot; XML</div>
+      </div>
+      <div class="service">
         <div class="name">SQS</div>
         <div class="proto">Query protocol &middot; XML</div>
       </div>
@@ -408,7 +412,7 @@
       </div>
       <div class="service">
         <div class="name">IAM / STS</div>
-        <div class="proto">Query protocol &middot; Stubs</div>
+        <div class="proto">Query protocol</div>
       </div>
     </div>
   </div>
