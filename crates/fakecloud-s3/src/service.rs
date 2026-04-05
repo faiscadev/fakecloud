@@ -5138,9 +5138,9 @@ fn is_valid_bucket_name(name: &str) -> bool {
     if !bytes[0].is_ascii_alphanumeric() || !bytes[bytes.len() - 1].is_ascii_alphanumeric() {
         return false;
     }
-    // Only lowercase letters, digits, hyphens, dots
+    // Only lowercase letters, digits, hyphens, dots (also allow underscores for compatibility)
     name.chars()
-        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '.')
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '.' || c == '_')
 }
 
 fn is_valid_region(region: &str) -> bool {
@@ -5438,25 +5438,31 @@ fn validate_lifecycle_xml(xml: &str) -> Result<(), AwsServiceError> {
             let has_filter = rule_body.contains("<Filter>")
                 || rule_body.contains("<Filter/>")
                 || rule_body.contains("<Filter />");
-            let has_prefix_at_rule_level = {
-                // Check if <Prefix> appears outside of <Filter>
+
+            // Check for <Prefix> at rule level (outside of <Filter>...</Filter>)
+            let has_prefix_outside_filter = {
                 if !rule_body.contains("<Prefix") {
                     false
                 } else if !has_filter {
-                    true // <Prefix> without <Filter> = rule-level
+                    true // No filter means any Prefix is at rule level
                 } else {
-                    // Check if any <Prefix> is before <Filter> (rule-level)
-                    let prefix_pos = rule_body.find("<Prefix");
-                    let filter_pos = rule_body.find("<Filter");
-                    matches!((prefix_pos, filter_pos), (Some(pp), Some(fp)) if pp < fp)
+                    // Remove the Filter block and check if Prefix remains
+                    let mut stripped = rule_body.to_string();
+                    // Remove <Filter>...</Filter> or self-closing variants
+                    if let Some(fs) = stripped.find("<Filter") {
+                        if let Some(fe) = stripped.find("</Filter>") {
+                            stripped = format!("{}{}", &stripped[..fs], &stripped[fe + 9..]);
+                        }
+                    }
+                    stripped.contains("<Prefix")
                 }
             };
 
-            if !has_filter && !has_prefix_at_rule_level {
+            if !has_filter && !has_prefix_outside_filter {
                 return Err(malformed());
             }
             // Can't have both Filter and rule-level Prefix
-            if has_filter && has_prefix_at_rule_level {
+            if has_filter && has_prefix_outside_filter {
                 return Err(malformed());
             }
 
