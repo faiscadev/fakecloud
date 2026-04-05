@@ -36,8 +36,8 @@ fi
 
 echo "Installing moto and test dependencies..."
 "$VENV_DIR/bin/pip" install --quiet --upgrade pip
-"$VENV_DIR/bin/pip" install --quiet -e "$MOTO_DIR[all]" 2>&1 | tail -1
-"$VENV_DIR/bin/pip" install --quiet pytest pytest-timeout pytest-xdist requests flask 2>&1 | tail -1
+"$VENV_DIR/bin/pip" install --quiet -e "$MOTO_DIR[all,server]" 2>&1 | tail -1
+"$VENV_DIR/bin/pip" install --quiet pytest pytest-timeout pytest-xdist requests flask freezegun 2>&1 | tail -1
 
 echo ""
 echo "Setup complete."
