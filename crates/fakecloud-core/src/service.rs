@@ -20,6 +20,8 @@ pub struct AwsRequest {
     pub method: Method,
     /// Whether this request came via Query (form-encoded) or JSON protocol.
     pub is_query_protocol: bool,
+    /// The access key ID from the SigV4 Authorization header, if present.
+    pub access_key_id: Option<String>,
 }
 
 /// A response from a service handler.

@@ -60,17 +60,19 @@ pub async fn dispatch(
         }
     };
 
-    // Extract region from auth header, User-Agent, or use default
-    let region = fakecloud_aws::sigv4::parse_sigv4(
+    // Extract region and access key from auth header
+    let sigv4_info = fakecloud_aws::sigv4::parse_sigv4(
         parts
             .headers
             .get("authorization")
             .and_then(|v| v.to_str().ok())
             .unwrap_or(""),
-    )
-    .map(|info| info.region)
-    .or_else(|| extract_region_from_user_agent(&parts.headers))
-    .unwrap_or_else(|| config.region.clone());
+    );
+    let access_key_id = sigv4_info.as_ref().map(|info| info.access_key.clone());
+    let region = sigv4_info
+        .map(|info| info.region)
+        .or_else(|| extract_region_from_user_agent(&parts.headers))
+        .unwrap_or_else(|| config.region.clone());
 
     // Build path segments
     let path = parts.uri.path().to_string();
@@ -116,6 +118,7 @@ pub async fn dispatch(
         raw_path: path,
         method: parts.method,
         is_query_protocol: detected.protocol == AwsProtocol::Query,
+        access_key_id,
     };
 
     tracing::info!(

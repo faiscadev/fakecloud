@@ -1,0 +1,20 @@
+--- a/tests/test_iam/test_iam.py	2026-04-05
++++ b/tests/test_iam/test_iam.py	2026-04-05
+@@ -1616,7 +1616,7 @@
+     assert 0 <= (utcnow() - access_key["CreateDate"].replace(tzinfo=None)).seconds < 10
+     assert len(access_key["AccessKeyId"]) == 20
+     assert len(access_key["SecretAccessKey"]) == 40
+-    assert access_key["AccessKeyId"].startswith("AKIA")
++    assert access_key["AccessKeyId"][:4] in ("AKIA", "FKIA")
+     conn = boto3.client(
+         "iam",
+         region_name="us-east-1",
+@@ -1627,7 +1627,7 @@
+     assert 0 <= (utcnow() - access_key["CreateDate"].replace(tzinfo=None)).seconds < 10
+     assert len(access_key["AccessKeyId"]) == 20
+     assert len(access_key["SecretAccessKey"]) == 40
+-    assert access_key["AccessKeyId"].startswith("AKIA")
++    assert access_key["AccessKeyId"][:4] in ("AKIA", "FKIA")
+
+
+ @mock_aws

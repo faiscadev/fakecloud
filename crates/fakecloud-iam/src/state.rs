@@ -200,6 +200,14 @@ pub struct SshPublicKey {
     pub fingerprint: String,
 }
 
+/// Tracks when an access key was last used.
+#[derive(Debug, Clone)]
+pub struct AccessKeyLastUsed {
+    pub last_used_date: DateTime<Utc>,
+    pub service_name: String,
+    pub region: String,
+}
+
 pub struct IamState {
     pub account_id: String,
     pub users: HashMap<String, IamUser>,
@@ -225,6 +233,7 @@ pub struct IamState {
     pub credential_identities: HashMap<String, CredentialIdentity>,
     pub credential_report_generated: bool,
     pub ssh_public_keys: HashMap<String, Vec<SshPublicKey>>, // user_name -> keys
+    pub access_key_last_used: HashMap<String, AccessKeyLastUsed>,
 }
 
 impl IamState {
@@ -253,6 +262,7 @@ impl IamState {
             credential_identities: HashMap::new(),
             credential_report_generated: false,
             ssh_public_keys: HashMap::new(),
+            access_key_last_used: HashMap::new(),
         }
     }
 

@@ -6,10 +6,10 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceErr
 
 use crate::policy_validation::validate_policy_document;
 use crate::state::{
-    AccountPasswordPolicy, IamAccessKey, IamGroup, IamInstanceProfile, IamPolicy, IamRole, IamUser,
-    LoginProfile, OidcProvider, PolicyVersion, SamlProvider, ServerCertificate,
-    ServiceLinkedRoleDeletion, SharedIamState, SigningCertificate, SshPublicKey, Tag,
-    VirtualMfaDevice,
+    AccessKeyLastUsed, AccountPasswordPolicy, IamAccessKey, IamGroup, IamInstanceProfile,
+    IamPolicy, IamRole, IamUser, LoginProfile, OidcProvider, PolicyVersion, SamlProvider,
+    ServerCertificate, ServiceLinkedRoleDeletion, SharedIamState, SigningCertificate, SshPublicKey,
+    Tag, VirtualMfaDevice,
 };
 use crate::xml_responses;
 
@@ -47,6 +47,26 @@ impl AwsService for IamService {
     }
 
     async fn handle(&self, req: AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        // Track access key usage for GetAccessKeyLastUsed
+        if let Some(ref key_id) = req.access_key_id {
+            let mut state = self.state.write();
+            let is_known = state
+                .access_keys
+                .values()
+                .any(|keys| keys.iter().any(|k| k.access_key_id == *key_id));
+            if is_known {
+                state.access_key_last_used.insert(
+                    key_id.clone(),
+                    AccessKeyLastUsed {
+                        last_used_date: Utc::now(),
+                        service_name: "iam".to_string(),
+                        region: req.region.clone(),
+                    },
+                );
+            }
+            drop(state);
+        }
+
         match req.action.as_str() {
             // Users
             "CreateUser" => self.create_user(&req),
@@ -4787,15 +4807,31 @@ impl IamService {
             ));
         }
 
+        let last_used_xml = if let Some(usage) = state.access_key_last_used.get(&access_key_id) {
+            format!(
+                r#"    <AccessKeyLastUsed>
+      <LastUsedDate>{}</LastUsedDate>
+      <Region>{}</Region>
+      <ServiceName>{}</ServiceName>
+    </AccessKeyLastUsed>"#,
+                usage.last_used_date.format("%Y-%m-%dT%H:%M:%SZ"),
+                usage.region,
+                usage.service_name,
+            )
+        } else {
+            r#"    <AccessKeyLastUsed>
+      <Region>N/A</Region>
+      <ServiceName>N/A</ServiceName>
+    </AccessKeyLastUsed>"#
+                .to_string()
+        };
+
         let xml = format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
 <GetAccessKeyLastUsedResponse xmlns="https://iam.amazonaws.com/doc/2010-05-08/">
   <GetAccessKeyLastUsedResult>
     <UserName>{user_name}</UserName>
-    <AccessKeyLastUsed>
-      <Region>N/A</Region>
-      <ServiceName>N/A</ServiceName>
-    </AccessKeyLastUsed>
+{last_used_xml}
   </GetAccessKeyLastUsedResult>
   <ResponseMetadata>
     <RequestId>{}</RequestId>
@@ -4994,7 +5030,7 @@ impl IamService {
       <entry><key>SigningCertificatesPerUserQuota</key><value>2</value></entry>
       <entry><key>AccessKeysPerUserQuota</key><value>2</value></entry>
       <entry><key>MFADevices</key><value>{}</value></entry>
-      <entry><key>MFADevicesInUse</key><value>0</value></entry>
+      <entry><key>MFADevicesInUse</key><value>{}</value></entry>
       <entry><key>AccountMFAEnabled</key><value>0</value></entry>
       <entry><key>AccountAccessKeysPresent</key><value>0</value></entry>
       <entry><key>AccountSigningCertificatesPresent</key><value>0</value></entry>
@@ -5024,8 +5060,20 @@ impl IamService {
             state.users.len(),
             state.groups.len(),
             state.server_certificates.len(),
-            state.virtual_mfa_devices.len(),
+            // MFADevices: count all devices with an assigned user (hardware + virtual enabled)
+            state
+                .virtual_mfa_devices
+                .values()
+                .filter(|d| d.user.is_some())
+                .count(),
+            // MFADevicesInUse: count enabled devices
+            state
+                .virtual_mfa_devices
+                .values()
+                .filter(|d| d.user.is_some() && d.enable_date.is_some())
+                .count(),
             state.policies.len(),
+            // PolicyVersionsInUse: sum of all versions across all policies
             state
                 .policies
                 .values()
@@ -5538,23 +5586,36 @@ impl IamService {
             "user,arn,user_creation_time,password_enabled,password_last_used,password_last_changed,password_next_rotation,mfa_active,access_key_1_active,access_key_1_last_rotated,access_key_1_last_used_date,access_key_1_last_used_region,access_key_1_last_used_service,access_key_2_active,access_key_2_last_rotated,access_key_2_last_used_date,access_key_2_last_used_region,access_key_2_last_used_service,cert_1_active,cert_1_last_rotated,cert_2_active,cert_2_last_rotated\n"
         );
 
-        // Root account
-        csv.push_str(&format!(
-            "<root_account>,arn:aws:iam::{}:root,{},not_supported,not_supported,not_supported,not_supported,false,false,N/A,N/A,N/A,N/A,false,N/A,N/A,N/A,N/A,false,N/A,false,N/A\n",
-            state.account_id,
-            Utc::now().format("%Y-%m-%dT%H:%M:%S+00:00")
-        ));
+        // User rows first (sorted), then root account
+        let mut sorted_users: Vec<&crate::state::IamUser> = state.users.values().collect();
+        sorted_users.sort_by(|a, b| a.user_name.cmp(&b.user_name));
 
-        for user in state.users.values() {
+        for user in &sorted_users {
             let has_password = state.login_profiles.contains_key(&user.user_name);
+            let password_last_used = if has_password {
+                "no_information".to_string()
+            } else {
+                "not_supported".to_string()
+            };
             let keys = state
                 .access_keys
                 .get(&user.user_name)
                 .cloned()
                 .unwrap_or_default();
             let key1_active = keys.first().map(|k| k.status == "Active").unwrap_or(false);
+            let key1_last_rotated = keys
+                .first()
+                .map(|k| k.created_at.format("%Y-%m-%dT%H:%M:%S+00:00").to_string())
+                .unwrap_or_else(|| "N/A".to_string());
             let key2_active = keys.get(1).map(|k| k.status == "Active").unwrap_or(false);
-
+            let key2_last_rotated = keys
+                .get(1)
+                .map(|k| k.created_at.format("%Y-%m-%dT%H:%M:%S+00:00").to_string())
+                .unwrap_or_else(|| "N/A".to_string());
+            let mfa_active = state
+                .virtual_mfa_devices
+                .values()
+                .any(|d| d.user.as_deref() == Some(&user.user_name) && d.enable_date.is_some());
             let certs = state
                 .signing_certificates
                 .get(&user.user_name)
@@ -5564,17 +5625,28 @@ impl IamService {
             let cert2_active = certs.get(1).map(|c| c.status == "Active").unwrap_or(false);
 
             csv.push_str(&format!(
-                "{},{},{},{},not_supported,N/A,N/A,false,{},N/A,N/A,N/A,N/A,{},N/A,N/A,N/A,N/A,{},N/A,{},N/A\n",
+                "{},{},{},{},{},N/A,N/A,{},{},{},N/A,N/A,N/A,{},{},N/A,N/A,N/A,{},N/A,{},N/A\n",
                 user.user_name,
                 user.arn,
                 user.created_at.format("%Y-%m-%dT%H:%M:%S+00:00"),
                 has_password,
+                password_last_used,
+                mfa_active,
                 key1_active,
+                key1_last_rotated,
                 key2_active,
+                key2_last_rotated,
                 cert1_active,
                 cert2_active,
             ));
         }
+
+        // Root account row (after users)
+        csv.push_str(&format!(
+            "<root_account>,arn:aws:iam::{}:root,{},not_supported,not_supported,not_supported,not_supported,false,false,N/A,N/A,N/A,N/A,false,N/A,N/A,N/A,N/A,false,N/A,false,N/A\n",
+            state.account_id,
+            Utc::now().format("%Y-%m-%dT%H:%M:%S+00:00")
+        ));
 
         let encoded = base64::engine::general_purpose::STANDARD.encode(csv.as_bytes());
 
@@ -5609,7 +5681,16 @@ impl IamService {
             .unwrap_or_else(|| "/".to_string());
         let tags = parse_tags(&req.query_params);
 
-        // Validate path
+        // Validate path length first (different error message than format)
+        if path.len() > 512 {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ValidationError",
+                "1 validation error detected: Value \"{}\" at \"path\" failed to satisfy constraint: Member must have length less than or equal to 512",
+            ));
+        }
+
+        // Validate path format
         if !is_valid_iam_path(&path) {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
@@ -5620,9 +5701,11 @@ impl IamService {
 
         let mut state = self.state.write();
 
+        // Include path in serial number
+        let path_part = path.trim_start_matches('/');
         let serial_number = format!(
-            "arn:aws:iam::{}:mfa/{}",
-            state.account_id, virtual_mfa_device_name
+            "arn:aws:iam::{}:mfa/{}{}",
+            state.account_id, path_part, virtual_mfa_device_name
         );
 
         if state.virtual_mfa_devices.contains_key(&serial_number) {
@@ -5690,8 +5773,25 @@ impl IamService {
     fn list_virtual_mfa_devices(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let state = self.state.read();
         let assignment_status = req.query_params.get("AssignmentStatus").cloned();
+        let max_items: Option<usize> = req
+            .query_params
+            .get("MaxItems")
+            .and_then(|v| v.parse().ok());
+        let marker: Option<usize> = req
+            .query_params
+            .get("Marker")
+            .map(|v| {
+                v.parse::<usize>().map_err(|_| {
+                    AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "ValidationError",
+                        "Invalid Marker.",
+                    )
+                })
+            })
+            .transpose()?;
 
-        let devices: Vec<&VirtualMfaDevice> = state
+        let mut devices: Vec<&VirtualMfaDevice> = state
             .virtual_mfa_devices
             .values()
             .filter(|d| match assignment_status.as_deref() {
@@ -5700,8 +5800,30 @@ impl IamService {
                 _ => true,
             })
             .collect();
+        devices.sort_by(|a, b| a.serial_number.cmp(&b.serial_number));
 
-        let members: String = devices
+        let start = marker.unwrap_or(0);
+        if start > devices.len() {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ValidationError",
+                "Invalid Marker.",
+            ));
+        }
+        let (page, is_truncated, next_marker) = if let Some(max) = max_items {
+            let end = (start + max).min(devices.len());
+            let truncated = end < devices.len();
+            let nm = if truncated {
+                Some(end.to_string())
+            } else {
+                None
+            };
+            (&devices[start..end], truncated, nm)
+        } else {
+            (&devices[start..], false, None)
+        };
+
+        let members: String = page
             .iter()
             .map(|d| {
                 let user_xml = d
@@ -5709,9 +5831,15 @@ impl IamService {
                     .as_ref()
                     .and_then(|uname| {
                         state.users.get(uname).map(|u| {
+                            let tags_xml = if u.tags.is_empty() { String::new() } else {
+                                let tm: String = u.tags.iter().map(|t| format!(
+                                    "\n              <member>\n                <Key>{}</Key>\n                <Value>{}</Value>\n              </member>", t.key, t.value
+                                )).collect::<Vec<_>>().join("");
+                                format!("\n          <Tags>{}\n          </Tags>", tm)
+                            };
                             format!(
-                                "\n        <User>\n          <Path>{}</Path>\n          <UserName>{}</UserName>\n          <UserId>{}</UserId>\n          <Arn>{}</Arn>\n          <CreateDate>{}</CreateDate>\n        </User>",
-                                u.path, u.user_name, u.user_id, u.arn, u.created_at.format("%Y-%m-%dT%H:%M:%SZ")
+                                "\n        <User>\n          <Path>{}</Path>\n          <UserName>{}</UserName>\n          <UserId>{}</UserId>\n          <Arn>{}</Arn>\n          <CreateDate>{}</CreateDate>{}\n        </User>",
+                                u.path, u.user_name, u.user_id, u.arn, u.created_at.format("%Y-%m-%dT%H:%M:%SZ"), tags_xml
                             )
                         })
                     })
@@ -5733,11 +5861,15 @@ impl IamService {
             .collect::<Vec<_>>()
             .join("\n");
 
+        let marker_xml = next_marker
+            .map(|m| format!("\n    <Marker>{}</Marker>", m))
+            .unwrap_or_default();
+
         let xml = format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
 <ListVirtualMFADevicesResponse xmlns="https://iam.amazonaws.com/doc/2010-05-08/">
   <ListVirtualMFADevicesResult>
-    <IsTruncated>false</IsTruncated>
+    <IsTruncated>{is_truncated}</IsTruncated>{marker_xml}
     <VirtualMFADevices>
 {members}
     </VirtualMFADevices>
@@ -5767,19 +5899,21 @@ impl IamService {
             ));
         }
 
-        let device = state
-            .virtual_mfa_devices
-            .get_mut(&serial_number)
-            .ok_or_else(|| {
-                AwsServiceError::aws_error(
-                    StatusCode::NOT_FOUND,
-                    "NoSuchEntity",
-                    format!("VirtualMFADevice with serial number {serial_number} not found"),
-                )
-            })?;
-
-        device.user = Some(user_name);
-        device.enable_date = Some(Utc::now());
+        // Support both virtual MFA devices and hardware/arbitrary serial numbers
+        if let Some(device) = state.virtual_mfa_devices.get_mut(&serial_number) {
+            device.user = Some(user_name);
+            device.enable_date = Some(Utc::now());
+        } else {
+            let device = VirtualMfaDevice {
+                serial_number: serial_number.clone(),
+                base32_string_seed: String::new(),
+                qr_code_png: String::new(),
+                enable_date: Some(Utc::now()),
+                user: Some(user_name),
+                tags: Vec::new(),
+            };
+            state.virtual_mfa_devices.insert(serial_number, device);
+        }
 
         let xml = empty_response("EnableMFADevice", &req.request_id);
         Ok(AwsResponse::xml(StatusCode::OK, xml))
@@ -5873,6 +6007,7 @@ fn is_valid_iam_path(path: &str) -> bool {
 impl IamService {
     fn list_entities_for_policy(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let policy_arn = required_param(&req.query_params, "PolicyArn")?;
+        let entity_filter = req.query_params.get("EntityFilter").cloned();
         let state = self.state.read();
 
         if !state.policies.contains_key(&policy_arn) {
@@ -5883,8 +6018,24 @@ impl IamService {
             ));
         }
 
+        let include_roles = matches!(
+            entity_filter.as_deref(),
+            None | Some("Role") | Some("LocalManagedPolicy") | Some("AWSManagedPolicy")
+        );
+        let include_users = matches!(
+            entity_filter.as_deref(),
+            None | Some("User") | Some("LocalManagedPolicy") | Some("AWSManagedPolicy")
+        );
+        let include_groups = matches!(
+            entity_filter.as_deref(),
+            None | Some("Group") | Some("LocalManagedPolicy") | Some("AWSManagedPolicy")
+        );
+
         // Find roles attached to this policy
-        let role_members: String = state
+        let role_members: String = if !include_roles {
+            String::new()
+        } else {
+            state
             .role_policies
             .iter()
             .filter(|(_, arns)| arns.contains(&policy_arn))
@@ -5897,10 +6048,14 @@ impl IamService {
                 })
             })
             .collect::<Vec<_>>()
-            .join("\n");
+            .join("\n")
+        };
 
         // Find users attached to this policy
-        let user_members: String = state
+        let user_members: String = if !include_users {
+            String::new()
+        } else {
+            state
             .user_policies
             .iter()
             .filter(|(_, arns)| arns.contains(&policy_arn))
@@ -5913,10 +6068,14 @@ impl IamService {
                 })
             })
             .collect::<Vec<_>>()
-            .join("\n");
+            .join("\n")
+        };
 
         // Find groups attached to this policy
-        let group_members: String = state
+        let group_members: String = if !include_groups {
+            String::new()
+        } else {
+            state
             .groups
             .values()
             .filter(|g| g.attached_policies.contains(&policy_arn))
@@ -5927,7 +6086,8 @@ impl IamService {
                 )
             })
             .collect::<Vec<_>>()
-            .join("\n");
+            .join("\n")
+        };
 
         let xml = format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
