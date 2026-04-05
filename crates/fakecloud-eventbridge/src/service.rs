@@ -2642,9 +2642,11 @@ pub fn deliver_to_logs(
             arn: format!("arn:aws:logs:{region}:{account_id}:log-group:{group_name}"),
             creation_time: ts_millis,
             retention_in_days: None,
+            kms_key_id: None,
             tags: HashMap::new(),
             log_streams: HashMap::new(),
             stored_bytes: 0,
+            subscription_filters: Vec::new(),
         });
 
     let stream = group

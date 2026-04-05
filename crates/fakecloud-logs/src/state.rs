@@ -9,6 +9,15 @@ pub struct LogsState {
     pub account_id: String,
     pub region: String,
     pub log_groups: HashMap<String, LogGroup>,
+    pub metric_filters: Vec<MetricFilter>,
+    pub resource_policies: HashMap<String, ResourcePolicy>,
+    pub destinations: HashMap<String, Destination>,
+    pub queries: HashMap<String, QueryInfo>,
+    pub export_tasks: Vec<ExportTask>,
+    pub delivery_destinations: HashMap<String, DeliveryDestination>,
+    pub delivery_sources: HashMap<String, DeliverySource>,
+    pub deliveries: HashMap<String, Delivery>,
+    pub query_definitions: HashMap<String, QueryDefinition>,
 }
 
 impl LogsState {
@@ -17,11 +26,29 @@ impl LogsState {
             account_id: account_id.to_string(),
             region: region.to_string(),
             log_groups: HashMap::new(),
+            metric_filters: Vec::new(),
+            resource_policies: HashMap::new(),
+            destinations: HashMap::new(),
+            queries: HashMap::new(),
+            export_tasks: Vec::new(),
+            delivery_destinations: HashMap::new(),
+            delivery_sources: HashMap::new(),
+            deliveries: HashMap::new(),
+            query_definitions: HashMap::new(),
         }
     }
 
     pub fn reset(&mut self) {
         self.log_groups.clear();
+        self.metric_filters.clear();
+        self.resource_policies.clear();
+        self.destinations.clear();
+        self.queries.clear();
+        self.export_tasks.clear();
+        self.delivery_destinations.clear();
+        self.delivery_sources.clear();
+        self.deliveries.clear();
+        self.query_definitions.clear();
     }
 }
 
@@ -30,9 +57,11 @@ pub struct LogGroup {
     pub arn: String,
     pub creation_time: i64,
     pub retention_in_days: Option<i32>,
+    pub kms_key_id: Option<String>,
     pub tags: HashMap<String, String>,
     pub log_streams: HashMap<String, LogStream>,
     pub stored_bytes: i64,
+    pub subscription_filters: Vec<SubscriptionFilter>,
 }
 
 pub struct LogStream {
@@ -51,4 +80,101 @@ pub struct LogEvent {
     pub timestamp: i64,
     pub message: String,
     pub ingestion_time: i64,
+}
+
+pub struct SubscriptionFilter {
+    pub filter_name: String,
+    pub log_group_name: String,
+    pub filter_pattern: String,
+    pub destination_arn: String,
+    pub role_arn: Option<String>,
+    pub distribution: String,
+    pub creation_time: i64,
+}
+
+pub struct MetricFilter {
+    pub filter_name: String,
+    pub filter_pattern: String,
+    pub log_group_name: String,
+    pub metric_transformations: Vec<MetricTransformation>,
+    pub creation_time: i64,
+}
+
+pub struct MetricTransformation {
+    pub metric_name: String,
+    pub metric_namespace: String,
+    pub metric_value: String,
+    pub default_value: Option<f64>,
+}
+
+pub struct ResourcePolicy {
+    pub policy_name: String,
+    pub policy_document: String,
+    pub last_updated_time: i64,
+}
+
+pub struct Destination {
+    pub destination_name: String,
+    pub target_arn: String,
+    pub role_arn: String,
+    pub arn: String,
+    pub access_policy: Option<String>,
+    pub creation_time: i64,
+    pub tags: HashMap<String, String>,
+}
+
+pub struct QueryInfo {
+    pub query_id: String,
+    pub log_group_name: String,
+    pub query_string: String,
+    pub start_time: i64,
+    pub end_time: i64,
+    pub status: String,
+    pub create_time: i64,
+}
+
+pub struct ExportTask {
+    pub task_id: String,
+    pub log_group_name: String,
+    pub from_time: i64,
+    pub to_time: i64,
+    pub destination: String,
+    pub destination_prefix: String,
+    pub status_code: String,
+    pub status_message: String,
+}
+
+pub struct DeliveryDestination {
+    pub name: String,
+    pub arn: String,
+    pub output_format: Option<String>,
+    pub delivery_destination_configuration: HashMap<String, String>,
+    pub tags: HashMap<String, String>,
+    pub delivery_destination_policy: Option<String>,
+}
+
+pub struct DeliverySource {
+    pub name: String,
+    pub arn: String,
+    pub resource_arns: Vec<String>,
+    pub service: String,
+    pub log_type: String,
+    pub tags: HashMap<String, String>,
+}
+
+pub struct Delivery {
+    pub id: String,
+    pub delivery_source_name: String,
+    pub delivery_destination_arn: String,
+    pub delivery_destination_type: String,
+    pub arn: String,
+    pub tags: HashMap<String, String>,
+}
+
+pub struct QueryDefinition {
+    pub query_definition_id: String,
+    pub name: String,
+    pub query_string: String,
+    pub log_group_names: Vec<String>,
+    pub last_modified: i64,
 }
