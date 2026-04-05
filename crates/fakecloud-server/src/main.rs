@@ -88,6 +88,13 @@ async fn main() {
     ));
     let delivery_for_eb = Arc::new(
         DeliveryBus::new()
+            .with_sqs(sqs_delivery.clone())
+            .with_sns(sns_delivery.clone()),
+    );
+
+    // Step 3: S3 delivery (S3 notifications can push to SQS and SNS)
+    let delivery_for_s3 = Arc::new(
+        DeliveryBus::new()
             .with_sqs(sqs_delivery)
             .with_sns(sns_delivery),
     );
@@ -117,7 +124,7 @@ async fn main() {
     registry.register(Arc::new(IamService::new(iam_state.clone())));
     registry.register(Arc::new(StsService::new(iam_state)));
     registry.register(Arc::new(SsmService::new(ssm_state)));
-    registry.register(Arc::new(S3Service::new(s3_state.clone())));
+    registry.register(Arc::new(S3Service::new(s3_state.clone(), delivery_for_s3)));
 
     // Spawn the S3 lifecycle processor as a background task
     let lifecycle_processor = fakecloud_s3::lifecycle::LifecycleProcessor::new(s3_state);

@@ -465,3 +465,100 @@ async fn s3_lifecycle_put_get_delete() {
         .await;
     assert!(!output.success(), "expected error after lifecycle deletion");
 }
+// ---- S3 Event Notification Tests ----
+
+#[tokio::test]
+async fn s3_notification_delivery_to_sqs() {
+    let server = TestServer::start().await;
+    let s3 = server.s3_client().await;
+    let sqs = server.sqs_client().await;
+
+    // Create SQS queue
+    let queue = sqs
+        .create_queue()
+        .queue_name("s3-events")
+        .send()
+        .await
+        .unwrap();
+    let queue_url = queue.queue_url().unwrap();
+
+    // Get queue ARN
+    let attrs = sqs
+        .get_queue_attributes()
+        .queue_url(queue_url)
+        .attribute_names(aws_sdk_sqs::types::QueueAttributeName::QueueArn)
+        .send()
+        .await
+        .unwrap();
+    let queue_arn = attrs
+        .attributes()
+        .unwrap()
+        .get(&aws_sdk_sqs::types::QueueAttributeName::QueueArn)
+        .unwrap()
+        .clone();
+
+    // Create S3 bucket
+    s3.create_bucket()
+        .bucket("notif-bucket")
+        .send()
+        .await
+        .unwrap();
+
+    // Set notification configuration via CLI (SDK doesn't easily set raw XML)
+    let notif_config = format!(
+        r#"{{
+            "QueueConfigurations": [{{
+                "QueueArn": "{}",
+                "Events": ["s3:ObjectCreated:*"]
+            }}]
+        }}"#,
+        queue_arn
+    );
+    let output = server
+        .aws_cli(&[
+            "s3api",
+            "put-bucket-notification-configuration",
+            "--bucket",
+            "notif-bucket",
+            "--notification-configuration",
+            &notif_config,
+        ])
+        .await;
+    assert!(
+        output.success(),
+        "Failed to set notification: {}",
+        output.stderr_text()
+    );
+
+    // Put object
+    s3.put_object()
+        .bucket("notif-bucket")
+        .key("test.txt")
+        .body(ByteStream::from_static(b"hello notifications"))
+        .send()
+        .await
+        .unwrap();
+
+    // Receive message from SQS
+    let msgs = sqs
+        .receive_message()
+        .queue_url(queue_url)
+        .wait_time_seconds(2)
+        .max_number_of_messages(1)
+        .send()
+        .await
+        .unwrap();
+
+    let messages = msgs.messages();
+    assert!(
+        !messages.is_empty(),
+        "Expected an S3 event notification message"
+    );
+
+    let body = messages[0].body().unwrap();
+    let event: serde_json::Value = serde_json::from_str(body).unwrap();
+    assert_eq!(event["Records"][0]["eventSource"], "aws:s3");
+    assert_eq!(event["Records"][0]["eventName"], "ObjectCreated:Put");
+    assert_eq!(event["Records"][0]["s3"]["bucket"]["name"], "notif-bucket");
+    assert_eq!(event["Records"][0]["s3"]["object"]["key"], "test.txt");
+}
