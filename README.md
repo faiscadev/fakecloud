@@ -38,6 +38,7 @@ built to fill that gap -- with a focus on correctness and simplicity.
 | EventBridge | 15 actions | Paid |
 | IAM / STS | 100+ actions | Paid |
 | SSM Parameter Store | 28 actions | Paid |
+| S3 | 16 actions | Paid |
 | Cross-service delivery | Yes | Yes |
 | Scheduled rules fire | Yes | Yes |
 
@@ -181,6 +182,16 @@ Key features: String / StringList / SecureString types, automatic versioning,
 parameter history, hierarchical path queries with recursive option, pagination
 with NextToken, labels, version limits, parameter name normalization (leading
 slash optional), tag-based filtering.
+
+### S3 (16 actions)
+
+CreateBucket, DeleteBucket, HeadBucket, ListBuckets, GetBucketLocation,
+PutObject, GetObject, DeleteObject, HeadObject, CopyObject, DeleteObjects,
+ListObjectsV2, GetBucketTagging, PutBucketTagging, DeleteBucketTagging
+
+Key features: path-style addressing, nested key paths, prefix/delimiter listing
+with common prefixes, pagination with continuation tokens, user metadata,
+cross-bucket copy, batch delete, ETag (MD5) computation.
 
 ### Cross-Service Delivery
 
@@ -348,7 +359,7 @@ curl http://localhost:4566/_fakecloud/health
 {
   "status": "ok",
   "version": "0.1.0",
-  "services": ["sqs", "sns", "events", "iam", "sts", "ssm"]
+  "services": ["sqs", "sns", "events", "iam", "sts", "ssm", "s3"]
 }
 ```
 
@@ -366,18 +377,20 @@ FakeCloud is organized as a Cargo workspace:
 | `fakecloud-eventbridge` | EventBridge implementation with scheduler |
 | `fakecloud-iam` | IAM and STS implementation |
 | `fakecloud-ssm` | SSM Parameter Store implementation |
+| `fakecloud-s3` | S3 implementation |
 | `fakecloud-e2e` | End-to-end tests using aws-sdk-rust |
 
 Protocol handling:
 - **Query protocol** (SQS, SNS, IAM, STS): form-encoded body, `Action` parameter, XML responses
 - **JSON protocol** (SSM, EventBridge): JSON body, `X-Amz-Target` header, JSON responses
+- **REST protocol** (S3): HTTP method + path-based routing, XML responses
 - SigV4 signatures are parsed for service routing but never validated
 
 ## Testing
 
 ```sh
 cargo test --workspace              # unit tests
-cargo build && cargo test -p fakecloud-e2e  # E2E tests (86 tests)
+cargo build && cargo test -p fakecloud-e2e  # E2E tests (96 tests)
 cargo clippy --workspace -- -D warnings     # lint
 cargo fmt --check                           # format check
 ```
@@ -400,7 +413,7 @@ Contributions are welcome. FakeCloud is still in early development (Phase 1).
 
 ### Planned services (Phase 2)
 
-S3, DynamoDB, Lambda, CloudWatch Logs, Secrets Manager.
+DynamoDB, Lambda, CloudWatch Logs, Secrets Manager.
 
 ## License
 
