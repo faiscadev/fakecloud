@@ -150,7 +150,7 @@ exists, anything-but), scheduled rules (rate and cron expressions) that actually
 fire, targets deliver to SNS topics and SQS queues, archives and replays,
 connections and API destinations.
 
-### IAM / STS (133 actions)
+### IAM / STS (135 actions)
 
 **IAM Users:** CreateUser, GetUser, DeleteUser, ListUsers, UpdateUser, TagUser,
 UntagUser, ListUserTags, CreateAccessKey, DeleteAccessKey, ListAccessKeys,
@@ -238,38 +238,20 @@ with NextToken, labels, version limits, parameter name normalization (leading
 slash optional), tag-based filtering, document management with permissions,
 maintenance windows with targets and tasks, patch baselines and patch groups.
 
-### S3 (52 actions)
+### S3 (20 actions)
 
-**Buckets:** ListBuckets, CreateBucket, DeleteBucket, HeadBucket
+**Buckets:** ListBuckets, CreateBucket, DeleteBucket, HeadBucket,
+GetBucketLocation
 
 **Objects:** PutObject, GetObject, DeleteObject, HeadObject, CopyObject,
-DeleteObjects, ListObjectsV2, ListObjects, ListObjectVersions, GetObjectAcl,
-GetObjectAttributes
+DeleteObjects, ListObjectsV2, ListObjects, ListObjectVersions
 
 **Multipart Uploads:** CreateMultipartUpload, UploadPart,
 CompleteMultipartUpload, AbortMultipartUpload, ListParts, ListMultipartUploads
 
-**Bucket Configuration:** GetBucketLocation, GetBucketVersioning,
-PutBucketVersioning, GetBucketEncryption, PutBucketEncryption,
-DeleteBucketEncryption, GetBucketLifecycleConfiguration,
-PutBucketLifecycleConfiguration, DeleteBucketLifecycle, GetBucketPolicy,
-PutBucketPolicy, DeleteBucketPolicy, GetBucketCors, PutBucketCors,
-DeleteBucketCors, GetBucketAcl, PutBucketAcl,
-GetBucketNotificationConfiguration, PutBucketNotificationConfiguration,
-GetBucketLogging, PutBucketLogging, GetBucketWebsite, PutBucketWebsite,
-DeleteBucketWebsite, GetBucketAccelerateConfiguration,
-PutBucketAccelerateConfiguration
-
-**Tags:** GetBucketTagging, PutBucketTagging, DeleteBucketTagging
-
-**Access Control:** GetPublicAccessBlock, PutPublicAccessBlock,
-DeletePublicAccessBlock, GetObjectLockConfiguration, PutObjectLockConfiguration
-
 Key features: path-style addressing, nested key paths, prefix/delimiter listing
 with common prefixes, pagination with continuation tokens, user metadata,
-cross-bucket copy, batch delete, ETag (MD5) computation, multipart uploads,
-bucket versioning, lifecycle configuration, CORS, website hosting configuration,
-public access block, object lock.
+cross-bucket copy, batch delete, ETag (MD5) computation, multipart uploads.
 
 ### Cross-Service Delivery
 
