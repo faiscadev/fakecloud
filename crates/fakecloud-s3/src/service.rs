@@ -1040,7 +1040,7 @@ impl S3Service {
             }
 
             let display_key = if encoding_type.as_deref() == Some("url") {
-                url_encode_key(key)
+                url_encode_s3_key(key)
             } else {
                 xml_escape(key)
             };
@@ -1066,7 +1066,7 @@ impl S3Service {
         let mut common_prefixes_xml = String::new();
         for cp in &common_prefixes {
             let display_cp = if encoding_type.as_deref() == Some("url") {
-                url_encode_key(cp)
+                url_encode_s3_key(cp)
             } else {
                 xml_escape(cp)
             };
@@ -1090,7 +1090,7 @@ impl S3Service {
             String::new()
         } else {
             let display_prefix = if encoding_type.as_deref() == Some("url") {
-                url_encode_key(&prefix)
+                url_encode_s3_key(&prefix)
             } else {
                 xml_escape(&prefix)
             };
@@ -1179,6 +1179,9 @@ impl S3Service {
         let mut last_key = String::new();
 
         for (key, obj) in &b.objects {
+            if obj.is_delete_marker {
+                continue;
+            }
             if !key.starts_with(&prefix) {
                 continue;
             }
@@ -1226,6 +1229,14 @@ impl S3Service {
                 String::new()
             };
 
+            let use_url_enc =
+                req.query_params.get("encoding-type").map(|s| s.as_str()) == Some("url");
+            let display_key = if use_url_enc {
+                url_encode_s3_key(key)
+            } else {
+                xml_escape(key)
+            };
+
             contents.push_str(&format!(
                 "<Contents>\
                  <Key>{}</Key>\
@@ -1235,7 +1246,7 @@ impl S3Service {
                  <StorageClass>{}</StorageClass>\
                  {owner_xml}{checksum_xml}\
                  </Contents>",
-                xml_escape(key),
+                display_key,
                 obj.last_modified.format("%Y-%m-%dT%H:%M:%S%.3fZ"),
                 obj.etag,
                 obj.size,
@@ -1245,11 +1256,18 @@ impl S3Service {
             count += 1;
         }
 
+        let encoding_type = req.query_params.get("encoding-type").cloned();
+        let use_url_encoding = encoding_type.as_deref() == Some("url");
+
         let mut common_prefixes_xml = String::new();
         for cp in &common_prefixes {
+            let display_cp = if use_url_encoding {
+                url_encode_s3_key(cp)
+            } else {
+                xml_escape(cp)
+            };
             common_prefixes_xml.push_str(&format!(
-                "<CommonPrefixes><Prefix>{}</Prefix></CommonPrefixes>",
-                xml_escape(cp),
+                "<CommonPrefixes><Prefix>{display_cp}</Prefix></CommonPrefixes>",
             ));
         }
 
@@ -1268,8 +1286,7 @@ impl S3Service {
             String::new()
         };
 
-        let encoding_type = req.query_params.get("encoding-type").cloned();
-        let encoding_xml = if encoding_type.as_deref() == Some("url") {
+        let encoding_xml = if use_url_encoding {
             "<EncodingType>url</EncodingType>".to_string()
         } else {
             String::new()
@@ -1293,7 +1310,7 @@ impl S3Service {
              <KeyCount>{count}</KeyCount>\
              <MaxKeys>{max_keys}</MaxKeys>{start_after_xml}<IsTruncated>{is_truncated}</IsTruncated>\
              {cont_token}{next_token}{contents}{common_prefixes_xml}</ListBucketResult>",
-            prefix = xml_escape(&prefix),
+            prefix = if use_url_encoding { url_encode_s3_key(&prefix) } else { xml_escape(&prefix) },
         );
         Ok(AwsResponse::xml(StatusCode::OK, body))
     }
@@ -1475,7 +1492,7 @@ impl S3Service {
 
     fn list_object_versions(
         &self,
-        _req: &AwsRequest,
+        req: &AwsRequest,
         bucket: &str,
     ) -> Result<AwsResponse, AwsServiceError> {
         let state = self.state.read();
@@ -1484,41 +1501,57 @@ impl S3Service {
             .get(bucket)
             .ok_or_else(|| no_such_bucket(bucket))?;
 
-        let prefix = self
-            .state
-            .read()
-            .buckets
-            .get(bucket)
-            .map(|_| String::new())
-            .unwrap_or_default();
-        let _ = prefix; // prefix filtering not implemented for now
-
+        let prefix = req.query_params.get("prefix").cloned().unwrap_or_default();
         let mut versions_xml = String::new();
+        let owner_id = &b.acl_owner_id;
 
-        if b.versioning.is_some() {
-            // Build versions from stored version history
+        if b.object_versions.is_empty() {
+            for (key, obj) in &b.objects {
+                if !key.starts_with(&prefix) {
+                    continue;
+                }
+                versions_xml.push_str(&format!(
+                    "<Version>\
+                     <Key>{}</Key>\
+                     <VersionId>null</VersionId>\
+                     <IsLatest>true</IsLatest>\
+                     <LastModified>{}</LastModified>\
+                     <ETag>&quot;{}&quot;</ETag>\
+                     <Size>{}</Size>\
+                     <Owner><ID>{owner_id}</ID><DisplayName>{owner_id}</DisplayName></Owner>\
+                     <StorageClass>{}</StorageClass>\
+                     </Version>",
+                    xml_escape(key),
+                    obj.last_modified.format("%Y-%m-%dT%H:%M:%S%.3fZ"),
+                    obj.etag,
+                    obj.size,
+                    obj.storage_class,
+                ));
+            }
+        } else {
             let mut all_entries: Vec<(&str, &S3Object, bool)> = Vec::new();
-            for (key, versions) in &b.object_versions {
-                let latest_vid = b.objects.get(key).and_then(|o| o.version_id.as_deref());
-                for v in versions.iter().rev() {
-                    let is_latest = v.version_id.as_deref() == latest_vid;
-                    all_entries.push((key, v, is_latest));
+            let mut keys: Vec<&String> = b.object_versions.keys().collect();
+            keys.sort();
+            for key in keys {
+                if let Some(versions) = b.object_versions.get(key.as_str()) {
+                    let len = versions.len();
+                    for (i, obj) in versions.iter().enumerate().rev() {
+                        let is_latest = i == len - 1;
+                        all_entries.push((key, obj, is_latest));
+                    }
                 }
             }
-            // Also include objects not in object_versions (pre-versioning objects)
             for (key, obj) in &b.objects {
-                if !b.object_versions.contains_key(key) && !obj.is_delete_marker {
+                if !b.object_versions.contains_key(key) {
                     all_entries.push((key, obj, true));
                 }
             }
-            // Sort by key, then by last_modified descending
-            all_entries.sort_by(|a, b_entry| {
-                a.0.cmp(b_entry.0)
-                    .then(b_entry.1.last_modified.cmp(&a.1.last_modified))
-            });
+            all_entries.sort_by(|a, b_entry| a.0.cmp(b_entry.0));
 
             for (key, obj, is_latest) in &all_entries {
-                let vid = obj.version_id.as_deref().unwrap_or("null");
+                if !key.starts_with(prefix.as_str()) {
+                    continue;
+                }
                 if obj.is_delete_marker {
                     versions_xml.push_str(&format!(
                         "<DeleteMarker>\
@@ -1526,9 +1559,10 @@ impl S3Service {
                          <VersionId>{}</VersionId>\
                          <IsLatest>{}</IsLatest>\
                          <LastModified>{}</LastModified>\
+                         <Owner><ID>{owner_id}</ID><DisplayName>{owner_id}</DisplayName></Owner>\
                          </DeleteMarker>",
                         xml_escape(key),
-                        xml_escape(vid),
+                        obj.version_id.as_deref().unwrap_or("null"),
                         is_latest,
                         obj.last_modified.format("%Y-%m-%dT%H:%M:%S%.3fZ"),
                     ));
@@ -1541,10 +1575,11 @@ impl S3Service {
                          <LastModified>{}</LastModified>\
                          <ETag>&quot;{}&quot;</ETag>\
                          <Size>{}</Size>\
+                         <Owner><ID>{owner_id}</ID><DisplayName>{owner_id}</DisplayName></Owner>\
                          <StorageClass>{}</StorageClass>\
                          </Version>",
                         xml_escape(key),
-                        xml_escape(vid),
+                        obj.version_id.as_deref().unwrap_or("null"),
                         is_latest,
                         obj.last_modified.format("%Y-%m-%dT%H:%M:%S%.3fZ"),
                         obj.etag,
@@ -1553,40 +1588,18 @@ impl S3Service {
                     ));
                 }
             }
-        } else {
-            // Non-versioned: return current objects as "null" version
-            for (key, obj) in &b.objects {
-                if obj.is_delete_marker {
-                    continue;
-                }
-                let vid = obj.version_id.as_deref().unwrap_or("null");
-                versions_xml.push_str(&format!(
-                    "<Version>\
-                     <Key>{}</Key>\
-                     <VersionId>{vid}</VersionId>\
-                     <IsLatest>true</IsLatest>\
-                     <LastModified>{}</LastModified>\
-                     <ETag>&quot;{}&quot;</ETag>\
-                     <Size>{}</Size>\
-                     <StorageClass>{}</StorageClass>\
-                     </Version>",
-                    xml_escape(key),
-                    obj.last_modified.format("%Y-%m-%dT%H:%M:%S%.3fZ"),
-                    obj.etag,
-                    obj.size,
-                    obj.storage_class,
-                ));
-            }
         }
 
         let body = format!(
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
              <ListVersionsResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
              <Name>{}</Name>\
+             <Prefix>{}</Prefix>\
              <IsTruncated>false</IsTruncated>\
              {versions_xml}\
              </ListVersionsResult>",
             xml_escape(bucket),
+            xml_escape(&prefix),
         );
         Ok(AwsResponse::xml(StatusCode::OK, body))
     }
@@ -2009,19 +2022,6 @@ impl S3Service {
             lock_legal_hold,
         };
         if b.versioning.as_deref() == Some("Enabled") {
-            // If there's an existing pre-versioning object not yet in versions, add it first
-            if !b.object_versions.contains_key(key) {
-                if let Some(existing) = b.objects.get(key) {
-                    if existing.version_id.is_none() {
-                        let mut null_version = existing.clone();
-                        null_version.version_id = Some("null".to_string());
-                        b.object_versions
-                            .entry(key.to_string())
-                            .or_default()
-                            .push(null_version);
-                    }
-                }
-            }
             b.object_versions
                 .entry(key.to_string())
                 .or_default()
@@ -2081,6 +2081,7 @@ impl S3Service {
             .get(bucket)
             .ok_or_else(|| no_such_bucket(bucket))?;
         let obj = resolve_object(b, key, req.query_params.get("versionId"))?;
+
         if obj.is_delete_marker {
             return Err(AwsServiceError::aws_error_with_fields(
                 StatusCode::NOT_FOUND,
@@ -2089,6 +2090,8 @@ impl S3Service {
                 vec![("Key".to_string(), key.to_string())],
             ));
         }
+
+        // Conditional checks
         check_get_conditionals(req, obj)?;
         let total_size = obj.size as usize;
         let mut headers = HeaderMap::new();
@@ -2230,14 +2233,12 @@ impl S3Service {
         bucket: &str,
         key: &str,
     ) -> Result<AwsResponse, AwsServiceError> {
-        // Check for If-Match conditional on DELETE
         let if_match = req
             .headers
             .get("if-match")
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
-
-        let version_id = req.query_params.get("versionId").cloned();
+        let version_id_param = req.query_params.get("versionId").cloned();
 
         let mut state = self.state.write();
         let b = state
@@ -2260,12 +2261,16 @@ impl S3Service {
         }
 
         let mut resp_headers = HeaderMap::new();
+        let versioning_enabled = b.versioning.as_deref() == Some("Enabled");
 
-        if let Some(ref vid) = version_id {
-            // Delete specific version
+        // Delete a specific version
+        if let Some(ref vid) = version_id_param {
+            let mut is_dm = false;
             if let Some(versions) = b.object_versions.get_mut(key) {
-                versions.retain(|o| o.version_id.as_deref() != Some(vid));
-                // Update current object to latest non-deleted version
+                is_dm = versions
+                    .iter()
+                    .any(|o| o.version_id.as_deref() == Some(vid.as_str()) && o.is_delete_marker);
+                versions.retain(|o| o.version_id.as_deref() != Some(vid.as_str()));
                 if let Some(latest) = versions.last() {
                     if latest.is_delete_marker {
                         b.objects.remove(key);
@@ -2278,19 +2283,39 @@ impl S3Service {
                 if versions.is_empty() {
                     b.object_versions.remove(key);
                 }
-            } else {
-                // No versions stored, just remove the current object if vid matches
-                if let Some(obj) = b.objects.get(key) {
-                    let matches = obj.version_id.as_deref() == Some(vid)
-                        || (vid == "null" && obj.version_id.is_none());
-                    if matches {
-                        b.objects.remove(key);
-                    }
+            } else if let Some(obj) = b.objects.get(key) {
+                if obj.version_id.as_deref() == Some(vid.as_str()) {
+                    is_dm = obj.is_delete_marker;
+                    b.objects.remove(key);
                 }
             }
             resp_headers.insert("x-amz-version-id", vid.parse().unwrap());
-        } else if b.versioning.as_deref() == Some("Enabled") {
-            // Create a delete marker
+            if is_dm {
+                resp_headers.insert("x-amz-delete-marker", "true".parse().unwrap());
+            }
+            return Ok(AwsResponse {
+                status: StatusCode::NO_CONTENT,
+                content_type: "application/xml".to_string(),
+                body: Bytes::new(),
+                headers: resp_headers,
+            });
+        }
+
+        // Versioned bucket: create a delete marker
+        if versioning_enabled {
+            // If the existing object was created before versioning, preserve it
+            if !b.object_versions.contains_key(key) {
+                if let Some(existing) = b.objects.get(key) {
+                    let mut preserved = existing.clone();
+                    if preserved.version_id.is_none() {
+                        preserved.version_id = Some("null".to_string());
+                    }
+                    b.object_versions
+                        .entry(key.to_string())
+                        .or_default()
+                        .push(preserved);
+                }
+            }
             let dm_id = Uuid::new_v4().to_string();
             let marker = make_delete_marker(key, &dm_id);
             b.object_versions
@@ -2298,18 +2323,22 @@ impl S3Service {
                 .or_default()
                 .push(marker.clone());
             b.objects.insert(key.to_string(), marker);
-            resp_headers.insert("x-amz-delete-marker", "true".parse().unwrap());
             resp_headers.insert("x-amz-version-id", dm_id.parse().unwrap());
-        } else {
-            // S3 returns 204 even if the key doesn't exist
-            b.objects.remove(key);
+            resp_headers.insert("x-amz-delete-marker", "true".parse().unwrap());
+            return Ok(AwsResponse {
+                status: StatusCode::NO_CONTENT,
+                content_type: "application/xml".to_string(),
+                body: Bytes::new(),
+                headers: resp_headers,
+            });
         }
 
+        b.objects.remove(key);
         Ok(AwsResponse {
             status: StatusCode::NO_CONTENT,
             content_type: "application/xml".to_string(),
             body: Bytes::new(),
-            headers: resp_headers,
+            headers: HeaderMap::new(),
         })
     }
 
@@ -2352,6 +2381,8 @@ impl S3Service {
                 headers,
             });
         }
+
+        // Conditional checks for HEAD
         check_head_conditionals(req, obj)?;
         let total_size = obj.size;
         let mut response_status = StatusCode::OK;
@@ -2506,11 +2537,12 @@ impl S3Service {
             .decode_utf8_lossy()
             .to_string();
         let source = decoded.strip_prefix('/').unwrap_or(&decoded);
-
-        // Parse versionId from ?versionId=X at the end
-        let (source_path, source_version_id) = if let Some(idx) = source.find("?versionId=") {
-            let vid = source[idx + 11..].to_string();
-            (&source[..idx], Some(vid))
+        let (source_path, src_version_id) = if let Some((path, query)) = source.split_once('?') {
+            let vid = query
+                .split('&')
+                .find_map(|p| p.strip_prefix("versionId="))
+                .map(|s| s.to_string());
+            (path, vid)
         } else {
             (source, None)
         };
@@ -2586,46 +2618,8 @@ impl S3Service {
                 .buckets
                 .get(src_bucket)
                 .ok_or_else(|| no_such_bucket(src_bucket))?;
-
-            if let Some(ref vid) = source_version_id {
-                // Look for specific version
-                if vid == "null" {
-                    // "null" means the non-versioned version
-                    let obj = sb.objects.get(src_key).ok_or_else(|| {
-                        AwsServiceError::aws_error_with_fields(
-                            StatusCode::NOT_FOUND,
-                            "NoSuchKey",
-                            "The specified key does not exist.",
-                            vec![("Key".to_string(), src_key.to_string())],
-                        )
-                    })?;
-                    (obj.clone(), obj.version_id.clone())
-                } else {
-                    // Search in object_versions
-                    let obj = resolve_object(sb, src_key, Some(vid)).map_err(|_| {
-                        AwsServiceError::aws_error_with_fields(
-                            StatusCode::NOT_FOUND,
-                            "NoSuchVersion",
-                            "The specified version does not exist.",
-                            vec![
-                                ("Key".to_string(), src_key.to_string()),
-                                ("VersionId".to_string(), vid.to_string()),
-                            ],
-                        )
-                    })?;
-                    (obj.clone(), obj.version_id.clone())
-                }
-            } else {
-                let obj = sb.objects.get(src_key).ok_or_else(|| {
-                    AwsServiceError::aws_error_with_fields(
-                        StatusCode::NOT_FOUND,
-                        "NoSuchKey",
-                        "The specified key does not exist.",
-                        vec![("Key".to_string(), src_key.to_string())],
-                    )
-                })?;
-                (obj.clone(), obj.version_id.clone())
-            }
+            let obj = resolve_object(sb, src_key, src_version_id.as_ref())?.clone();
+            (obj.clone(), obj.version_id.clone())
         };
 
         if let Some(ref inm) = if_none_match {
@@ -2644,7 +2638,7 @@ impl S3Service {
         }
 
         // Check copy-in-place validity
-        let has_version_id = source_version_id.is_some();
+        let has_version_id = src_version_id.is_some();
         if src_bucket == dest_bucket
             && src_key == dest_key
             && metadata_directive == "COPY"
@@ -4385,6 +4379,21 @@ fn compute_checksum(algorithm: &str, data: &[u8]) -> String {
 #[allow(dead_code)]
 fn url_encode_key(s: &str) -> String {
     percent_encoding::utf8_percent_encode(s, percent_encoding::NON_ALPHANUMERIC).to_string()
+}
+
+fn url_encode_s3_key(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() * 2);
+    for byte in s.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => {
+                out.push(byte as char);
+            }
+            _ => {
+                out.push_str(&format!("%{:02X}", byte));
+            }
+        }
+    }
+    out
 }
 
 fn xml_escape(s: &str) -> String {
