@@ -1480,9 +1480,10 @@ impl SqsService {
             .clone();
 
         let mut state = self.state.write();
+        let resolved_url = resolve_queue_url(queue_url, &state).ok_or_else(queue_not_found)?;
         let queue = state
             .queues
-            .get_mut(queue_url)
+            .get_mut(&resolved_url)
             .ok_or_else(queue_not_found)?;
 
         let now = Utc::now();
