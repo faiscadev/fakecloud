@@ -9,6 +9,23 @@ fn xml_escape(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
+/// URL-encode a policy document for XML embedding (like AWS does).
+fn url_encode_policy(s: &str) -> String {
+    let mut result = String::new();
+    for byte in s.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                result.push(byte as char);
+            }
+            _ => {
+                use std::fmt::Write;
+                write!(result, "%{:02X}", byte).unwrap();
+            }
+        }
+    }
+    result
+}
+
 fn tags_xml(tags: &[crate::state::Tag]) -> String {
     if tags.is_empty() {
         return String::new();
@@ -102,7 +119,7 @@ fn role_xml(role: &IamRole) -> String {
         id = role.role_id,
         arn = role.arn,
         date = role.created_at.format("%Y-%m-%dT%H:%M:%SZ"),
-        policy = xml_escape(&role.assume_role_policy_document),
+        policy = url_encode_policy(&role.assume_role_policy_document),
         max_session = role.max_session_duration,
     )
 }
@@ -310,7 +327,7 @@ pub fn list_roles_response(roles: &[IamRole], request_id: &str) -> String {
                 id = r.role_id,
                 arn = r.arn,
                 date = r.created_at.format("%Y-%m-%dT%H:%M:%SZ"),
-                policy = xml_escape(&r.assume_role_policy_document),
+                policy = url_encode_policy(&r.assume_role_policy_document),
                 max_session = r.max_session_duration,
             )
         })

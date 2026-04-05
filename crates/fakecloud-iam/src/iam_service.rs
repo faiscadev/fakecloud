@@ -73,6 +73,8 @@ impl AwsService for IamService {
             "TagRole" => self.tag_role(&req),
             "UntagRole" => self.untag_role(&req),
             "ListRoleTags" => self.list_role_tags(&req),
+            "PutRolePermissionsBoundary" => self.put_role_permissions_boundary(&req),
+            "DeleteRolePermissionsBoundary" => self.delete_role_permissions_boundary(&req),
 
             // Policies (managed)
             "CreatePolicy" => self.create_policy(&req),
@@ -240,6 +242,8 @@ impl AwsService for IamService {
             "TagRole",
             "UntagRole",
             "ListRoleTags",
+            "PutRolePermissionsBoundary",
+            "DeleteRolePermissionsBoundary",
             "CreatePolicy",
             "GetPolicy",
             "DeletePolicy",
@@ -387,6 +391,19 @@ fn required_param(
     })
 }
 
+/// Resolve the calling user when UserName is not provided.
+/// Returns the first user found or a default "default" name.
+fn resolve_calling_user(state: &crate::state::IamState, _account_id: &str) -> String {
+    // In a real implementation, we'd look up the user from the access key.
+    // For simplicity, return the first user or "default".
+    state
+        .users
+        .keys()
+        .next()
+        .cloned()
+        .unwrap_or_else(|| "default".to_string())
+}
+
 fn generate_id() -> String {
     uuid::Uuid::new_v4()
         .to_string()
@@ -443,6 +460,46 @@ fn tags_xml(tags: &[Tag]) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn paginated_tags_response(action: &str, tags: &[Tag], req: &AwsRequest) -> String {
+    let max_items: usize = req
+        .query_params
+        .get("MaxItems")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(100);
+    let offset: usize = req
+        .query_params
+        .get("Marker")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+
+    let offset = offset.min(tags.len());
+    let page = &tags[offset..tags.len().min(offset + max_items)];
+    let is_truncated = offset + max_items < tags.len();
+    let members = tags_xml(page);
+    let marker = if is_truncated {
+        format!("<Marker>{}</Marker>", offset + max_items)
+    } else {
+        String::new()
+    };
+
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<{action}Response xmlns="https://iam.amazonaws.com/doc/2010-05-08/">
+  <{action}Result>
+    <IsTruncated>{is_truncated}</IsTruncated>
+    <Tags>
+{members}
+    </Tags>
+    {marker}
+  </{action}Result>
+  <ResponseMetadata>
+    <RequestId>{}</RequestId>
+  </ResponseMetadata>
+</{action}Response>"#,
+        req.request_id
+    )
 }
 
 fn validate_tags(tags: &[Tag], existing_count: usize) -> Result<(), AwsServiceError> {
@@ -519,10 +576,49 @@ fn validate_tags(tags: &[Tag], existing_count: usize) -> Result<(), AwsServiceEr
     Ok(())
 }
 
+fn validate_untag_keys(keys: &[String]) -> Result<(), AwsServiceError> {
+    if keys.len() > 50 {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "ValidationError",
+            "1 validation error detected: Value at 'tagKeys' failed to satisfy constraint: Member must have length less than or equal to 50.".to_string(),
+        ));
+    }
+    for key in keys {
+        if key.len() > 128 {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ValidationError",
+                "1 validation error detected: Value at 'tagKeys' failed to satisfy constraint: Member must have length less than or equal to 128.".to_string(),
+            ));
+        }
+        if !key.chars().all(|c| {
+            c.is_alphanumeric()
+                || c == ' '
+                || c == '+'
+                || c == '-'
+                || c == '='
+                || c == '.'
+                || c == '_'
+                || c == ':'
+                || c == '/'
+                || c == '@'
+        }) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ValidationError",
+                "1 validation error detected: Value at 'tagKeys' failed to satisfy constraint: Member must satisfy regular expression pattern: [\\p{L}\\p{Z}\\p{N}_.:/=+\\-@]+".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn empty_response(action: &str, request_id: &str) -> String {
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <{action}Response xmlns="https://iam.amazonaws.com/doc/2010-05-08/">
+  <{action}Result/>
   <ResponseMetadata>
     <RequestId>{request_id}</RequestId>
   </ResponseMetadata>
@@ -893,7 +989,11 @@ impl IamService {
     }
 
     fn delete_access_key(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        let user_name = required_param(&req.query_params, "UserName")?;
+        let user_name = req
+            .query_params
+            .get("UserName")
+            .cloned()
+            .unwrap_or_else(|| resolve_calling_user(&self.state.read(), &req.account_id));
         let access_key_id = required_param(&req.query_params, "AccessKeyId")?;
         let mut state = self.state.write();
 
@@ -920,7 +1020,11 @@ impl IamService {
     }
 
     fn list_access_keys(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        let user_name = required_param(&req.query_params, "UserName")?;
+        let user_name = req
+            .query_params
+            .get("UserName")
+            .cloned()
+            .unwrap_or_else(|| resolve_calling_user(&self.state.read(), &req.account_id));
         let state = self.state.read();
         let keys = state
             .access_keys
@@ -932,7 +1036,11 @@ impl IamService {
     }
 
     fn update_access_key(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        let user_name = required_param(&req.query_params, "UserName")?;
+        let user_name = req
+            .query_params
+            .get("UserName")
+            .cloned()
+            .unwrap_or_else(|| resolve_calling_user(&self.state.read(), &req.account_id));
         let access_key_id = required_param(&req.query_params, "AccessKeyId")?;
         let status = required_param(&req.query_params, "Status")?;
         let mut state = self.state.write();
@@ -982,7 +1090,19 @@ impl IamService {
             .and_then(|v| v.parse().ok())
             .unwrap_or(3600);
         let tags = parse_tags(&req.query_params);
+        validate_tags(&tags, 0)?;
         let permissions_boundary = req.query_params.get("PermissionsBoundary").cloned();
+
+        // Validate permissions boundary ARN format
+        if let Some(ref boundary) = permissions_boundary {
+            if !boundary.contains(":policy/") {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationError",
+                    format!("Value ({boundary}) for parameter PermissionsBoundary is invalid."),
+                ));
+            }
+        }
 
         let mut state = self.state.write();
 
@@ -1127,9 +1247,12 @@ impl IamService {
             )
         })?;
 
-        if let Some(desc) = req.query_params.get("Description") {
-            role.description = desc.clone();
-        }
+        // UpdateRole clears description if not provided
+        role.description = req
+            .query_params
+            .get("Description")
+            .cloned()
+            .unwrap_or_default();
         if let Some(dur) = req
             .query_params
             .get("MaxSessionDuration")
@@ -1170,12 +1293,51 @@ impl IamService {
         let policy_document = required_param(&req.query_params, "PolicyDocument")?;
 
         // Validate policy document is valid JSON
-        if serde_json::from_str::<serde_json::Value>(&policy_document).is_err() {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "MalformedPolicyDocument",
-                "Syntax errors in policy.".to_string(),
-            ));
+        let doc: serde_json::Value = match serde_json::from_str(&policy_document) {
+            Ok(v) => v,
+            Err(_) => {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "MalformedPolicyDocument",
+                    "Syntax errors in policy.".to_string(),
+                ));
+            }
+        };
+
+        // Validate trust policy constraints
+        if let Some(statements) = doc.get("Statement").and_then(|s| s.as_array()) {
+            for stmt in statements {
+                // Check for prohibited Resource field
+                if stmt.get("Resource").is_some() {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "MalformedPolicyDocument",
+                        "Has prohibited field Resource.".to_string(),
+                    ));
+                }
+                // Validate actions are valid trust policy actions
+                let allowed = [
+                    "sts:AssumeRole",
+                    "sts:AssumeRoleWithSAML",
+                    "sts:AssumeRoleWithWebIdentity",
+                ];
+                let actions: Vec<&str> = match stmt.get("Action") {
+                    Some(serde_json::Value::String(s)) => vec![s.as_str()],
+                    Some(serde_json::Value::Array(arr)) => {
+                        arr.iter().filter_map(|v| v.as_str()).collect()
+                    }
+                    _ => vec![],
+                };
+                for action in &actions {
+                    if !allowed.contains(action) {
+                        return Err(AwsServiceError::aws_error(
+                            StatusCode::BAD_REQUEST,
+                            "MalformedPolicyDocument",
+                            "Trust Policy statement actions can only be sts:AssumeRole, sts:AssumeRoleWithSAML,  and sts:AssumeRoleWithWebIdentity".to_string(),
+                        ));
+                    }
+                }
+            }
         }
 
         let mut state = self.state.write();
@@ -1207,6 +1369,14 @@ impl IamService {
             )
         })?;
 
+        // Count existing tags that won't be overwritten by new tags
+        let existing_count = role
+            .tags
+            .iter()
+            .filter(|t| !new_tags.iter().any(|nt| nt.key == t.key))
+            .count();
+        validate_tags(&new_tags, existing_count)?;
+
         for new_tag in new_tags {
             if let Some(existing) = role.tags.iter_mut().find(|t| t.key == new_tag.key) {
                 existing.value = new_tag.value;
@@ -1222,6 +1392,7 @@ impl IamService {
     fn untag_role(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let role_name = required_param(&req.query_params, "RoleName")?;
         let tag_keys = parse_tag_keys(&req.query_params);
+        validate_untag_keys(&tag_keys)?;
         let mut state = self.state.write();
 
         let role = state.roles.get_mut(&role_name).ok_or_else(|| {
@@ -1250,22 +1421,57 @@ impl IamService {
             )
         })?;
 
-        let members = tags_xml(&role.tags);
-        let xml = format!(
-            r#"<?xml version="1.0" encoding="UTF-8"?>
-<ListRoleTagsResponse xmlns="https://iam.amazonaws.com/doc/2010-05-08/">
-  <ListRoleTagsResult>
-    <IsTruncated>false</IsTruncated>
-    <Tags>
-{members}
-    </Tags>
-  </ListRoleTagsResult>
-  <ResponseMetadata>
-    <RequestId>{}</RequestId>
-  </ResponseMetadata>
-</ListRoleTagsResponse>"#,
-            req.request_id
-        );
+        let xml = paginated_tags_response("ListRoleTags", &role.tags, req);
+        Ok(AwsResponse::xml(StatusCode::OK, xml))
+    }
+
+    fn put_role_permissions_boundary(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let role_name = required_param(&req.query_params, "RoleName")?;
+        let boundary = required_param(&req.query_params, "PermissionsBoundary")?;
+
+        // Validate boundary ARN format
+        if !boundary.contains(":policy/") {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ValidationError",
+                format!("Value ({boundary}) for parameter PermissionsBoundary is invalid."),
+            ));
+        }
+
+        let mut state = self.state.write();
+        let role = state.roles.get_mut(&role_name).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "NoSuchEntity",
+                format!("Role {role_name} not found"),
+            )
+        })?;
+
+        role.permissions_boundary = Some(boundary);
+        let xml = empty_response("PutRolePermissionsBoundary", &req.request_id);
+        Ok(AwsResponse::xml(StatusCode::OK, xml))
+    }
+
+    fn delete_role_permissions_boundary(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let role_name = required_param(&req.query_params, "RoleName")?;
+        let mut state = self.state.write();
+
+        let role = state.roles.get_mut(&role_name).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "NoSuchEntity",
+                format!("Role {role_name} not found"),
+            )
+        })?;
+
+        role.permissions_boundary = None;
+        let xml = empty_response("DeleteRolePermissionsBoundary", &req.request_id);
         Ok(AwsResponse::xml(StatusCode::OK, xml))
     }
 }
@@ -1426,6 +1632,7 @@ impl IamService {
     fn untag_policy(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let policy_arn = required_param(&req.query_params, "PolicyArn")?;
         let tag_keys = parse_tag_keys(&req.query_params);
+        validate_untag_keys(&tag_keys)?;
         let mut state = self.state.write();
 
         let policy = state.policies.get_mut(&policy_arn).ok_or_else(|| {
@@ -1454,22 +1661,7 @@ impl IamService {
             )
         })?;
 
-        let members = tags_xml(&policy.tags);
-        let xml = format!(
-            r#"<?xml version="1.0" encoding="UTF-8"?>
-<ListPolicyTagsResponse xmlns="https://iam.amazonaws.com/doc/2010-05-08/">
-  <ListPolicyTagsResult>
-    <IsTruncated>false</IsTruncated>
-    <Tags>
-{members}
-    </Tags>
-  </ListPolicyTagsResult>
-  <ResponseMetadata>
-    <RequestId>{}</RequestId>
-  </ResponseMetadata>
-</ListPolicyTagsResponse>"#,
-            req.request_id
-        );
+        let xml = paginated_tags_response("ListPolicyTags", &policy.tags, req);
         Ok(AwsResponse::xml(StatusCode::OK, xml))
     }
 }
@@ -1492,7 +1684,7 @@ impl IamService {
             AwsServiceError::aws_error(
                 StatusCode::NOT_FOUND,
                 "NoSuchEntity",
-                format!("Policy {policy_arn} not found."),
+                format!("Policy {policy_arn} not found"),
             )
         })?;
 
@@ -1557,7 +1749,7 @@ impl IamService {
             AwsServiceError::aws_error(
                 StatusCode::NOT_FOUND,
                 "NoSuchEntity",
-                format!("Policy {policy_arn} not found."),
+                format!("Policy {policy_arn} not found"),
             )
         })?;
 
@@ -1607,7 +1799,7 @@ impl IamService {
             AwsServiceError::aws_error(
                 StatusCode::NOT_FOUND,
                 "NoSuchEntity",
-                format!("Policy {policy_arn} not found."),
+                format!("Policy {policy_arn} not found"),
             )
         })?;
 
@@ -1654,7 +1846,7 @@ impl IamService {
             AwsServiceError::aws_error(
                 StatusCode::NOT_FOUND,
                 "NoSuchEntity",
-                format!("Policy {policy_arn} not found."),
+                format!("Policy {policy_arn} not found"),
             )
         })?;
 
@@ -1671,7 +1863,7 @@ impl IamService {
             return Err(AwsServiceError::aws_error(
                 StatusCode::NOT_FOUND,
                 "NoSuchEntity",
-                format!("Policy version {version_id} not found."),
+                format!("Policy version {version_id} not found"),
             ));
         }
 
@@ -1685,13 +1877,39 @@ impl IamService {
         let policy_arn = required_param(&req.query_params, "PolicyArn")?;
         let version_id = required_param(&req.query_params, "VersionId")?;
 
+        // Validate version ID format: must match v[1-9][0-9]*(\.[A-Za-z0-9-]*)?
+        let valid_format = version_id.starts_with('v')
+            && version_id.len() > 1
+            && version_id[1..2]
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_digit() && c != '0')
+            && version_id[1..]
+                .split_once('.')
+                .map(|(num, ext)| {
+                    num.chars().all(|c| c.is_ascii_digit())
+                        && ext.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+                })
+                .unwrap_or_else(|| version_id[1..].chars().all(|c| c.is_ascii_digit()));
+
+        if !valid_format {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ValidationError",
+                format!(
+                    "Value '{}' at 'versionId' failed to satisfy constraint: Member must satisfy regular expression pattern: v[1-9][0-9]*(\\.[A-Za-z0-9-]*)?",
+                    version_id
+                ),
+            ));
+        }
+
         let mut state = self.state.write();
 
         let policy = state.policies.get_mut(&policy_arn).ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::NOT_FOUND,
                 "NoSuchEntity",
-                format!("Policy {policy_arn} not found."),
+                format!("Policy {policy_arn} not found"),
             )
         })?;
 
@@ -1699,7 +1917,9 @@ impl IamService {
             return Err(AwsServiceError::aws_error(
                 StatusCode::NOT_FOUND,
                 "NoSuchEntity",
-                format!("Version {version_id} not found."),
+                format!(
+                    "Policy {policy_arn} version {version_id} does not exist or is not attachable."
+                ),
             ));
         }
 
@@ -1928,6 +2148,19 @@ impl IamService {
                 StatusCode::NOT_FOUND,
                 "NoSuchEntity",
                 format!("Role {role_name} not found"),
+            ));
+        }
+
+        let policy_exists = state
+            .role_inline_policies
+            .get(&role_name)
+            .is_some_and(|p| p.contains_key(&policy_name));
+
+        if !policy_exists {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "NoSuchEntity",
+                format!("The role policy with name {policy_name} cannot be found."),
             ));
         }
 
@@ -3158,7 +3391,7 @@ impl IamService {
                 state.roles.get(rn).map(|r| {
                     format!(
                         "        <member>\n          <Path>{}</Path>\n          <RoleName>{}</RoleName>\n          <RoleId>{}</RoleId>\n          <Arn>{}</Arn>\n          <CreateDate>{}</CreateDate>\n          <AssumeRolePolicyDocument>{}</AssumeRolePolicyDocument>\n        </member>",
-                        r.path, r.role_name, r.role_id, r.arn, r.created_at.format("%Y-%m-%dT%H:%M:%SZ"), xml_escape(&r.assume_role_policy_document)
+                        r.path, r.role_name, r.role_id, r.arn, r.created_at.format("%Y-%m-%dT%H:%M:%SZ"), url_encode(&r.assume_role_policy_document)
                     )
                 })
             })
@@ -3369,7 +3602,7 @@ impl IamService {
             AwsServiceError::aws_error(
                 StatusCode::NOT_FOUND,
                 "NoSuchEntity",
-                format!("SAML provider {arn} not found."),
+                format!("SAML provider {arn} not found"),
             )
         })?;
 
@@ -3405,7 +3638,7 @@ impl IamService {
             return Err(AwsServiceError::aws_error(
                 StatusCode::NOT_FOUND,
                 "NoSuchEntity",
-                format!("SAML provider {arn} not found."),
+                format!("SAML provider {arn} not found"),
             ));
         }
 
@@ -3457,7 +3690,7 @@ impl IamService {
             AwsServiceError::aws_error(
                 StatusCode::NOT_FOUND,
                 "NoSuchEntity",
-                format!("SAML provider {arn} not found."),
+                format!("SAML provider {arn} not found"),
             )
         })?;
 
@@ -4334,7 +4567,7 @@ impl IamService {
                 AwsServiceError::aws_error(
                     StatusCode::NOT_FOUND,
                     "NoSuchEntity",
-                    format!("Deletion task {task_id} not found."),
+                    format!("Deletion task {task_id} not found"),
                 )
             })?;
 
@@ -4696,6 +4929,50 @@ impl IamService {
         &self,
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
+        // Validate constraints
+        let min_len: Option<i64> = req
+            .query_params
+            .get("MinimumPasswordLength")
+            .and_then(|v| v.parse().ok());
+        let max_age: Option<i64> = req
+            .query_params
+            .get("MaxPasswordAge")
+            .and_then(|v| v.parse().ok());
+        let reuse_prevention: Option<i64> = req
+            .query_params
+            .get("PasswordReusePrevention")
+            .and_then(|v| v.parse().ok());
+
+        let mut errors = Vec::new();
+        if let Some(v) = min_len {
+            if v > 128 {
+                errors.push(format!("Value \"{v}\" at \"minimumPasswordLength\" failed to satisfy constraint: Member must have value less than or equal to 128"));
+            }
+        }
+        if let Some(v) = reuse_prevention {
+            if v > 24 {
+                errors.push(format!("Value \"{v}\" at \"passwordReusePrevention\" failed to satisfy constraint: Member must have value less than or equal to 24"));
+            }
+        }
+        if let Some(v) = max_age {
+            if v > 1095 {
+                errors.push(format!("Value \"{v}\" at \"maxPasswordAge\" failed to satisfy constraint: Member must have value less than or equal to 1095"));
+            }
+        }
+        if !errors.is_empty() {
+            let n = errors.len();
+            let msg = format!(
+                "{n} validation error{} detected: {}",
+                if n > 1 { "s" } else { "" },
+                errors.join("; ")
+            );
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ValidationError",
+                msg,
+            ));
+        }
+
         let mut state = self.state.write();
 
         let policy = state
@@ -4756,18 +5033,17 @@ impl IamService {
             AwsServiceError::aws_error(
                 StatusCode::NOT_FOUND,
                 "NoSuchEntity",
-                "The Password Policy with domain name IAM cannot be found.".to_string(),
+                format!(
+                    "The Password Policy with domain name {} cannot be found.",
+                    state.account_id
+                ),
             )
         })?;
 
-        let max_age_xml = if policy.max_password_age > 0 {
-            format!(
-                "\n      <MaxPasswordAge>{}</MaxPasswordAge>",
-                policy.max_password_age
-            )
-        } else {
-            String::new()
-        };
+        let max_age_xml = format!(
+            "\n      <MaxPasswordAge>{}</MaxPasswordAge>",
+            policy.max_password_age
+        );
 
         let reuse_prevention_xml = if policy.password_reuse_prevention > 0 {
             format!(
@@ -5001,7 +5277,7 @@ impl IamService {
             return Err(AwsServiceError::aws_error(
                 StatusCode::NOT_FOUND,
                 "NoSuchEntity",
-                format!("VirtualMFADevice with serial number {serial_number} not found."),
+                format!("VirtualMFADevice with serial number {serial_number} not found"),
             ));
         }
 
@@ -5096,7 +5372,7 @@ impl IamService {
                 AwsServiceError::aws_error(
                     StatusCode::NOT_FOUND,
                     "NoSuchEntity",
-                    format!("VirtualMFADevice with serial number {serial_number} not found."),
+                    format!("VirtualMFADevice with serial number {serial_number} not found"),
                 )
             })?;
 

@@ -41,7 +41,33 @@ impl SqsDelivery for SqsDeliveryImpl {
         let queue = state.queues.values_mut().find(|q| q.arn == queue_arn);
 
         if let Some(queue) = queue {
+            // For FIFO queues without content-based dedup, require explicit dedup ID
+            if queue.is_fifo && message_dedup_id.is_none() {
+                let content_based = queue
+                    .attributes
+                    .get("ContentBasedDeduplication")
+                    .map(|v| v.as_str())
+                    == Some("true");
+                if !content_based {
+                    tracing::debug!(
+                        queue_arn,
+                        "skipping delivery: FIFO queue requires dedup ID or content-based dedup"
+                    );
+                    return;
+                }
+            }
+
             let now = Utc::now();
+
+            // For FIFO queues with content-based dedup, generate dedup ID if not provided
+            let effective_dedup_id = if message_dedup_id.is_some() {
+                message_dedup_id.map(|s| s.to_string())
+            } else if queue.is_fifo {
+                // Content-based dedup: use SHA-256 of body (matches real SQS behavior)
+                Some(crate::service::sha256_hex(message_body))
+            } else {
+                None
+            };
 
             // Convert SqsMessageAttribute to the SQS state MessageAttribute
             let sqs_attrs: HashMap<String, MessageAttribute> = message_attributes
@@ -69,7 +95,7 @@ impl SqsDelivery for SqsDeliveryImpl {
                 visible_at: None,
                 receive_count: 0,
                 message_group_id: message_group_id.map(|s| s.to_string()),
-                message_dedup_id: message_dedup_id.map(|s| s.to_string()),
+                message_dedup_id: effective_dedup_id,
                 created_at: now,
                 sequence_number: None,
             };

@@ -3,6 +3,7 @@ use chrono::Utc;
 use http::StatusCode;
 use md5::{Digest, Md5};
 use serde_json::{json, Value};
+use sha2::Sha256;
 use std::collections::{HashMap, VecDeque};
 
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
@@ -2089,12 +2090,13 @@ fn format_receive_response(
         })
         .collect();
 
-    sqs_response(
-        "ReceiveMessage",
-        json!({ "Messages": messages }),
-        request_id,
-        is_query,
-    )
+    let body = if messages.is_empty() {
+        json!({})
+    } else {
+        json!({ "Messages": messages })
+    };
+
+    sqs_response("ReceiveMessage", body, request_id, is_query)
 }
 
 fn parse_message_attributes(body: &Value) -> HashMap<String, MessageAttribute> {
@@ -2313,4 +2315,10 @@ pub fn md5_hex(input: &str) -> String {
     let mut hasher = Md5::new();
     hasher.update(input.as_bytes());
     format!("{:032x}", hasher.finalize())
+}
+
+pub fn sha256_hex(input: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(input.as_bytes());
+    format!("{:064x}", hasher.finalize())
 }
