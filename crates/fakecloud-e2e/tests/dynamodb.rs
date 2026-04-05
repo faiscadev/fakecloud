@@ -648,3 +648,161 @@ async fn dynamodb_condition_expression() {
         .await;
     assert!(result.is_err());
 }
+
+#[tokio::test]
+async fn dynamodb_nested_projection_on_list_element() {
+    let server = TestServer::start().await;
+    let client = server.dynamodb_client().await;
+
+    client
+        .create_table()
+        .table_name("NestedProj")
+        .key_schema(
+            KeySchemaElement::builder()
+                .attribute_name("pk")
+                .key_type(KeyType::Hash)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            AttributeDefinition::builder()
+                .attribute_name("pk")
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .billing_mode(BillingMode::PayPerRequest)
+        .send()
+        .await
+        .unwrap();
+
+    // Put item with a list of maps
+    client
+        .put_item()
+        .table_name("NestedProj")
+        .item("pk", AttributeValue::S("k1".to_string()))
+        .item(
+            "people",
+            AttributeValue::L(vec![
+                AttributeValue::M(HashMap::from([
+                    ("name".to_string(), AttributeValue::S("Alice".to_string())),
+                    ("age".to_string(), AttributeValue::N("30".to_string())),
+                ])),
+                AttributeValue::M(HashMap::from([
+                    ("name".to_string(), AttributeValue::S("Bob".to_string())),
+                    ("age".to_string(), AttributeValue::N("25".to_string())),
+                ])),
+            ]),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    // Project only people[0].name — should NOT return the whole element
+    let resp = client
+        .get_item()
+        .table_name("NestedProj")
+        .key("pk", AttributeValue::S("k1".to_string()))
+        .projection_expression("people[0].#n")
+        .expression_attribute_names("#n", "name")
+        .send()
+        .await
+        .unwrap();
+
+    let item = resp.item().unwrap();
+    let people = item.get("people").unwrap().as_l().unwrap();
+    let first = people[0].as_m().unwrap();
+    // Should have "name"
+    assert_eq!(
+        first.get("name").unwrap().as_s().unwrap(),
+        "Alice",
+        "projected name should be Alice"
+    );
+    // Should NOT have "age" (that was the bug: returning entire element)
+    assert!(
+        first.get("age").is_none(),
+        "age should not be present in projection of people[0].name"
+    );
+}
+
+#[tokio::test]
+async fn dynamodb_filter_with_parenthesized_and_or() {
+    let server = TestServer::start().await;
+    let client = server.dynamodb_client().await;
+
+    client
+        .create_table()
+        .table_name("ParenFilter")
+        .key_schema(
+            KeySchemaElement::builder()
+                .attribute_name("pk")
+                .key_type(KeyType::Hash)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            AttributeDefinition::builder()
+                .attribute_name("pk")
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .billing_mode(BillingMode::PayPerRequest)
+        .send()
+        .await
+        .unwrap();
+
+    // Item 1: color=red, size=large
+    client
+        .put_item()
+        .table_name("ParenFilter")
+        .item("pk", AttributeValue::S("i1".to_string()))
+        .item("color", AttributeValue::S("red".to_string()))
+        .item("size", AttributeValue::S("large".to_string()))
+        .send()
+        .await
+        .unwrap();
+
+    // Item 2: color=blue, size=small
+    client
+        .put_item()
+        .table_name("ParenFilter")
+        .item("pk", AttributeValue::S("i2".to_string()))
+        .item("color", AttributeValue::S("blue".to_string()))
+        .item("size", AttributeValue::S("small".to_string()))
+        .send()
+        .await
+        .unwrap();
+
+    // Item 3: color=red, size=small, premium=yes
+    client
+        .put_item()
+        .table_name("ParenFilter")
+        .item("pk", AttributeValue::S("i3".to_string()))
+        .item("color", AttributeValue::S("red".to_string()))
+        .item("size", AttributeValue::S("small".to_string()))
+        .item("premium", AttributeValue::S("yes".to_string()))
+        .send()
+        .await
+        .unwrap();
+
+    // Filter: (color = red AND size = large) OR premium = yes
+    // Should match i1 (red+large) and i3 (premium=yes), not i2
+    let resp = client
+        .scan()
+        .table_name("ParenFilter")
+        .filter_expression("(color = :red AND #s = :large) OR premium = :yes")
+        .expression_attribute_names("#s", "size")
+        .expression_attribute_values(":red", AttributeValue::S("red".to_string()))
+        .expression_attribute_values(":large", AttributeValue::S("large".to_string()))
+        .expression_attribute_values(":yes", AttributeValue::S("yes".to_string()))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.count(),
+        2,
+        "should match 2 items: (red AND large) OR premium=yes"
+    );
+}

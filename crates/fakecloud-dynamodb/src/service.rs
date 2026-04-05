@@ -1117,17 +1117,195 @@ fn project_item(
             let expr_attr_names = parse_expression_attribute_names(body);
             let attrs: Vec<String> = proj
                 .split(',')
-                .map(|s| resolve_attr_name(s.trim(), &expr_attr_names))
+                .map(|s| resolve_projection_path(s.trim(), &expr_attr_names))
                 .collect();
             let mut result = HashMap::new();
             for attr in &attrs {
-                if let Some(v) = item.get(attr) {
-                    result.insert(attr.clone(), v.clone());
+                if let Some(v) = resolve_nested_path(item, attr) {
+                    insert_nested_value(&mut result, attr, v);
                 }
             }
             result
         }
         _ => item.clone(),
+    }
+}
+
+/// Resolve expression attribute names within each segment of a projection path.
+/// For example, "people[0].#n" with {"#n": "name"} => "people[0].name".
+fn resolve_projection_path(path: &str, expr_attr_names: &HashMap<String, String>) -> String {
+    // Split on dots, resolve each part, rejoin
+    let mut result = String::new();
+    for (i, segment) in path.split('.').enumerate() {
+        if i > 0 {
+            result.push('.');
+        }
+        // A segment might be like "#n" or "people[0]" or "#attr[0]"
+        if let Some(bracket_pos) = segment.find('[') {
+            let key_part = &segment[..bracket_pos];
+            let index_part = &segment[bracket_pos..];
+            result.push_str(&resolve_attr_name(key_part, expr_attr_names));
+            result.push_str(index_part);
+        } else {
+            result.push_str(&resolve_attr_name(segment, expr_attr_names));
+        }
+    }
+    result
+}
+
+/// Resolve a potentially nested path like "a.b.c" or "a[0].b" from an item.
+fn resolve_nested_path(item: &HashMap<String, AttributeValue>, path: &str) -> Option<Value> {
+    let segments = parse_path_segments(path);
+    if segments.is_empty() {
+        return None;
+    }
+
+    let first = &segments[0];
+    let top_key = match first {
+        PathSegment::Key(k) => k.as_str(),
+        _ => return None,
+    };
+
+    let mut current = item.get(top_key)?.clone();
+
+    for segment in &segments[1..] {
+        match segment {
+            PathSegment::Key(k) => {
+                // Navigate into a Map: {"M": {"key": ...}}
+                current = current.get("M")?.get(k)?.clone();
+            }
+            PathSegment::Index(idx) => {
+                // Navigate into a List: {"L": [...]}
+                current = current.get("L")?.get(*idx)?.clone();
+            }
+        }
+    }
+
+    Some(current)
+}
+
+#[derive(Debug)]
+enum PathSegment {
+    Key(String),
+    Index(usize),
+}
+
+/// Parse a path like "a.b[0].c" into segments: [Key("a"), Key("b"), Index(0), Key("c")]
+fn parse_path_segments(path: &str) -> Vec<PathSegment> {
+    let mut segments = Vec::new();
+    let mut current = String::new();
+
+    let chars: Vec<char> = path.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        match chars[i] {
+            '.' => {
+                if !current.is_empty() {
+                    segments.push(PathSegment::Key(current.clone()));
+                    current.clear();
+                }
+            }
+            '[' => {
+                if !current.is_empty() {
+                    segments.push(PathSegment::Key(current.clone()));
+                    current.clear();
+                }
+                i += 1;
+                let mut num = String::new();
+                while i < chars.len() && chars[i] != ']' {
+                    num.push(chars[i]);
+                    i += 1;
+                }
+                if let Ok(idx) = num.parse::<usize>() {
+                    segments.push(PathSegment::Index(idx));
+                }
+                // skip ']'
+            }
+            c => {
+                current.push(c);
+            }
+        }
+        i += 1;
+    }
+    if !current.is_empty() {
+        segments.push(PathSegment::Key(current));
+    }
+    segments
+}
+
+/// Insert a value at a nested path in the result HashMap.
+/// For a path like "a.b", we set result["a"] = {"M": {"b": value}}.
+fn insert_nested_value(result: &mut HashMap<String, AttributeValue>, path: &str, value: Value) {
+    // Simple case: no nesting
+    if !path.contains('.') && !path.contains('[') {
+        result.insert(path.to_string(), value);
+        return;
+    }
+
+    let segments = parse_path_segments(path);
+    if segments.is_empty() {
+        return;
+    }
+
+    let top_key = match &segments[0] {
+        PathSegment::Key(k) => k.clone(),
+        _ => return,
+    };
+
+    if segments.len() == 1 {
+        result.insert(top_key, value);
+        return;
+    }
+
+    // For nested paths, wrap the value back into the nested structure
+    let wrapped = wrap_value_in_path(&segments[1..], value);
+    // Merge into existing value if present
+    let existing = result.remove(&top_key);
+    let merged = match existing {
+        Some(existing) => merge_attribute_values(existing, wrapped),
+        None => wrapped,
+    };
+    result.insert(top_key, merged);
+}
+
+/// Wrap a value in the nested path structure.
+fn wrap_value_in_path(segments: &[PathSegment], value: Value) -> Value {
+    if segments.is_empty() {
+        return value;
+    }
+    let inner = wrap_value_in_path(&segments[1..], value);
+    match &segments[0] {
+        PathSegment::Key(k) => {
+            json!({"M": {k.clone(): inner}})
+        }
+        PathSegment::Index(idx) => {
+            let mut arr = vec![Value::Null; idx + 1];
+            arr[*idx] = inner;
+            json!({"L": arr})
+        }
+    }
+}
+
+/// Merge two attribute values (for overlapping projections).
+fn merge_attribute_values(a: Value, b: Value) -> Value {
+    if let (Some(a_map), Some(b_map)) = (
+        a.get("M").and_then(|v| v.as_object()),
+        b.get("M").and_then(|v| v.as_object()),
+    ) {
+        let mut merged = a_map.clone();
+        for (k, v) in b_map {
+            if let Some(existing) = merged.get(k) {
+                merged.insert(
+                    k.clone(),
+                    merge_attribute_values(existing.clone(), v.clone()),
+                );
+            } else {
+                merged.insert(k.clone(), v.clone());
+            }
+        }
+        json!({"M": merged})
+    } else {
+        b
     }
 }
 
@@ -1240,10 +1418,44 @@ fn split_on_and(expr: &str) -> Vec<&str> {
     let mut start = 0;
     let len = expr.len();
     let mut i = 0;
+    let mut depth = 0;
     while i < len {
-        if i + 5 <= len && expr[i..i + 5].eq_ignore_ascii_case(" AND ") {
+        let ch = expr.as_bytes()[i];
+        if ch == b'(' {
+            depth += 1;
+        } else if ch == b')' {
+            if depth > 0 {
+                depth -= 1;
+            }
+        } else if depth == 0 && i + 5 <= len && expr[i..i + 5].eq_ignore_ascii_case(" AND ") {
             parts.push(&expr[start..i]);
             start = i + 5;
+            i = start;
+            continue;
+        }
+        i += 1;
+    }
+    parts.push(&expr[start..]);
+    parts
+}
+
+fn split_on_or(expr: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let len = expr.len();
+    let mut i = 0;
+    let mut depth = 0;
+    while i < len {
+        let ch = expr.as_bytes()[i];
+        if ch == b'(' {
+            depth += 1;
+        } else if ch == b')' {
+            if depth > 0 {
+                depth -= 1;
+            }
+        } else if depth == 0 && i + 4 <= len && expr[i..i + 4].eq_ignore_ascii_case(" OR ") {
+            parts.push(&expr[start..i]);
+            start = i + 4;
             i = start;
             continue;
         }
@@ -1383,13 +1595,59 @@ fn evaluate_filter_expression(
     expr_attr_names: &HashMap<String, String>,
     expr_attr_values: &HashMap<String, Value>,
 ) -> bool {
-    let parts = split_on_and(expr);
-    for part in &parts {
-        if !evaluate_single_filter_condition(part.trim(), item, expr_attr_names, expr_attr_values) {
-            return false;
+    let trimmed = expr.trim();
+
+    // Split on OR first (lower precedence), respecting parentheses
+    let or_parts = split_on_or(trimmed);
+    if or_parts.len() > 1 {
+        return or_parts.iter().any(|part| {
+            evaluate_filter_expression(part.trim(), item, expr_attr_names, expr_attr_values)
+        });
+    }
+
+    // Then split on AND (higher precedence), respecting parentheses
+    let and_parts = split_on_and(trimmed);
+    if and_parts.len() > 1 {
+        return and_parts.iter().all(|part| {
+            evaluate_filter_expression(part.trim(), item, expr_attr_names, expr_attr_values)
+        });
+    }
+
+    // Strip outer parentheses if present
+    let stripped = strip_outer_parens(trimmed);
+    if stripped != trimmed {
+        return evaluate_filter_expression(stripped, item, expr_attr_names, expr_attr_values);
+    }
+
+    evaluate_single_filter_condition(trimmed, item, expr_attr_names, expr_attr_values)
+}
+
+/// Strip matching outer parentheses from an expression.
+fn strip_outer_parens(expr: &str) -> &str {
+    let trimmed = expr.trim();
+    if !trimmed.starts_with('(') || !trimmed.ends_with(')') {
+        return trimmed;
+    }
+    // Verify the outer parens actually match each other
+    let inner = &trimmed[1..trimmed.len() - 1];
+    let mut depth = 0;
+    for ch in inner.bytes() {
+        match ch {
+            b'(' => depth += 1,
+            b')' => {
+                if depth == 0 {
+                    return trimmed; // closing paren matches something inside, not the outer one
+                }
+                depth -= 1;
+            }
+            _ => {}
         }
     }
-    true
+    if depth == 0 {
+        inner
+    } else {
+        trimmed
+    }
 }
 
 fn evaluate_single_filter_condition(
@@ -1954,5 +2212,109 @@ mod tests {
         assert_eq!(parts.len(), 2);
         assert_eq!(parts[0].trim(), "pk = :pk");
         assert_eq!(parts[1].trim(), "sk > :sk");
+    }
+
+    #[test]
+    fn test_split_on_and_respects_parentheses() {
+        // Before fix: split_on_and would split inside the parens
+        let parts = split_on_and("(a = :a AND b = :b) OR c = :c");
+        // Should NOT split on the AND inside parentheses
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].trim(), "(a = :a AND b = :b) OR c = :c");
+    }
+
+    #[test]
+    fn test_evaluate_filter_expression_parenthesized_and_with_or() {
+        // (a AND b) OR c — should match when c is true but a is false
+        let mut item = HashMap::new();
+        item.insert("x".to_string(), json!({"S": "no"}));
+        item.insert("y".to_string(), json!({"S": "no"}));
+        item.insert("z".to_string(), json!({"S": "yes"}));
+
+        let mut expr_values = HashMap::new();
+        expr_values.insert(":yes".to_string(), json!({"S": "yes"}));
+
+        // x=yes AND y=yes => false, but z=yes => true => overall true
+        let result = evaluate_filter_expression(
+            "(x = :yes AND y = :yes) OR z = :yes",
+            &item,
+            &HashMap::new(),
+            &expr_values,
+        );
+        assert!(result, "should match because z = :yes is true");
+
+        // x=yes AND y=yes => false, z=yes => false => overall false
+        let mut item2 = HashMap::new();
+        item2.insert("x".to_string(), json!({"S": "no"}));
+        item2.insert("y".to_string(), json!({"S": "no"}));
+        item2.insert("z".to_string(), json!({"S": "no"}));
+
+        let result2 = evaluate_filter_expression(
+            "(x = :yes AND y = :yes) OR z = :yes",
+            &item2,
+            &HashMap::new(),
+            &expr_values,
+        );
+        assert!(!result2, "should not match because nothing is true");
+    }
+
+    #[test]
+    fn test_project_item_nested_path() {
+        // Item with a list attribute containing maps
+        let mut item = HashMap::new();
+        item.insert("pk".to_string(), json!({"S": "key1"}));
+        item.insert(
+            "data".to_string(),
+            json!({"L": [{"M": {"name": {"S": "Alice"}, "age": {"N": "30"}}}, {"M": {"name": {"S": "Bob"}}}]}),
+        );
+
+        let body = json!({
+            "ProjectionExpression": "data[0].name"
+        });
+
+        let projected = project_item(&item, &body);
+        // Should contain data[0].name = "Alice", not the entire data[0] element
+        let name = projected
+            .get("data")
+            .and_then(|v| v.get("L"))
+            .and_then(|v| v.get(0))
+            .and_then(|v| v.get("M"))
+            .and_then(|v| v.get("name"))
+            .and_then(|v| v.get("S"))
+            .and_then(|v| v.as_str());
+        assert_eq!(name, Some("Alice"));
+
+        // Should NOT contain the "age" field
+        let age = projected
+            .get("data")
+            .and_then(|v| v.get("L"))
+            .and_then(|v| v.get(0))
+            .and_then(|v| v.get("M"))
+            .and_then(|v| v.get("age"));
+        assert!(age.is_none(), "age should not be present in projection");
+    }
+
+    #[test]
+    fn test_resolve_nested_path_map() {
+        let mut item = HashMap::new();
+        item.insert(
+            "info".to_string(),
+            json!({"M": {"address": {"M": {"city": {"S": "NYC"}}}}}),
+        );
+
+        let result = resolve_nested_path(&item, "info.address.city");
+        assert_eq!(result, Some(json!({"S": "NYC"})));
+    }
+
+    #[test]
+    fn test_resolve_nested_path_list_then_map() {
+        let mut item = HashMap::new();
+        item.insert(
+            "items".to_string(),
+            json!({"L": [{"M": {"sku": {"S": "ABC"}}}]}),
+        );
+
+        let result = resolve_nested_path(&item, "items[0].sku");
+        assert_eq!(result, Some(json!({"S": "ABC"})));
     }
 }
