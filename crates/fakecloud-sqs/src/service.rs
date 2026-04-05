@@ -443,7 +443,7 @@ impl SqsService {
         if let Some(attrs) = body["Attributes"].as_object() {
             for (k, v) in attrs {
                 if let Some(s) = v.as_str() {
-                    new_attributes.insert(k.clone(), s.to_string());
+                    new_attributes.insert(k.trim().to_string(), s.to_string());
                 }
             }
         }
