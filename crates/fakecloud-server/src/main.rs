@@ -148,7 +148,9 @@ async fn main() {
     tokio::spawn(scheduler.run());
     registry.register(Arc::new(IamService::new(iam_state.clone())));
     registry.register(Arc::new(StsService::new(iam_state)));
-    registry.register(Arc::new(SsmService::new(ssm_state)));
+    registry.register(Arc::new(
+        SsmService::new(ssm_state).with_secretsmanager(secretsmanager_state.clone()),
+    ));
     registry.register(Arc::new(DynamoDbService::new(dynamodb_state)));
     registry.register(Arc::new(LambdaService::new(lambda_state)));
     registry.register(Arc::new(SecretsManagerService::new(secretsmanager_state)));

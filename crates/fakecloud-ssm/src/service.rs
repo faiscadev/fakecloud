@@ -13,15 +13,26 @@ use crate::state::{
     SharedSsmState, SsmCommand, SsmDocument, SsmDocumentVersion, SsmParameter, SsmParameterVersion,
 };
 
+use fakecloud_secretsmanager::state::SharedSecretsManagerState;
+
 const PARAMETER_VERSION_LIMIT: i64 = 100;
 
 pub struct SsmService {
     state: SharedSsmState,
+    secretsmanager_state: Option<SharedSecretsManagerState>,
 }
 
 impl SsmService {
     pub fn new(state: SharedSsmState) -> Self {
-        Self { state }
+        Self {
+            state,
+            secretsmanager_state: None,
+        }
+    }
+
+    pub fn with_secretsmanager(mut self, sm_state: SharedSecretsManagerState) -> Self {
+        self.secretsmanager_state = Some(sm_state);
+        self
     }
 }
 
@@ -606,6 +617,85 @@ impl SsmService {
         })))
     }
 
+    /// Resolve a Secrets Manager reference parameter.
+    /// Path format: /aws/reference/secretsmanager/{secret-name}
+    fn resolve_secretsmanager_param(
+        &self,
+        raw_name: &str,
+        secret_name: &str,
+        region: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let sm_state = self.secretsmanager_state.as_ref().ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ParameterNotFound",
+                format!(
+                    "An error occurred (ParameterNotFound) when referencing \
+                     Secrets Manager: Secret {raw_name} not found.",
+                ),
+            )
+        })?;
+
+        let sm = sm_state.read();
+        let secret = sm.secrets.get(secret_name).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ParameterNotFound",
+                format!(
+                    "An error occurred (ParameterNotFound) when referencing \
+                     Secrets Manager: Secret {raw_name} not found.",
+                ),
+            )
+        })?;
+
+        if secret.deleted {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ParameterNotFound",
+                format!(
+                    "An error occurred (ParameterNotFound) when referencing \
+                     Secrets Manager: Secret {raw_name} not found.",
+                ),
+            ));
+        }
+
+        // Get the current version's secret string
+        let version = secret
+            .versions
+            .get(&secret.current_version_id)
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ParameterNotFound",
+                    format!(
+                        "An error occurred (ParameterNotFound) when referencing \
+                     Secrets Manager: Secret {raw_name} not found.",
+                    ),
+                )
+            })?;
+
+        let value = version.secret_string.as_deref().unwrap_or("").to_string();
+
+        let ssm_state = self.state.read();
+        let arn = format!(
+            "arn:aws:ssm:{region}:{}:parameter{}",
+            ssm_state.account_id, raw_name
+        );
+
+        Ok(json_resp(json!({
+            "Parameter": {
+                "Name": raw_name,
+                "Type": "SecureString",
+                "Value": value,
+                "Version": 0,
+                "ARN": arn,
+                "LastModifiedDate": version.created_at.timestamp_millis() as f64 / 1000.0,
+                "DataType": "text",
+                "SourceResult": secret.arn,
+            }
+        })))
+    }
+
     fn get_parameter(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = parse_body(req);
         let raw_name = body["Name"].as_str().ok_or_else(|| missing("Name"))?;
@@ -618,6 +708,11 @@ impl SsmService {
                 "ValidationException",
                 "WithDecryption flag must be True for retrieving a Secret Manager secret.",
             ));
+        }
+
+        // Resolve Secrets Manager references via cross-service lookup
+        if let Some(secret_name) = raw_name.strip_prefix("/aws/reference/secretsmanager/") {
+            return self.resolve_secretsmanager_param(raw_name, secret_name, &req.region);
         }
 
         let state = self.state.read();
@@ -638,21 +733,8 @@ impl SsmService {
         }
 
         // Try looking up by name or by ARN - use raw_name in error for full context
-        let param = resolve_param_by_name_or_arn(&state, base_name).map_err(|_| {
-            if raw_name.starts_with("/aws/reference/secretsmanager/") {
-                AwsServiceError::aws_error(
-                    StatusCode::BAD_REQUEST,
-                    "ParameterNotFound",
-                    format!(
-                        "An error occurred (ParameterNotFound) when referencing \
-                         Secrets Manager: Secret {} not found.",
-                        raw_name
-                    ),
-                )
-            } else {
-                param_not_found(raw_name)
-            }
-        })?;
+        let param = resolve_param_by_name_or_arn(&state, base_name)
+            .map_err(|_| param_not_found(raw_name))?;
 
         match selector {
             ParamSelector::None => Ok(json_resp(json!({

@@ -402,3 +402,53 @@ async fn ssm_config_driven_sns_sqs_workflow() {
         serde_json::from_str(msgs.messages()[0].body().unwrap()).unwrap();
     assert_eq!(envelope["Message"], "config-driven workflow");
 }
+
+/// SSM -> SecretsManager: resolve a secret via the SSM parameter path.
+#[tokio::test]
+async fn ssm_secretsmanager_parameter_resolution() {
+    let server = TestServer::start().await;
+    let ssm = server.ssm_client().await;
+    let sm = server.secretsmanager_client().await;
+
+    // Create a secret in SecretsManager
+    sm.create_secret()
+        .name("my/test-secret")
+        .secret_string("super-secret-value-42")
+        .send()
+        .await
+        .unwrap();
+
+    // Retrieve it via SSM parameter path with WithDecryption=true
+    let param = ssm
+        .get_parameter()
+        .name("/aws/reference/secretsmanager/my/test-secret")
+        .with_decryption(true)
+        .send()
+        .await
+        .unwrap();
+
+    let p = param.parameter().unwrap();
+    assert_eq!(p.value().unwrap(), "super-secret-value-42");
+    assert_eq!(
+        p.name().unwrap(),
+        "/aws/reference/secretsmanager/my/test-secret"
+    );
+
+    // Without WithDecryption should fail
+    let err = ssm
+        .get_parameter()
+        .name("/aws/reference/secretsmanager/my/test-secret")
+        .with_decryption(false)
+        .send()
+        .await;
+    assert!(err.is_err(), "expected error without WithDecryption");
+
+    // Non-existent secret should fail
+    let err = ssm
+        .get_parameter()
+        .name("/aws/reference/secretsmanager/no-such-secret")
+        .with_decryption(true)
+        .send()
+        .await;
+    assert!(err.is_err(), "expected error for non-existent secret");
+}
