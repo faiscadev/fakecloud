@@ -1219,6 +1219,7 @@ name = "fakecloud"
 version = "0.1.1"
 dependencies = [
  "axum",
+ "chrono",
  "clap",
  "fakecloud-aws",
  "fakecloud-core",
@@ -1325,6 +1326,8 @@ dependencies = [
  "chrono",
  "fakecloud-aws",
  "fakecloud-core",
+ "fakecloud-lambda",
+ "fakecloud-logs",
  "http 1.4.0",
  "parking_lot",
  "reqwest",
@@ -1415,6 +1418,7 @@ dependencies = [
  "crc32fast",
  "fakecloud-aws",
  "fakecloud-core",
+ "fakecloud-kms",
  "http 1.4.0",
  "md-5",
  "parking_lot",
@@ -1495,6 +1499,7 @@ dependencies = [
  "chrono",
  "fakecloud-aws",
  "fakecloud-core",
+ "fakecloud-secretsmanager",
  "http 1.4.0",
  "md5",
  "parking_lot",

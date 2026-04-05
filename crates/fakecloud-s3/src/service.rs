@@ -4512,7 +4512,7 @@ impl S3Service {
                     "One or more of the specified parts could not be found.",
                 )
             })?;
-            if !submitted_etag.is_empty() && submitted_etag != &part.etag {
+            if submitted_etag != &part.etag {
                 return Err(AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
                     "InvalidPart",
