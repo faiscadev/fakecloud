@@ -128,6 +128,39 @@ def main():
             QueueUrl=notifications_url, ReceiptHandle=msg["ReceiptHandle"]
         )
 
+    # --- S3 Bucket Notifications ---
+    print("\n[S3 Notifications] Setting up bucket -> SQS delivery...")
+    s3.create_bucket(Bucket="events-bucket")
+    events_queue = sqs.create_queue(QueueName="s3-events")
+    events_url = events_queue["QueueUrl"]
+    events_arn = f"arn:aws:sqs:{REGION}:{ACCOUNT_ID}:s3-events"
+
+    s3.put_bucket_notification_configuration(
+        Bucket="events-bucket",
+        NotificationConfiguration={
+            "QueueConfigurations": [
+                {
+                    "QueueArn": events_arn,
+                    "Events": ["s3:ObjectCreated:*"],
+                }
+            ]
+        },
+    )
+
+    s3.put_object(Bucket="events-bucket", Key="trigger.txt", Body=b"trigger!")
+    time.sleep(0.5)
+
+    response = sqs.receive_message(QueueUrl=events_url, MaxNumberOfMessages=10)
+    for msg in response.get("Messages", []):
+        body = json.loads(msg["Body"])
+        print(f"  S3 event received: {body.get('Event', body.get('Records', [{}])[0].get('eventName', 'unknown'))}")
+        sqs.delete_message(QueueUrl=events_url, ReceiptHandle=msg["ReceiptHandle"])
+
+    s3.delete_object(Bucket="events-bucket", Key="trigger.txt")
+    s3.delete_bucket(Bucket="events-bucket")
+    sqs.delete_queue(QueueUrl=events_url)
+    print("  notification pipeline cleaned up")
+
     # --- Cleanup ---
     print("\n[Cleanup] Deleting resources...")
     sqs.delete_queue(QueueUrl=orders_url)

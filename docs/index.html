@@ -285,22 +285,22 @@
       <div class="feature">
         <div class="label">Coverage</div>
         <h3>7 AWS services</h3>
-        <p>S3, SQS, SNS, EventBridge, SSM, IAM/STS. 296 actions across 7 services. The services local dev actually needs.</p>
+        <p>S3, SQS, SNS, EventBridge, SSM, IAM/STS. 350 actions across 7 services. The services local dev actually needs.</p>
       </div>
       <div class="feature">
         <div class="label">Tested</div>
         <h3>Moto compatible</h3>
-        <p>920+ tests passing from <a href="https://github.com/getmoto/moto">Moto</a>'s own test suite, plus 96 native E2E tests with official AWS SDKs.</p>
+        <p>197 tests passing from <a href="https://github.com/getmoto/moto">Moto</a>'s own test suite, plus 79 native E2E tests with official AWS SDKs.</p>
       </div>
       <div class="feature">
         <div class="label">Scheduling</div>
         <h3>EventBridge rules</h3>
-        <p>Cron and rate-based scheduling that actually fires. Rules deliver to SQS targets on schedule.</p>
+        <p>Cron and rate-based scheduling that actually fires. Rules deliver to SQS and SNS targets on schedule.</p>
       </div>
       <div class="feature">
         <div class="label">Wired up</div>
         <h3>Cross-service delivery</h3>
-        <p>SNS topics deliver to SQS queues. EventBridge rules target SQS. Services talk to each other like they do on real AWS.</p>
+        <p>S3 bucket notifications deliver to SNS/SQS. SNS fans out to SQS. EventBridge rules target SQS/SNS. S3 lifecycle runs in the background. Services talk to each other like they do on real AWS.</p>
       </div>
     </div>
   </div>

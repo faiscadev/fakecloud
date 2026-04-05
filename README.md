@@ -147,8 +147,9 @@ ListApiDestinations, UpdateApiDestination, DeleteApiDestination
 
 Key features: pattern-based rules (nested fields, numeric comparisons, prefix,
 exists, anything-but), scheduled rules (rate and cron expressions) that actually
-fire, targets deliver to SNS topics and SQS queues, archives and replays,
-connections and API destinations.
+fire on a background timer, targets deliver to SNS topics and SQS queues,
+archives with event replay, connections and API destinations, partner event
+sources.
 
 ### IAM / STS (135 actions)
 
@@ -238,30 +239,64 @@ with NextToken, labels, version limits, parameter name normalization (leading
 slash optional), tag-based filtering, document management with permissions,
 maintenance windows with targets and tasks, patch baselines and patch groups.
 
-### S3 (20 actions)
+### S3 (74 actions)
 
 **Buckets:** ListBuckets, CreateBucket, DeleteBucket, HeadBucket,
 GetBucketLocation
 
 **Objects:** PutObject, GetObject, DeleteObject, HeadObject, CopyObject,
-DeleteObjects, ListObjectsV2, ListObjects, ListObjectVersions
+DeleteObjects, ListObjectsV2, ListObjects, ListObjectVersions,
+GetObjectAttributes, RestoreObject
 
-**Multipart Uploads:** CreateMultipartUpload, UploadPart,
+**Object Properties:** PutObjectTagging, GetObjectTagging, DeleteObjectTagging,
+PutObjectAcl, GetObjectAcl, PutObjectRetention, GetObjectRetention,
+PutObjectLegalHold, GetObjectLegalHold
+
+**Bucket Configuration:** PutBucketTagging, GetBucketTagging, DeleteBucketTagging,
+PutBucketAcl, GetBucketAcl, PutBucketVersioning, GetBucketVersioning,
+PutBucketCors, GetBucketCors, DeleteBucketCors,
+PutBucketNotificationConfiguration, GetBucketNotificationConfiguration,
+PutBucketWebsite, GetBucketWebsite, DeleteBucketWebsite,
+PutBucketAccelerateConfiguration, GetBucketAccelerateConfiguration,
+PutPublicAccessBlock, GetPublicAccessBlock, DeletePublicAccessBlock,
+PutBucketEncryption, GetBucketEncryption, DeleteBucketEncryption,
+PutBucketLifecycleConfiguration, GetBucketLifecycleConfiguration,
+DeleteBucketLifecycleConfiguration,
+PutBucketLogging, GetBucketLogging,
+PutBucketPolicy, GetBucketPolicy, DeleteBucketPolicy,
+PutObjectLockConfiguration, GetObjectLockConfiguration,
+PutBucketReplication, GetBucketReplication, DeleteBucketReplication,
+PutBucketOwnershipControls, GetBucketOwnershipControls,
+DeleteBucketOwnershipControls,
+PutBucketInventoryConfiguration, GetBucketInventoryConfiguration,
+DeleteBucketInventoryConfiguration
+
+**Multipart Uploads:** CreateMultipartUpload, UploadPart, UploadPartCopy,
 CompleteMultipartUpload, AbortMultipartUpload, ListParts, ListMultipartUploads
 
 Key features: path-style addressing, nested key paths, prefix/delimiter listing
 with common prefixes, pagination with continuation tokens, user metadata,
-cross-bucket copy, batch delete, ETag (MD5) computation, multipart uploads.
+cross-bucket copy, batch delete, ETag (MD5) computation, multipart uploads with
+copy support, versioning, CORS, bucket notifications (SNS/SQS delivery),
+lifecycle rules with background expiration and storage class transitions, object
+lock (retention and legal hold), encryption, replication, and website
+configuration.
 
-### Cross-Service Delivery
+### Cross-Service Integration
 
-FakeCloud implements real cross-service message delivery:
+FakeCloud implements real cross-service message delivery and background
+processing:
 
-- **EventBridge -> SNS -> SQS**: Events matching rules are published to SNS
-  topics, which fan out to SQS subscriptions.
-- **EventBridge -> SQS**: Rules can target SQS queues directly.
+- **S3 -> SNS/SQS**: Bucket event notification configurations deliver to SNS
+  topics and SQS queues when objects are created/deleted.
 - **SNS -> SQS**: Publishing to an SNS topic delivers to all SQS subscriptions.
 - **SNS -> HTTP/HTTPS**: Publishing to an SNS topic delivers to HTTP endpoints.
+- **EventBridge -> SNS/SQS**: PutEvents and scheduled rules deliver to SNS
+  topic and SQS queue targets.
+- **S3 Lifecycle**: Background processor runs every 60 seconds, expiring objects
+  and transitioning storage classes based on lifecycle rules.
+- **EventBridge Scheduler**: Cron and rate-based rules fire on schedule,
+  delivering events to configured targets.
 
 ## Configuration
 
@@ -321,7 +356,7 @@ Protocol handling:
 
 ```sh
 cargo test --workspace              # unit tests
-cargo build && cargo test -p fakecloud-e2e  # E2E tests (96 tests)
+cargo build && cargo test -p fakecloud-e2e  # E2E tests (79 tests)
 cargo clippy --workspace -- -D warnings     # lint
 cargo fmt --check                           # format check
 ```
