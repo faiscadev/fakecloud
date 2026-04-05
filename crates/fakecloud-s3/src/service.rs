@@ -333,7 +333,11 @@ impl AwsService for S3Service {
                 } else if req.query_params.contains_key("ownershipControls") {
                     self.get_bucket_ownership_controls(b)
                 } else if req.query_params.contains_key("inventory") {
-                    self.get_bucket_inventory(&req, b)
+                    if req.query_params.contains_key("id") {
+                        self.get_bucket_inventory(&req, b)
+                    } else {
+                        self.list_bucket_inventory_configurations(b)
+                    }
                 } else if req.query_params.get("list-type").map(|s| s.as_str()) == Some("2") {
                     self.list_objects_v2(&req, b)
                 } else {
@@ -935,6 +939,39 @@ impl S3Service {
         bucket: &str,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body_str = std::str::from_utf8(&req.body).unwrap_or("").to_string();
+
+        // Validate CORS configuration
+        let rule_count = body_str.matches("<CORSRule>").count();
+        if rule_count == 0 || rule_count > 100 {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "MalformedXML",
+                "The XML you provided was not well-formed or did not validate against our published schema",
+            ));
+        }
+
+        // Validate HTTP methods
+        let valid_methods = ["GET", "PUT", "POST", "DELETE", "HEAD"];
+        let mut remaining = body_str.as_str();
+        while let Some(start) = remaining.find("<AllowedMethod>") {
+            let after = &remaining[start + 15..];
+            if let Some(end) = after.find("</AllowedMethod>") {
+                let method = after[..end].trim();
+                if !valid_methods.contains(&method) {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "InvalidRequest",
+                        format!(
+                            "Found unsupported HTTP method in CORS config. Unsupported method is {method}"
+                        ),
+                    ));
+                }
+                remaining = &after[end + 16..];
+            } else {
+                break;
+            }
+        }
+
         let mut state = self.state.write();
         let b = state
             .buckets
@@ -984,7 +1021,9 @@ impl S3Service {
             .buckets
             .get_mut(bucket)
             .ok_or_else(|| no_such_bucket(bucket))?;
-        b.notification_config = Some(body_str);
+        // Auto-generate Id for each configuration element if missing
+        let normalized = normalize_notification_ids(&body_str);
+        b.notification_config = Some(normalized);
         Ok(empty_response(StatusCode::OK))
     }
 
@@ -2160,6 +2199,28 @@ impl S3Service {
         }
     }
 
+    fn list_bucket_inventory_configurations(
+        &self,
+        bucket: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let state = self.state.read();
+        let b = state
+            .buckets
+            .get(bucket)
+            .ok_or_else(|| no_such_bucket(bucket))?;
+
+        let mut body = String::from(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+             <ListInventoryConfigurationsResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
+             <IsTruncated>false</IsTruncated>",
+        );
+        for config in b.inventory_configs.values() {
+            body.push_str(config);
+        }
+        body.push_str("</ListInventoryConfigurationsResult>");
+        Ok(s3_xml(StatusCode::OK, body))
+    }
+
     fn delete_bucket_inventory(
         &self,
         req: &AwsRequest,
@@ -2424,24 +2485,24 @@ impl S3Service {
         }
 
         // Checksum: detect algorithm from various headers
-        let checksum_algorithm = req
+        let explicit_checksum_algo = req
             .headers
             .get("x-amz-checksum-algorithm")
             .or_else(|| req.headers.get("x-amz-sdk-checksum-algorithm"))
             .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_uppercase())
-            .or_else(|| {
-                // Also detect from checksum value headers
-                if req.headers.contains_key("x-amz-checksum-crc32") {
-                    Some("CRC32".to_string())
-                } else if req.headers.contains_key("x-amz-checksum-sha1") {
-                    Some("SHA1".to_string())
-                } else if req.headers.contains_key("x-amz-checksum-sha256") {
-                    Some("SHA256".to_string())
-                } else {
-                    None
-                }
-            });
+            .map(|s| s.to_uppercase());
+        let checksum_algorithm = explicit_checksum_algo.clone().or_else(|| {
+            // Also detect from checksum value headers
+            if req.headers.contains_key("x-amz-checksum-crc32") {
+                Some("CRC32".to_string())
+            } else if req.headers.contains_key("x-amz-checksum-sha1") {
+                Some("SHA1".to_string())
+            } else if req.headers.contains_key("x-amz-checksum-sha256") {
+                Some("SHA256".to_string())
+            } else {
+                None
+            }
+        });
         let checksum_value = checksum_algorithm
             .as_deref()
             .map(|algo| compute_checksum(algo, &data));
@@ -2572,6 +2633,10 @@ impl S3Service {
                 if let Ok(hval) = val.parse() {
                     headers.insert(name, hval);
                 }
+            }
+            // Echo back the checksum algorithm only when explicitly requested
+            if explicit_checksum_algo.is_some() {
+                headers.insert("x-amz-sdk-checksum-algorithm", algo.parse().unwrap());
             }
         }
 
@@ -2718,18 +2783,9 @@ impl S3Service {
             };
             headers.insert("x-amz-restore", rv.parse().unwrap());
         }
-        if let Some(algo) = &obj.checksum_algorithm {
-            if let Some(val) = &obj.checksum_value {
-                let hn = format!("x-amz-checksum-{}", algo.to_lowercase());
-                if let Ok(name) = hn.parse::<http::header::HeaderName>() {
-                    if let Ok(hv) = val.parse() {
-                        headers.insert(name, hv);
-                    }
-                }
-            }
-        }
         let mut response_status = StatusCode::OK;
         let response_body;
+        let mut is_range_request = false;
         if let Some(range_str) = req.headers.get("range").and_then(|v| v.to_str().ok()) {
             if let Some(rr) = parse_range_header(range_str, total_size) {
                 match rr {
@@ -2744,12 +2800,17 @@ impl S3Service {
                         );
                         response_body = obj.data.slice(start..=end);
                         response_status = StatusCode::PARTIAL_CONTENT;
+                        is_range_request = true;
                     }
                     RangeResult::NotSatisfiable => {
-                        return Err(AwsServiceError::aws_error(
+                        return Err(AwsServiceError::aws_error_with_fields(
                             StatusCode::RANGE_NOT_SATISFIABLE,
                             "InvalidRange",
                             "The requested range is not satisfiable",
+                            vec![
+                                ("ActualObjectSize".to_string(), total_size.to_string()),
+                                ("RangeRequested".to_string(), range_str.to_string()),
+                            ],
                         ));
                     }
                     RangeResult::Ignored => {
@@ -2805,6 +2866,19 @@ impl S3Service {
         } else {
             headers.insert("content-length", total_size.to_string().parse().unwrap());
             response_body = obj.data.clone();
+        }
+        // Only include checksum headers for full (non-range) responses
+        if !is_range_request {
+            if let Some(algo) = &obj.checksum_algorithm {
+                if let Some(val) = &obj.checksum_value {
+                    let hn = format!("x-amz-checksum-{}", algo.to_lowercase());
+                    if let Ok(name) = hn.parse::<http::header::HeaderName>() {
+                        if let Ok(hv) = val.parse() {
+                            headers.insert(name, hv);
+                        }
+                    }
+                }
+            }
         }
         Ok(AwsResponse {
             status: response_status,
@@ -6018,6 +6092,44 @@ fn validate_lifecycle_xml(xml: &str) -> Result<(), AwsServiceError> {
 }
 
 /// Normalize replication configuration XML to include defaults AWS adds.
+/// Auto-generate `<Id>` for notification configuration elements that lack one.
+fn normalize_notification_ids(xml: &str) -> String {
+    let config_tags = [
+        "TopicConfiguration",
+        "QueueConfiguration",
+        "CloudFunctionConfiguration",
+    ];
+    let mut result = xml.to_string();
+    for tag in &config_tags {
+        let open = format!("<{tag}>");
+        let close = format!("</{tag}>");
+        let mut output = String::new();
+        let mut remaining = result.as_str();
+        while let Some(start) = remaining.find(&open) {
+            output.push_str(&remaining[..start]);
+            let after = &remaining[start + open.len()..];
+            if let Some(end) = after.find(&close) {
+                let body = &after[..end];
+                output.push_str(&open);
+                if !body.contains("<Id>") {
+                    output.push_str(&format!("<Id>{}</Id>", uuid::Uuid::new_v4()));
+                }
+                output.push_str(body);
+                output.push_str(&close);
+                remaining = &after[end + close.len()..];
+            } else {
+                output.push_str(&open);
+                output.push_str(after);
+                remaining = "";
+                break;
+            }
+        }
+        output.push_str(remaining);
+        result = output;
+    }
+    result
+}
+
 fn normalize_replication_xml(xml: &str) -> String {
     let mut result = String::new();
     let mut remaining = xml;
