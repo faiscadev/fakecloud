@@ -197,7 +197,7 @@ impl ResetState {
             eb.replays.clear();
             eb.buses.retain(|name, _| name == "default");
         }
-        self.ssm.write().parameters.clear();
+        self.ssm.write().reset();
         tracing::info!("state reset via reset API");
         axum::Json(serde_json::json!({"status": "ok"}))
     }

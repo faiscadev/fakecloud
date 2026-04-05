@@ -100,6 +100,8 @@ impl SsmState {
 
     pub fn reset(&mut self) {
         self.parameters.clear();
+        self.documents.clear();
+        self.commands.clear();
     }
 }
 
