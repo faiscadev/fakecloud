@@ -386,6 +386,7 @@ impl SnsService {
         let next_token = param(req, "NextToken")
             .and_then(|t| t.parse::<usize>().ok())
             .unwrap_or(0);
+        let next_token = next_token.min(all_topics.len());
 
         let page = &all_topics[next_token..];
         let has_more = page.len() > DEFAULT_PAGE_SIZE;
@@ -1310,6 +1311,7 @@ impl SnsService {
         let next_token = param(req, "NextToken")
             .and_then(|t| t.parse::<usize>().ok())
             .unwrap_or(0);
+        let next_token = next_token.min(all_subs.len());
 
         let page = &all_subs[next_token..];
         let has_more = page.len() > DEFAULT_PAGE_SIZE;
@@ -1368,6 +1370,7 @@ impl SnsService {
         let next_token = param(req, "NextToken")
             .and_then(|t| t.parse::<usize>().ok())
             .unwrap_or(0);
+        let next_token = next_token.min(all_subs.len());
 
         let page = &all_subs[next_token..];
         let has_more = page.len() > DEFAULT_PAGE_SIZE;

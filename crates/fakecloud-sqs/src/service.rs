@@ -501,6 +501,19 @@ impl SqsService {
             attributes.insert("FifoThroughputLimit".to_string(), "perQueue".to_string());
         }
 
+        // Validate DelaySeconds (0–900 inclusive)
+        if let Some(ds) = new_attributes.get("DelaySeconds") {
+            if let Ok(d) = ds.parse::<i64>() {
+                if !(0..=900).contains(&d) {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "InvalidAttributeValue",
+                        "Invalid value for the parameter DelaySeconds.".to_string(),
+                    ));
+                }
+            }
+        }
+
         // Validate MaximumMessageSize before inserting
         if let Some(mms) = new_attributes.get("MaximumMessageSize") {
             if let Ok(size) = mms.parse::<u64>() {
@@ -954,9 +967,9 @@ impl SqsService {
             ));
         }
 
-        // Validate delay seconds (max 900 = 15 minutes)
+        // Validate delay seconds (0–900 inclusive)
         if let Some(d) = val_as_i64(&body["DelaySeconds"]) {
-            if d > 900 {
+            if !(0..=900).contains(&d) {
                 return Err(AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
                     "InvalidParameterValue",
@@ -1588,6 +1601,21 @@ impl SqsService {
             .get_mut(&resolved_url)
             .ok_or_else(queue_not_found)?;
 
+        // Validate DelaySeconds (0–900 inclusive) before applying
+        if let Some(attrs) = body["Attributes"].as_object() {
+            if let Some(ds) = attrs.get("DelaySeconds").and_then(|v| v.as_str()) {
+                if let Ok(d) = ds.parse::<i64>() {
+                    if !(0..=900).contains(&d) {
+                        return Err(AwsServiceError::aws_error(
+                            StatusCode::BAD_REQUEST,
+                            "InvalidAttributeValue",
+                            "Invalid value for the parameter DelaySeconds.".to_string(),
+                        ));
+                    }
+                }
+            }
+        }
+
         if let Some(attrs) = body["Attributes"].as_object() {
             for (k, v) in attrs {
                 if let Some(s) = v.as_str() {
@@ -1776,9 +1804,9 @@ impl SqsService {
                 continue;
             }
 
-            // Per-entry delay validation (max 900 seconds)
+            // Per-entry delay validation (0–900 seconds)
             if let Some(d) = val_as_i64(&entry["DelaySeconds"]) {
-                if d > 900 {
+                if !(0..=900).contains(&d) {
                     failed.push(json!({
                         "Id": id,
                         "SenderFault": true,
