@@ -1384,3 +1384,302 @@ async fn s3_copy_object_within_bucket() {
     let body = resp.body.collect().await.unwrap().into_bytes();
     assert_eq!(body.as_ref(), b"hello copy");
 }
+
+// ---- P1 Bug Fix Regression Tests ----
+
+/// Regression: ListObjectsV2 with delimiter and many prefixes must not panic
+/// due to bounds check on continuation token / prefix slicing.
+#[tokio::test]
+async fn s3_list_objects_v2_delimiter_many_prefixes() {
+    let server = TestServer::start().await;
+    let client = server.s3_client().await;
+
+    client
+        .create_bucket()
+        .bucket("delim-bucket")
+        .send()
+        .await
+        .unwrap();
+
+    // Create objects under several prefixes
+    for i in 0..5 {
+        client
+            .put_object()
+            .bucket("delim-bucket")
+            .key(format!("prefix{i}/file.txt"))
+            .body(ByteStream::from_static(b"data"))
+            .send()
+            .await
+            .unwrap();
+    }
+
+    // First page: max-keys=2 to force pagination
+    let page1 = client
+        .list_objects_v2()
+        .bucket("delim-bucket")
+        .delimiter("/")
+        .max_keys(2)
+        .send()
+        .await
+        .unwrap();
+    assert!(page1.is_truncated().unwrap_or(false));
+    assert_eq!(page1.common_prefixes().len(), 2);
+    let token = page1.next_continuation_token().unwrap().to_string();
+
+    // Second page using continuation token — this previously could panic
+    let page2 = client
+        .list_objects_v2()
+        .bucket("delim-bucket")
+        .delimiter("/")
+        .max_keys(2)
+        .continuation_token(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(page2.common_prefixes().len(), 2);
+
+    // Third page: should have 1 remaining prefix
+    if page2.is_truncated().unwrap_or(false) {
+        let token2 = page2.next_continuation_token().unwrap().to_string();
+        let page3 = client
+            .list_objects_v2()
+            .bucket("delim-bucket")
+            .delimiter("/")
+            .max_keys(2)
+            .continuation_token(&token2)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(page3.common_prefixes().len(), 1);
+    }
+}
+
+/// Regression: CompleteMultipartUpload with wrong ETag returns InvalidPart error.
+#[tokio::test]
+async fn s3_complete_multipart_wrong_etag_returns_error() {
+    let server = TestServer::start().await;
+    let client = server.s3_client().await;
+
+    client
+        .create_bucket()
+        .bucket("mpu-etag-bucket")
+        .send()
+        .await
+        .unwrap();
+
+    let create = client
+        .create_multipart_upload()
+        .bucket("mpu-etag-bucket")
+        .key("test.bin")
+        .send()
+        .await
+        .unwrap();
+    let upload_id = create.upload_id().unwrap().to_string();
+
+    // Upload a part
+    let part = client
+        .upload_part()
+        .bucket("mpu-etag-bucket")
+        .key("test.bin")
+        .upload_id(&upload_id)
+        .part_number(1)
+        .body(ByteStream::from_static(b"part1data"))
+        .send()
+        .await
+        .unwrap();
+    let _real_etag = part.e_tag().unwrap().to_string();
+
+    // Complete with a wrong ETag — should fail with InvalidPart
+    use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart};
+    let bad_part = CompletedPart::builder()
+        .part_number(1)
+        .e_tag("\"0000000000000000000000000000dead\"")
+        .build();
+    let result = client
+        .complete_multipart_upload()
+        .bucket("mpu-etag-bucket")
+        .key("test.bin")
+        .upload_id(&upload_id)
+        .multipart_upload(CompletedMultipartUpload::builder().parts(bad_part).build())
+        .send()
+        .await;
+    assert!(result.is_err(), "Expected InvalidPart error for wrong ETag");
+    let err_str = format!("{:?}", result.unwrap_err());
+    assert!(
+        err_str.contains("InvalidPart") || err_str.contains("could not be found"),
+        "Error should mention InvalidPart, got: {err_str}"
+    );
+}
+
+/// Regression: AbortMultipartUpload with wrong key returns NoSuchUpload error.
+#[tokio::test]
+async fn s3_abort_multipart_wrong_key_returns_error() {
+    let server = TestServer::start().await;
+    let client = server.s3_client().await;
+
+    client
+        .create_bucket()
+        .bucket("mpu-abort-bucket")
+        .send()
+        .await
+        .unwrap();
+
+    let create = client
+        .create_multipart_upload()
+        .bucket("mpu-abort-bucket")
+        .key("correct-key.txt")
+        .send()
+        .await
+        .unwrap();
+    let upload_id = create.upload_id().unwrap().to_string();
+
+    // Abort with the wrong key — should fail
+    let result = client
+        .abort_multipart_upload()
+        .bucket("mpu-abort-bucket")
+        .key("wrong-key.txt")
+        .upload_id(&upload_id)
+        .send()
+        .await;
+    assert!(
+        result.is_err(),
+        "Expected NoSuchUpload error when aborting with wrong key"
+    );
+
+    // Abort with the correct key — should succeed
+    client
+        .abort_multipart_upload()
+        .bucket("mpu-abort-bucket")
+        .key("correct-key.txt")
+        .upload_id(&upload_id)
+        .send()
+        .await
+        .unwrap();
+}
+
+/// Regression: CopyObject rejects a delete marker as copy source.
+#[tokio::test]
+async fn s3_copy_object_rejects_delete_marker_source() {
+    let server = TestServer::start().await;
+    let client = server.s3_client().await;
+
+    client
+        .create_bucket()
+        .bucket("copy-dm-bucket")
+        .send()
+        .await
+        .unwrap();
+
+    // Enable versioning
+    let output = server
+        .aws_cli(&[
+            "s3api",
+            "put-bucket-versioning",
+            "--bucket",
+            "copy-dm-bucket",
+            "--versioning-configuration",
+            "Status=Enabled",
+        ])
+        .await;
+    assert!(output.success(), "versioning: {}", output.stderr_text());
+
+    // Put an object, then delete it to create a delete marker
+    client
+        .put_object()
+        .bucket("copy-dm-bucket")
+        .key("source.txt")
+        .body(ByteStream::from_static(b"hello"))
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .delete_object()
+        .bucket("copy-dm-bucket")
+        .key("source.txt")
+        .send()
+        .await
+        .unwrap();
+
+    // Copy from the (now delete-marked) source should fail
+    let result = client
+        .copy_object()
+        .bucket("copy-dm-bucket")
+        .key("dest.txt")
+        .copy_source("copy-dm-bucket/source.txt")
+        .send()
+        .await;
+    assert!(
+        result.is_err(),
+        "Expected copy from delete marker to fail, but it succeeded"
+    );
+}
+
+/// Regression: Deleting a specific version that doesn't exist must not affect
+/// the current object.
+#[tokio::test]
+async fn s3_delete_specific_version_preserves_current_object() {
+    let server = TestServer::start().await;
+    let client = server.s3_client().await;
+
+    client
+        .create_bucket()
+        .bucket("ver-del-bucket")
+        .send()
+        .await
+        .unwrap();
+
+    // Enable versioning
+    let output = server
+        .aws_cli(&[
+            "s3api",
+            "put-bucket-versioning",
+            "--bucket",
+            "ver-del-bucket",
+            "--versioning-configuration",
+            "Status=Enabled",
+        ])
+        .await;
+    assert!(output.success());
+
+    // Put an object (creates a real version)
+    client
+        .put_object()
+        .bucket("ver-del-bucket")
+        .key("keep-me.txt")
+        .body(ByteStream::from_static(b"important data"))
+        .send()
+        .await
+        .unwrap();
+
+    // Delete a non-existent version ID — must not affect the current object
+    let output = server
+        .aws_cli(&[
+            "s3api",
+            "delete-object",
+            "--bucket",
+            "ver-del-bucket",
+            "--key",
+            "keep-me.txt",
+            "--version-id",
+            "nonexistent-version-id-12345",
+        ])
+        .await;
+    // The delete may succeed (noop) or fail, but the object must still be readable
+    let _ = output;
+
+    // The current object must still be intact
+    let get = client
+        .get_object()
+        .bucket("ver-del-bucket")
+        .key("keep-me.txt")
+        .send()
+        .await
+        .unwrap();
+    let body = get.body.collect().await.unwrap().into_bytes();
+    assert_eq!(
+        body.as_ref(),
+        b"important data",
+        "Current object was corrupted by deleting a non-existent version"
+    );
+}

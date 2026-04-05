@@ -6658,4 +6658,70 @@ mod tests {
         assert!(origin_matches("https://foo.example.com", "*.example.com"));
         assert!(!origin_matches("https://evil.com", "https://example.com"));
     }
+
+    /// Regression: resolve_object with versionId="null" must match objects
+    /// whose version_id is either None or Some("null").
+    #[test]
+    fn resolve_null_version_matches_both_none_and_null_string() {
+        use crate::state::S3Bucket;
+        use bytes::Bytes;
+        use chrono::Utc;
+
+        let mut b = S3Bucket::new("test", "us-east-1", "owner");
+
+        // Helper to create a minimal S3Object
+        let make_obj = |key: &str, vid: Option<&str>| crate::state::S3Object {
+            key: key.to_string(),
+            data: Bytes::from_static(b"x"),
+            content_type: "text/plain".to_string(),
+            etag: "\"abc\"".to_string(),
+            size: 1,
+            last_modified: Utc::now(),
+            metadata: Default::default(),
+            storage_class: "STANDARD".to_string(),
+            tags: Default::default(),
+            acl_grants: vec![],
+            acl_owner_id: None,
+            parts_count: None,
+            part_sizes: None,
+            sse_algorithm: None,
+            sse_kms_key_id: None,
+            bucket_key_enabled: None,
+            version_id: vid.map(|s| s.to_string()),
+            is_delete_marker: false,
+            content_encoding: None,
+            website_redirect_location: None,
+            restore_ongoing: None,
+            restore_expiry: None,
+            checksum_algorithm: None,
+            checksum_value: None,
+            lock_mode: None,
+            lock_retain_until: None,
+            lock_legal_hold: None,
+        };
+
+        // Object with version_id = Some("null") (pre-versioning migrated)
+        let obj = make_obj("file.txt", Some("null"));
+        b.objects.insert("file.txt".to_string(), obj.clone());
+        b.object_versions.insert("file.txt".to_string(), vec![obj]);
+
+        let null_str = "null".to_string();
+        let result = resolve_object(&b, "file.txt", Some(&null_str));
+        assert!(
+            result.is_ok(),
+            "versionId=null should match version_id=Some(\"null\")"
+        );
+
+        // Object with version_id = None (true pre-versioning)
+        let obj2 = make_obj("file2.txt", None);
+        b.objects.insert("file2.txt".to_string(), obj2.clone());
+        b.object_versions
+            .insert("file2.txt".to_string(), vec![obj2]);
+
+        let result2 = resolve_object(&b, "file2.txt", Some(&null_str));
+        assert!(
+            result2.is_ok(),
+            "versionId=null should match version_id=None"
+        );
+    }
 }
