@@ -1,0 +1,30 @@
+[package]
+name = "fakecloud-cloudformation"
+description = "CloudFormation implementation for FakeCloud"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+version.workspace = true
+
+[dependencies]
+fakecloud-aws = { workspace = true }
+fakecloud-core = { workspace = true }
+fakecloud-sqs = { workspace = true }
+fakecloud-sns = { workspace = true }
+fakecloud-ssm = { workspace = true }
+fakecloud-iam = { workspace = true }
+fakecloud-s3 = { workspace = true }
+fakecloud-eventbridge = { workspace = true }
+fakecloud-dynamodb = { workspace = true }
+fakecloud-logs = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+http = { workspace = true }
+parking_lot = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+tracing = { workspace = true }

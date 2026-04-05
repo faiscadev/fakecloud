@@ -14,6 +14,7 @@ members = [
     "crates/fakecloud-secretsmanager",
     "crates/fakecloud-logs",
     "crates/fakecloud-kms",
+    "crates/fakecloud-cloudformation",
     "crates/fakecloud-e2e",
 ]
 resolver = "2"
@@ -69,3 +70,4 @@ fakecloud-lambda = { path = "crates/fakecloud-lambda", version = "0.1.1" }
 fakecloud-secretsmanager = { path = "crates/fakecloud-secretsmanager", version = "0.1.1" }
 fakecloud-logs = { path = "crates/fakecloud-logs", version = "0.1.1" }
 fakecloud-kms = { path = "crates/fakecloud-kms", version = "0.1.1" }
+fakecloud-cloudformation = { path = "crates/fakecloud-cloudformation", version = "0.1.1" }

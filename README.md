@@ -33,7 +33,7 @@ alternatives have emerged since then. Here's how they compare:
 | Language | Rust | Python | Java (Quarkus Native) | Python |
 | Auth required | No | Yes (account + token) | No | No |
 | Commercial use | Free | Paid plans only | Free | Free |
-| AWS services | 9 | 80+ | 25 | 38 |
+| AWS services | 10 | 80+ | 25 | 38 |
 | Cross-service delivery | Yes | Yes | Yes | Yes |
 | Scheduled rules fire | Yes | Yes | -- | -- |
 
@@ -338,6 +338,21 @@ Key features: fake envelope encryption (base64-encoded with key ID prefix),
 key enable/disable/deletion scheduling, alias resolution for all operations,
 data key generation.
 
+### CloudFormation (8 actions)
+
+CreateStack, DeleteStack, DescribeStacks, ListStacks, ListStackResources,
+DescribeStackResources, UpdateStack, GetTemplate
+
+Key features: JSON and YAML template parsing, resource provisioning into
+existing services (SQS, SNS, SSM, IAM, S3, EventBridge, DynamoDB, CloudWatch
+Logs), stack update with diff-based resource create/delete, parameter and
+tag support, Ref/Fn::Sub/Fn::Join intrinsic function resolution.
+
+Supported resource types: AWS::SQS::Queue, AWS::SNS::Topic,
+AWS::SNS::Subscription, AWS::SSM::Parameter, AWS::IAM::Role,
+AWS::IAM::Policy, AWS::S3::Bucket, AWS::Events::Rule,
+AWS::DynamoDB::Table, AWS::Logs::LogGroup.
+
 ### Cross-Service Integration
 
 FakeCloud implements real cross-service message delivery and background
@@ -381,7 +396,7 @@ curl http://localhost:4566/_fakecloud/health
 {
   "status": "ok",
   "version": "0.1.0",
-  "services": ["sqs", "sns", "events", "iam", "sts", "ssm", "lambda", "secretsmanager", "logs", "kms", "s3"]
+  "services": ["cloudformation", "sqs", "sns", "events", "iam", "sts", "ssm", "lambda", "secretsmanager", "logs", "kms", "s3"]
 }
 ```
 
@@ -405,10 +420,11 @@ FakeCloud is organized as a Cargo workspace:
 | `fakecloud-s3` | S3 implementation |
 | `fakecloud-logs` | CloudWatch Logs implementation |
 | `fakecloud-kms` | KMS implementation |
+| `fakecloud-cloudformation` | CloudFormation implementation |
 | `fakecloud-e2e` | End-to-end tests using aws-sdk-rust |
 
 Protocol handling:
-- **Query protocol** (SQS, SNS, IAM, STS): form-encoded body, `Action` parameter, XML responses
+- **Query protocol** (SQS, SNS, IAM, STS, CloudFormation): form-encoded body, `Action` parameter, XML responses
 - **JSON protocol** (SSM, EventBridge, DynamoDB, CloudWatch Logs, KMS): JSON body, `X-Amz-Target` header, JSON responses
 - **REST protocol** (S3): HTTP method + path-based routing, XML responses
 - **JSON protocol** (SSM, EventBridge, Secrets Manager, CloudWatch Logs, KMS): JSON body, `X-Amz-Target` header, JSON responses

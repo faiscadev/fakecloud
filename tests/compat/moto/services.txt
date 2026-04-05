@@ -1,2 +1,2 @@
-sqs sns events iam sts ssm s3 dynamodb logs kms
-sqs sns events iam sts ssm s3 awslambda secretsmanager logs kms
+sqs sns events iam sts ssm s3 dynamodb logs kms cloudformation
+sqs sns events iam sts ssm s3 awslambda secretsmanager logs kms cloudformation

@@ -25,6 +25,7 @@ fakecloud-lambda = { workspace = true }
 fakecloud-secretsmanager = { workspace = true }
 fakecloud-logs = { workspace = true }
 fakecloud-kms = { workspace = true }
+fakecloud-cloudformation = { workspace = true }
 axum = { workspace = true }
 chrono = { workspace = true }
 parking_lot = { workspace = true }

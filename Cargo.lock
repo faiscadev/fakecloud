@@ -198,6 +198,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "aws-sdk-cloudformation"
+version = "1.110.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4687fe4ff3ed2764592177371a4a52348201dbea1e38eaed33a0cd7f3e303f74"
+dependencies = [
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-http",
+ "aws-smithy-json",
+ "aws-smithy-observability",
+ "aws-smithy-query",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-types",
+ "aws-smithy-xml",
+ "aws-types",
+ "fastrand",
+ "http 0.2.12",
+ "http 1.4.0",
+ "regex-lite",
+ "tracing",
+]
+
+[[package]]
 name = "aws-sdk-cloudwatchlogs"
 version = "1.125.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1222,6 +1247,7 @@ dependencies = [
  "chrono",
  "clap",
  "fakecloud-aws",
+ "fakecloud-cloudformation",
  "fakecloud-core",
  "fakecloud-dynamodb",
  "fakecloud-eventbridge",
@@ -1255,6 +1281,32 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+ "uuid",
+]
+
+[[package]]
+name = "fakecloud-cloudformation"
+version = "0.1.1"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "fakecloud-aws",
+ "fakecloud-core",
+ "fakecloud-dynamodb",
+ "fakecloud-eventbridge",
+ "fakecloud-iam",
+ "fakecloud-logs",
+ "fakecloud-s3",
+ "fakecloud-sns",
+ "fakecloud-sqs",
+ "fakecloud-ssm",
+ "http 1.4.0",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "thiserror",
+ "tracing",
  "uuid",
 ]
 
@@ -1299,6 +1351,7 @@ version = "0.1.1"
 dependencies = [
  "aws-config",
  "aws-credential-types",
+ "aws-sdk-cloudformation",
  "aws-sdk-cloudwatchlogs",
  "aws-sdk-dynamodb",
  "aws-sdk-eventbridge",

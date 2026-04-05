@@ -13,6 +13,7 @@ use fakecloud_core::registry::ServiceRegistry;
 mod sqs_lambda_poller;
 use sqs_lambda_poller::SqsLambdaPoller;
 
+use fakecloud_cloudformation::service::CloudFormationService;
 use fakecloud_dynamodb::service::DynamoDbService;
 use fakecloud_eventbridge::service::EventBridgeService;
 use fakecloud_iam::iam_service::IamService;
@@ -96,6 +97,9 @@ async fn main() {
     let kms_state = Arc::new(parking_lot::RwLock::new(
         fakecloud_kms::state::KmsState::new(&cli.account_id, &cli.region),
     ));
+    let cloudformation_state = Arc::new(parking_lot::RwLock::new(
+        fakecloud_cloudformation::state::CloudFormationState::new(&cli.account_id, &cli.region),
+    ));
 
     // Cross-service delivery bus
     // Step 1: SQS delivery (SNS and EventBridge can push messages into SQS queues)
@@ -138,10 +142,22 @@ async fn main() {
         s3: s3_state.clone(),
         logs: logs_state.clone(),
         kms: kms_state.clone(),
+        cloudformation: cloudformation_state.clone(),
     };
 
     // Register services
     let mut registry = ServiceRegistry::new();
+    registry.register(Arc::new(CloudFormationService::new(
+        cloudformation_state,
+        sqs_state.clone(),
+        sns_state.clone(),
+        ssm_state.clone(),
+        iam_state.clone(),
+        s3_state.clone(),
+        eb_state.clone(),
+        dynamodb_state.clone(),
+        logs_state.clone(),
+    )));
     registry.register(Arc::new(SqsService::new(sqs_state.clone())));
     registry.register(Arc::new(SnsService::new(sns_state, delivery_for_sns)));
     registry.register(Arc::new(
@@ -267,6 +283,7 @@ struct ResetState {
     s3: fakecloud_s3::state::SharedS3State,
     logs: fakecloud_logs::state::SharedLogsState,
     kms: fakecloud_kms::state::SharedKmsState,
+    cloudformation: fakecloud_cloudformation::state::SharedCloudFormationState,
 }
 
 impl ResetState {
@@ -299,6 +316,7 @@ impl ResetState {
         self.s3.write().reset();
         self.logs.write().reset();
         self.kms.write().reset();
+        self.cloudformation.write().reset();
         tracing::info!("state reset via reset API");
         axum::Json(serde_json::json!({"status": "ok"}))
     }
