@@ -1443,7 +1443,7 @@ impl SsmService {
                 "SchemaVersion": "2.2",
                 "PlatformTypes": ["Linux", "MacOS", "Windows"],
                 "Hash": format!("{:x}", md5::compute(b"placeholder")),
-                "HashType": "Sha256",
+                "HashType": "Md5",
             }
         })))
     }
@@ -1611,7 +1611,7 @@ impl SsmService {
                 "SchemaVersion": "2.2",
                 "PlatformTypes": ["Linux", "MacOS", "Windows"],
                 "Hash": format!("{:x}", md5::compute(b"placeholder")),
-                "HashType": "Sha256",
+                "HashType": "Md5",
             }
         })))
     }

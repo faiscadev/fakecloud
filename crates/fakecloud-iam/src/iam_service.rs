@@ -1495,12 +1495,14 @@ impl IamService {
         let tags = parse_tags(&req.query_params);
         validate_tags(&tags, 0)?;
 
+        let partition = partition_for_region(&req.region);
+        let effective_account = self.effective_account_id(req);
+
         let mut state = self.state.write();
 
-        let partition = partition_for_region(&req.region);
         let arn = format!(
             "arn:{}:iam::{}:policy{}{}",
-            partition, state.account_id, path, policy_name
+            partition, effective_account, path, policy_name
         );
 
         // Check for duplicate policy ARN
