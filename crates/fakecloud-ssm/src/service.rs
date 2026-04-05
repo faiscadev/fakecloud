@@ -1270,7 +1270,7 @@ impl SsmService {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "ParameterVersionLabelLimitExceeded",
-                "A parameter version can have maximum 10 labels.\
+                "A parameter version can have maximum 10 labels. \
                  Move one or more labels to another version and try again.",
             ));
         }
