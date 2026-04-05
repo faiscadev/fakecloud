@@ -374,6 +374,7 @@ FakeCloud is organized as a Cargo workspace:
 | `fakecloud-eventbridge` | EventBridge implementation with scheduler |
 | `fakecloud-iam` | IAM and STS implementation |
 | `fakecloud-ssm` | SSM Parameter Store implementation |
+| `fakecloud-dynamodb` | DynamoDB implementation |
 | `fakecloud-s3` | S3 implementation |
 | `fakecloud-logs` | CloudWatch Logs implementation |
 | `fakecloud-kms` | KMS implementation |
@@ -381,7 +382,7 @@ FakeCloud is organized as a Cargo workspace:
 
 Protocol handling:
 - **Query protocol** (SQS, SNS, IAM, STS): form-encoded body, `Action` parameter, XML responses
-- **JSON protocol** (SSM, EventBridge, CloudWatch Logs, KMS): JSON body, `X-Amz-Target` header, JSON responses
+- **JSON protocol** (SSM, EventBridge, DynamoDB, CloudWatch Logs, KMS): JSON body, `X-Amz-Target` header, JSON responses
 - **REST protocol** (S3): HTTP method + path-based routing, XML responses
 - SigV4 signatures are parsed for service routing but never validated
 

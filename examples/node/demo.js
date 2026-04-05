@@ -1,8 +1,8 @@
 /**
- * FakeCloud demo: S3 + SQS + SNS + SSM using AWS SDK v3.
+ * FakeCloud demo: S3 + SQS + SNS + SSM + DynamoDB using AWS SDK v3.
  *
  * Prerequisites:
- *   npm install @aws-sdk/client-s3 @aws-sdk/client-sqs @aws-sdk/client-sns @aws-sdk/client-ssm
+ *   npm install @aws-sdk/client-s3 @aws-sdk/client-sqs @aws-sdk/client-sns @aws-sdk/client-ssm @aws-sdk/client-dynamodb
  *
  * Usage:
  *   1. Start FakeCloud: cargo run --bin fakecloud
@@ -43,6 +43,14 @@ import {
   DeleteParametersCommand,
 } from "@aws-sdk/client-ssm";
 
+import {
+  DynamoDBClient,
+  CreateTableCommand as DDBCreateTableCommand,
+  PutItemCommand,
+  QueryCommand as DDBQueryCommand,
+  DeleteTableCommand as DDBDeleteTableCommand,
+} from "@aws-sdk/client-dynamodb";
+
 const ENDPOINT = "http://localhost:4566";
 const REGION = "us-east-1";
 const ACCOUNT_ID = "123456789012";
@@ -52,9 +60,10 @@ const s3 = new S3Client({ endpoint: ENDPOINT, region: REGION, credentials, force
 const sqs = new SQSClient({ endpoint: ENDPOINT, region: REGION, credentials });
 const sns = new SNSClient({ endpoint: ENDPOINT, region: REGION, credentials });
 const ssm = new SSMClient({ endpoint: ENDPOINT, region: REGION, credentials });
+const dynamodb = new DynamoDBClient({ endpoint: ENDPOINT, region: REGION, credentials });
 
 async function main() {
-  console.log("=== FakeCloud Demo: S3 + SQS + SNS + SSM ===\n");
+  console.log("=== FakeCloud Demo: S3 + SQS + SNS + SSM + DynamoDB ===\n");
 
   // --- S3 ---
   console.log("[S3] Creating bucket and uploading objects...");
@@ -169,6 +178,52 @@ async function main() {
       ReceiptHandle: msg.ReceiptHandle,
     }));
   }
+
+  // --- DynamoDB ---
+  console.log("\n[DynamoDB] Creating table and working with items...");
+  await dynamodb.send(new DDBCreateTableCommand({
+    TableName: "demo-orders",
+    KeySchema: [
+      { AttributeName: "userId", KeyType: "HASH" },
+      { AttributeName: "orderId", KeyType: "RANGE" },
+    ],
+    AttributeDefinitions: [
+      { AttributeName: "userId", AttributeType: "S" },
+      { AttributeName: "orderId", AttributeType: "S" },
+    ],
+    BillingMode: "PAY_PER_REQUEST",
+  }));
+
+  await dynamodb.send(new PutItemCommand({
+    TableName: "demo-orders",
+    Item: {
+      userId: { S: "user1" },
+      orderId: { S: "order-001" },
+      total: { N: "29.99" },
+      status: { S: "shipped" },
+    },
+  }));
+  await dynamodb.send(new PutItemCommand({
+    TableName: "demo-orders",
+    Item: {
+      userId: { S: "user1" },
+      orderId: { S: "order-002" },
+      total: { N: "59.99" },
+      status: { S: "pending" },
+    },
+  }));
+
+  const queryResp = await dynamodb.send(new DDBQueryCommand({
+    TableName: "demo-orders",
+    KeyConditionExpression: "userId = :uid",
+    ExpressionAttributeValues: { ":uid": { S: "user1" } },
+  }));
+  for (const item of queryResp.Items || []) {
+    console.log(`  ${item.orderId.S}: $${item.total.N} (${item.status.S})`);
+  }
+
+  await dynamodb.send(new DDBDeleteTableCommand({ TableName: "demo-orders" }));
+  console.log("  table cleaned up");
 
   // --- Cleanup ---
   console.log("\n[Cleanup] Deleting resources...");

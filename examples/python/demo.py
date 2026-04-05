@@ -1,5 +1,5 @@
 """
-FakeCloud demo: S3 + SQS + SNS + SSM using boto3.
+FakeCloud demo: S3 + SQS + SNS + SSM + DynamoDB using boto3.
 
 Prerequisites:
     pip install boto3
@@ -28,10 +28,11 @@ s3 = session.client("s3", endpoint_url=ENDPOINT)
 sqs = session.client("sqs", endpoint_url=ENDPOINT)
 sns = session.client("sns", endpoint_url=ENDPOINT)
 ssm = session.client("ssm", endpoint_url=ENDPOINT)
+dynamodb = session.client("dynamodb", endpoint_url=ENDPOINT)
 
 
 def main():
-    print("=== FakeCloud Demo: S3 + SQS + SNS + SSM ===\n")
+    print("=== FakeCloud Demo: S3 + SQS + SNS + SSM + DynamoDB ===\n")
 
     # --- S3 ---
     print("[S3] Creating bucket and uploading objects...")
@@ -160,6 +161,51 @@ def main():
     s3.delete_bucket(Bucket="events-bucket")
     sqs.delete_queue(QueueUrl=events_url)
     print("  notification pipeline cleaned up")
+
+    # --- DynamoDB ---
+    print("\n[DynamoDB] Creating table and working with items...")
+    dynamodb.create_table(
+        TableName="demo-orders",
+        KeySchema=[
+            {"AttributeName": "userId", "KeyType": "HASH"},
+            {"AttributeName": "orderId", "KeyType": "RANGE"},
+        ],
+        AttributeDefinitions=[
+            {"AttributeName": "userId", "AttributeType": "S"},
+            {"AttributeName": "orderId", "AttributeType": "S"},
+        ],
+        BillingMode="PAY_PER_REQUEST",
+    )
+
+    dynamodb.put_item(
+        TableName="demo-orders",
+        Item={
+            "userId": {"S": "user1"},
+            "orderId": {"S": "order-001"},
+            "total": {"N": "29.99"},
+            "status": {"S": "shipped"},
+        },
+    )
+    dynamodb.put_item(
+        TableName="demo-orders",
+        Item={
+            "userId": {"S": "user1"},
+            "orderId": {"S": "order-002"},
+            "total": {"N": "59.99"},
+            "status": {"S": "pending"},
+        },
+    )
+
+    result = dynamodb.query(
+        TableName="demo-orders",
+        KeyConditionExpression="userId = :uid",
+        ExpressionAttributeValues={":uid": {"S": "user1"}},
+    )
+    for item in result["Items"]:
+        print(f"  {item['orderId']['S']}: ${item['total']['N']} ({item['status']['S']})")
+
+    dynamodb.delete_table(TableName="demo-orders")
+    print("  table cleaned up")
 
     # --- Cleanup ---
     print("\n[Cleanup] Deleting resources...")

@@ -10,6 +10,7 @@ use fakecloud_core::delivery::DeliveryBus;
 use fakecloud_core::dispatch::{self, DispatchConfig};
 use fakecloud_core::registry::ServiceRegistry;
 
+use fakecloud_dynamodb::service::DynamoDbService;
 use fakecloud_eventbridge::service::EventBridgeService;
 use fakecloud_iam::iam_service::IamService;
 use fakecloud_iam::sts_service::StsService;
@@ -71,6 +72,9 @@ async fn main() {
     let ssm_state = Arc::new(parking_lot::RwLock::new(
         fakecloud_ssm::state::SsmState::new(&cli.account_id, &cli.region),
     ));
+    let dynamodb_state = Arc::new(parking_lot::RwLock::new(
+        fakecloud_dynamodb::state::DynamoDbState::new(&cli.account_id, &cli.region),
+    ));
     let s3_state = Arc::new(parking_lot::RwLock::new(fakecloud_s3::state::S3State::new(
         &cli.account_id,
         &cli.region,
@@ -114,6 +118,7 @@ async fn main() {
         sns: sns_state.clone(),
         eb: eb_state.clone(),
         ssm: ssm_state.clone(),
+        dynamodb: dynamodb_state.clone(),
         s3: s3_state.clone(),
         logs: logs_state.clone(),
         kms: kms_state.clone(),
@@ -134,6 +139,7 @@ async fn main() {
     registry.register(Arc::new(IamService::new(iam_state.clone())));
     registry.register(Arc::new(StsService::new(iam_state)));
     registry.register(Arc::new(SsmService::new(ssm_state)));
+    registry.register(Arc::new(DynamoDbService::new(dynamodb_state)));
     registry.register(Arc::new(LogsService::new(logs_state)));
     registry.register(Arc::new(KmsService::new(kms_state)));
     registry.register(Arc::new(S3Service::new(s3_state.clone(), delivery_for_s3)));
@@ -205,6 +211,7 @@ struct ResetState {
     sns: fakecloud_sns::state::SharedSnsState,
     eb: fakecloud_eventbridge::state::SharedEventBridgeState,
     ssm: fakecloud_ssm::state::SharedSsmState,
+    dynamodb: fakecloud_dynamodb::state::SharedDynamoDbState,
     s3: fakecloud_s3::state::SharedS3State,
     logs: fakecloud_logs::state::SharedLogsState,
     kms: fakecloud_kms::state::SharedKmsState,
@@ -234,6 +241,7 @@ impl ResetState {
             eb.step_function_executions.clear();
         }
         self.ssm.write().reset();
+        self.dynamodb.write().reset();
         self.s3.write().reset();
         self.logs.write().reset();
         self.kms.write().reset();
