@@ -2900,7 +2900,7 @@ impl SsmService {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "DoesNotExistException",
-                format!("Maintenance window {baseline_id} does not exist"),
+                format!("Patch baseline {baseline_id} does not exist"),
             ));
         }
 

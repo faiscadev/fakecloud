@@ -223,15 +223,18 @@ impl SsmState {
             self.insert_default_param(&format!("{base_path}/longName"), long_name, now);
             self.insert_default_param(&format!("{base_path}/domain"), "amazonaws.com", now);
             self.insert_default_param(&format!("{base_path}/geolocationRegion"), region_code, now);
-            self.insert_default_param(
-                &format!("{base_path}/geolocationCountry"),
-                &region_code
-                    .split('-')
-                    .next()
-                    .unwrap_or(region_code)
-                    .to_uppercase(),
-                now,
-            );
+            let country = match region_code.split('-').next().unwrap_or("") {
+                "us" => "US",
+                "eu" => "DE",
+                "ap" => "JP",
+                "sa" => "BR",
+                "ca" => "CA",
+                "me" => "BH",
+                "af" => "ZA",
+                "il" => "IL",
+                _ => "US",
+            };
+            self.insert_default_param(&format!("{base_path}/geolocationCountry"), country, now);
             self.insert_default_param(&format!("{base_path}/partition"), "aws", now);
         }
 
