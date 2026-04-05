@@ -14,6 +14,8 @@ pub struct S3Object {
     pub last_modified: DateTime<Utc>,
     pub metadata: HashMap<String, String>,
     pub storage_class: String,
+    pub version_id: Option<String>,
+    pub is_delete_marker: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -58,6 +60,8 @@ pub struct S3Bucket {
     pub accelerate_status: Option<String>,
     pub public_access_block: Option<String>,
     pub object_lock_config: Option<String>,
+    /// Version history: key -> list of versions (newest last)
+    pub object_versions: HashMap<String, Vec<S3Object>>,
 }
 
 impl S3Bucket {
@@ -80,6 +84,7 @@ impl S3Bucket {
             accelerate_status: None,
             public_access_block: None,
             object_lock_config: None,
+            object_versions: HashMap::new(),
         }
     }
 }

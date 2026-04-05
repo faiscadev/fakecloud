@@ -3,10 +3,11 @@ use bytes::Bytes;
 use chrono::Utc;
 use http::{HeaderMap, Method, StatusCode};
 use md5::{Digest, Md5};
+use uuid::Uuid;
 
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 
-use crate::state::{MultipartUpload, S3Bucket, S3Object, SharedS3State};
+use crate::state::{MultipartUpload, S3Bucket, S3Object, SharedS3State, UploadPart};
 
 pub struct S3Service {
     state: SharedS3State,
@@ -41,21 +42,49 @@ impl AwsService for S3Service {
             (&Method::GET, Some(b), None) => self.route_get_bucket(&req, b),
 
             (&Method::PUT, Some(b), Some(k)) => {
-                if req.headers.contains_key("x-amz-copy-source") {
+                if req.query_params.contains_key("partNumber") {
+                    self.upload_part(&req, b, k)
+                } else if req.headers.contains_key("x-amz-copy-source") {
                     self.copy_object(&req, b, k)
                 } else {
                     self.put_object(&req, b, k)
                 }
             }
-            (&Method::GET, Some(b), Some(k)) => self.get_object(b, k),
-            (&Method::DELETE, Some(b), Some(k)) => self.delete_object(b, k),
-            (&Method::HEAD, Some(b), Some(k)) => self.head_object(b, k),
+            (&Method::GET, Some(b), Some(k)) => {
+                if req.query_params.contains_key("uploadId") {
+                    self.list_parts(&req, b, k)
+                } else if req.query_params.contains_key("acl") {
+                    self.get_object_acl(&req, b, k)
+                } else if req.query_params.contains_key("attributes") {
+                    self.get_object_attributes(&req, b, k)
+                } else {
+                    self.get_object(&req, b, k)
+                }
+            }
+            (&Method::DELETE, Some(b), Some(k)) => {
+                if req.query_params.contains_key("uploadId") {
+                    self.abort_multipart_upload(&req, b, k)
+                } else {
+                    self.delete_object(&req, b, k)
+                }
+            }
+            (&Method::HEAD, Some(b), Some(k)) => self.head_object(&req, b, k),
+            (&Method::POST, Some(b), Some(k)) => {
+                if req.query_params.contains_key("uploads") {
+                    self.create_multipart_upload(&req, b, k)
+                } else if req.query_params.contains_key("uploadId") {
+                    self.complete_multipart_upload(&req, b, k)
+                } else {
+                    Err(AwsServiceError::aws_error(
+                        StatusCode::METHOD_NOT_ALLOWED,
+                        "MethodNotAllowed",
+                        "The specified method is not allowed against this resource",
+                    ))
+                }
+            }
 
             (&Method::POST, Some(b), None) if req.query_params.contains_key("delete") => {
                 self.delete_objects(&req, b)
-            }
-            (&Method::POST, Some(b), Some(k)) if req.query_params.contains_key("uploads") => {
-                self.create_multipart_upload(&req, b, k)
             }
 
             _ => Err(AwsServiceError::aws_error(
@@ -116,6 +145,13 @@ impl AwsService for S3Service {
             "PutObjectLockConfiguration",
             "ListObjectVersions",
             "CreateMultipartUpload",
+            "UploadPart",
+            "CompleteMultipartUpload",
+            "AbortMultipartUpload",
+            "ListParts",
+            "ListMultipartUploads",
+            "GetObjectAcl",
+            "GetObjectAttributes",
         ]
     }
 }
@@ -195,6 +231,8 @@ impl S3Service {
             self.get_object_lock_config(bucket)
         } else if req.query_params.contains_key("versions") {
             self.list_object_versions(req, bucket)
+        } else if req.query_params.contains_key("uploads") {
+            self.list_multipart_uploads(req, bucket)
         } else if req.query_params.get("list-type").map(|s| s.as_str()) == Some("2") {
             self.list_objects_v2(req, bucket)
         } else {
@@ -591,22 +629,7 @@ impl S3Service {
             .buckets
             .get(bucket)
             .ok_or_else(|| no_such_bucket(bucket))?;
-        let owner_id = &req.account_id;
-        let body = format!(
-            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
-             <AccessControlPolicy xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
-             <Owner><ID>{owner_id}</ID><DisplayName>{owner_id}</DisplayName></Owner>\
-             <AccessControlList>\
-             <Grant>\
-             <Grantee xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:type=\"CanonicalUser\">\
-             <ID>{owner_id}</ID><DisplayName>{owner_id}</DisplayName>\
-             </Grantee>\
-             <Permission>FULL_CONTROL</Permission>\
-             </Grant>\
-             </AccessControlList>\
-             </AccessControlPolicy>"
-        );
-        Ok(AwsResponse::xml(StatusCode::OK, body))
+        Ok(AwsResponse::xml(StatusCode::OK, acl_xml(&req.account_id)))
     }
 
     // ---- Notification ----
@@ -925,6 +948,9 @@ impl S3Service {
         let mut last_key = String::new();
 
         for (key, obj) in &b.objects {
+            if obj.is_delete_marker {
+                continue;
+            }
             if !key.starts_with(&prefix) {
                 continue;
             }
@@ -1044,6 +1070,11 @@ impl S3Service {
             .cloned()
             .unwrap_or_default();
         let continuation = req.query_params.get("continuation-token").cloned();
+        let fetch_owner = req
+            .query_params
+            .get("fetch-owner")
+            .map(|v| v == "true")
+            .unwrap_or(false);
 
         let effective_start = continuation.as_deref().unwrap_or(&start_after);
 
@@ -1054,6 +1085,9 @@ impl S3Service {
         let mut last_key = String::new();
 
         for (key, obj) in &b.objects {
+            if obj.is_delete_marker {
+                continue;
+            }
             if !key.starts_with(&prefix) {
                 continue;
             }
@@ -1083,19 +1117,20 @@ impl S3Service {
                 break;
             }
 
+            let owner_xml = if fetch_owner {
+                format!(
+                    "<Owner><ID>{}</ID><DisplayName>{}</DisplayName></Owner>",
+                    req.account_id, req.account_id
+                )
+            } else {
+                String::new()
+            };
+
             contents.push_str(&format!(
-                "<Contents>\
-                 <Key>{}</Key>\
-                 <LastModified>{}</LastModified>\
-                 <ETag>&quot;{}&quot;</ETag>\
-                 <Size>{}</Size>\
-                 <StorageClass>{}</StorageClass>\
-                 </Contents>",
+                "<Contents><Key>{}</Key><LastModified>{}</LastModified><ETag>&quot;{}&quot;</ETag><Size>{}</Size><StorageClass>{}</StorageClass>{owner_xml}</Contents>",
                 xml_escape(key),
                 obj.last_modified.format("%Y-%m-%dT%H:%M:%S%.3fZ"),
-                obj.etag,
-                obj.size,
-                obj.storage_class,
+                obj.etag, obj.size, obj.storage_class,
             ));
             last_key = key.clone();
             count += 1;
@@ -1127,16 +1162,9 @@ impl S3Service {
         let body = format!(
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
              <ListBucketResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
-             <Name>{bucket}</Name>\
-             <Prefix>{prefix}</Prefix>\
-             <KeyCount>{count}</KeyCount>\
-             <MaxKeys>{max_keys}</MaxKeys>\
-             <IsTruncated>{is_truncated}</IsTruncated>\
-             {cont_token}\
-             {next_token}\
-             {contents}\
-             {common_prefixes_xml}\
-             </ListBucketResult>",
+             <Name>{bucket}</Name><Prefix>{prefix}</Prefix><KeyCount>{count}</KeyCount>\
+             <MaxKeys>{max_keys}</MaxKeys><IsTruncated>{is_truncated}</IsTruncated>\
+             {cont_token}{next_token}{contents}{common_prefixes_xml}</ListBucketResult>",
             prefix = xml_escape(&prefix),
         );
         Ok(AwsResponse::xml(StatusCode::OK, body))
@@ -1154,53 +1182,82 @@ impl S3Service {
             .ok_or_else(|| no_such_bucket(bucket))?;
 
         let prefix = req.query_params.get("prefix").cloned().unwrap_or_default();
-        let max_keys: usize = req
-            .query_params
-            .get("max-keys")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(1000);
 
         let mut versions_xml = String::new();
-        let mut count = 0;
-        let mut is_truncated = false;
+        let mut delete_markers_xml = String::new();
 
+        for (key, versions) in &b.object_versions {
+            if !key.starts_with(&prefix) {
+                continue;
+            }
+            let n = versions.len();
+            for (i, obj) in versions.iter().enumerate() {
+                let is_latest = i == n - 1;
+                let vid = obj.version_id.as_deref().unwrap_or("null");
+                if obj.is_delete_marker {
+                    delete_markers_xml.push_str(&format!(
+                        "<DeleteMarker><Key>{}</Key><VersionId>{}</VersionId><IsLatest>{}</IsLatest>\
+                         <LastModified>{}</LastModified>\
+                         <Owner><ID>{}</ID><DisplayName>{}</DisplayName></Owner></DeleteMarker>",
+                        xml_escape(key), vid, is_latest,
+                        obj.last_modified.format("%Y-%m-%dT%H:%M:%S%.3fZ"),
+                        req.account_id, req.account_id,
+                    ));
+                } else {
+                    versions_xml.push_str(&format!(
+                        "<Version><Key>{}</Key><VersionId>{}</VersionId><IsLatest>{}</IsLatest>\
+                         <LastModified>{}</LastModified><ETag>&quot;{}&quot;</ETag>\
+                         <Size>{}</Size><StorageClass>{}</StorageClass>\
+                         <Owner><ID>{}</ID><DisplayName>{}</DisplayName></Owner></Version>",
+                        xml_escape(key),
+                        vid,
+                        is_latest,
+                        obj.last_modified.format("%Y-%m-%dT%H:%M:%S%.3fZ"),
+                        obj.etag,
+                        obj.size,
+                        obj.storage_class,
+                        req.account_id,
+                        req.account_id,
+                    ));
+                }
+            }
+        }
+
+        // Non-versioned objects
         for (key, obj) in &b.objects {
             if !key.starts_with(&prefix) {
                 continue;
             }
-            if count >= max_keys {
-                is_truncated = true;
-                break;
+            if b.object_versions.contains_key(key) {
+                continue;
             }
+            if obj.is_delete_marker {
+                continue;
+            }
+            let vid = obj.version_id.as_deref().unwrap_or("null");
             versions_xml.push_str(&format!(
-                "<Version>\
-                 <Key>{}</Key>\
-                 <VersionId>null</VersionId>\
-                 <IsLatest>true</IsLatest>\
-                 <LastModified>{}</LastModified>\
-                 <ETag>&quot;{}&quot;</ETag>\
-                 <Size>{}</Size>\
-                 <StorageClass>{}</StorageClass>\
-                 </Version>",
+                "<Version><Key>{}</Key><VersionId>{}</VersionId><IsLatest>true</IsLatest>\
+                 <LastModified>{}</LastModified><ETag>&quot;{}&quot;</ETag>\
+                 <Size>{}</Size><StorageClass>{}</StorageClass>\
+                 <Owner><ID>{}</ID><DisplayName>{}</DisplayName></Owner></Version>",
                 xml_escape(key),
+                vid,
                 obj.last_modified.format("%Y-%m-%dT%H:%M:%S%.3fZ"),
                 obj.etag,
                 obj.size,
                 obj.storage_class,
+                req.account_id,
+                req.account_id,
             ));
-            count += 1;
         }
 
         let body = format!(
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
              <ListVersionsResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
-             <Name>{bucket}</Name>\
-             <Prefix>{prefix}</Prefix>\
-             <MaxKeys>{max_keys}</MaxKeys>\
-             <IsTruncated>{is_truncated}</IsTruncated>\
-             {versions_xml}\
+             <Name>{bucket}</Name><Prefix>{}</Prefix><MaxKeys>1000</MaxKeys>\
+             <IsTruncated>false</IsTruncated>{versions_xml}{delete_markers_xml}\
              </ListVersionsResult>",
-            prefix = xml_escape(&prefix),
+            xml_escape(&prefix),
         );
         Ok(AwsResponse::xml(StatusCode::OK, body))
     }
@@ -1218,31 +1275,14 @@ impl S3Service {
             return Err(no_such_bucket(bucket));
         }
 
+        let upload_id = Uuid::new_v4().to_string();
         let content_type = req
             .headers
             .get("content-type")
             .and_then(|v| v.to_str().ok())
-            .unwrap_or("binary/octet-stream")
+            .unwrap_or("application/octet-stream")
             .to_string();
-        let storage_class = req
-            .headers
-            .get("x-amz-storage-class")
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string());
         let metadata = extract_user_metadata(&req.headers);
-
-        let upload_id = format!(
-            "{:x}",
-            Md5::digest(
-                format!(
-                    "{}/{}/{}",
-                    bucket,
-                    key,
-                    Utc::now().timestamp_nanos_opt().unwrap_or(0)
-                )
-                .as_bytes()
-            )
-        );
 
         let upload = MultipartUpload {
             upload_id: upload_id.clone(),
@@ -1250,7 +1290,7 @@ impl S3Service {
             key: key.to_string(),
             parts: std::collections::HashMap::new(),
             initiated: Utc::now(),
-            storage_class,
+            storage_class: None,
             metadata,
             content_type,
         };
@@ -1259,12 +1299,8 @@ impl S3Service {
         let body = format!(
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
              <InitiateMultipartUploadResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
-             <Bucket>{}</Bucket>\
-             <Key>{}</Key>\
-             <UploadId>{upload_id}</UploadId>\
-             </InitiateMultipartUploadResult>",
-            xml_escape(bucket),
-            xml_escape(key),
+             <Bucket>{}</Bucket><Key>{}</Key><UploadId>{}</UploadId></InitiateMultipartUploadResult>",
+            xml_escape(bucket), xml_escape(key), xml_escape(&upload_id),
         );
         Ok(AwsResponse::xml(StatusCode::OK, body))
     }
@@ -1294,8 +1330,14 @@ impl S3Service {
             .and_then(|v| v.to_str().ok())
             .unwrap_or("application/octet-stream")
             .to_string();
-
         let metadata = extract_user_metadata(&req.headers);
+
+        let versioning_enabled = b.versioning_status.as_deref() == Some("Enabled");
+        let version_id = if versioning_enabled {
+            Some(Uuid::new_v4().to_string())
+        } else {
+            None
+        };
 
         let obj = S3Object {
             key: key.to_string(),
@@ -1306,11 +1348,23 @@ impl S3Service {
             last_modified: Utc::now(),
             metadata,
             storage_class: "STANDARD".to_string(),
+            version_id: version_id.clone(),
+            is_delete_marker: false,
         };
+
+        if versioning_enabled {
+            b.object_versions
+                .entry(key.to_string())
+                .or_default()
+                .push(obj.clone());
+        }
         b.objects.insert(key.to_string(), obj);
 
         let mut headers = HeaderMap::new();
         headers.insert("etag", format!("\"{etag}\"").parse().unwrap());
+        if let Some(vid) = &version_id {
+            headers.insert("x-amz-version-id", vid.parse().unwrap());
+        }
         Ok(AwsResponse {
             status: StatusCode::OK,
             content_type: "application/xml".to_string(),
@@ -1319,13 +1373,23 @@ impl S3Service {
         })
     }
 
-    fn get_object(&self, bucket: &str, key: &str) -> Result<AwsResponse, AwsServiceError> {
+    fn get_object(
+        &self,
+        req: &AwsRequest,
+        bucket: &str,
+        key: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
         let state = self.state.read();
         let b = state
             .buckets
             .get(bucket)
             .ok_or_else(|| no_such_bucket(bucket))?;
-        let obj = b.objects.get(key).ok_or_else(|| no_such_key(key))?;
+
+        let obj = resolve_object(b, key, req.query_params.get("versionId"))?;
+
+        if obj.is_delete_marker {
+            return Err(no_such_key(key));
+        }
 
         let mut headers = HeaderMap::new();
         headers.insert("etag", format!("\"{}\"", obj.etag).parse().unwrap());
@@ -1338,6 +1402,12 @@ impl S3Service {
                 .unwrap(),
         );
         headers.insert("content-length", obj.size.to_string().parse().unwrap());
+        if obj.storage_class != "STANDARD" {
+            headers.insert("x-amz-storage-class", obj.storage_class.parse().unwrap());
+        }
+        if let Some(vid) = &obj.version_id {
+            headers.insert("x-amz-version-id", vid.parse().unwrap());
+        }
         for (k, v) in &obj.metadata {
             if let (Ok(name), Ok(val)) = (
                 format!("x-amz-meta-{k}").parse::<http::header::HeaderName>(),
@@ -1355,23 +1425,80 @@ impl S3Service {
         })
     }
 
-    fn delete_object(&self, bucket: &str, key: &str) -> Result<AwsResponse, AwsServiceError> {
+    fn delete_object(
+        &self,
+        req: &AwsRequest,
+        bucket: &str,
+        key: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
         let mut state = self.state.write();
         let b = state
             .buckets
             .get_mut(bucket)
             .ok_or_else(|| no_such_bucket(bucket))?;
-        b.objects.remove(key);
-        Ok(empty_response(StatusCode::NO_CONTENT))
+
+        let versioning_enabled = b.versioning_status.as_deref() == Some("Enabled");
+        let version_id_param = req.query_params.get("versionId").cloned();
+
+        let mut headers = HeaderMap::new();
+
+        if let Some(vid) = version_id_param {
+            if let Some(versions) = b.object_versions.get_mut(key) {
+                versions.retain(|o| o.version_id.as_deref() != Some(&vid));
+                // Update the current object to match the latest version
+                if let Some(latest) = versions.last() {
+                    if latest.is_delete_marker {
+                        b.objects.remove(key);
+                    } else {
+                        b.objects.insert(key.to_string(), latest.clone());
+                    }
+                } else {
+                    b.objects.remove(key);
+                }
+                if versions.is_empty() {
+                    b.object_versions.remove(key);
+                }
+            }
+            headers.insert("x-amz-version-id", vid.parse().unwrap());
+        } else if versioning_enabled {
+            let dm_id = Uuid::new_v4().to_string();
+            let marker = make_delete_marker(key, &dm_id);
+            b.object_versions
+                .entry(key.to_string())
+                .or_default()
+                .push(marker.clone());
+            b.objects.insert(key.to_string(), marker);
+            headers.insert("x-amz-delete-marker", "true".parse().unwrap());
+            headers.insert("x-amz-version-id", dm_id.parse().unwrap());
+        } else {
+            b.objects.remove(key);
+        }
+
+        Ok(AwsResponse {
+            status: StatusCode::NO_CONTENT,
+            content_type: "application/xml".to_string(),
+            body: Bytes::new(),
+            headers,
+        })
     }
 
-    fn head_object(&self, bucket: &str, key: &str) -> Result<AwsResponse, AwsServiceError> {
+    fn head_object(
+        &self,
+        req: &AwsRequest,
+        bucket: &str,
+        key: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
         let state = self.state.read();
         let b = state
             .buckets
             .get(bucket)
             .ok_or_else(|| no_such_bucket(bucket))?;
-        let obj = b.objects.get(key).ok_or_else(|| no_such_key(key))?;
+
+        let obj = resolve_object(b, key, req.query_params.get("versionId"))?;
+
+        if obj.is_delete_marker {
+            return Err(no_such_key(key));
+        }
 
         let mut headers = HeaderMap::new();
         headers.insert("etag", format!("\"{}\"", obj.etag).parse().unwrap());
@@ -1384,6 +1511,12 @@ impl S3Service {
                 .unwrap(),
         );
         headers.insert("content-length", obj.size.to_string().parse().unwrap());
+        if obj.storage_class != "STANDARD" {
+            headers.insert("x-amz-storage-class", obj.storage_class.parse().unwrap());
+        }
+        if let Some(vid) = &obj.version_id {
+            headers.insert("x-amz-version-id", vid.parse().unwrap());
+        }
 
         Ok(AwsResponse {
             status: StatusCode::OK,
@@ -1443,24 +1576,42 @@ impl S3Service {
             .buckets
             .get_mut(dest_bucket)
             .ok_or_else(|| no_such_bucket(dest_bucket))?;
-        db.objects.insert(
-            dest_key.to_string(),
-            S3Object {
-                key: dest_key.to_string(),
-                last_modified,
-                ..src_obj
-            },
-        );
+        let versioning_enabled = db.versioning_status.as_deref() == Some("Enabled");
+        let version_id = if versioning_enabled {
+            Some(Uuid::new_v4().to_string())
+        } else {
+            None
+        };
+
+        let new_obj = S3Object {
+            key: dest_key.to_string(),
+            last_modified,
+            version_id: version_id.clone(),
+            is_delete_marker: false,
+            ..src_obj
+        };
+
+        if versioning_enabled {
+            db.object_versions
+                .entry(dest_key.to_string())
+                .or_default()
+                .push(new_obj.clone());
+        }
+        db.objects.insert(dest_key.to_string(), new_obj);
+
+        let mut headers = HeaderMap::new();
+        if let Some(vid) = &version_id {
+            headers.insert("x-amz-version-id", vid.parse().unwrap());
+        }
 
         let body = format!(
-            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
-             <CopyObjectResult>\
-             <ETag>&quot;{etag}&quot;</ETag>\
-             <LastModified>{}</LastModified>\
-             </CopyObjectResult>",
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?><CopyObjectResult>\
+             <ETag>&quot;{etag}&quot;</ETag><LastModified>{}</LastModified></CopyObjectResult>",
             last_modified.format("%Y-%m-%dT%H:%M:%S%.3fZ"),
         );
-        Ok(AwsResponse::xml(StatusCode::OK, body))
+        let mut resp = AwsResponse::xml(StatusCode::OK, body);
+        resp.headers = headers;
+        Ok(resp)
     }
 
     fn delete_objects(
@@ -1476,21 +1627,403 @@ impl S3Service {
             .buckets
             .get_mut(bucket)
             .ok_or_else(|| no_such_bucket(bucket))?;
+        let versioning_enabled = b.versioning_status.as_deref() == Some("Enabled");
 
         let mut deleted_xml = String::new();
         for key in &keys {
-            b.objects.remove(key);
-            deleted_xml.push_str(&format!(
-                "<Deleted><Key>{}</Key></Deleted>",
-                xml_escape(key),
+            if versioning_enabled {
+                let dm_id = Uuid::new_v4().to_string();
+                let marker = make_delete_marker(key, &dm_id);
+                b.object_versions
+                    .entry(key.to_string())
+                    .or_default()
+                    .push(marker.clone());
+                b.objects.insert(key.to_string(), marker);
+                deleted_xml.push_str(&format!(
+                    "<Deleted><Key>{}</Key><DeleteMarker>true</DeleteMarker><DeleteMarkerVersionId>{}</DeleteMarkerVersionId></Deleted>",
+                    xml_escape(key), dm_id,
+                ));
+            } else {
+                b.objects.remove(key);
+                deleted_xml.push_str(&format!(
+                    "<Deleted><Key>{}</Key></Deleted>",
+                    xml_escape(key)
+                ));
+            }
+        }
+
+        let body = format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+             <DeleteResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">{deleted_xml}</DeleteResult>"
+        );
+        Ok(AwsResponse::xml(StatusCode::OK, body))
+    }
+
+    fn get_object_acl(
+        &self,
+        req: &AwsRequest,
+        bucket: &str,
+        key: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let state = self.state.read();
+        let b = state
+            .buckets
+            .get(bucket)
+            .ok_or_else(|| no_such_bucket(bucket))?;
+        let _obj = b.objects.get(key).ok_or_else(|| no_such_key(key))?;
+        Ok(AwsResponse::xml(StatusCode::OK, acl_xml(&req.account_id)))
+    }
+
+    fn get_object_attributes(
+        &self,
+        req: &AwsRequest,
+        bucket: &str,
+        key: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let state = self.state.read();
+        let b = state
+            .buckets
+            .get(bucket)
+            .ok_or_else(|| no_such_bucket(bucket))?;
+        let obj = resolve_object(b, key, req.query_params.get("versionId"))?;
+
+        if obj.is_delete_marker {
+            return Err(no_such_key(key));
+        }
+
+        let requested_attrs: Vec<&str> = req
+            .headers
+            .get("x-amz-object-attributes")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        let mut body_parts = String::new();
+        for attr in &requested_attrs {
+            match *attr {
+                "ETag" => body_parts.push_str(&format!("<ETag>&quot;{}&quot;</ETag>", obj.etag)),
+                "StorageClass" => body_parts.push_str(&format!(
+                    "<StorageClass>{}</StorageClass>",
+                    obj.storage_class
+                )),
+                "ObjectSize" => {
+                    body_parts.push_str(&format!("<ObjectSize>{}</ObjectSize>", obj.size))
+                }
+                "ObjectParts" => body_parts
+                    .push_str("<ObjectParts><TotalPartsCount>0</TotalPartsCount></ObjectParts>"),
+                _ => {}
+            }
+        }
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "last-modified",
+            obj.last_modified
+                .format("%a, %d %b %Y %H:%M:%S GMT")
+                .to_string()
+                .parse()
+                .unwrap(),
+        );
+        if let Some(vid) = &obj.version_id {
+            headers.insert("x-amz-version-id", vid.parse().unwrap());
+        }
+
+        let body = format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+             <GetObjectAttributesResponse xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">{body_parts}</GetObjectAttributesResponse>"
+        );
+        let mut resp = AwsResponse::xml(StatusCode::OK, body);
+        resp.headers = headers;
+        Ok(resp)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Multipart upload operations
+// ---------------------------------------------------------------------------
+impl S3Service {
+    fn upload_part(
+        &self,
+        req: &AwsRequest,
+        _bucket: &str,
+        _key: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let upload_id = req
+            .query_params
+            .get("uploadId")
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidArgument",
+                    "uploadId is required",
+                )
+            })?
+            .clone();
+
+        let part_number: i32 = req
+            .query_params
+            .get("partNumber")
+            .and_then(|v| v.parse().ok())
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidArgument",
+                    "partNumber is required",
+                )
+            })?;
+
+        let data = req.body.clone();
+        let etag = compute_md5(&data);
+
+        let mut state = self.state.write();
+        let upload = state.multipart_uploads.get_mut(&upload_id).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "NoSuchUpload",
+                "The specified multipart upload does not exist",
+            )
+        })?;
+
+        upload.parts.insert(
+            part_number,
+            UploadPart {
+                part_number,
+                data,
+                etag: etag.clone(),
+                last_modified: Utc::now(),
+            },
+        );
+
+        let mut headers = HeaderMap::new();
+        headers.insert("etag", format!("\"{etag}\"").parse().unwrap());
+        Ok(AwsResponse {
+            status: StatusCode::OK,
+            content_type: "application/xml".to_string(),
+            body: Bytes::new(),
+            headers,
+        })
+    }
+
+    fn complete_multipart_upload(
+        &self,
+        req: &AwsRequest,
+        bucket: &str,
+        key: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let upload_id = req
+            .query_params
+            .get("uploadId")
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidArgument",
+                    "uploadId is required",
+                )
+            })?
+            .clone();
+
+        let mut state = self.state.write();
+        let upload = state.multipart_uploads.remove(&upload_id).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "NoSuchUpload",
+                "The specified multipart upload does not exist",
+            )
+        })?;
+
+        let body_str = std::str::from_utf8(&req.body).unwrap_or("");
+        let requested_parts = parse_complete_multipart_xml(body_str);
+
+        let part_numbers = if requested_parts.is_empty() {
+            let mut nums: Vec<i32> = upload.parts.keys().copied().collect();
+            nums.sort();
+            nums
+        } else {
+            requested_parts
+        };
+
+        let mut combined = Vec::new();
+        for pn in &part_numbers {
+            if let Some(part) = upload.parts.get(pn) {
+                combined.extend_from_slice(&part.data);
+            }
+        }
+
+        let data = Bytes::from(combined);
+        let etag = format!("{}-{}", compute_md5(&data), part_numbers.len());
+
+        let b = state
+            .buckets
+            .get_mut(bucket)
+            .ok_or_else(|| no_such_bucket(bucket))?;
+        let versioning_enabled = b.versioning_status.as_deref() == Some("Enabled");
+        let version_id = if versioning_enabled {
+            Some(Uuid::new_v4().to_string())
+        } else {
+            None
+        };
+
+        let obj = S3Object {
+            key: key.to_string(),
+            size: data.len() as u64,
+            data,
+            content_type: upload.content_type,
+            etag: etag.clone(),
+            last_modified: Utc::now(),
+            metadata: upload.metadata,
+            storage_class: upload
+                .storage_class
+                .unwrap_or_else(|| "STANDARD".to_string()),
+            version_id: version_id.clone(),
+            is_delete_marker: false,
+        };
+
+        if versioning_enabled {
+            b.object_versions
+                .entry(key.to_string())
+                .or_default()
+                .push(obj.clone());
+        }
+        b.objects.insert(key.to_string(), obj);
+
+        let location = format!("http://s3.amazonaws.com/{}/{}", bucket, key);
+        let body = format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+             <CompleteMultipartUploadResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
+             <Location>{}</Location><Bucket>{}</Bucket><Key>{}</Key>\
+             <ETag>&quot;{}&quot;</ETag></CompleteMultipartUploadResult>",
+            xml_escape(&location),
+            xml_escape(bucket),
+            xml_escape(key),
+            etag,
+        );
+        let mut resp = AwsResponse::xml(StatusCode::OK, body);
+        if let Some(vid) = &version_id {
+            resp.headers
+                .insert("x-amz-version-id", vid.parse().unwrap());
+        }
+        Ok(resp)
+    }
+
+    fn abort_multipart_upload(
+        &self,
+        req: &AwsRequest,
+        _bucket: &str,
+        _key: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let upload_id = req
+            .query_params
+            .get("uploadId")
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidArgument",
+                    "uploadId is required",
+                )
+            })?
+            .clone();
+
+        let mut state = self.state.write();
+        state.multipart_uploads.remove(&upload_id).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "NoSuchUpload",
+                "The specified multipart upload does not exist",
+            )
+        })?;
+
+        Ok(empty_response(StatusCode::NO_CONTENT))
+    }
+
+    fn list_parts(
+        &self,
+        req: &AwsRequest,
+        bucket: &str,
+        key: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let upload_id = req
+            .query_params
+            .get("uploadId")
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidArgument",
+                    "uploadId is required",
+                )
+            })?
+            .clone();
+
+        let state = self.state.read();
+        let upload = state.multipart_uploads.get(&upload_id).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "NoSuchUpload",
+                "The specified multipart upload does not exist",
+            )
+        })?;
+
+        let mut parts_xml = String::new();
+        let mut sorted_parts: Vec<_> = upload.parts.values().collect();
+        sorted_parts.sort_by_key(|p| p.part_number);
+
+        for part in sorted_parts {
+            parts_xml.push_str(&format!(
+                "<Part><PartNumber>{}</PartNumber><LastModified>{}</LastModified>\
+                 <ETag>&quot;{}&quot;</ETag><Size>{}</Size></Part>",
+                part.part_number,
+                part.last_modified.format("%Y-%m-%dT%H:%M:%S%.3fZ"),
+                part.etag,
+                part.data.len(),
             ));
         }
 
         let body = format!(
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
-             <DeleteResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
-             {deleted_xml}\
-             </DeleteResult>"
+             <ListPartsResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
+             <Bucket>{}</Bucket><Key>{}</Key><UploadId>{}</UploadId>\
+             <IsTruncated>false</IsTruncated><MaxParts>1000</MaxParts>\
+             {parts_xml}</ListPartsResult>",
+            xml_escape(bucket),
+            xml_escape(key),
+            xml_escape(&upload_id),
+        );
+        Ok(AwsResponse::xml(StatusCode::OK, body))
+    }
+
+    fn list_multipart_uploads(
+        &self,
+        _req: &AwsRequest,
+        bucket: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let state = self.state.read();
+        if !state.buckets.contains_key(bucket) {
+            return Err(no_such_bucket(bucket));
+        }
+
+        let mut uploads_xml = String::new();
+        for upload in state.multipart_uploads.values() {
+            if upload.bucket != bucket {
+                continue;
+            }
+            uploads_xml.push_str(&format!(
+                "<Upload><Key>{}</Key><UploadId>{}</UploadId><Initiated>{}</Initiated>\
+                 <StorageClass>{}</StorageClass></Upload>",
+                xml_escape(&upload.key),
+                xml_escape(&upload.upload_id),
+                upload.initiated.format("%Y-%m-%dT%H:%M:%S%.3fZ"),
+                upload.storage_class.as_deref().unwrap_or("STANDARD"),
+            ));
+        }
+
+        let body = format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+             <ListMultipartUploadsResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
+             <Bucket>{}</Bucket><IsTruncated>false</IsTruncated><MaxUploads>1000</MaxUploads>\
+             {uploads_xml}</ListMultipartUploadsResult>",
+            xml_escape(bucket),
         );
         Ok(AwsResponse::xml(StatusCode::OK, body))
     }
@@ -1562,6 +2095,50 @@ fn is_valid_bucket_name(name: &str) -> bool {
         .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '.')
 }
 
+fn resolve_object<'a>(
+    b: &'a S3Bucket,
+    key: &str,
+    version_id: Option<&String>,
+) -> Result<&'a S3Object, AwsServiceError> {
+    if let Some(vid) = version_id {
+        let versions = b.object_versions.get(key).ok_or_else(|| no_such_key(key))?;
+        versions
+            .iter()
+            .find(|o| o.version_id.as_deref() == Some(vid))
+            .ok_or_else(|| no_such_key(key))
+    } else {
+        b.objects.get(key).ok_or_else(|| no_such_key(key))
+    }
+}
+
+fn make_delete_marker(key: &str, dm_id: &str) -> S3Object {
+    S3Object {
+        key: key.to_string(),
+        data: Bytes::new(),
+        content_type: String::new(),
+        etag: String::new(),
+        size: 0,
+        last_modified: Utc::now(),
+        metadata: std::collections::HashMap::new(),
+        storage_class: "STANDARD".to_string(),
+        version_id: Some(dm_id.to_string()),
+        is_delete_marker: true,
+    }
+}
+
+fn acl_xml(owner_id: &str) -> String {
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+         <AccessControlPolicy xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
+         <Owner><ID>{owner_id}</ID><DisplayName>{owner_id}</DisplayName></Owner>\
+         <AccessControlList><Grant>\
+         <Grantee xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:type=\"CanonicalUser\">\
+         <ID>{owner_id}</ID><DisplayName>{owner_id}</DisplayName></Grantee>\
+         <Permission>FULL_CONTROL</Permission></Grant></AccessControlList>\
+         </AccessControlPolicy>"
+    )
+}
+
 fn parse_delete_objects_xml(xml: &str) -> Vec<String> {
     let mut keys = Vec::new();
     let mut remaining = xml;
@@ -1605,6 +2182,23 @@ fn extract_xml_value(xml: &str, tag: &str) -> Option<String> {
     Some(xml[start..end].to_string())
 }
 
+fn parse_complete_multipart_xml(xml: &str) -> Vec<i32> {
+    let mut parts = Vec::new();
+    let mut remaining = xml;
+    while let Some(start) = remaining.find("<PartNumber>") {
+        let after = &remaining[start + 12..];
+        if let Some(end) = after.find("</PartNumber>") {
+            if let Ok(n) = after[..end].parse::<i32>() {
+                parts.push(n);
+            }
+            remaining = &after[end + 13..];
+        } else {
+            break;
+        }
+    }
+    parts
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1639,5 +2233,12 @@ mod tests {
     fn md5_hash() {
         let hash = compute_md5(b"hello");
         assert_eq!(hash, "5d41402abc4b2a76b9719d911017c592");
+    }
+
+    #[test]
+    fn parse_complete_multipart() {
+        let xml = r#"<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>"abc"</ETag></Part><Part><PartNumber>2</PartNumber><ETag>"def"</ETag></Part></CompleteMultipartUpload>"#;
+        let parts = parse_complete_multipart_xml(xml);
+        assert_eq!(parts, vec![1, 2]);
     }
 }
