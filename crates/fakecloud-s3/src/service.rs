@@ -1532,9 +1532,13 @@ impl S3Service {
 
             // Handle delimiter-based grouping
             if !delimiter.is_empty() {
+                if prefix.len() > key.len() {
+                    continue;
+                }
                 let suffix = &key[prefix.len()..];
                 if let Some(pos) = suffix.find(&delimiter) {
-                    let cp = format!("{}{}", prefix, &suffix[..=pos]);
+                    let end = (pos + delimiter.len()).min(suffix.len());
+                    let cp = format!("{}{}", prefix, &suffix[..end]);
                     if !common_prefixes.contains(&cp) {
                         if count >= max_keys {
                             is_truncated = true;
@@ -2999,15 +3003,20 @@ impl S3Service {
                 is_dm = versions
                     .iter()
                     .any(|o| vid_matches(o) && o.is_delete_marker);
+                let len_before = versions.len();
                 versions.retain(|o| !vid_matches(o));
-                if let Some(latest) = versions.last() {
-                    if latest.is_delete_marker {
-                        b.objects.remove(key);
+                let removed = len_before != versions.len();
+                // Only update current object if we actually removed a version
+                if removed {
+                    if let Some(latest) = versions.last() {
+                        if latest.is_delete_marker {
+                            b.objects.remove(key);
+                        } else {
+                            b.objects.insert(key.to_string(), latest.clone());
+                        }
                     } else {
-                        b.objects.insert(key.to_string(), latest.clone());
+                        b.objects.remove(key);
                     }
-                } else {
-                    b.objects.remove(key);
                 }
                 if versions.is_empty() {
                     b.object_versions.remove(key);
@@ -3453,6 +3462,11 @@ impl S3Service {
             let obj = resolve_object(sb, src_key, src_version_id.as_ref())?.clone();
             (obj.clone(), obj.version_id.clone())
         };
+
+        // Delete markers cannot be used as copy source
+        if src_obj.is_delete_marker {
+            return Err(no_such_key(src_key));
+        }
 
         // Glacier/Deep Archive: cannot copy unless restored
         if is_frozen(&src_obj) {
@@ -4490,7 +4504,7 @@ impl S3Service {
         let mut md5_digests = Vec::new();
         let mut part_sizes = Vec::new();
 
-        for (part_num, _submitted_etag) in &sorted_parts {
+        for (part_num, submitted_etag) in &sorted_parts {
             let part = upload.parts.get(part_num).ok_or_else(|| {
                 AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
@@ -4498,6 +4512,13 @@ impl S3Service {
                     "One or more of the specified parts could not be found.",
                 )
             })?;
+            if submitted_etag != &part.etag {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidPart",
+                    "One or more of the specified parts could not be found. The part may not have been uploaded, or the specified entity tag may not have matched the part's entity tag.",
+                ));
+            }
             combined_data.extend_from_slice(&part.data);
             let part_md5 = Md5::digest(&part.data);
             md5_digests.extend_from_slice(&part_md5);
@@ -4593,7 +4614,7 @@ impl S3Service {
     fn abort_multipart_upload(
         &self,
         bucket: &str,
-        _key: &str,
+        key: &str,
         upload_id: &str,
     ) -> Result<AwsResponse, AwsServiceError> {
         let mut state = self.state.write();
@@ -4602,9 +4623,17 @@ impl S3Service {
             .get_mut(bucket)
             .ok_or_else(|| no_such_bucket(bucket))?;
 
-        if b.multipart_uploads.remove(upload_id).is_none() {
-            return Err(no_such_upload(upload_id));
+        // Validate upload exists and belongs to the requested key
+        match b.multipart_uploads.get(upload_id) {
+            Some(upload) if upload.key != key => {
+                return Err(no_such_upload(upload_id));
+            }
+            None => {
+                return Err(no_such_upload(upload_id));
+            }
+            _ => {}
         }
+        b.multipart_uploads.remove(upload_id);
 
         Ok(AwsResponse {
             status: StatusCode::NO_CONTENT,
@@ -5745,15 +5774,18 @@ fn resolve_object<'a>(
     if let Some(vid) = version_id {
         // "null" version ID refers to an object with no version_id (pre-versioning)
         if vid == "null" {
-            // Check versions for a pre-versioning object (version_id == None)
+            // Check versions for a pre-versioning object (version_id == None or Some("null"))
             if let Some(versions) = b.object_versions.get(key) {
-                if let Some(obj) = versions.iter().find(|o| o.version_id.is_none()) {
+                if let Some(obj) = versions
+                    .iter()
+                    .find(|o| o.version_id.is_none() || o.version_id.as_deref() == Some("null"))
+                {
                     return Ok(obj);
                 }
             }
             // Also check current object if it has no version_id
             if let Some(obj) = b.objects.get(key) {
-                if obj.version_id.is_none() {
+                if obj.version_id.is_none() || obj.version_id.as_deref() == Some("null") {
                     return Ok(obj);
                 }
             }
@@ -6625,5 +6657,71 @@ mod tests {
         assert!(origin_matches("https://example.com", "*"));
         assert!(origin_matches("https://foo.example.com", "*.example.com"));
         assert!(!origin_matches("https://evil.com", "https://example.com"));
+    }
+
+    /// Regression: resolve_object with versionId="null" must match objects
+    /// whose version_id is either None or Some("null").
+    #[test]
+    fn resolve_null_version_matches_both_none_and_null_string() {
+        use crate::state::S3Bucket;
+        use bytes::Bytes;
+        use chrono::Utc;
+
+        let mut b = S3Bucket::new("test", "us-east-1", "owner");
+
+        // Helper to create a minimal S3Object
+        let make_obj = |key: &str, vid: Option<&str>| crate::state::S3Object {
+            key: key.to_string(),
+            data: Bytes::from_static(b"x"),
+            content_type: "text/plain".to_string(),
+            etag: "\"abc\"".to_string(),
+            size: 1,
+            last_modified: Utc::now(),
+            metadata: Default::default(),
+            storage_class: "STANDARD".to_string(),
+            tags: Default::default(),
+            acl_grants: vec![],
+            acl_owner_id: None,
+            parts_count: None,
+            part_sizes: None,
+            sse_algorithm: None,
+            sse_kms_key_id: None,
+            bucket_key_enabled: None,
+            version_id: vid.map(|s| s.to_string()),
+            is_delete_marker: false,
+            content_encoding: None,
+            website_redirect_location: None,
+            restore_ongoing: None,
+            restore_expiry: None,
+            checksum_algorithm: None,
+            checksum_value: None,
+            lock_mode: None,
+            lock_retain_until: None,
+            lock_legal_hold: None,
+        };
+
+        // Object with version_id = Some("null") (pre-versioning migrated)
+        let obj = make_obj("file.txt", Some("null"));
+        b.objects.insert("file.txt".to_string(), obj.clone());
+        b.object_versions.insert("file.txt".to_string(), vec![obj]);
+
+        let null_str = "null".to_string();
+        let result = resolve_object(&b, "file.txt", Some(&null_str));
+        assert!(
+            result.is_ok(),
+            "versionId=null should match version_id=Some(\"null\")"
+        );
+
+        // Object with version_id = None (true pre-versioning)
+        let obj2 = make_obj("file2.txt", None);
+        b.objects.insert("file2.txt".to_string(), obj2.clone());
+        b.object_versions
+            .insert("file2.txt".to_string(), vec![obj2]);
+
+        let result2 = resolve_object(&b, "file2.txt", Some(&null_str));
+        assert!(
+            result2.is_ok(),
+            "versionId=null should match version_id=None"
+        );
     }
 }
