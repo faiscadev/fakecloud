@@ -97,6 +97,15 @@ impl TestServer {
         aws_sdk_ssm::Client::new(&self.aws_config().await)
     }
 
+    /// Create an S3 client (path-style addressing for single-endpoint emulator).
+    pub async fn s3_client(&self) -> aws_sdk_s3::Client {
+        let config = self.aws_config().await;
+        let s3_config = aws_sdk_s3::config::Builder::from(&config)
+            .force_path_style(true)
+            .build();
+        aws_sdk_s3::Client::from_conf(s3_config)
+    }
+
     /// Run an AWS CLI command against this test server.
     pub async fn aws_cli(&self, args: &[&str]) -> CliOutput {
         let output = Command::new("aws")

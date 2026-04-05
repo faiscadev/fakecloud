@@ -65,6 +65,40 @@ pub fn json_error_response(
     )
 }
 
+/// Build an S3-style XML error response.
+/// S3 uses `<Error>` (not `<ErrorResponse>`) with different field ordering.
+pub fn s3_xml_error_response(
+    status: StatusCode,
+    code: &str,
+    message: &str,
+    request_id: &str,
+) -> (StatusCode, String, Bytes) {
+    #[derive(Serialize)]
+    #[serde(rename = "Error")]
+    struct S3Error<'a> {
+        #[serde(rename = "Code")]
+        code: &'a str,
+        #[serde(rename = "Message")]
+        message: &'a str,
+        #[serde(rename = "RequestId")]
+        request_id: &'a str,
+    }
+
+    let resp = S3Error {
+        code,
+        message,
+        request_id,
+    };
+
+    let mut buffer = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>");
+    let mut ser = XmlSerializer::new(&mut buffer);
+    ser.indent(' ', 2);
+    resp.serialize(ser)
+        .expect("XML serialization should not fail");
+
+    (status, "application/xml".to_string(), Bytes::from(buffer))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

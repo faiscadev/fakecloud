@@ -1,0 +1,21 @@
+[package]
+name = "fakecloud-s3"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+version.workspace = true
+
+[dependencies]
+fakecloud-aws = { workspace = true }
+fakecloud-core = { workspace = true }
+async-trait = { workspace = true }
+bytes = { workspace = true }
+chrono = { workspace = true }
+http = { workspace = true }
+md-5 = { workspace = true }
+parking_lot = { workspace = true }
+percent-encoding = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }

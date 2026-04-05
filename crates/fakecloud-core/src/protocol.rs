@@ -11,7 +11,13 @@ pub enum AwsProtocol {
     /// JSON protocol: JSON body, X-Amz-Target header, JSON response.
     /// Used by: SSM, EventBridge, DynamoDB, SecretsManager, KMS, CloudWatch Logs.
     Json,
+    /// REST protocol: HTTP method + path-based routing, XML responses.
+    /// Used by: S3, API Gateway, Route53.
+    Rest,
 }
+
+/// Services that use REST protocol (detected from SigV4 credential scope).
+const REST_SERVICES: &[&str] = &["s3"];
 
 /// Detected service name and action from an incoming HTTP request.
 #[derive(Debug)]
@@ -62,8 +68,17 @@ pub fn detect_service(
         }
     }
 
-    // 4. Fallback: try to get service from auth header alone
-    // (for services that use POST with JSON but no X-Amz-Target — unlikely for Phase 1)
+    // 4. Fallback: check auth header for REST-style services (S3, etc.)
+    if let Some(service) = extract_service_from_auth(headers) {
+        if REST_SERVICES.contains(&service.as_str()) {
+            return Some(DetectedRequest {
+                service,
+                action: String::new(), // REST services determine action from method+path
+                protocol: AwsProtocol::Rest,
+            });
+        }
+    }
+
     None
 }
 

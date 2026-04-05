@@ -184,7 +184,7 @@ fn build_error_response(
     protocol: AwsProtocol,
 ) -> Response<Body> {
     let (status, content_type, body) = match protocol {
-        AwsProtocol::Query => {
+        AwsProtocol::Query | AwsProtocol::Rest => {
             fakecloud_aws::error::xml_error_response(status, code, message, request_id)
         }
         AwsProtocol::Json => fakecloud_aws::error::json_error_response(status, code, message),

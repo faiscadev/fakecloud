@@ -17,6 +17,7 @@ fakecloud-sns = { workspace = true }
 fakecloud-eventbridge = { workspace = true }
 fakecloud-iam = { workspace = true }
 fakecloud-ssm = { workspace = true }
+fakecloud-s3 = { workspace = true }
 axum = { workspace = true }
 parking_lot = { workspace = true }
 clap = { workspace = true }

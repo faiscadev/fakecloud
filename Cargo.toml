@@ -8,6 +8,7 @@ members = [
     "crates/fakecloud-eventbridge",
     "crates/fakecloud-iam",
     "crates/fakecloud-ssm",
+    "crates/fakecloud-s3",
     "crates/fakecloud-e2e",
 ]
 resolver = "2"
@@ -53,3 +54,4 @@ fakecloud-sns = { path = "crates/fakecloud-sns" }
 fakecloud-eventbridge = { path = "crates/fakecloud-eventbridge" }
 fakecloud-iam = { path = "crates/fakecloud-iam" }
 fakecloud-ssm = { path = "crates/fakecloud-ssm" }
+fakecloud-s3 = { path = "crates/fakecloud-s3" }
