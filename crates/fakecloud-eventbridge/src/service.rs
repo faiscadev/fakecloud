@@ -72,6 +72,8 @@ impl AwsService for EventBridgeService {
             "DescribeReplay" => self.describe_replay(&req),
             "ListReplays" => self.list_replays(&req),
             "CancelReplay" => self.cancel_replay(&req),
+            "CreatePartnerEventSource" => self.create_partner_event_source(&req),
+            "DescribePartnerEventSource" => self.describe_partner_event_source(&req),
             _ => Err(AwsServiceError::action_not_implemented(
                 "events",
                 &req.action,
@@ -120,6 +122,8 @@ impl AwsService for EventBridgeService {
             "DescribeReplay",
             "ListReplays",
             "CancelReplay",
+            "CreatePartnerEventSource",
+            "DescribePartnerEventSource",
         ]
     }
 }
@@ -193,11 +197,16 @@ impl EventBridgeService {
         // Partner event bus validation
         if name.starts_with("aws.partner/") {
             let event_source = body["EventSourceName"].as_str().unwrap_or("");
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "ResourceNotFoundException",
-                format!("Event source {event_source} does not exist."),
-            ));
+            let state_r = self.state.read();
+            let has_source = state_r.partner_event_sources.contains_key(event_source);
+            drop(state_r);
+            if !has_source {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ResourceNotFoundException",
+                    format!("Event source {event_source} does not exist."),
+                ));
+            }
         }
 
         let mut state = self.state.write();
@@ -878,7 +887,61 @@ impl EventBridgeService {
         Ok(json_resp(resp))
     }
 
-    // ─── PutEvents ──────────────────────────────────────────────────────
+    // ─── Partner Event Sources ────────────���───────────────────────────
+
+    fn create_partner_event_source(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let name = body["Name"]
+            .as_str()
+            .ok_or_else(|| missing("Name"))?
+            .to_string();
+        let account = body["Account"]
+            .as_str()
+            .ok_or_else(|| missing("Account"))?
+            .to_string();
+
+        let mut state = self.state.write();
+        state
+            .partner_event_sources
+            .insert(name.clone(), account.clone());
+
+        Ok(json_resp(json!({})))
+    }
+
+    fn describe_partner_event_source(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let name = body["Name"]
+            .as_str()
+            .ok_or_else(|| missing("Name"))?
+            .to_string();
+
+        let state = self.state.read();
+        if !state.partner_event_sources.contains_key(&name) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "ResourceNotFoundException",
+                format!("Partner event source {name} does not exist."),
+            ));
+        }
+
+        let arn = format!(
+            "arn:aws:events:{}::event-source/aws.partner/{}",
+            state.region, name
+        );
+
+        Ok(json_resp(json!({
+            "Arn": arn,
+            "Name": name,
+        })))
+    }
+
+    // ─── PutEvents ───────────────���──────────────────────────────────────
 
     fn put_events(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = parse_body(req);
@@ -947,11 +1010,18 @@ impl EventBridgeService {
                 .unwrap_or("default")
                 .to_string();
             let event_bus_name = state.resolve_bus_name(&raw_bus);
-            let time = entry["Time"]
-                .as_str()
-                .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-                .map(|dt| dt.with_timezone(&Utc))
-                .unwrap_or_else(Utc::now);
+            let time = if let Some(s) = entry["Time"].as_str() {
+                DateTime::parse_from_rfc3339(s)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now())
+            } else if let Some(ts) = entry["Time"].as_f64() {
+                DateTime::from_timestamp(ts as i64, ((ts.fract()) * 1_000_000_000.0) as u32)
+                    .unwrap_or_else(Utc::now)
+            } else if let Some(ts) = entry["Time"].as_i64() {
+                DateTime::from_timestamp(ts, 0).unwrap_or_else(Utc::now)
+            } else {
+                Utc::now()
+            };
             let resources: Vec<String> = entry["Resources"]
                 .as_array()
                 .map(|arr| {
@@ -1003,6 +1073,9 @@ impl EventBridgeService {
                             &source,
                             &detail_type,
                             &detail,
+                            &req.account_id,
+                            &req.region,
+                            &resources,
                         )
                 })
                 .flat_map(|r| r.targets.clone())
@@ -1028,13 +1101,15 @@ impl EventBridgeService {
 
         // Deliver to targets
         for (event_id, source, detail_type, detail, time, resources, targets) in events_to_deliver {
+            let detail_value: Value = serde_json::from_str(&detail).unwrap_or(json!({}));
             let event_json = json!({
                 "version": "0",
                 "id": event_id,
                 "source": source,
+                "account": req.account_id,
                 "detail-type": detail_type,
-                "detail": serde_json::from_str::<Value>(&detail).unwrap_or(json!({})),
-                "time": time.to_rfc3339(),
+                "detail": detail_value,
+                "time": time.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
                 "region": req.region,
                 "resources": resources,
             });
@@ -1042,12 +1117,43 @@ impl EventBridgeService {
 
             for target in targets {
                 let arn = &target.arn;
+                // Compute the message body, applying InputTransformer if present
+                let body_str = if let Some(ref transformer) = target.input_transformer {
+                    apply_input_transformer(transformer, &event_json)
+                } else if let Some(ref input) = target.input {
+                    input.clone()
+                } else if let Some(ref input_path) = target.input_path {
+                    resolve_json_path(&event_json, input_path)
+                        .map(|v| v.to_string())
+                        .unwrap_or_else(|| event_str.clone())
+                } else {
+                    event_str.clone()
+                };
+
                 if arn.contains(":sqs:") {
-                    self.delivery
-                        .send_to_sqs(arn, &event_str, &std::collections::HashMap::new());
+                    // Extract FIFO parameters (MessageGroupId)
+                    let group_id = target
+                        .sqs_parameters
+                        .as_ref()
+                        .and_then(|p| p["MessageGroupId"].as_str())
+                        .map(|s| s.to_string());
+                    if group_id.is_some() {
+                        // FIFO queue: send with group ID but no dedup ID.
+                        // Queues with content-based dedup will auto-generate one;
+                        // queues without it will reject the message.
+                        self.delivery.send_to_sqs_with_attrs(
+                            arn,
+                            &body_str,
+                            &HashMap::new(),
+                            group_id.as_deref(),
+                            None,
+                        );
+                    } else {
+                        self.delivery.send_to_sqs(arn, &body_str, &HashMap::new());
+                    }
                 } else if arn.contains(":sns:") {
                     self.delivery
-                        .publish_to_sns(arn, &event_str, Some(&detail_type));
+                        .publish_to_sns(arn, &body_str, Some(&detail_type));
                 }
             }
         }
@@ -2167,6 +2273,9 @@ fn matches_pattern(
     source: &str,
     detail_type: &str,
     detail: &str,
+    account: &str,
+    region: &str,
+    resources: &[String],
 ) -> bool {
     let pattern_json = match pattern_json {
         Some(p) => p,
@@ -2188,6 +2297,9 @@ fn matches_pattern(
         "source": source,
         "detail-type": detail_type,
         "detail": detail_value,
+        "account": account,
+        "region": region,
+        "resources": resources,
     });
 
     for (key, pattern_value) in pattern_obj {
@@ -2286,6 +2398,56 @@ fn values_equal(a: &Value, b: &Value) -> bool {
     a == b
 }
 
+/// Resolve a simple JSON path like `$.detail.name` against an event JSON value.
+fn resolve_json_path(event: &Value, path: &str) -> Option<Value> {
+    let path = path.strip_prefix('$').unwrap_or(path);
+    let mut current = event;
+    for segment in path.split('.') {
+        if segment.is_empty() {
+            continue;
+        }
+        current = current.get(segment)?;
+    }
+    Some(current.clone())
+}
+
+/// Apply an EventBridge InputTransformer to an event.
+fn apply_input_transformer(transformer: &Value, event: &Value) -> String {
+    let input_paths_map = transformer
+        .get("InputPathsMap")
+        .and_then(|v| v.as_object())
+        .cloned()
+        .unwrap_or_default();
+    let template = transformer
+        .get("InputTemplate")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    // Resolve all input paths
+    let mut resolved: HashMap<String, Value> = HashMap::new();
+    for (var_name, path_val) in &input_paths_map {
+        if let Some(path_str) = path_val.as_str() {
+            if let Some(val) = resolve_json_path(event, path_str) {
+                resolved.insert(var_name.clone(), val);
+            }
+        }
+    }
+
+    // Replace <varName> placeholders in template
+    let mut result = template;
+    for (var_name, val) in &resolved {
+        let placeholder = format!("<{var_name}>");
+        let replacement = match val {
+            Value::String(s) => s.clone(),
+            other => other.to_string(),
+        };
+        result = result.replace(&placeholder, &replacement);
+    }
+
+    result
+}
+
 fn missing(name: &str) -> AwsServiceError {
     AwsServiceError::aws_error(
         StatusCode::BAD_REQUEST,
@@ -2298,15 +2460,33 @@ fn missing(name: &str) -> AwsServiceError {
 mod tests {
     use super::*;
 
+    /// Test helper that calls matches_pattern with default account/region/resources
+    fn test_matches(
+        pattern_json: Option<&str>,
+        source: &str,
+        detail_type: &str,
+        detail: &str,
+    ) -> bool {
+        matches_pattern(
+            pattern_json,
+            source,
+            detail_type,
+            detail,
+            "123456789012",
+            "us-east-1",
+            &[],
+        )
+    }
+
     #[test]
     fn pattern_matches_source() {
-        assert!(matches_pattern(
+        assert!(test_matches(
             Some(r#"{"source": ["my.app"]}"#),
             "my.app",
             "OrderPlaced",
             "{}"
         ));
-        assert!(!matches_pattern(
+        assert!(!test_matches(
             Some(r#"{"source": ["other.app"]}"#),
             "my.app",
             "OrderPlaced",
@@ -2316,13 +2496,13 @@ mod tests {
 
     #[test]
     fn pattern_matches_detail_type() {
-        assert!(matches_pattern(
+        assert!(test_matches(
             Some(r#"{"detail-type": ["OrderPlaced"]}"#),
             "my.app",
             "OrderPlaced",
             "{}"
         ));
-        assert!(!matches_pattern(
+        assert!(!test_matches(
             Some(r#"{"detail-type": ["OrderShipped"]}"#),
             "my.app",
             "OrderPlaced",
@@ -2332,13 +2512,13 @@ mod tests {
 
     #[test]
     fn pattern_matches_detail_field() {
-        assert!(matches_pattern(
+        assert!(test_matches(
             Some(r#"{"detail": {"status": ["ACTIVE"]}}"#),
             "my.app",
             "StatusChange",
             r#"{"status": "ACTIVE"}"#
         ));
-        assert!(!matches_pattern(
+        assert!(!test_matches(
             Some(r#"{"detail": {"status": ["ACTIVE"]}}"#),
             "my.app",
             "StatusChange",
@@ -2348,48 +2528,33 @@ mod tests {
 
     #[test]
     fn no_pattern_matches_everything() {
-        assert!(matches_pattern(None, "any", "any", "{}"));
+        assert!(test_matches(None, "any", "any", "{}"));
     }
 
     #[test]
     fn combined_pattern() {
         let pattern = r#"{"source": ["orders"], "detail-type": ["OrderPlaced"]}"#;
-        assert!(matches_pattern(
-            Some(pattern),
-            "orders",
-            "OrderPlaced",
-            "{}"
-        ));
-        assert!(!matches_pattern(
-            Some(pattern),
-            "orders",
-            "OrderShipped",
-            "{}"
-        ));
-        assert!(!matches_pattern(
-            Some(pattern),
-            "other",
-            "OrderPlaced",
-            "{}"
-        ));
+        assert!(test_matches(Some(pattern), "orders", "OrderPlaced", "{}"));
+        assert!(!test_matches(Some(pattern), "orders", "OrderShipped", "{}"));
+        assert!(!test_matches(Some(pattern), "other", "OrderPlaced", "{}"));
     }
 
     #[test]
     fn nested_detail_pattern() {
         let pattern = r#"{"detail": {"order": {"status": ["PLACED"]}}}"#;
-        assert!(matches_pattern(
+        assert!(test_matches(
             Some(pattern),
             "my.app",
             "OrderEvent",
             r#"{"order": {"status": "PLACED", "id": "123"}}"#
         ));
-        assert!(!matches_pattern(
+        assert!(!test_matches(
             Some(pattern),
             "my.app",
             "OrderEvent",
             r#"{"order": {"status": "SHIPPED", "id": "123"}}"#
         ));
-        assert!(!matches_pattern(
+        assert!(!test_matches(
             Some(pattern),
             "my.app",
             "OrderEvent",
@@ -2400,13 +2565,13 @@ mod tests {
     #[test]
     fn deeply_nested_detail_pattern() {
         let pattern = r#"{"detail": {"a": {"b": {"c": ["deep"]}}}}"#;
-        assert!(matches_pattern(
+        assert!(test_matches(
             Some(pattern),
             "src",
             "type",
             r#"{"a": {"b": {"c": "deep"}}}"#
         ));
-        assert!(!matches_pattern(
+        assert!(!test_matches(
             Some(pattern),
             "src",
             "type",
@@ -2417,19 +2582,19 @@ mod tests {
     #[test]
     fn prefix_matcher() {
         let pattern = r#"{"source": [{"prefix": "com.myapp"}]}"#;
-        assert!(matches_pattern(
+        assert!(test_matches(
             Some(pattern),
             "com.myapp.orders",
             "OrderPlaced",
             "{}"
         ));
-        assert!(matches_pattern(
+        assert!(test_matches(
             Some(pattern),
             "com.myapp",
             "OrderPlaced",
             "{}"
         ));
-        assert!(!matches_pattern(
+        assert!(!test_matches(
             Some(pattern),
             "com.other",
             "OrderPlaced",
@@ -2440,13 +2605,13 @@ mod tests {
     #[test]
     fn prefix_matcher_in_detail() {
         let pattern = r#"{"detail": {"region": [{"prefix": "us-"}]}}"#;
-        assert!(matches_pattern(
+        assert!(test_matches(
             Some(pattern),
             "src",
             "type",
             r#"{"region": "us-east-1"}"#
         ));
-        assert!(!matches_pattern(
+        assert!(!test_matches(
             Some(pattern),
             "src",
             "type",
@@ -2457,13 +2622,13 @@ mod tests {
     #[test]
     fn exists_matcher() {
         let pattern = r#"{"detail": {"error": [{"exists": true}]}}"#;
-        assert!(matches_pattern(
+        assert!(test_matches(
             Some(pattern),
             "src",
             "type",
             r#"{"error": "something broke"}"#
         ));
-        assert!(!matches_pattern(
+        assert!(!test_matches(
             Some(pattern),
             "src",
             "type",
@@ -2471,13 +2636,13 @@ mod tests {
         ));
 
         let pattern = r#"{"detail": {"error": [{"exists": false}]}}"#;
-        assert!(matches_pattern(
+        assert!(test_matches(
             Some(pattern),
             "src",
             "type",
             r#"{"status": "ok"}"#
         ));
-        assert!(!matches_pattern(
+        assert!(!test_matches(
             Some(pattern),
             "src",
             "type",
@@ -2488,25 +2653,25 @@ mod tests {
     #[test]
     fn anything_but_matcher() {
         let pattern = r#"{"source": [{"anything-but": "internal"}]}"#;
-        assert!(matches_pattern(Some(pattern), "external", "Event", "{}"));
-        assert!(!matches_pattern(Some(pattern), "internal", "Event", "{}"));
+        assert!(test_matches(Some(pattern), "external", "Event", "{}"));
+        assert!(!test_matches(Some(pattern), "internal", "Event", "{}"));
 
         let pattern = r#"{"source": [{"anything-but": ["internal", "test"]}]}"#;
-        assert!(matches_pattern(Some(pattern), "external", "Event", "{}"));
-        assert!(!matches_pattern(Some(pattern), "internal", "Event", "{}"));
-        assert!(!matches_pattern(Some(pattern), "test", "Event", "{}"));
+        assert!(test_matches(Some(pattern), "external", "Event", "{}"));
+        assert!(!test_matches(Some(pattern), "internal", "Event", "{}"));
+        assert!(!test_matches(Some(pattern), "test", "Event", "{}"));
     }
 
     #[test]
     fn anything_but_in_detail() {
         let pattern = r#"{"detail": {"env": [{"anything-but": "prod"}]}}"#;
-        assert!(matches_pattern(
+        assert!(test_matches(
             Some(pattern),
             "src",
             "type",
             r#"{"env": "staging"}"#
         ));
-        assert!(!matches_pattern(
+        assert!(!test_matches(
             Some(pattern),
             "src",
             "type",
@@ -2517,19 +2682,19 @@ mod tests {
     #[test]
     fn numeric_greater_than() {
         let pattern = r#"{"detail": {"count": [{"numeric": [">", 100]}]}}"#;
-        assert!(matches_pattern(
+        assert!(test_matches(
             Some(pattern),
             "src",
             "type",
             r#"{"count": 150}"#
         ));
-        assert!(!matches_pattern(
+        assert!(!test_matches(
             Some(pattern),
             "src",
             "type",
             r#"{"count": 100}"#
         ));
-        assert!(!matches_pattern(
+        assert!(!test_matches(
             Some(pattern),
             "src",
             "type",
@@ -2540,19 +2705,19 @@ mod tests {
     #[test]
     fn numeric_less_than() {
         let pattern = r#"{"detail": {"count": [{"numeric": ["<", 10]}]}}"#;
-        assert!(matches_pattern(
+        assert!(test_matches(
             Some(pattern),
             "src",
             "type",
             r#"{"count": 5}"#
         ));
-        assert!(!matches_pattern(
+        assert!(!test_matches(
             Some(pattern),
             "src",
             "type",
             r#"{"count": 10}"#
         ));
-        assert!(!matches_pattern(
+        assert!(!test_matches(
             Some(pattern),
             "src",
             "type",
@@ -2563,25 +2728,25 @@ mod tests {
     #[test]
     fn numeric_range() {
         let pattern = r#"{"detail": {"count": [{"numeric": [">=", 50, "<", 200]}]}}"#;
-        assert!(matches_pattern(
+        assert!(test_matches(
             Some(pattern),
             "src",
             "type",
             r#"{"count": 50}"#
         ));
-        assert!(matches_pattern(
+        assert!(test_matches(
             Some(pattern),
             "src",
             "type",
             r#"{"count": 100}"#
         ));
-        assert!(!matches_pattern(
+        assert!(!test_matches(
             Some(pattern),
             "src",
             "type",
             r#"{"count": 200}"#
         ));
-        assert!(!matches_pattern(
+        assert!(!test_matches(
             Some(pattern),
             "src",
             "type",
@@ -2592,18 +2757,13 @@ mod tests {
     #[test]
     fn mixed_matchers_and_literals() {
         let pattern = r#"{"source": ["exact.match", {"prefix": "com.myapp"}]}"#;
-        assert!(matches_pattern(Some(pattern), "exact.match", "Event", "{}"));
-        assert!(matches_pattern(
+        assert!(test_matches(Some(pattern), "exact.match", "Event", "{}"));
+        assert!(test_matches(
             Some(pattern),
             "com.myapp.orders",
             "Event",
             "{}"
         ));
-        assert!(!matches_pattern(
-            Some(pattern),
-            "other.source",
-            "Event",
-            "{}"
-        ));
+        assert!(!test_matches(Some(pattern), "other.source", "Event", "{}"));
     }
 }

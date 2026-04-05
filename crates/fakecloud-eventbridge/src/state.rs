@@ -125,6 +125,8 @@ pub struct EventBridgeState {
     pub connections: HashMap<String, Connection>,
     pub api_destinations: HashMap<String, ApiDestination>,
     pub replays: HashMap<String, Replay>,
+    /// Partner event sources: name -> account
+    pub partner_event_sources: HashMap<String, String>,
 }
 
 impl EventBridgeState {
@@ -157,6 +159,7 @@ impl EventBridgeState {
             connections: HashMap::new(),
             api_destinations: HashMap::new(),
             replays: HashMap::new(),
+            partner_event_sources: HashMap::new(),
         }
     }
 
@@ -177,6 +180,7 @@ impl EventBridgeState {
         self.buses.clear();
         self.rules.clear();
         self.events.clear();
+        self.partner_event_sources.clear();
         // Re-create default bus
         let default_bus_arn = format!(
             "arn:aws:events:{}:{}:event-bus/default",

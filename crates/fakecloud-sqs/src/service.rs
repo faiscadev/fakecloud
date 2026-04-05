@@ -2089,12 +2089,13 @@ fn format_receive_response(
         })
         .collect();
 
-    sqs_response(
-        "ReceiveMessage",
-        json!({ "Messages": messages }),
-        request_id,
-        is_query,
-    )
+    let body = if messages.is_empty() {
+        json!({})
+    } else {
+        json!({ "Messages": messages })
+    };
+
+    sqs_response("ReceiveMessage", body, request_id, is_query)
 }
 
 fn parse_message_attributes(body: &Value) -> HashMap<String, MessageAttribute> {
