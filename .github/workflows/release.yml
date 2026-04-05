@@ -106,7 +106,7 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
       - name: Wait for crates.io index
-        run: sleep 30
+        run: sleep 60
 
       - name: Publish fakecloud-core
         run: cargo publish -p fakecloud-core
@@ -114,16 +114,21 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
       - name: Wait for crates.io index
-        run: sleep 30
+        run: sleep 60
 
       - name: Publish service crates
         run: |
           for crate in fakecloud-sqs fakecloud-sns fakecloud-eventbridge fakecloud-iam fakecloud-ssm fakecloud-s3; do
-            cargo publish -p "$crate"
-            sleep 30
+            echo "Publishing $crate..."
+            cargo publish -p "$crate" || true
+            echo "Waiting for crates.io index..."
+            sleep 60
           done
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Wait for crates.io index
+        run: sleep 60
 
       - name: Publish fakecloud
         run: cargo publish -p fakecloud
