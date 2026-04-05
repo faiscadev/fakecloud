@@ -79,7 +79,7 @@ pub fn detect_service(
         }
     }
 
-    // 5. Check query params for presigned URL auth (X-Amz-Credential)
+    // 5. Check query params for presigned URL auth (X-Amz-Credential for SigV4)
     if let Some(credential) = query_params.get("X-Amz-Credential") {
         // Format: AKID/date/region/service/aws4_request
         let parts: Vec<&str> = credential.split('/').collect();
@@ -93,6 +93,16 @@ pub fn detect_service(
                 });
             }
         }
+    }
+
+    // 6. Check for SigV2-style presigned URL (AWSAccessKeyId + Signature)
+    if query_params.contains_key("AWSAccessKeyId") && query_params.contains_key("Signature") {
+        // SigV2 presigned URLs are typically for S3
+        return Some(DetectedRequest {
+            service: "s3".to_string(),
+            action: String::new(),
+            protocol: AwsProtocol::Rest,
+        });
     }
 
     None

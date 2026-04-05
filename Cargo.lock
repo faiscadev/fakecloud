@@ -1183,8 +1183,10 @@ name = "fakecloud-s3"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64",
  "bytes",
  "chrono",
+ "crc32fast",
  "fakecloud-aws",
  "fakecloud-core",
  "http 1.4.0",
@@ -1193,6 +1195,8 @@ dependencies = [
  "percent-encoding",
  "serde",
  "serde_json",
+ "sha1",
+ "sha2",
  "tracing",
  "uuid",
 ]

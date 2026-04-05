@@ -7,6 +7,9 @@ use uuid::Uuid;
 
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine as _;
+
 use crate::state::{AclGrant, MultipartUpload, S3Bucket, S3Object, SharedS3State, UploadPart};
 
 pub struct S3Service {
@@ -137,6 +140,10 @@ impl AwsService for S3Service {
                     self.put_bucket_acl(&req, b)
                 } else if req.query_params.contains_key("versioning") {
                     self.put_bucket_versioning(&req, b)
+                } else if req.query_params.contains_key("encryption") {
+                    self.put_bucket_encryption(&req, b)
+                } else if req.query_params.contains_key("object-lock") {
+                    self.put_object_lock_config(&req, b)
                 } else {
                     self.create_bucket(&req, b)
                 }
@@ -144,6 +151,8 @@ impl AwsService for S3Service {
             (&Method::DELETE, Some(b), None) => {
                 if req.query_params.contains_key("tagging") {
                     self.delete_bucket_tagging(&req, b)
+                } else if req.query_params.contains_key("encryption") {
+                    self.delete_bucket_encryption(b)
                 } else {
                     self.delete_bucket(&req, b)
                 }
@@ -162,6 +171,8 @@ impl AwsService for S3Service {
                     self.list_object_versions(b)
                 } else if req.query_params.contains_key("object-lock") {
                     self.get_object_lock_configuration(b)
+                } else if req.query_params.contains_key("encryption") {
+                    self.get_bucket_encryption(b)
                 } else {
                     self.list_objects_v2(&req, b)
                 }
@@ -184,6 +195,8 @@ impl AwsService for S3Service {
                     self.get_object_tagging(&req, b, k)
                 } else if req.query_params.contains_key("acl") {
                     self.get_object_acl(&req, b, k)
+                } else if req.query_params.contains_key("attributes") {
+                    self.get_object_attributes(&req, b, k)
                 } else {
                     self.get_object(&req, b, k)
                 }
@@ -325,8 +338,25 @@ impl S3Service {
                 vec![("BucketName".to_string(), bucket.to_string())],
             ));
         }
+        let object_lock_enabled = req
+            .headers
+            .get("x-amz-bucket-object-lock-enabled")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+
         let mut b = S3Bucket::new(bucket, &requested_region, &req.account_id);
         b.acl_grants = canned_acl_grants(acl, &req.account_id);
+        if object_lock_enabled {
+            b.versioning = Some("Enabled".to_string());
+            b.object_lock_config = Some(
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+                 <ObjectLockConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
+                 <ObjectLockEnabled>Enabled</ObjectLockEnabled>\
+                 </ObjectLockConfiguration>"
+                    .to_string(),
+            );
+        }
         state.buckets.insert(bucket.to_string(), b);
 
         let mut headers = HeaderMap::new();
@@ -349,7 +379,10 @@ impl S3Service {
             .buckets
             .get(bucket)
             .ok_or_else(|| no_such_bucket(bucket))?;
-        if !b.objects.is_empty() {
+        // Bucket must be empty to delete (no objects and no versions)
+        let has_real_objects = b.objects.values().any(|o| !o.is_delete_marker);
+        let has_versions = b.object_versions.values().any(|v| !v.is_empty());
+        if has_real_objects || has_versions {
             return Err(AwsServiceError::aws_error_with_fields(
                 StatusCode::CONFLICT,
                 "BucketNotEmpty",
@@ -403,7 +436,6 @@ impl S3Service {
 
     // ---- Encryption ----
 
-    #[allow(dead_code)]
     fn put_bucket_encryption(
         &self,
         req: &AwsRequest,
@@ -419,7 +451,6 @@ impl S3Service {
         Ok(empty_response(StatusCode::OK))
     }
 
-    #[allow(dead_code)]
     fn get_bucket_encryption(&self, bucket: &str) -> Result<AwsResponse, AwsServiceError> {
         let state = self.state.read();
         let b = state
@@ -436,7 +467,6 @@ impl S3Service {
         }
     }
 
-    #[allow(dead_code)]
     fn delete_bucket_encryption(&self, bucket: &str) -> Result<AwsResponse, AwsServiceError> {
         let mut state = self.state.write();
         let b = state
@@ -810,7 +840,6 @@ impl S3Service {
 
     // ---- ObjectLockConfiguration ----
 
-    #[allow(dead_code)]
     fn put_object_lock_config(
         &self,
         req: &AwsRequest,
@@ -1318,25 +1347,99 @@ impl S3Service {
             .get(bucket)
             .ok_or_else(|| no_such_bucket(bucket))?;
 
-        // Without real versioning support, return current objects as "null" version
+        let prefix = self
+            .state
+            .read()
+            .buckets
+            .get(bucket)
+            .map(|_| String::new())
+            .unwrap_or_default();
+        let _ = prefix; // prefix filtering not implemented for now
+
         let mut versions_xml = String::new();
-        for (key, obj) in &b.objects {
-            versions_xml.push_str(&format!(
-                "<Version>\
-                 <Key>{}</Key>\
-                 <VersionId>null</VersionId>\
-                 <IsLatest>true</IsLatest>\
-                 <LastModified>{}</LastModified>\
-                 <ETag>&quot;{}&quot;</ETag>\
-                 <Size>{}</Size>\
-                 <StorageClass>{}</StorageClass>\
-                 </Version>",
-                xml_escape(key),
-                obj.last_modified.format("%Y-%m-%dT%H:%M:%S%.3fZ"),
-                obj.etag,
-                obj.size,
-                obj.storage_class,
-            ));
+
+        if b.versioning.is_some() {
+            // Build versions from stored version history
+            let mut all_entries: Vec<(&str, &S3Object, bool)> = Vec::new();
+            for (key, versions) in &b.object_versions {
+                let latest_vid = b.objects.get(key).and_then(|o| o.version_id.as_deref());
+                for v in versions.iter().rev() {
+                    let is_latest = v.version_id.as_deref() == latest_vid;
+                    all_entries.push((key, v, is_latest));
+                }
+            }
+            // Also include objects not in object_versions (pre-versioning objects)
+            for (key, obj) in &b.objects {
+                if !b.object_versions.contains_key(key) && !obj.is_delete_marker {
+                    all_entries.push((key, obj, true));
+                }
+            }
+            // Sort by key, then by last_modified descending
+            all_entries.sort_by(|a, b_entry| {
+                a.0.cmp(b_entry.0)
+                    .then(b_entry.1.last_modified.cmp(&a.1.last_modified))
+            });
+
+            for (key, obj, is_latest) in &all_entries {
+                let vid = obj.version_id.as_deref().unwrap_or("null");
+                if obj.is_delete_marker {
+                    versions_xml.push_str(&format!(
+                        "<DeleteMarker>\
+                         <Key>{}</Key>\
+                         <VersionId>{}</VersionId>\
+                         <IsLatest>{}</IsLatest>\
+                         <LastModified>{}</LastModified>\
+                         </DeleteMarker>",
+                        xml_escape(key),
+                        xml_escape(vid),
+                        is_latest,
+                        obj.last_modified.format("%Y-%m-%dT%H:%M:%S%.3fZ"),
+                    ));
+                } else {
+                    versions_xml.push_str(&format!(
+                        "<Version>\
+                         <Key>{}</Key>\
+                         <VersionId>{}</VersionId>\
+                         <IsLatest>{}</IsLatest>\
+                         <LastModified>{}</LastModified>\
+                         <ETag>&quot;{}&quot;</ETag>\
+                         <Size>{}</Size>\
+                         <StorageClass>{}</StorageClass>\
+                         </Version>",
+                        xml_escape(key),
+                        xml_escape(vid),
+                        is_latest,
+                        obj.last_modified.format("%Y-%m-%dT%H:%M:%S%.3fZ"),
+                        obj.etag,
+                        obj.size,
+                        obj.storage_class,
+                    ));
+                }
+            }
+        } else {
+            // Non-versioned: return current objects as "null" version
+            for (key, obj) in &b.objects {
+                if obj.is_delete_marker {
+                    continue;
+                }
+                let vid = obj.version_id.as_deref().unwrap_or("null");
+                versions_xml.push_str(&format!(
+                    "<Version>\
+                     <Key>{}</Key>\
+                     <VersionId>{vid}</VersionId>\
+                     <IsLatest>true</IsLatest>\
+                     <LastModified>{}</LastModified>\
+                     <ETag>&quot;{}&quot;</ETag>\
+                     <Size>{}</Size>\
+                     <StorageClass>{}</StorageClass>\
+                     </Version>",
+                    xml_escape(key),
+                    obj.last_modified.format("%Y-%m-%dT%H:%M:%S%.3fZ"),
+                    obj.etag,
+                    obj.size,
+                    obj.storage_class,
+                ));
+            }
         }
 
         let body = format!(
@@ -1353,15 +1456,18 @@ impl S3Service {
 
     fn get_object_lock_configuration(&self, bucket: &str) -> Result<AwsResponse, AwsServiceError> {
         let state = self.state.read();
-        if !state.buckets.contains_key(bucket) {
-            return Err(no_such_bucket(bucket));
+        let b = state
+            .buckets
+            .get(bucket)
+            .ok_or_else(|| no_such_bucket(bucket))?;
+        match &b.object_lock_config {
+            Some(config) => Ok(AwsResponse::xml(StatusCode::OK, config.clone())),
+            None => Err(AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "ObjectLockConfigurationNotFoundError",
+                "Object Lock configuration does not exist for this bucket",
+            )),
         }
-        // Object Lock is not configured
-        Err(AwsServiceError::aws_error(
-            StatusCode::NOT_FOUND,
-            "ObjectLockConfigurationNotFoundError",
-            "Object Lock configuration does not exist for this bucket",
-        ))
     }
 }
 
@@ -1520,6 +1626,63 @@ impl S3Service {
             }]
         };
 
+        // SSE headers
+        let sse_algorithm = req
+            .headers
+            .get("x-amz-server-side-encryption")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+        let sse_kms_key_id = req
+            .headers
+            .get("x-amz-server-side-encryption-aws-kms-key-id")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+        let bucket_key_enabled = req
+            .headers
+            .get("x-amz-server-side-encryption-bucket-key-enabled")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.eq_ignore_ascii_case("true"));
+
+        // Checksum: detect algorithm from various headers
+        let checksum_algorithm = req
+            .headers
+            .get("x-amz-checksum-algorithm")
+            .or_else(|| req.headers.get("x-amz-sdk-checksum-algorithm"))
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_uppercase())
+            .or_else(|| {
+                // Also detect from checksum value headers
+                if req.headers.contains_key("x-amz-checksum-crc32") {
+                    Some("CRC32".to_string())
+                } else if req.headers.contains_key("x-amz-checksum-sha1") {
+                    Some("SHA1".to_string())
+                } else if req.headers.contains_key("x-amz-checksum-sha256") {
+                    Some("SHA256".to_string())
+                } else {
+                    None
+                }
+            });
+        let checksum_value = checksum_algorithm
+            .as_deref()
+            .map(|algo| compute_checksum(algo, &data));
+
+        // Object lock
+        let lock_mode = req
+            .headers
+            .get("x-amz-object-lock-mode")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+        let lock_retain_until = req
+            .headers
+            .get("x-amz-object-lock-retain-until-date")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<DateTime<Utc>>().ok());
+        let lock_legal_hold = req
+            .headers
+            .get("x-amz-object-lock-legal-hold")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+
         let obj = S3Object {
             key: key.to_string(),
             size: data.len() as u64,
@@ -1534,14 +1697,38 @@ impl S3Service {
             acl_owner_id: Some(b.acl_owner_id.clone()),
             parts_count: None,
             part_sizes: None,
-            sse_algorithm: None,
-            sse_kms_key_id: None,
-            bucket_key_enabled: None,
+            sse_algorithm: sse_algorithm.clone(),
+            sse_kms_key_id: sse_kms_key_id.clone(),
+            bucket_key_enabled,
             version_id: version_id.clone(),
             is_delete_marker: false,
             content_encoding,
             website_redirect_location,
+            checksum_algorithm: checksum_algorithm.clone(),
+            checksum_value: checksum_value.clone(),
+            lock_mode,
+            lock_retain_until,
+            lock_legal_hold,
         };
+        if b.versioning.as_deref() == Some("Enabled") {
+            // If there's an existing pre-versioning object not yet in versions, add it first
+            if !b.object_versions.contains_key(key) {
+                if let Some(existing) = b.objects.get(key) {
+                    if existing.version_id.is_none() {
+                        let mut null_version = existing.clone();
+                        null_version.version_id = Some("null".to_string());
+                        b.object_versions
+                            .entry(key.to_string())
+                            .or_default()
+                            .push(null_version);
+                    }
+                }
+            }
+            b.object_versions
+                .entry(key.to_string())
+                .or_default()
+                .push(obj.clone());
+        }
         b.objects.insert(key.to_string(), obj);
 
         let mut headers = HeaderMap::new();
@@ -1549,8 +1736,31 @@ impl S3Service {
         if let Some(vid) = &version_id {
             headers.insert("x-amz-version-id", vid.parse().unwrap());
         }
-        // Return ServerSideEncryption header (AWS always returns this for successful PutObject)
-        headers.insert("x-amz-server-side-encryption", "AES256".parse().unwrap());
+        // Return SSE headers
+        if let Some(algo) = &sse_algorithm {
+            headers.insert("x-amz-server-side-encryption", algo.parse().unwrap());
+        } else {
+            headers.insert("x-amz-server-side-encryption", "AES256".parse().unwrap());
+        }
+        if let Some(kid) = &sse_kms_key_id {
+            headers.insert(
+                "x-amz-server-side-encryption-aws-kms-key-id",
+                kid.parse().unwrap(),
+            );
+        }
+        if bucket_key_enabled == Some(true) {
+            headers.insert(
+                "x-amz-server-side-encryption-bucket-key-enabled",
+                "true".parse().unwrap(),
+            );
+        }
+        // Checksum in response
+        if let (Some(algo), Some(val)) = (&checksum_algorithm, &checksum_value) {
+            let header_name = format!("x-amz-checksum-{}", algo.to_lowercase());
+            if let Ok(name) = header_name.parse::<http::header::HeaderName>() {
+                headers.insert(name, val.parse().unwrap());
+            }
+        }
         Ok(AwsResponse {
             status: StatusCode::OK,
             content_type: "application/xml".to_string(),
@@ -1587,7 +1797,6 @@ impl S3Service {
         );
         headers.insert("content-length", obj.size.to_string().parse().unwrap());
         headers.insert("accept-ranges", "bytes".parse().unwrap());
-        headers.insert("x-amz-server-side-encryption", "AES256".parse().unwrap());
         // Always include storage class
         headers.insert("x-amz-storage-class", obj.storage_class.parse().unwrap());
         if let Some(vid) = &obj.version_id {
@@ -1616,10 +1825,7 @@ impl S3Service {
             );
         }
 
-        if obj.storage_class != "STANDARD" {
-            headers.insert("x-amz-storage-class", obj.storage_class.parse().unwrap());
-        }
-
+        // SSE headers - only when explicitly set
         if let Some(algo) = &obj.sse_algorithm {
             headers.insert("x-amz-server-side-encryption", algo.parse().unwrap());
         }
@@ -1635,8 +1841,19 @@ impl S3Service {
                 "true".parse().unwrap(),
             );
         }
-        if let Some(redirect) = &obj.website_redirect_location {
-            headers.insert("x-amz-website-redirect-location", redirect.parse().unwrap());
+
+        // Object lock headers
+        if let Some(ref mode) = obj.lock_mode {
+            headers.insert("x-amz-object-lock-mode", mode.parse().unwrap());
+        }
+        if let Some(ref until) = obj.lock_retain_until {
+            headers.insert(
+                "x-amz-object-lock-retain-until-date",
+                until.to_rfc3339().parse().unwrap(),
+            );
+        }
+        if let Some(ref hold) = obj.lock_legal_hold {
+            headers.insert("x-amz-object-lock-legal-hold", hold.parse().unwrap());
         }
 
         Ok(AwsResponse {
@@ -1660,6 +1877,8 @@ impl S3Service {
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
 
+        let version_id = req.query_params.get("versionId").cloned();
+
         let mut state = self.state.write();
         let b = state
             .buckets
@@ -1680,13 +1899,57 @@ impl S3Service {
             }
         }
 
-        // S3 returns 204 even if the key doesn't exist
-        b.objects.remove(key);
+        let mut headers = HeaderMap::new();
+
+        if let Some(ref vid) = version_id {
+            // Delete specific version
+            if let Some(versions) = b.object_versions.get_mut(key) {
+                versions.retain(|o| o.version_id.as_deref() != Some(vid));
+                // Update current object to latest non-deleted version
+                if let Some(latest) = versions.last() {
+                    if latest.is_delete_marker {
+                        b.objects.remove(key);
+                    } else {
+                        b.objects.insert(key.to_string(), latest.clone());
+                    }
+                } else {
+                    b.objects.remove(key);
+                }
+                if versions.is_empty() {
+                    b.object_versions.remove(key);
+                }
+            } else {
+                // No versions stored, just remove the current object if vid matches
+                if let Some(obj) = b.objects.get(key) {
+                    let matches = obj.version_id.as_deref() == Some(vid)
+                        || (vid == "null" && obj.version_id.is_none());
+                    if matches {
+                        b.objects.remove(key);
+                    }
+                }
+            }
+            headers.insert("x-amz-version-id", vid.parse().unwrap());
+        } else if b.versioning.as_deref() == Some("Enabled") {
+            // Create a delete marker
+            let dm_id = Uuid::new_v4().to_string();
+            let marker = make_delete_marker(key, &dm_id);
+            b.object_versions
+                .entry(key.to_string())
+                .or_default()
+                .push(marker.clone());
+            b.objects.insert(key.to_string(), marker);
+            headers.insert("x-amz-delete-marker", "true".parse().unwrap());
+            headers.insert("x-amz-version-id", dm_id.parse().unwrap());
+        } else {
+            // S3 returns 204 even if the key doesn't exist
+            b.objects.remove(key);
+        }
+
         Ok(AwsResponse {
             status: StatusCode::NO_CONTENT,
             content_type: "application/xml".to_string(),
             body: Bytes::new(),
-            headers: HeaderMap::new(),
+            headers,
         })
     }
 
@@ -1749,7 +2012,6 @@ impl S3Service {
                 .unwrap(),
         );
         headers.insert("accept-ranges", "bytes".parse().unwrap());
-        headers.insert("x-amz-server-side-encryption", "AES256".parse().unwrap());
         headers.insert("x-amz-storage-class", obj.storage_class.parse().unwrap());
         if let Some(ref enc) = obj.content_encoding {
             headers.insert("content-encoding", enc.parse().unwrap());
@@ -1788,17 +2050,39 @@ impl S3Service {
             headers.insert("x-amz-website-redirect-location", redirect.parse().unwrap());
         }
 
-        for (k, v) in &obj.metadata {
-            if let (Ok(name), Ok(val)) = (
-                format!("x-amz-meta-{k}").parse::<http::header::HeaderName>(),
-                v.parse::<http::header::HeaderValue>(),
-            ) {
-                headers.insert(name, val);
-            }
-        }
-
         if let Some(vid) = &obj.version_id {
             headers.insert("x-amz-version-id", vid.parse().unwrap());
+        }
+
+        // SSE headers
+        if let Some(algo) = &obj.sse_algorithm {
+            headers.insert("x-amz-server-side-encryption", algo.parse().unwrap());
+        }
+        if let Some(kid) = &obj.sse_kms_key_id {
+            headers.insert(
+                "x-amz-server-side-encryption-aws-kms-key-id",
+                kid.parse().unwrap(),
+            );
+        }
+        if let Some(true) = obj.bucket_key_enabled {
+            headers.insert(
+                "x-amz-server-side-encryption-bucket-key-enabled",
+                "true".parse().unwrap(),
+            );
+        }
+
+        // Object lock headers
+        if let Some(ref mode) = obj.lock_mode {
+            headers.insert("x-amz-object-lock-mode", mode.parse().unwrap());
+        }
+        if let Some(ref until) = obj.lock_retain_until {
+            headers.insert(
+                "x-amz-object-lock-retain-until-date",
+                until.to_rfc3339().parse().unwrap(),
+            );
+        }
+        if let Some(ref hold) = obj.lock_legal_hold {
+            headers.insert("x-amz-object-lock-legal-hold", hold.parse().unwrap());
         }
 
         Ok(AwsResponse {
@@ -1831,7 +2115,14 @@ impl S3Service {
             .decode_utf8_lossy()
             .to_string();
         let source = decoded.strip_prefix('/').unwrap_or(&decoded);
-        let source_path = source.split('?').next().unwrap_or(source);
+
+        // Parse versionId from ?versionId=X at the end
+        let (source_path, source_version_id) = if let Some(idx) = source.find("?versionId=") {
+            let vid = source[idx + 11..].to_string();
+            (&source[..idx], Some(vid))
+        } else {
+            (source, None)
+        };
 
         let (src_bucket, src_key) = source_path.split_once('/').ok_or_else(|| {
             AwsServiceError::aws_error(
@@ -1889,47 +2180,103 @@ impl S3Service {
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
 
+        let checksum_algorithm = req
+            .headers
+            .get("x-amz-checksum-algorithm")
+            .or_else(|| req.headers.get("x-amz-sdk-checksum-algorithm"))
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_uppercase());
+
         let mut state = self.state.write();
 
-        let src_obj = {
+        // Resolve source object, possibly a specific version
+        let (src_obj, src_version_id_actual) = {
             let sb = state
                 .buckets
                 .get(src_bucket)
                 .ok_or_else(|| no_such_bucket(src_bucket))?;
-            sb.objects
-                .get(src_key)
-                .ok_or_else(|| {
+
+            if let Some(ref vid) = source_version_id {
+                // Look for specific version
+                if vid == "null" {
+                    // "null" means the non-versioned version
+                    let obj = sb.objects.get(src_key).ok_or_else(|| {
+                        AwsServiceError::aws_error_with_fields(
+                            StatusCode::NOT_FOUND,
+                            "NoSuchKey",
+                            "The specified key does not exist.",
+                            vec![("Key".to_string(), src_key.to_string())],
+                        )
+                    })?;
+                    (obj.clone(), obj.version_id.clone())
+                } else {
+                    // Search in object_versions
+                    let obj = resolve_object(sb, src_key, Some(vid)).map_err(|_| {
+                        AwsServiceError::aws_error_with_fields(
+                            StatusCode::NOT_FOUND,
+                            "NoSuchVersion",
+                            "The specified version does not exist.",
+                            vec![
+                                ("Key".to_string(), src_key.to_string()),
+                                ("VersionId".to_string(), vid.to_string()),
+                            ],
+                        )
+                    })?;
+                    (obj.clone(), obj.version_id.clone())
+                }
+            } else {
+                let obj = sb.objects.get(src_key).ok_or_else(|| {
                     AwsServiceError::aws_error_with_fields(
                         StatusCode::NOT_FOUND,
                         "NoSuchKey",
                         "The specified key does not exist.",
                         vec![("Key".to_string(), src_key.to_string())],
                     )
-                })?
-                .clone()
+                })?;
+                (obj.clone(), obj.version_id.clone())
+            }
         };
 
         if let Some(ref inm) = if_none_match {
             let src_etag = format!("\"{}\"", src_obj.etag);
             if etag_matches(inm, &src_etag) {
-                return Err(precondition_failed("If-None-Match"));
+                return Err(AwsServiceError::aws_error_with_fields(
+                    StatusCode::PRECONDITION_FAILED,
+                    "PreconditionFailed",
+                    "At least one of the pre-conditions you specified did not hold",
+                    vec![(
+                        "Condition".to_string(),
+                        "x-amz-copy-source-If-None-Match".to_string(),
+                    )],
+                ));
             }
         }
 
+        // Check copy-in-place validity
+        let has_version_id = source_version_id.is_some();
         if src_bucket == dest_bucket
             && src_key == dest_key
             && metadata_directive == "COPY"
             && storage_class.is_none()
             && sse_algorithm.is_none()
             && website_redirect.is_none()
+            && !has_version_id
         {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "InvalidRequest",
-                "This copy request is illegal because it is trying to copy an object to itself \
-                 without changing the object's metadata, storage class, website redirect location \
-                 or encryption attributes.",
-            ));
+            // Check if bucket encryption would make this a valid copy-in-place
+            let sb = state
+                .buckets
+                .get(src_bucket)
+                .ok_or_else(|| no_such_bucket(src_bucket))?;
+            let has_bucket_encryption = sb.encryption_config.is_some();
+            if !has_bucket_encryption {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidRequest",
+                    "This copy request is illegal because it is trying to copy an object to itself \
+                     without changing the object's metadata, storage class, website redirect location \
+                     or encryption attributes.",
+                ));
+            }
         }
 
         let etag = src_obj.etag.clone();
@@ -1959,26 +2306,63 @@ impl S3Service {
                 .get("x-amz-tagging")
                 .and_then(|v| v.to_str().ok())
                 .unwrap_or("");
-            parse_url_encoded_tags(th).into_iter().collect()
+            let tags = parse_url_encoded_tags(th);
+            // Validate aws: prefix
+            for (k, _) in &tags {
+                if k.starts_with("aws:") {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "InvalidTag",
+                        "Your TagKey cannot be prefixed with aws:",
+                    ));
+                }
+            }
+            tags.into_iter().collect()
         } else {
             src_obj.tags.clone()
         };
 
-        let new_sse = sse_algorithm.or_else(|| {
-            if metadata_directive == "COPY" {
+        // Determine bucket default encryption
+        let dest_bucket_encryption = state
+            .buckets
+            .get(dest_bucket)
+            .and_then(|b| b.encryption_config.as_ref())
+            .and_then(|config| {
+                if config.contains("AES256") {
+                    Some("AES256".to_string())
+                } else if config.contains("aws:kms") {
+                    Some("aws:kms".to_string())
+                } else {
+                    None
+                }
+            });
+
+        // For SSE: if explicitly set, use new values; if copy-in-place changed SSE, use new;
+        // otherwise fall back based on source or bucket default
+        let new_sse = if sse_algorithm.is_some() {
+            sse_algorithm
+        } else if src_bucket == dest_bucket && src_key == dest_key {
+            // Copy-in-place without SSE specified: if source had non-AES256 SSE, default to AES256
+            if src_obj.sse_algorithm.is_some() && src_obj.sse_algorithm.as_deref() != Some("AES256")
+            {
+                Some("AES256".to_string())
+            } else if src_obj.sse_algorithm.is_some() {
                 src_obj.sse_algorithm.clone()
             } else {
-                None
+                // Use bucket default encryption if available
+                dest_bucket_encryption.clone()
             }
-        });
-        let new_kms = sse_kms_key_id.or_else(|| {
-            if metadata_directive == "COPY" {
-                src_obj.sse_kms_key_id.clone()
-            } else {
-                None
-            }
-        });
-        let new_bke = bucket_key_enabled.or(src_obj.bucket_key_enabled);
+        } else {
+            // For cross-key copy, use bucket default encryption if no explicit SSE
+            dest_bucket_encryption.clone()
+        };
+
+        let new_kms = if sse_kms_key_id.is_some() {
+            sse_kms_key_id
+        } else {
+            None
+        };
+        let new_bke = bucket_key_enabled; // Only set if explicitly provided
         let new_redirect = website_redirect.or_else(|| {
             if metadata_directive == "COPY" {
                 src_obj.website_redirect_location.clone()
@@ -1986,6 +2370,19 @@ impl S3Service {
                 None
             }
         });
+
+        // Checksum: compute new if algorithm specified, or copy from source
+        let (new_checksum_algo, new_checksum_val) = if let Some(ref algo) = checksum_algorithm {
+            let val = compute_checksum(algo, &src_obj.data);
+            (Some(algo.clone()), Some(val))
+        } else if src_obj.checksum_algorithm.is_some() {
+            (
+                src_obj.checksum_algorithm.clone(),
+                src_obj.checksum_value.clone(),
+            )
+        } else {
+            (None, None)
+        };
 
         let db = state
             .buckets
@@ -1998,42 +2395,91 @@ impl S3Service {
             None
         };
 
-        db.objects.insert(
-            dest_key.to_string(),
-            S3Object {
-                key: dest_key.to_string(),
-                data: src_obj.data,
-                size: src_obj.size,
-                etag: etag.clone(),
-                last_modified,
-                content_type: new_content_type,
-                metadata: new_metadata,
-                storage_class: new_storage_class,
-                tags: new_tags,
-                acl_grants: vec![],
-                acl_owner_id: Some(req.account_id.clone()),
-                parts_count: src_obj.parts_count,
-                part_sizes: src_obj.part_sizes,
-                sse_algorithm: new_sse,
-                sse_kms_key_id: new_kms,
-                bucket_key_enabled: new_bke,
-                version_id: version_id.clone(),
-                is_delete_marker: false,
-                content_encoding: src_obj.content_encoding,
-                website_redirect_location: new_redirect,
-            },
-        );
+        // Default ACL for destination (not copied from source)
+        let dest_acl_grants = vec![AclGrant {
+            grantee_type: "CanonicalUser".to_string(),
+            grantee_id: Some(db.acl_owner_id.clone()),
+            grantee_display_name: Some(db.acl_owner_id.clone()),
+            grantee_uri: None,
+            permission: "FULL_CONTROL".to_string(),
+        }];
+
+        let dest_obj = S3Object {
+            key: dest_key.to_string(),
+            data: src_obj.data,
+            size: src_obj.size,
+            etag: etag.clone(),
+            last_modified,
+            content_type: new_content_type,
+            metadata: new_metadata,
+            storage_class: new_storage_class,
+            tags: new_tags,
+            acl_grants: dest_acl_grants,
+            acl_owner_id: Some(db.acl_owner_id.clone()),
+            parts_count: src_obj.parts_count,
+            part_sizes: src_obj.part_sizes,
+            sse_algorithm: new_sse.clone(),
+            sse_kms_key_id: new_kms.clone(),
+            bucket_key_enabled: new_bke,
+            version_id: version_id.clone(),
+            is_delete_marker: false,
+            content_encoding: src_obj.content_encoding,
+            website_redirect_location: new_redirect,
+            checksum_algorithm: new_checksum_algo.clone(),
+            checksum_value: new_checksum_val.clone(),
+            // Do not copy lock from source
+            lock_mode: None,
+            lock_retain_until: None,
+            lock_legal_hold: None,
+        };
+
+        // Store in version history if versioning enabled
+        if db.versioning.as_deref() == Some("Enabled") {
+            db.object_versions
+                .entry(dest_key.to_string())
+                .or_default()
+                .push(dest_obj.clone());
+        }
+        db.objects.insert(dest_key.to_string(), dest_obj);
 
         let mut response_headers = HeaderMap::new();
         if let Some(vid) = &version_id {
             response_headers.insert("x-amz-version-id", vid.parse().unwrap());
         }
+        if let Some(ref svid) = src_version_id_actual {
+            response_headers.insert("x-amz-copy-source-version-id", svid.parse().unwrap());
+        }
+        // SSE headers in copy response
+        if let Some(ref algo) = new_sse {
+            response_headers.insert("x-amz-server-side-encryption", algo.parse().unwrap());
+        }
+        if let Some(ref kid) = new_kms {
+            response_headers.insert(
+                "x-amz-server-side-encryption-aws-kms-key-id",
+                kid.parse().unwrap(),
+            );
+        }
+        if new_bke == Some(true) {
+            response_headers.insert(
+                "x-amz-server-side-encryption-bucket-key-enabled",
+                "true".parse().unwrap(),
+            );
+        }
+
+        // Build checksum XML if present
+        let checksum_xml = if let (Some(algo), Some(val)) = (&new_checksum_algo, &new_checksum_val)
+        {
+            format!("<Checksum{algo}>{val}</Checksum{algo}>")
+        } else {
+            String::new()
+        };
 
         let body = format!(
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
              <CopyObjectResult>\
              <ETag>&quot;{etag}&quot;</ETag>\
              <LastModified>{}</LastModified>\
+             {checksum_xml}\
              </CopyObjectResult>",
             last_modified.format("%Y-%m-%dT%H:%M:%S%.3fZ"),
         );
@@ -2451,7 +2897,16 @@ impl S3Service {
             .decode_utf8_lossy()
             .to_string();
         let source = decoded.strip_prefix('/').unwrap_or(&decoded);
-        let (src_bucket, src_key) = source.split_once('/').ok_or_else(|| {
+
+        // Parse versionId from ?versionId=X
+        let (source_path, source_version_id) = if let Some(idx) = source.find("?versionId=") {
+            let vid = source[idx + 11..].to_string();
+            (&source[..idx], Some(vid))
+        } else {
+            (source, None)
+        };
+
+        let (src_bucket, src_key) = source_path.split_once('/').ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "InvalidArgument",
@@ -2470,10 +2925,14 @@ impl S3Service {
                 .buckets
                 .get(src_bucket)
                 .ok_or_else(|| no_such_bucket(src_bucket))?;
-            let src_obj = sb
-                .objects
-                .get(src_key)
-                .ok_or_else(|| no_such_key(src_key))?;
+
+            let src_obj = if let Some(ref vid) = source_version_id {
+                resolve_object(sb, src_key, Some(vid))?
+            } else {
+                sb.objects
+                    .get(src_key)
+                    .ok_or_else(|| no_such_key(src_key))?
+            };
 
             if let Some(range_str) = copy_range {
                 let range_part = range_str.strip_prefix("bytes=").unwrap_or(range_str);
@@ -2490,6 +2949,7 @@ impl S3Service {
             }
         };
 
+        let data_len = src_data.len() as u64;
         let etag = compute_md5(&src_data);
         let b = state
             .buckets
@@ -2507,7 +2967,7 @@ impl S3Service {
             part_number: part_number as u32,
             data: src_data,
             etag: etag.clone(),
-            size: 0, // will be set from data
+            size: data_len,
             last_modified: Utc::now(),
         };
         upload.parts.insert(part_number as u32, part);
@@ -2541,26 +3001,11 @@ impl S3Service {
             ));
         }
 
-        // Check for If-None-Match conditional
-        let if_none_match = req
-            .headers
-            .get("if-none-match")
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string());
-
         let mut state = self.state.write();
         let b = state
             .buckets
             .get_mut(bucket)
             .ok_or_else(|| no_such_bucket(bucket))?;
-
-        // If-None-Match: if "*", fail if object already exists
-        if let Some(ref inm) = if_none_match {
-            if inm.trim() == "*" && b.objects.contains_key(key) {
-                b.multipart_uploads.remove(upload_id);
-                return Err(precondition_failed("If-None-Match"));
-            }
-        }
 
         let upload = match b.multipart_uploads.get(upload_id) {
             Some(u) => u.clone(),
@@ -2598,6 +3043,26 @@ impl S3Service {
         let mut sorted_parts = submitted_parts;
         sorted_parts.sort_by_key(|p| p.0);
 
+        // Validate minimum part size: all non-last parts must be >= 5MB
+        // This check only applies when there are multiple parts (single-part uploads always pass)
+        if sorted_parts.len() > 1 {
+            const MIN_PART_SIZE: usize = 5 * 1024 * 1024;
+            for (i, (part_num, _)) in sorted_parts.iter().enumerate() {
+                if i >= sorted_parts.len() - 1 {
+                    break; // skip last part
+                }
+                if let Some(part) = upload.parts.get(part_num) {
+                    if part.data.len() < MIN_PART_SIZE {
+                        return Err(AwsServiceError::aws_error(
+                            StatusCode::BAD_REQUEST,
+                            "EntityTooSmall",
+                            "Your proposed upload is smaller than the minimum allowed object size.",
+                        ));
+                    }
+                }
+            }
+        }
+
         // Assemble the object from parts
         let mut combined_data = Vec::new();
         let mut md5_digests = Vec::new();
@@ -2614,7 +3079,7 @@ impl S3Service {
             combined_data.extend_from_slice(&part.data);
             let part_md5 = Md5::digest(&part.data);
             md5_digests.extend_from_slice(&part_md5);
-            part_sizes.push((*part_num, part.size));
+            part_sizes.push((*part_num, part.data.len() as u64));
         }
 
         // Multipart ETag: MD5(concat(part_md5_digests))-N
@@ -2655,6 +3120,11 @@ impl S3Service {
             is_delete_marker: false,
             content_encoding: None,
             website_redirect_location: None,
+            checksum_algorithm: None,
+            checksum_value: None,
+            lock_mode: None,
+            lock_retain_until: None,
+            lock_legal_hold: None,
         };
         b.objects.insert(key.to_string(), obj);
         b.multipart_uploads.remove(upload_id);
@@ -2724,7 +3194,9 @@ impl S3Service {
             .ok_or_else(|| no_such_bucket(bucket))?;
 
         let mut uploads_xml = String::new();
-        for upload in b.multipart_uploads.values() {
+        let mut sorted_uploads: Vec<_> = b.multipart_uploads.values().collect();
+        sorted_uploads.sort_by_key(|u| &u.key);
+        for upload in &sorted_uploads {
             uploads_xml.push_str(&format!(
                 "<Upload>\
                  <Key>{}</Key>\
@@ -2754,11 +3226,52 @@ impl S3Service {
 
     fn list_parts(
         &self,
-        _req: &AwsRequest,
+        req: &AwsRequest,
         bucket: &str,
         key: &str,
         upload_id: &str,
     ) -> Result<AwsResponse, AwsServiceError> {
+        let max_parts: i64 = req
+            .query_params
+            .get("max-parts")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1000);
+        let part_number_marker: i64 = req
+            .query_params
+            .get("part-number-marker")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+
+        // Validate max-parts and part-number-marker
+        if max_parts < 0 {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidArgument",
+                "Argument max-parts must be an integer between 0 and 2147483647",
+            ));
+        }
+        if max_parts > 2147483647 {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidArgument",
+                "Provided max-parts not an integer or within integer range",
+            ));
+        }
+        if part_number_marker < 0 {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidArgument",
+                "Argument part-number-marker must be an integer between 0 and 2147483647",
+            ));
+        }
+        if part_number_marker > 2147483647 {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidArgument",
+                "Provided part-number-marker not an integer or within integer range",
+            ));
+        }
+
         let state = self.state.read();
         let b = state
             .buckets
@@ -2772,8 +3285,20 @@ impl S3Service {
             return Err(no_such_upload(upload_id));
         }
 
+        // Filter parts after marker and apply limit
+        let all_parts: Vec<_> = upload
+            .parts
+            .values()
+            .filter(|p| p.part_number as i64 > part_number_marker)
+            .collect();
+        let max = max_parts as usize;
+        let is_truncated = all_parts.len() > max;
+        let display_parts: Vec<_> = all_parts.into_iter().take(max).collect();
+
         let mut parts_xml = String::new();
-        for part in upload.parts.values() {
+        let mut next_marker: i64 = 0;
+        for part in &display_parts {
+            next_marker = part.part_number as i64;
             parts_xml.push_str(&format!(
                 "<Part>\
                  <PartNumber>{}</PartNumber>\
@@ -2794,7 +3319,10 @@ impl S3Service {
              <Bucket>{}</Bucket>\
              <Key>{}</Key>\
              <UploadId>{}</UploadId>\
-             <IsTruncated>false</IsTruncated>\
+             <PartNumberMarker>{part_number_marker}</PartNumberMarker>\
+             <NextPartNumberMarker>{next_marker}</NextPartNumberMarker>\
+             <MaxParts>{max_parts}</MaxParts>\
+             <IsTruncated>{is_truncated}</IsTruncated>\
              {parts_xml}\
              </ListPartsResult>",
             xml_escape(bucket),
@@ -2821,6 +3349,95 @@ impl S3Service {
             content_type: "application/xml".to_string(),
             body: Bytes::new(),
             headers: HeaderMap::new(),
+        })
+    }
+
+    fn get_object_attributes(
+        &self,
+        req: &AwsRequest,
+        bucket: &str,
+        key: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let state = self.state.read();
+        let b = state
+            .buckets
+            .get(bucket)
+            .ok_or_else(|| no_such_bucket(bucket))?;
+        let obj = b.objects.get(key).ok_or_else(|| no_such_key(key))?;
+
+        let attrs = req
+            .headers
+            .get("x-amz-object-attributes")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+
+        let mut body_parts = Vec::new();
+
+        for attr in attrs.split(',') {
+            let attr = attr.trim();
+            match attr {
+                "ETag" => {
+                    body_parts.push(format!("<ETag>{}</ETag>", xml_escape(&obj.etag)));
+                }
+                "StorageClass" => {
+                    body_parts.push(format!(
+                        "<StorageClass>{}</StorageClass>",
+                        xml_escape(&obj.storage_class)
+                    ));
+                }
+                "ObjectSize" => {
+                    body_parts.push(format!("<ObjectSize>{}</ObjectSize>", obj.size));
+                }
+                "Checksum" => {
+                    if let (Some(algo), Some(val)) = (&obj.checksum_algorithm, &obj.checksum_value)
+                    {
+                        body_parts.push(format!(
+                            "<Checksum><Checksum{algo}>{val}</Checksum{algo}></Checksum>"
+                        ));
+                    }
+                }
+                "ObjectParts" => {
+                    if let Some(pc) = obj.parts_count {
+                        let mut parts_inner = format!("<TotalPartsCount>{pc}</TotalPartsCount>");
+                        if let Some(ref ps) = obj.part_sizes {
+                            for (pn, sz) in ps {
+                                parts_inner.push_str(&format!(
+                                    "<Part><PartNumber>{pn}</PartNumber><Size>{sz}</Size></Part>"
+                                ));
+                            }
+                        }
+                        body_parts.push(format!("<ObjectParts>{parts_inner}</ObjectParts>"));
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let mut headers = HeaderMap::new();
+        if let Some(vid) = &obj.version_id {
+            headers.insert("x-amz-version-id", vid.parse().unwrap());
+        }
+        headers.insert(
+            "last-modified",
+            obj.last_modified
+                .format("%a, %d %b %Y %H:%M:%S GMT")
+                .to_string()
+                .parse()
+                .unwrap(),
+        );
+
+        let body = format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+             <GetObjectAttributesResponse xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
+             {}\
+             </GetObjectAttributesResponse>",
+            body_parts.join("")
+        );
+        Ok(AwsResponse {
+            status: StatusCode::OK,
+            content_type: "text/xml".to_string(),
+            body: body.into(),
+            headers,
         })
     }
 }
@@ -3258,6 +3875,26 @@ fn compute_md5(data: &[u8]) -> String {
     format!("{:x}", digest)
 }
 
+fn compute_checksum(algorithm: &str, data: &[u8]) -> String {
+    match algorithm {
+        "CRC32" => {
+            let crc = crc32fast::hash(data);
+            BASE64.encode(crc.to_be_bytes())
+        }
+        "SHA1" => {
+            use sha1::Digest as _;
+            let hash = sha1::Sha1::digest(data);
+            BASE64.encode(hash)
+        }
+        "SHA256" => {
+            use sha2::Digest as _;
+            let hash = sha2::Sha256::digest(data);
+            BASE64.encode(hash)
+        }
+        _ => String::new(),
+    }
+}
+
 #[allow(dead_code)]
 fn url_encode_key(s: &str) -> String {
     percent_encoding::utf8_percent_encode(s, percent_encoding::NON_ALPHANUMERIC).to_string()
@@ -3411,6 +4048,11 @@ fn make_delete_marker(key: &str, dm_id: &str) -> S3Object {
         is_delete_marker: true,
         content_encoding: None,
         website_redirect_location: None,
+        checksum_algorithm: None,
+        checksum_value: None,
+        lock_mode: None,
+        lock_retain_until: None,
+        lock_legal_hold: None,
     }
 }
 

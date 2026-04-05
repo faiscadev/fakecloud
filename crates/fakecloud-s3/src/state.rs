@@ -41,6 +41,16 @@ pub struct S3Object {
     pub is_delete_marker: bool,
     pub content_encoding: Option<String>,
     pub website_redirect_location: Option<String>,
+    /// Checksum algorithm (CRC32, SHA1, SHA256).
+    pub checksum_algorithm: Option<String>,
+    /// Base64-encoded checksum value.
+    pub checksum_value: Option<String>,
+    /// Object lock mode (GOVERNANCE or COMPLIANCE).
+    pub lock_mode: Option<String>,
+    /// Object lock retain-until date (ISO 8601).
+    pub lock_retain_until: Option<DateTime<Utc>>,
+    /// Legal hold status (ON or OFF).
+    pub lock_legal_hold: Option<String>,
 }
 
 /// A part uploaded via the multipart upload API.
