@@ -21,3 +21,5 @@ aws-sdk-ssm = "1"
 aws-sdk-s3 = "1"
 aws-credential-types = "1"
 aws-types = "1"
+reqwest = "0.12"
+chrono = { workspace = true }

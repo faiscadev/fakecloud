@@ -465,3 +465,429 @@ async fn s3_lifecycle_put_get_delete() {
         .await;
     assert!(!output.success(), "expected error after lifecycle deletion");
 }
+// ---- S3 Event Notification Tests ----
+
+#[tokio::test]
+async fn s3_notification_delivery_to_sqs() {
+    let server = TestServer::start().await;
+    let s3 = server.s3_client().await;
+    let sqs = server.sqs_client().await;
+
+    // Create SQS queue
+    let queue = sqs
+        .create_queue()
+        .queue_name("s3-events")
+        .send()
+        .await
+        .unwrap();
+    let queue_url = queue.queue_url().unwrap();
+
+    // Get queue ARN
+    let attrs = sqs
+        .get_queue_attributes()
+        .queue_url(queue_url)
+        .attribute_names(aws_sdk_sqs::types::QueueAttributeName::QueueArn)
+        .send()
+        .await
+        .unwrap();
+    let queue_arn = attrs
+        .attributes()
+        .unwrap()
+        .get(&aws_sdk_sqs::types::QueueAttributeName::QueueArn)
+        .unwrap()
+        .clone();
+
+    // Create S3 bucket
+    s3.create_bucket()
+        .bucket("notif-bucket")
+        .send()
+        .await
+        .unwrap();
+
+    // Set notification configuration via CLI (SDK doesn't easily set raw XML)
+    let notif_config = format!(
+        r#"{{
+            "QueueConfigurations": [{{
+                "QueueArn": "{}",
+                "Events": ["s3:ObjectCreated:*"]
+            }}]
+        }}"#,
+        queue_arn
+    );
+    let output = server
+        .aws_cli(&[
+            "s3api",
+            "put-bucket-notification-configuration",
+            "--bucket",
+            "notif-bucket",
+            "--notification-configuration",
+            &notif_config,
+        ])
+        .await;
+    assert!(
+        output.success(),
+        "Failed to set notification: {}",
+        output.stderr_text()
+    );
+
+    // Put object
+    s3.put_object()
+        .bucket("notif-bucket")
+        .key("test.txt")
+        .body(ByteStream::from_static(b"hello notifications"))
+        .send()
+        .await
+        .unwrap();
+
+    // Receive message from SQS
+    let msgs = sqs
+        .receive_message()
+        .queue_url(queue_url)
+        .wait_time_seconds(2)
+        .max_number_of_messages(1)
+        .send()
+        .await
+        .unwrap();
+
+    let messages = msgs.messages();
+    assert!(
+        !messages.is_empty(),
+        "Expected an S3 event notification message"
+    );
+
+    let body = messages[0].body().unwrap();
+    let event: serde_json::Value = serde_json::from_str(body).unwrap();
+    assert_eq!(event["Records"][0]["eventSource"], "aws:s3");
+    assert_eq!(event["Records"][0]["eventName"], "ObjectCreated:Put");
+    assert_eq!(event["Records"][0]["s3"]["bucket"]["name"], "notif-bucket");
+    assert_eq!(event["Records"][0]["s3"]["object"]["key"], "test.txt");
+}
+// ---- S3 CORS Tests ----
+
+#[tokio::test]
+async fn s3_cors_preflight_and_response_headers() {
+    let server = TestServer::start().await;
+    let s3 = server.s3_client().await;
+
+    // Create bucket
+    s3.create_bucket()
+        .bucket("cors-bucket")
+        .send()
+        .await
+        .unwrap();
+
+    // Set CORS config via CLI
+    let cors_config = r#"{
+        "CORSRules": [{
+            "AllowedOrigins": ["https://example.com"],
+            "AllowedMethods": ["GET", "PUT"],
+            "AllowedHeaders": ["*"],
+            "ExposeHeaders": ["x-amz-request-id"],
+            "MaxAgeSeconds": 3600
+        }]
+    }"#;
+    let output = server
+        .aws_cli(&[
+            "s3api",
+            "put-bucket-cors",
+            "--bucket",
+            "cors-bucket",
+            "--cors-configuration",
+            cors_config,
+        ])
+        .await;
+    assert!(
+        output.success(),
+        "Failed to set CORS: {}",
+        output.stderr_text()
+    );
+
+    // Put an object for GET test
+    s3.put_object()
+        .bucket("cors-bucket")
+        .key("file.txt")
+        .body(ByteStream::from_static(b"cors test"))
+        .send()
+        .await
+        .unwrap();
+
+    let http = reqwest::Client::new();
+
+    // OPTIONS preflight
+    let resp = http
+        .request(
+            reqwest::Method::OPTIONS,
+            format!("{}/cors-bucket/file.txt", server.endpoint()),
+        )
+        .header("Origin", "https://example.com")
+        .header("Access-Control-Request-Method", "GET")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        resp.headers().get("access-control-allow-origin").unwrap(),
+        "https://example.com"
+    );
+    assert!(resp.headers().get("access-control-allow-methods").is_some());
+    assert_eq!(
+        resp.headers().get("access-control-max-age").unwrap(),
+        "3600"
+    );
+
+    // Regular GET with Origin should include CORS headers
+    let resp = http
+        .get(format!("{}/cors-bucket/file.txt", server.endpoint()))
+        .header("Origin", "https://example.com")
+        .header("Authorization", "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20240101/us-east-1/s3/aws4_request, SignedHeaders=host, Signature=fake")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.headers().get("access-control-allow-origin").unwrap(),
+        "https://example.com"
+    );
+    assert_eq!(
+        resp.headers().get("access-control-expose-headers").unwrap(),
+        "x-amz-request-id"
+    );
+
+    // OPTIONS from non-matching origin should fail
+    let resp = http
+        .request(
+            reqwest::Method::OPTIONS,
+            format!("{}/cors-bucket/file.txt", server.endpoint()),
+        )
+        .header("Origin", "https://evil.com")
+        .header("Access-Control-Request-Method", "GET")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+}
+// ---- S3 Object Lock Tests ----
+
+#[tokio::test]
+async fn s3_object_lock_prevents_delete() {
+    let server = TestServer::start().await;
+    let s3 = server.s3_client().await;
+
+    // Create bucket with object lock enabled
+    let output = server
+        .aws_cli(&[
+            "s3api",
+            "create-bucket",
+            "--bucket",
+            "lock-bucket",
+            "--object-lock-enabled-for-bucket",
+        ])
+        .await;
+    assert!(
+        output.success(),
+        "Failed to create lock bucket: {}",
+        output.stderr_text()
+    );
+
+    // Put object and capture version ID
+    let put_resp = s3
+        .put_object()
+        .bucket("lock-bucket")
+        .key("locked.txt")
+        .body(ByteStream::from_static(b"precious data"))
+        .send()
+        .await
+        .unwrap();
+    let version_id = put_resp.version_id().unwrap().to_string();
+
+    // Set retention on the object (GOVERNANCE mode, 1 day in the future)
+    let retain_until = chrono::Utc::now() + chrono::Duration::days(1);
+    let output = server
+        .aws_cli(&[
+            "s3api",
+            "put-object-retention",
+            "--bucket",
+            "lock-bucket",
+            "--key",
+            "locked.txt",
+            "--retention",
+            &format!(
+                r#"{{"Mode":"GOVERNANCE","RetainUntilDate":"{}"}}"#,
+                retain_until.format("%Y-%m-%dT%H:%M:%SZ")
+            ),
+        ])
+        .await;
+    assert!(
+        output.success(),
+        "Failed to set retention: {}",
+        output.stderr_text()
+    );
+
+    // Try to delete specific version - should fail with 403
+    let result = s3
+        .delete_object()
+        .bucket("lock-bucket")
+        .key("locked.txt")
+        .version_id(&version_id)
+        .send()
+        .await;
+    assert!(result.is_err(), "Delete of locked object should fail");
+
+    // Delete with governance bypass should succeed
+    let output = server
+        .aws_cli(&[
+            "s3api",
+            "delete-object",
+            "--bucket",
+            "lock-bucket",
+            "--key",
+            "locked.txt",
+            "--version-id",
+            &version_id,
+            "--bypass-governance-retention",
+        ])
+        .await;
+    assert!(
+        output.success(),
+        "Governance bypass delete should succeed: {}",
+        output.stderr_text()
+    );
+}
+
+#[tokio::test]
+async fn s3_object_lock_legal_hold_prevents_delete() {
+    let server = TestServer::start().await;
+    let s3 = server.s3_client().await;
+
+    // Create bucket with object lock
+    let output = server
+        .aws_cli(&[
+            "s3api",
+            "create-bucket",
+            "--bucket",
+            "hold-bucket",
+            "--object-lock-enabled-for-bucket",
+        ])
+        .await;
+    assert!(output.success());
+
+    // Put object and capture version ID
+    let put_resp = s3
+        .put_object()
+        .bucket("hold-bucket")
+        .key("held.txt")
+        .body(ByteStream::from_static(b"held data"))
+        .send()
+        .await
+        .unwrap();
+    let version_id = put_resp.version_id().unwrap().to_string();
+
+    // Set legal hold ON
+    let output = server
+        .aws_cli(&[
+            "s3api",
+            "put-object-legal-hold",
+            "--bucket",
+            "hold-bucket",
+            "--key",
+            "held.txt",
+            "--legal-hold",
+            r#"{"Status":"ON"}"#,
+        ])
+        .await;
+    assert!(
+        output.success(),
+        "Failed to set legal hold: {}",
+        output.stderr_text()
+    );
+
+    // Try to delete specific version - should fail
+    let result = s3
+        .delete_object()
+        .bucket("hold-bucket")
+        .key("held.txt")
+        .version_id(&version_id)
+        .send()
+        .await;
+    assert!(result.is_err(), "Delete of legally held object should fail");
+
+    // Remove legal hold
+    let output = server
+        .aws_cli(&[
+            "s3api",
+            "put-object-legal-hold",
+            "--bucket",
+            "hold-bucket",
+            "--key",
+            "held.txt",
+            "--legal-hold",
+            r#"{"Status":"OFF"}"#,
+        ])
+        .await;
+    assert!(output.success());
+
+    // Now delete should succeed
+    let result = s3
+        .delete_object()
+        .bucket("hold-bucket")
+        .key("held.txt")
+        .version_id(&version_id)
+        .send()
+        .await;
+    assert!(
+        result.is_ok(),
+        "Delete after removing legal hold should succeed"
+    );
+}
+
+#[tokio::test]
+async fn s3_object_lock_prevents_overwrite() {
+    let server = TestServer::start().await;
+    let s3 = server.s3_client().await;
+
+    // Create bucket with object lock
+    let output = server
+        .aws_cli(&[
+            "s3api",
+            "create-bucket",
+            "--bucket",
+            "overwrite-lock-bucket",
+            "--object-lock-enabled-for-bucket",
+        ])
+        .await;
+    assert!(output.success());
+
+    // Put object with retention
+    let retain_until = chrono::Utc::now() + chrono::Duration::days(1);
+    s3.put_object()
+        .bucket("overwrite-lock-bucket")
+        .key("locked.txt")
+        .body(ByteStream::from_static(b"original"))
+        .object_lock_mode(aws_sdk_s3::types::ObjectLockMode::Governance)
+        .object_lock_retain_until_date(aws_sdk_s3::primitives::DateTime::from_millis(
+            retain_until.timestamp_millis(),
+        ))
+        .send()
+        .await
+        .unwrap();
+
+    // Try to overwrite - should fail with 403
+    let result = s3
+        .put_object()
+        .bucket("overwrite-lock-bucket")
+        .key("locked.txt")
+        .body(ByteStream::from_static(b"overwritten"))
+        .send()
+        .await;
+    assert!(result.is_err(), "Overwrite of locked object should fail");
+
+    // Verify original data is still there
+    let resp = s3
+        .get_object()
+        .bucket("overwrite-lock-bucket")
+        .key("locked.txt")
+        .send()
+        .await
+        .unwrap();
+    let body = resp.body.collect().await.unwrap().into_bytes();
+    assert_eq!(body.as_ref(), b"original");
+}

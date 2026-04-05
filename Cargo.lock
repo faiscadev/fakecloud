@@ -1163,6 +1163,8 @@ dependencies = [
  "aws-sdk-ssm",
  "aws-sdk-sts",
  "aws-types",
+ "chrono",
+ "reqwest",
  "serde_json",
  "tokio",
 ]
@@ -1177,6 +1179,7 @@ dependencies = [
  "fakecloud-core",
  "http 1.4.0",
  "parking_lot",
+ "reqwest",
  "serde",
  "serde_json",
  "thiserror",
@@ -1221,6 +1224,7 @@ dependencies = [
  "serde_json",
  "sha1",
  "sha2",
+ "tokio",
  "tracing",
  "uuid",
 ]

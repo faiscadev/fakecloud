@@ -36,13 +36,23 @@ pub async fn dispatch(
     let detected = match protocol::detect_service(&parts.headers, &query_params, &body_bytes) {
         Some(d) => d,
         None => {
-            return build_error_response(
-                StatusCode::BAD_REQUEST,
-                "MissingAction",
-                "Could not determine target service or action from request",
-                &request_id,
-                AwsProtocol::Query,
-            );
+            // OPTIONS requests (CORS preflight) don't carry Authorization headers.
+            // Route them to S3 since S3 is the only REST service that handles CORS.
+            if parts.method == http::Method::OPTIONS {
+                protocol::DetectedRequest {
+                    service: "s3".to_string(),
+                    action: String::new(),
+                    protocol: AwsProtocol::Rest,
+                }
+            } else {
+                return build_error_response(
+                    StatusCode::BAD_REQUEST,
+                    "MissingAction",
+                    "Could not determine target service or action from request",
+                    &request_id,
+                    AwsProtocol::Query,
+                );
+            }
         }
     };
 

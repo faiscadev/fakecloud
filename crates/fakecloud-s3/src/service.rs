@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use bytes::Bytes;
 use chrono::{DateTime, Timelike, Utc};
@@ -5,6 +7,7 @@ use http::{HeaderMap, Method, StatusCode};
 use md5::{Digest, Md5};
 use uuid::Uuid;
 
+use fakecloud_core::delivery::DeliveryBus;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -14,11 +17,12 @@ use crate::state::{AclGrant, MultipartUpload, S3Bucket, S3Object, SharedS3State,
 
 pub struct S3Service {
     state: SharedS3State,
+    delivery: Arc<DeliveryBus>,
 }
 
 impl S3Service {
-    pub fn new(state: SharedS3State) -> Self {
-        Self { state }
+    pub fn new(state: SharedS3State, delivery: Arc<DeliveryBus>) -> Self {
+        Self { state, delivery }
     }
 }
 
@@ -136,7 +140,85 @@ impl AwsService for S3Service {
             }
         }
 
-        match (&req.method, bucket, key.as_deref()) {
+        // Handle OPTIONS preflight requests (CORS)
+        if req.method == Method::OPTIONS {
+            if let Some(b_name) = bucket {
+                let cors_config = {
+                    let state = self.state.read();
+                    state
+                        .buckets
+                        .get(b_name)
+                        .and_then(|b| b.cors_config.clone())
+                };
+                if let Some(ref config) = cors_config {
+                    let origin = req
+                        .headers
+                        .get("origin")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("");
+                    let request_method = req
+                        .headers
+                        .get("access-control-request-method")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("");
+                    let rules = parse_cors_config(config);
+                    if let Some(rule) = find_cors_rule(&rules, origin, Some(request_method)) {
+                        let mut headers = HeaderMap::new();
+                        let matched_origin = if rule.allowed_origins.contains(&"*".to_string()) {
+                            "*"
+                        } else {
+                            origin
+                        };
+                        headers.insert(
+                            "access-control-allow-origin",
+                            matched_origin.parse().unwrap(),
+                        );
+                        headers.insert(
+                            "access-control-allow-methods",
+                            rule.allowed_methods.join(", ").parse().unwrap(),
+                        );
+                        if !rule.allowed_headers.is_empty() {
+                            let ah = if rule.allowed_headers.contains(&"*".to_string()) {
+                                req.headers
+                                    .get("access-control-request-headers")
+                                    .and_then(|v| v.to_str().ok())
+                                    .unwrap_or("*")
+                                    .to_string()
+                            } else {
+                                rule.allowed_headers.join(", ")
+                            };
+                            headers.insert("access-control-allow-headers", ah.parse().unwrap());
+                        }
+                        if let Some(max_age) = rule.max_age_seconds {
+                            headers.insert(
+                                "access-control-max-age",
+                                max_age.to_string().parse().unwrap(),
+                            );
+                        }
+                        return Ok(AwsResponse {
+                            status: StatusCode::OK,
+                            content_type: String::new(),
+                            body: Bytes::new(),
+                            headers,
+                        });
+                    }
+                }
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::FORBIDDEN,
+                    "CORSResponse",
+                    "CORS is not enabled for this bucket",
+                ));
+            }
+        }
+
+        // Capture origin for CORS response headers
+        let origin_header = req
+            .headers
+            .get("origin")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+
+        let mut result = match (&req.method, bucket, key.as_deref()) {
             // ListBuckets: GET /
             (&Method::GET, None, None) => self.list_buckets(&req),
 
@@ -298,7 +380,42 @@ impl AwsService for S3Service {
                 "MethodNotAllowed",
                 "The specified method is not allowed against this resource",
             )),
+        };
+
+        // Apply CORS headers to the response if Origin was present
+        if let (Some(ref origin), Some(b_name)) = (&origin_header, bucket) {
+            let cors_config = {
+                let state = self.state.read();
+                state
+                    .buckets
+                    .get(b_name)
+                    .and_then(|b| b.cors_config.clone())
+            };
+            if let Some(ref config) = cors_config {
+                let rules = parse_cors_config(config);
+                if let Some(rule) = find_cors_rule(&rules, origin, None) {
+                    if let Ok(ref mut resp) = result {
+                        let matched_origin = if rule.allowed_origins.contains(&"*".to_string()) {
+                            "*"
+                        } else {
+                            origin
+                        };
+                        resp.headers.insert(
+                            "access-control-allow-origin",
+                            matched_origin.parse().unwrap(),
+                        );
+                        if !rule.expose_headers.is_empty() {
+                            resp.headers.insert(
+                                "access-control-expose-headers",
+                                rule.expose_headers.join(", ").parse().unwrap(),
+                            );
+                        }
+                    }
+                }
+            }
         }
+
+        result
     }
 
     fn supported_actions(&self) -> &[&str] {
@@ -2068,6 +2185,19 @@ impl S3Service {
             .get_mut(bucket)
             .ok_or_else(|| no_such_bucket(bucket))?;
 
+        // Check object lock: overwriting a locked object is forbidden
+        if let Some(existing) = b.objects.get(key) {
+            if !existing.is_delete_marker {
+                if let Some(code) = check_object_lock_for_overwrite(existing, req) {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::FORBIDDEN,
+                        code,
+                        "Access Denied",
+                    ));
+                }
+            }
+        }
+
         // Handle If-Match: check existing object etag
         if let Some(ref if_match_val) = if_match {
             match b.objects.get(key) {
@@ -2091,6 +2221,7 @@ impl S3Service {
         }
 
         let data = req.body.clone();
+        let data_size = data.len() as u64;
         let etag = compute_md5(&data);
         let content_type = req
             .headers
@@ -2328,6 +2459,30 @@ impl S3Service {
                 }
             }
         }
+
+        // Capture notification config before dropping state lock
+        let notification_config = b.notification_config.clone();
+        let obj_size = data_size;
+        let obj_etag = etag.clone();
+        let bucket_name = bucket.to_string();
+        let obj_key = key.to_string();
+        let region = state.region.clone();
+        drop(state);
+
+        // Deliver S3 event notifications
+        if let Some(ref config) = notification_config {
+            deliver_notifications(
+                &self.delivery,
+                config,
+                "ObjectCreated:Put",
+                &bucket_name,
+                &obj_key,
+                obj_size,
+                &obj_etag,
+                &region,
+            );
+        }
+
         Ok(AwsResponse {
             status: StatusCode::OK,
             content_type: String::new(),
@@ -2558,6 +2713,7 @@ impl S3Service {
         let version_id_param = req.query_params.get("versionId").cloned();
 
         let mut state = self.state.write();
+        let region = state.region.clone();
         let b = state
             .buckets
             .get_mut(bucket)
@@ -2681,6 +2837,21 @@ impl S3Service {
             });
         }
 
+        // Check object lock for non-version-specific deletes on non-versioned buckets
+        if !versioning_enabled {
+            if let Some(existing) = b.objects.get(key) {
+                if !existing.is_delete_marker {
+                    if let Some(code) = check_object_lock_for_overwrite(existing, req) {
+                        return Err(AwsServiceError::aws_error(
+                            StatusCode::FORBIDDEN,
+                            code,
+                            "Access Denied",
+                        ));
+                    }
+                }
+            }
+        }
+
         // Versioned bucket: create a delete marker
         if versioning_enabled {
             // If the existing object was created before versioning, preserve it
@@ -2705,6 +2876,26 @@ impl S3Service {
             b.objects.insert(key.to_string(), marker);
             resp_headers.insert("x-amz-version-id", dm_id.parse().unwrap());
             resp_headers.insert("x-amz-delete-marker", "true".parse().unwrap());
+
+            // Notification for delete
+            let notification_config = b.notification_config.clone();
+            let bucket_name = bucket.to_string();
+            let obj_key = key.to_string();
+            let region = region.clone();
+            drop(state);
+            if let Some(ref config) = notification_config {
+                deliver_notifications(
+                    &self.delivery,
+                    config,
+                    "ObjectRemoved:DeleteMarkerCreated",
+                    &bucket_name,
+                    &obj_key,
+                    0,
+                    "",
+                    &region,
+                );
+            }
+
             return Ok(AwsResponse {
                 status: StatusCode::NO_CONTENT,
                 content_type: "application/xml".to_string(),
@@ -2713,7 +2904,28 @@ impl S3Service {
             });
         }
 
+        // Capture notification config before removing
+        let notification_config = b.notification_config.clone();
+        let bucket_name = bucket.to_string();
+        let obj_key = key.to_string();
+
         b.objects.remove(key);
+        drop(state);
+
+        // Deliver S3 event notifications
+        if let Some(ref config) = notification_config {
+            deliver_notifications(
+                &self.delivery,
+                config,
+                "ObjectRemoved:Delete",
+                &bucket_name,
+                &obj_key,
+                0,
+                "",
+                &region,
+            );
+        }
+
         Ok(AwsResponse {
             status: StatusCode::NO_CONTENT,
             content_type: "application/xml".to_string(),
@@ -3098,6 +3310,7 @@ impl S3Service {
         }
 
         let etag = src_obj.etag.clone();
+        let src_obj_size = src_obj.size;
         let last_modified = Utc::now();
 
         let new_metadata = if metadata_directive == "REPLACE" {
@@ -3294,6 +3507,15 @@ impl S3Service {
             String::new()
         };
 
+        // Capture notification config before dropping lock
+        let notification_config = db.notification_config.clone();
+        let copy_size = src_obj_size;
+        let copy_etag = etag.clone();
+        let copy_bucket = dest_bucket.to_string();
+        let copy_key = dest_key.to_string();
+        let region = state.region.clone();
+        drop(state);
+
         let body = format!(
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
              <CopyObjectResult>\
@@ -3303,6 +3525,21 @@ impl S3Service {
              </CopyObjectResult>",
             last_modified.format("%Y-%m-%dT%H:%M:%S%.3fZ"),
         );
+
+        // Deliver S3 event notifications
+        if let Some(ref config) = notification_config {
+            deliver_notifications(
+                &self.delivery,
+                config,
+                "ObjectCreated:Copy",
+                &copy_bucket,
+                &copy_key,
+                copy_size,
+                &copy_etag,
+                &region,
+            );
+        }
+
         Ok(AwsResponse {
             status: StatusCode::OK,
             content_type: "application/xml".to_string(),
@@ -4299,8 +4536,21 @@ impl S3Service {
             }
         } else {
             let obj = b.objects.get_mut(key).ok_or_else(|| no_such_key(key))?;
-            obj.lock_mode = mode;
+            obj.lock_mode = mode.clone();
             obj.lock_retain_until = retain_until;
+            // Also update in object_versions if the current object has a version_id
+            if let Some(ref vid) = obj.version_id {
+                let vid = vid.clone();
+                if let Some(versions) = b.object_versions.get_mut(key) {
+                    for v in versions.iter_mut() {
+                        if v.version_id.as_deref() == Some(&vid) {
+                            v.lock_mode = mode.clone();
+                            v.lock_retain_until = retain_until;
+                            break;
+                        }
+                    }
+                }
+            }
         }
 
         Ok(empty_response(StatusCode::OK))
@@ -4378,7 +4628,19 @@ impl S3Service {
             }
         } else {
             let obj = b.objects.get_mut(key).ok_or_else(|| no_such_key(key))?;
-            obj.lock_legal_hold = status;
+            obj.lock_legal_hold = status.clone();
+            // Also update in object_versions if the current object has a version_id
+            if let Some(ref vid) = obj.version_id {
+                let vid = vid.clone();
+                if let Some(versions) = b.object_versions.get_mut(key) {
+                    for v in versions.iter_mut() {
+                        if v.version_id.as_deref() == Some(&vid) {
+                            v.lock_legal_hold = status.clone();
+                            break;
+                        }
+                    }
+                }
+            }
         }
 
         Ok(empty_response(StatusCode::OK))
@@ -5508,6 +5770,271 @@ fn validate_lifecycle_xml(xml: &str) -> Result<(), AwsServiceError> {
     Ok(())
 }
 
+/// Build an S3 event notification JSON payload.
+fn build_s3_event_notification(
+    event_name: &str,
+    bucket_name: &str,
+    key: &str,
+    size: u64,
+    etag: &str,
+    region: &str,
+) -> String {
+    let event_time = Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
+    serde_json::json!({
+        "Records": [{
+            "eventVersion": "2.1",
+            "eventSource": "aws:s3",
+            "awsRegion": region,
+            "eventTime": event_time,
+            "eventName": event_name,
+            "s3": {
+                "bucket": {
+                    "name": bucket_name,
+                    "arn": format!("arn:aws:s3:::{}", bucket_name)
+                },
+                "object": {
+                    "key": key,
+                    "size": size,
+                    "eTag": etag
+                }
+            }
+        }]
+    })
+    .to_string()
+}
+
+/// Parsed notification target from the bucket notification config XML.
+struct NotificationTarget {
+    target_type: NotificationTargetType,
+    arn: String,
+    events: Vec<String>,
+}
+
+enum NotificationTargetType {
+    Sqs,
+    Sns,
+}
+
+/// Parse the bucket notification configuration XML into targets.
+fn parse_notification_config(xml: &str) -> Vec<NotificationTarget> {
+    let mut targets = Vec::new();
+
+    // Parse QueueConfiguration entries
+    let mut remaining = xml;
+    while let Some(start) = remaining.find("<QueueConfiguration>") {
+        let after = &remaining[start + 20..];
+        if let Some(end) = after.find("</QueueConfiguration>") {
+            let block = &after[..end];
+            if let Some(arn) = extract_xml_value(block, "Queue") {
+                let events = extract_all_xml_values(block, "Event");
+                targets.push(NotificationTarget {
+                    target_type: NotificationTargetType::Sqs,
+                    arn,
+                    events,
+                });
+            }
+            remaining = &after[end + 21..];
+        } else {
+            break;
+        }
+    }
+
+    // Parse TopicConfiguration entries
+    remaining = xml;
+    while let Some(start) = remaining.find("<TopicConfiguration>") {
+        let after = &remaining[start + 20..];
+        if let Some(end) = after.find("</TopicConfiguration>") {
+            let block = &after[..end];
+            if let Some(arn) = extract_xml_value(block, "Topic") {
+                let events = extract_all_xml_values(block, "Event");
+                targets.push(NotificationTarget {
+                    target_type: NotificationTargetType::Sns,
+                    arn,
+                    events,
+                });
+            }
+            remaining = &after[end + 21..];
+        } else {
+            break;
+        }
+    }
+
+    targets
+}
+
+/// Extract all values for a given XML tag (multiple occurrences).
+fn extract_all_xml_values(xml: &str, tag: &str) -> Vec<String> {
+    let mut values = Vec::new();
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let mut remaining = xml;
+    while let Some(start) = remaining.find(&open) {
+        let after = &remaining[start + open.len()..];
+        if let Some(end) = after.find(&close) {
+            values.push(after[..end].to_string());
+            remaining = &after[end + close.len()..];
+        } else {
+            break;
+        }
+    }
+    values
+}
+
+/// Check if an S3 event name matches a notification event filter.
+fn event_matches(event_name: &str, filter: &str) -> bool {
+    // Exact match
+    if filter == event_name {
+        return true;
+    }
+    // Wildcard: s3:ObjectCreated:* matches s3:ObjectCreated:Put, etc.
+    if filter.ends_with(":*") {
+        let prefix = &filter[..filter.len() - 1]; // "s3:ObjectCreated:"
+        if event_name.starts_with(prefix) {
+            return true;
+        }
+    }
+    // s3:* matches everything
+    if filter == "s3:*" {
+        return true;
+    }
+    false
+}
+
+/// Deliver S3 event notifications for a bucket operation.
+#[allow(clippy::too_many_arguments)]
+fn deliver_notifications(
+    delivery: &DeliveryBus,
+    notification_config: &str,
+    event_name: &str,
+    bucket_name: &str,
+    key: &str,
+    size: u64,
+    etag: &str,
+    region: &str,
+) {
+    let targets = parse_notification_config(notification_config);
+    let s3_event_name = format!("s3:{event_name}");
+    let message = build_s3_event_notification(event_name, bucket_name, key, size, etag, region);
+
+    for target in &targets {
+        let matches = target.events.is_empty()
+            || target
+                .events
+                .iter()
+                .any(|f| event_matches(&s3_event_name, f));
+        if !matches {
+            continue;
+        }
+        match target.target_type {
+            NotificationTargetType::Sqs => {
+                delivery.send_to_sqs(&target.arn, &message, &std::collections::HashMap::new());
+            }
+            NotificationTargetType::Sns => {
+                delivery.publish_to_sns(&target.arn, &message, Some("Amazon S3 Notification"));
+            }
+        }
+    }
+}
+
+/// Parse a CORS rule from XML.
+#[derive(Debug, Clone)]
+struct CorsRule {
+    allowed_origins: Vec<String>,
+    allowed_methods: Vec<String>,
+    allowed_headers: Vec<String>,
+    expose_headers: Vec<String>,
+    max_age_seconds: Option<u32>,
+}
+
+/// Parse CORS configuration XML into rules.
+fn parse_cors_config(xml: &str) -> Vec<CorsRule> {
+    let mut rules = Vec::new();
+    let mut remaining = xml;
+    while let Some(start) = remaining.find("<CORSRule>") {
+        let after = &remaining[start + 10..];
+        if let Some(end) = after.find("</CORSRule>") {
+            let block = &after[..end];
+            let allowed_origins = extract_all_xml_values(block, "AllowedOrigin");
+            let allowed_methods = extract_all_xml_values(block, "AllowedMethod");
+            let allowed_headers = extract_all_xml_values(block, "AllowedHeader");
+            let expose_headers = extract_all_xml_values(block, "ExposeHeader");
+            let max_age_seconds =
+                extract_xml_value(block, "MaxAgeSeconds").and_then(|s| s.parse().ok());
+            rules.push(CorsRule {
+                allowed_origins,
+                allowed_methods,
+                allowed_headers,
+                expose_headers,
+                max_age_seconds,
+            });
+            remaining = &after[end + 11..];
+        } else {
+            break;
+        }
+    }
+    rules
+}
+
+/// Match an origin against a CORS allowed origin pattern (supports "*" wildcard).
+fn origin_matches(origin: &str, pattern: &str) -> bool {
+    if pattern == "*" {
+        return true;
+    }
+    // Simple wildcard: *.example.com
+    if let Some(suffix) = pattern.strip_prefix('*') {
+        return origin.ends_with(suffix);
+    }
+    origin == pattern
+}
+
+/// Find the matching CORS rule for a given origin and method.
+fn find_cors_rule<'a>(
+    rules: &'a [CorsRule],
+    origin: &str,
+    method: Option<&str>,
+) -> Option<&'a CorsRule> {
+    rules.iter().find(|rule| {
+        let origin_ok = rule
+            .allowed_origins
+            .iter()
+            .any(|o| origin_matches(origin, o));
+        let method_ok = match method {
+            Some(m) => rule.allowed_methods.iter().any(|am| am == m),
+            None => true,
+        };
+        origin_ok && method_ok
+    })
+}
+
+/// Check if an object is locked (retention or legal hold) and should block mutation.
+/// Returns an error string if locked, None if allowed.
+fn check_object_lock_for_overwrite(obj: &S3Object, req: &AwsRequest) -> Option<&'static str> {
+    // Legal hold blocks overwrite
+    if obj.lock_legal_hold.as_deref() == Some("ON") {
+        return Some("AccessDenied");
+    }
+    // Retention check
+    if let (Some(mode), Some(until)) = (&obj.lock_mode, &obj.lock_retain_until) {
+        if *until > Utc::now() {
+            if mode == "COMPLIANCE" {
+                return Some("AccessDenied");
+            }
+            if mode == "GOVERNANCE" {
+                let bypass = req
+                    .headers
+                    .get("x-amz-bypass-governance-retention")
+                    .and_then(|v| v.to_str().ok())
+                    .map(|s| s.eq_ignore_ascii_case("true"))
+                    .unwrap_or(false);
+                if !bypass {
+                    return Some("AccessDenied");
+                }
+            }
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5562,5 +6089,79 @@ mod tests {
         assert!(etag_matches("abc", "\"abc\""));
         assert!(etag_matches("*", "\"abc\""));
         assert!(!etag_matches("\"xyz\"", "\"abc\""));
+    }
+
+    #[test]
+    fn test_event_matches() {
+        assert!(event_matches("s3:ObjectCreated:Put", "s3:ObjectCreated:*"));
+        assert!(event_matches("s3:ObjectCreated:Copy", "s3:ObjectCreated:*"));
+        assert!(event_matches(
+            "s3:ObjectRemoved:Delete",
+            "s3:ObjectRemoved:*"
+        ));
+        assert!(!event_matches(
+            "s3:ObjectRemoved:Delete",
+            "s3:ObjectCreated:*"
+        ));
+        assert!(event_matches(
+            "s3:ObjectCreated:Put",
+            "s3:ObjectCreated:Put"
+        ));
+        assert!(event_matches("s3:ObjectCreated:Put", "s3:*"));
+    }
+
+    #[test]
+    fn test_parse_notification_config() {
+        let xml = r#"<NotificationConfiguration>
+            <QueueConfiguration>
+                <Queue>arn:aws:sqs:us-east-1:123456789012:my-queue</Queue>
+                <Event>s3:ObjectCreated:*</Event>
+            </QueueConfiguration>
+            <TopicConfiguration>
+                <Topic>arn:aws:sns:us-east-1:123456789012:my-topic</Topic>
+                <Event>s3:ObjectRemoved:*</Event>
+            </TopicConfiguration>
+        </NotificationConfiguration>"#;
+        let targets = parse_notification_config(xml);
+        assert_eq!(targets.len(), 2);
+        assert_eq!(
+            targets[0].arn,
+            "arn:aws:sqs:us-east-1:123456789012:my-queue"
+        );
+        assert_eq!(targets[0].events, vec!["s3:ObjectCreated:*"]);
+        assert_eq!(
+            targets[1].arn,
+            "arn:aws:sns:us-east-1:123456789012:my-topic"
+        );
+        assert_eq!(targets[1].events, vec!["s3:ObjectRemoved:*"]);
+    }
+
+    #[test]
+    fn test_parse_cors_config() {
+        let xml = r#"<CORSConfiguration>
+            <CORSRule>
+                <AllowedOrigin>https://example.com</AllowedOrigin>
+                <AllowedMethod>GET</AllowedMethod>
+                <AllowedMethod>PUT</AllowedMethod>
+                <AllowedHeader>*</AllowedHeader>
+                <ExposeHeader>x-amz-request-id</ExposeHeader>
+                <MaxAgeSeconds>3600</MaxAgeSeconds>
+            </CORSRule>
+        </CORSConfiguration>"#;
+        let rules = parse_cors_config(xml);
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].allowed_origins, vec!["https://example.com"]);
+        assert_eq!(rules[0].allowed_methods, vec!["GET", "PUT"]);
+        assert_eq!(rules[0].allowed_headers, vec!["*"]);
+        assert_eq!(rules[0].expose_headers, vec!["x-amz-request-id"]);
+        assert_eq!(rules[0].max_age_seconds, Some(3600));
+    }
+
+    #[test]
+    fn test_origin_matches() {
+        assert!(origin_matches("https://example.com", "https://example.com"));
+        assert!(origin_matches("https://example.com", "*"));
+        assert!(origin_matches("https://foo.example.com", "*.example.com"));
+        assert!(!origin_matches("https://evil.com", "https://example.com"));
     }
 }
