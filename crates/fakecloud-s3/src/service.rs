@@ -140,10 +140,32 @@ impl AwsService for S3Service {
                     self.put_bucket_acl(&req, b)
                 } else if req.query_params.contains_key("versioning") {
                     self.put_bucket_versioning(&req, b)
+                } else if req.query_params.contains_key("cors") {
+                    self.put_bucket_cors(&req, b)
+                } else if req.query_params.contains_key("notification") {
+                    self.put_bucket_notification(&req, b)
+                } else if req.query_params.contains_key("website") {
+                    self.put_bucket_website(&req, b)
+                } else if req.query_params.contains_key("accelerate") {
+                    self.put_bucket_accelerate(&req, b)
+                } else if req.query_params.contains_key("publicAccessBlock") {
+                    self.put_public_access_block(&req, b)
                 } else if req.query_params.contains_key("encryption") {
                     self.put_bucket_encryption(&req, b)
+                } else if req.query_params.contains_key("lifecycle") {
+                    self.put_bucket_lifecycle(&req, b)
+                } else if req.query_params.contains_key("logging") {
+                    self.put_bucket_logging(&req, b)
+                } else if req.query_params.contains_key("policy") {
+                    self.put_bucket_policy(&req, b)
                 } else if req.query_params.contains_key("object-lock") {
                     self.put_object_lock_config(&req, b)
+                } else if req.query_params.contains_key("replication") {
+                    self.put_bucket_replication(&req, b)
+                } else if req.query_params.contains_key("ownershipControls") {
+                    self.put_bucket_ownership_controls(&req, b)
+                } else if req.query_params.contains_key("inventory") {
+                    self.put_bucket_inventory(&req, b)
                 } else {
                     self.create_bucket(&req, b)
                 }
@@ -151,8 +173,24 @@ impl AwsService for S3Service {
             (&Method::DELETE, Some(b), None) => {
                 if req.query_params.contains_key("tagging") {
                     self.delete_bucket_tagging(&req, b)
+                } else if req.query_params.contains_key("cors") {
+                    self.delete_bucket_cors(b)
+                } else if req.query_params.contains_key("website") {
+                    self.delete_bucket_website(b)
+                } else if req.query_params.contains_key("publicAccessBlock") {
+                    self.delete_public_access_block(b)
                 } else if req.query_params.contains_key("encryption") {
                     self.delete_bucket_encryption(b)
+                } else if req.query_params.contains_key("lifecycle") {
+                    self.delete_bucket_lifecycle(b)
+                } else if req.query_params.contains_key("policy") {
+                    self.delete_bucket_policy(b)
+                } else if req.query_params.contains_key("replication") {
+                    self.delete_bucket_replication(b)
+                } else if req.query_params.contains_key("ownershipControls") {
+                    self.delete_bucket_ownership_controls(b)
+                } else if req.query_params.contains_key("inventory") {
+                    self.delete_bucket_inventory(&req, b)
                 } else {
                     self.delete_bucket(&req, b)
                 }
@@ -173,8 +211,32 @@ impl AwsService for S3Service {
                     self.get_object_lock_configuration(b)
                 } else if req.query_params.contains_key("encryption") {
                     self.get_bucket_encryption(b)
-                } else {
+                } else if req.query_params.contains_key("lifecycle") {
+                    self.get_bucket_lifecycle(b)
+                } else if req.query_params.contains_key("cors") {
+                    self.get_bucket_cors(b)
+                } else if req.query_params.contains_key("notification") {
+                    self.get_bucket_notification(b)
+                } else if req.query_params.contains_key("website") {
+                    self.get_bucket_website(b)
+                } else if req.query_params.contains_key("accelerate") {
+                    self.get_bucket_accelerate(b)
+                } else if req.query_params.contains_key("publicAccessBlock") {
+                    self.get_public_access_block(b)
+                } else if req.query_params.contains_key("logging") {
+                    self.get_bucket_logging(b)
+                } else if req.query_params.contains_key("policy") {
+                    self.get_bucket_policy(b)
+                } else if req.query_params.contains_key("replication") {
+                    self.get_bucket_replication(b)
+                } else if req.query_params.contains_key("ownershipControls") {
+                    self.get_bucket_ownership_controls(b)
+                } else if req.query_params.contains_key("inventory") {
+                    self.get_bucket_inventory(&req, b)
+                } else if req.query_params.get("list-type").map(|s| s.as_str()) == Some("2") {
                     self.list_objects_v2(&req, b)
+                } else {
+                    self.list_objects_v1(&req, b)
                 }
             }
 
@@ -295,21 +357,59 @@ impl S3Service {
 
         // Parse LocationConstraint from body if present
         let body_str = std::str::from_utf8(&req.body).unwrap_or("");
-        if !body_str.is_empty() {
-            if let Some(constraint) = extract_xml_value(body_str, "LocationConstraint") {
-                if !constraint.is_empty() && !is_valid_region(&constraint) {
+        let has_config_body =
+            !body_str.is_empty() && body_str.contains("CreateBucketConfiguration");
+        let explicit_constraint = if has_config_body {
+            extract_xml_value(body_str, "LocationConstraint")
+        } else {
+            None
+        };
+
+        if let Some(ref constraint) = explicit_constraint {
+            if !constraint.is_empty() {
+                if constraint == "us-east-1" {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "InvalidLocationConstraint",
+                        "The specified location-constraint is not valid",
+                    ));
+                }
+                if !is_valid_region(constraint) {
                     return Err(AwsServiceError::aws_error(
                         StatusCode::BAD_REQUEST,
                         "InvalidLocationConstraint",
                         format!("The specified location-constraint is not valid: {constraint}"),
                     ));
                 }
+                if constraint != &req.region && req.region != "us-east-1" {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "IllegalLocationConstraintException",
+                        format!(
+                            "The {} location constraint is incompatible for the region specific endpoint this request was sent to.",
+                            constraint
+                        ),
+                    ));
+                }
             }
         }
 
-        // Determine the requested region from the body's LocationConstraint
-        let requested_region =
-            extract_xml_value(body_str, "LocationConstraint").unwrap_or_else(|| req.region.clone());
+        let constraint_unspecified = match &explicit_constraint {
+            None => true,
+            Some(c) => c.is_empty(),
+        };
+        if constraint_unspecified && req.region != "us-east-1" {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "IllegalLocationConstraintException",
+                "The unspecified location constraint is incompatible for the region specific endpoint this request was sent to.",
+            ));
+        }
+
+        let requested_region = match &explicit_constraint {
+            Some(c) if !c.is_empty() => c.clone(),
+            _ => req.region.clone(),
+        };
 
         // Parse ACL from header
         let acl = req
@@ -532,6 +632,13 @@ impl S3Service {
         bucket: &str,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body_str = std::str::from_utf8(&req.body).unwrap_or("").to_string();
+        if serde_json::from_str::<serde_json::Value>(&body_str).is_err() {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "MalformedPolicy",
+                "This policy contains invalid Json",
+            ));
+        }
         let mut state = self.state.write();
         let b = state
             .buckets
@@ -747,6 +854,13 @@ impl S3Service {
         req: &AwsRequest,
         bucket: &str,
     ) -> Result<AwsResponse, AwsServiceError> {
+        if bucket.contains('.') {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidRequest",
+                "S3 Transfer Acceleration is not supported for buckets with periods (.) in their names",
+            ));
+        }
         let body_str = std::str::from_utf8(&req.body).unwrap_or("");
         let status = extract_xml_value(body_str, "Status");
         let mut state = self.state.write();
@@ -1054,6 +1168,15 @@ impl S3Service {
             .cloned()
             .unwrap_or_default();
         let continuation = req.query_params.get("continuation-token").cloned();
+        if let Some(ref ct) = continuation {
+            if ct.is_empty() {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidArgument",
+                    "The continuation token provided is incorrect",
+                ));
+            }
+        }
 
         let effective_start = continuation.as_deref().unwrap_or(&start_after);
 
@@ -1469,6 +1592,143 @@ impl S3Service {
             )),
         }
     }
+
+    fn put_bucket_replication(
+        &self,
+        req: &AwsRequest,
+        bucket: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body_str = std::str::from_utf8(&req.body).unwrap_or("").to_string();
+        let mut state = self.state.write();
+        let b = state
+            .buckets
+            .get_mut(bucket)
+            .ok_or_else(|| no_such_bucket(bucket))?;
+        b.replication_config = Some(body_str);
+        Ok(empty_response(StatusCode::OK))
+    }
+
+    fn get_bucket_replication(&self, bucket: &str) -> Result<AwsResponse, AwsServiceError> {
+        let state = self.state.read();
+        let b = state
+            .buckets
+            .get(bucket)
+            .ok_or_else(|| no_such_bucket(bucket))?;
+        match &b.replication_config {
+            Some(config) => Ok(AwsResponse::xml(StatusCode::OK, config.clone())),
+            None => Err(AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "ReplicationConfigurationNotFoundError",
+                "The replication configuration was not found",
+            )),
+        }
+    }
+
+    fn delete_bucket_replication(&self, bucket: &str) -> Result<AwsResponse, AwsServiceError> {
+        let mut state = self.state.write();
+        let b = state
+            .buckets
+            .get_mut(bucket)
+            .ok_or_else(|| no_such_bucket(bucket))?;
+        b.replication_config = None;
+        Ok(empty_response(StatusCode::NO_CONTENT))
+    }
+
+    fn put_bucket_ownership_controls(
+        &self,
+        req: &AwsRequest,
+        bucket: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body_str = std::str::from_utf8(&req.body).unwrap_or("").to_string();
+        let mut state = self.state.write();
+        let b = state
+            .buckets
+            .get_mut(bucket)
+            .ok_or_else(|| no_such_bucket(bucket))?;
+        b.ownership_controls = Some(body_str);
+        Ok(empty_response(StatusCode::OK))
+    }
+
+    fn get_bucket_ownership_controls(&self, bucket: &str) -> Result<AwsResponse, AwsServiceError> {
+        let state = self.state.read();
+        let b = state
+            .buckets
+            .get(bucket)
+            .ok_or_else(|| no_such_bucket(bucket))?;
+        match &b.ownership_controls {
+            Some(config) => Ok(AwsResponse::xml(StatusCode::OK, config.clone())),
+            None => Err(AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "OwnershipControlsNotFoundError",
+                "The bucket ownership controls were not found",
+            )),
+        }
+    }
+
+    fn delete_bucket_ownership_controls(
+        &self,
+        bucket: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let mut state = self.state.write();
+        let b = state
+            .buckets
+            .get_mut(bucket)
+            .ok_or_else(|| no_such_bucket(bucket))?;
+        b.ownership_controls = None;
+        Ok(empty_response(StatusCode::NO_CONTENT))
+    }
+
+    fn put_bucket_inventory(
+        &self,
+        req: &AwsRequest,
+        bucket: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body_str = std::str::from_utf8(&req.body).unwrap_or("").to_string();
+        let inv_id = req.query_params.get("id").cloned().unwrap_or_default();
+        let mut state = self.state.write();
+        let b = state
+            .buckets
+            .get_mut(bucket)
+            .ok_or_else(|| no_such_bucket(bucket))?;
+        b.inventory_configs.insert(inv_id, body_str);
+        Ok(empty_response(StatusCode::OK))
+    }
+
+    fn get_bucket_inventory(
+        &self,
+        req: &AwsRequest,
+        bucket: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let inv_id = req.query_params.get("id").cloned().unwrap_or_default();
+        let state = self.state.read();
+        let b = state
+            .buckets
+            .get(bucket)
+            .ok_or_else(|| no_such_bucket(bucket))?;
+        match b.inventory_configs.get(&inv_id) {
+            Some(config) => Ok(AwsResponse::xml(StatusCode::OK, config.clone())),
+            None => Err(AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "NoSuchConfiguration",
+                format!("The specified configuration does not exist: {inv_id}"),
+            )),
+        }
+    }
+
+    fn delete_bucket_inventory(
+        &self,
+        req: &AwsRequest,
+        bucket: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let inv_id = req.query_params.get("id").cloned().unwrap_or_default();
+        let mut state = self.state.write();
+        let b = state
+            .buckets
+            .get_mut(bucket)
+            .ok_or_else(|| no_such_bucket(bucket))?;
+        b.inventory_configs.remove(&inv_id);
+        Ok(empty_response(StatusCode::NO_CONTENT))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1602,6 +1862,13 @@ impl S3Service {
             .and_then(|v| v.to_str().ok())
             .unwrap_or("STANDARD")
             .to_string();
+        if !is_valid_storage_class(&storage_class) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidStorageClass",
+                "The storage class you specified is not valid",
+            ));
+        }
         let website_redirect_location = req
             .headers
             .get("x-amz-website-redirect-location")
@@ -1704,6 +1971,8 @@ impl S3Service {
             is_delete_marker: false,
             content_encoding,
             website_redirect_location,
+            restore_ongoing: None,
+            restore_expiry: None,
             checksum_algorithm: checksum_algorithm.clone(),
             checksum_value: checksum_value.clone(),
             lock_mode,
@@ -2425,6 +2694,8 @@ impl S3Service {
             is_delete_marker: false,
             content_encoding: src_obj.content_encoding,
             website_redirect_location: new_redirect,
+            restore_ongoing: None,
+            restore_expiry: None,
             checksum_algorithm: new_checksum_algo.clone(),
             checksum_value: new_checksum_val.clone(),
             // Do not copy lock from source
@@ -3120,6 +3391,8 @@ impl S3Service {
             is_delete_marker: false,
             content_encoding: None,
             website_redirect_location: None,
+            restore_ongoing: None,
+            restore_expiry: None,
             checksum_algorithm: None,
             checksum_value: None,
             lock_mode: None,
@@ -3823,7 +4096,6 @@ fn parse_acl_xml(xml: &str) -> Result<Vec<AclGrant>, AwsServiceError> {
 // Helpers
 // ---------------------------------------------------------------------------
 
-#[allow(dead_code)]
 fn empty_response(status: StatusCode) -> AwsResponse {
     AwsResponse {
         status,
@@ -3932,6 +4204,23 @@ fn extract_user_metadata(headers: &HeaderMap) -> std::collections::HashMap<Strin
     meta
 }
 
+fn is_valid_storage_class(class: &str) -> bool {
+    matches!(
+        class,
+        "STANDARD"
+            | "REDUCED_REDUNDANCY"
+            | "STANDARD_IA"
+            | "ONEZONE_IA"
+            | "INTELLIGENT_TIERING"
+            | "GLACIER"
+            | "DEEP_ARCHIVE"
+            | "GLACIER_IR"
+            | "OUTPOSTS"
+            | "SNOW"
+            | "EXPRESS_ONEZONE"
+    )
+}
+
 fn is_valid_bucket_name(name: &str) -> bool {
     if name.len() < 3 || name.len() > 63 {
         return false;
@@ -3978,6 +4267,15 @@ fn is_valid_region(region: &str) -> bool {
         "me-south-1",
         "me-central-1",
         "sa-east-1",
+        "cn-north-1",
+        "cn-northwest-1",
+        "us-gov-east-1",
+        "us-gov-east-2",
+        "us-gov-west-1",
+        "us-iso-east-1",
+        "us-iso-west-1",
+        "us-isob-east-1",
+        "us-isof-south-1",
     ];
     valid_regions.contains(&region)
 }
@@ -4048,6 +4346,8 @@ fn make_delete_marker(key: &str, dm_id: &str) -> S3Object {
         is_delete_marker: true,
         content_encoding: None,
         website_redirect_location: None,
+        restore_ongoing: None,
+        restore_expiry: None,
         checksum_algorithm: None,
         checksum_value: None,
         lock_mode: None,

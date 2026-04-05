@@ -41,6 +41,10 @@ pub struct S3Object {
     pub is_delete_marker: bool,
     pub content_encoding: Option<String>,
     pub website_redirect_location: Option<String>,
+    /// Glacier restore: ongoing request status.
+    pub restore_ongoing: Option<bool>,
+    /// Glacier restore: expiry date string.
+    pub restore_expiry: Option<String>,
     /// Checksum algorithm (CRC32, SHA1, SHA256).
     pub checksum_algorithm: Option<String>,
     /// Base64-encoded checksum value.
@@ -109,6 +113,9 @@ pub struct S3Bucket {
     pub accelerate_status: Option<String>,
     pub public_access_block: Option<String>,
     pub object_lock_config: Option<String>,
+    pub replication_config: Option<String>,
+    pub ownership_controls: Option<String>,
+    pub inventory_configs: HashMap<String, String>,
 }
 
 impl S3Bucket {
@@ -141,6 +148,9 @@ impl S3Bucket {
             accelerate_status: None,
             public_access_block: None,
             object_lock_config: None,
+            replication_config: None,
+            ownership_controls: None,
+            inventory_configs: HashMap::new(),
         }
     }
 }
