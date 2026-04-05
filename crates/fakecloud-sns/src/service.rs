@@ -560,7 +560,7 @@ impl SnsService {
                     StatusCode::BAD_REQUEST,
                     "InvalidParameter",
                     format!(
-                        "Invalid parameter: Endpoint Reason: Endpoint does not exist for endpoint arn {endpoint}"
+                        "Invalid parameter: Endpoint Reason: Endpoint does not exist for endpoint {endpoint}"
                     ),
                 ));
             }

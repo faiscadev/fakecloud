@@ -294,12 +294,7 @@ pub fn list_roles_response(roles: &[IamRole], request_id: &str) -> String {
     let members: String = roles
         .iter()
         .map(|r| {
-            let tags_section = if r.tags.is_empty() {
-                String::new()
-            } else {
-                let tags_members = tags_xml(&r.tags);
-                format!("\n        <Tags>\n{tags_members}\n        </Tags>")
-            };
+            // ListRoles does NOT include Tags, PermissionsBoundary, or RoleLastUsed
             let description_section = match &r.description {
                 Some(desc) => format!("\n        <Description>{}</Description>", xml_escape(desc)),
                 None => String::new(),
@@ -312,7 +307,7 @@ pub fn list_roles_response(roles: &[IamRole], request_id: &str) -> String {
         <Arn>{arn}</Arn>
         <CreateDate>{date}</CreateDate>
         <AssumeRolePolicyDocument>{policy}</AssumeRolePolicyDocument>{description_section}
-        <MaxSessionDuration>{max_session}</MaxSessionDuration>{tags_section}
+        <MaxSessionDuration>{max_session}</MaxSessionDuration>
       </member>"#,
                 path = r.path,
                 name = r.role_name,
@@ -351,12 +346,7 @@ pub fn list_roles_response_paginated(
     let members: String = roles
         .iter()
         .map(|r| {
-            let tags_section = if r.tags.is_empty() {
-                String::new()
-            } else {
-                let tags_members = tags_xml(&r.tags);
-                format!("\n        <Tags>\n{tags_members}\n        </Tags>")
-            };
+            // ListRoles does NOT include Tags, PermissionsBoundary, or RoleLastUsed
             let description_section = match &r.description {
                 Some(desc) => format!("\n        <Description>{}</Description>", xml_escape(desc)),
                 None => String::new(),
@@ -369,7 +359,7 @@ pub fn list_roles_response_paginated(
         <Arn>{arn}</Arn>
         <CreateDate>{date}</CreateDate>
         <AssumeRolePolicyDocument>{policy}</AssumeRolePolicyDocument>{description_section}
-        <MaxSessionDuration>{max_session}</MaxSessionDuration>{tags_section}
+        <MaxSessionDuration>{max_session}</MaxSessionDuration>
       </member>"#,
                 path = r.path,
                 name = r.role_name,
@@ -499,6 +489,15 @@ pub fn get_policy_response(policy: &IamPolicy, request_id: &str) -> String {
         format!("\n      <Tags>\n{tags_members}\n      </Tags>")
     };
 
+    let description_section = if policy.description.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n      <Description>{}</Description>",
+            xml_escape(&policy.description)
+        )
+    };
+
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <GetPolicyResponse xmlns="https://iam.amazonaws.com/doc/2010-05-08/">
@@ -511,8 +510,7 @@ pub fn get_policy_response(policy: &IamPolicy, request_id: &str) -> String {
       <DefaultVersionId>{default_version}</DefaultVersionId>
       <AttachmentCount>{attachment_count}</AttachmentCount>
       <IsAttachable>true</IsAttachable>
-      <CreateDate>{date}</CreateDate>
-      <Description>{description}</Description>{tags_section}
+      <CreateDate>{date}</CreateDate>{description_section}{tags_section}
     </Policy>
   </GetPolicyResult>
   <ResponseMetadata>
@@ -526,7 +524,6 @@ pub fn get_policy_response(policy: &IamPolicy, request_id: &str) -> String {
         default_version = policy.default_version_id,
         attachment_count = policy.attachment_count,
         date = policy.created_at.format("%Y-%m-%dT%H:%M:%SZ"),
-        description = xml_escape(&policy.description),
     )
 }
 

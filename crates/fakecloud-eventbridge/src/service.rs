@@ -598,6 +598,9 @@ impl EventBridgeService {
                 if let Some(ref se) = r.schedule_expression {
                     obj["ScheduleExpression"] = json!(se);
                 }
+                if let Some(ref mb) = r.managed_by {
+                    obj["ManagedBy"] = json!(mb);
+                }
                 obj
             })
             .collect();
@@ -1312,11 +1315,24 @@ impl EventBridgeService {
             "arn:aws:events:{}:{}:rule/{}",
             req.region, state.account_id, rule_name
         );
+        // Merge archive event pattern with replay-name filter
+        let rule_event_pattern = {
+            let mut merged = if let Some(ref ep) = event_pattern {
+                serde_json::from_str::<Value>(ep).unwrap_or_else(|_| json!({}))
+            } else {
+                json!({})
+            };
+            if let Some(obj) = merged.as_object_mut() {
+                obj.insert("replay-name".to_string(), json!([{"exists": false}]));
+            }
+            serde_json::to_string(&merged).unwrap_or_default()
+        };
+
         let archive_rule = EventRule {
             name: rule_name.clone(),
             arn: rule_arn,
             event_bus_name: bus_name.clone(),
-            event_pattern: Some(r#"{"replay-name": [{"exists": false}]}"#.to_string()),
+            event_pattern: Some(rule_event_pattern),
             schedule_expression: None,
             state: "ENABLED".to_string(),
             description: None,

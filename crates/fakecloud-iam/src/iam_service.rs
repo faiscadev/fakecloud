@@ -1333,9 +1333,11 @@ impl IamService {
             )
         })?;
 
-        // UpdateRole updates description if provided
+        // UpdateRole: if Description is provided, set it; if absent, clear it
         if let Some(desc) = req.query_params.get("Description") {
             role.description = Some(desc.clone());
+        } else {
+            role.description = None;
         }
         if let Some(dur) = req
             .query_params
@@ -4522,8 +4524,20 @@ impl IamService {
 
         let mut state = self.state.write();
 
-        if let Some(certs) = state.signing_certificates.get_mut(&user_name) {
+        let found = if let Some(certs) = state.signing_certificates.get_mut(&user_name) {
+            let before = certs.len();
             certs.retain(|c| c.certificate_id != certificate_id);
+            certs.len() < before
+        } else {
+            false
+        };
+
+        if !found {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "NoSuchEntity",
+                format!("The Certificate with id {certificate_id} cannot be found."),
+            ));
         }
 
         let xml = empty_response("DeleteSigningCertificate", &req.request_id);
@@ -5512,6 +5526,14 @@ impl IamService {
         use base64::Engine;
         let state = self.state.read();
 
+        if !state.credential_report_generated {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::GONE,
+                "ReportNotPresent",
+                "Credential report does not exist. Use GenerateCredentialReport to generate one.",
+            ));
+        }
+
         let mut csv = String::from(
             "user,arn,user_creation_time,password_enabled,password_last_used,password_last_changed,password_next_rotation,mfa_active,access_key_1_active,access_key_1_last_rotated,access_key_1_last_used_date,access_key_1_last_used_region,access_key_1_last_used_service,access_key_2_active,access_key_2_last_rotated,access_key_2_last_used_date,access_key_2_last_used_region,access_key_2_last_used_service,cert_1_active,cert_1_last_rotated,cert_2_active,cert_2_last_rotated\n"
         );
@@ -5587,6 +5609,15 @@ impl IamService {
             .unwrap_or_else(|| "/".to_string());
         let tags = parse_tags(&req.query_params);
 
+        // Validate path
+        if !is_valid_iam_path(&path) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ValidationError",
+                "The specified value for path is invalid. It must begin and end with / and contain only alphanumeric characters and/or / characters.",
+            ));
+        }
+
         let mut state = self.state.write();
 
         let serial_number = format!(
@@ -5648,7 +5679,7 @@ impl IamService {
             return Err(AwsServiceError::aws_error(
                 StatusCode::NOT_FOUND,
                 "NoSuchEntity",
-                format!("VirtualMFADevice with serial number {serial_number} not found"),
+                format!("VirtualMFADevice with serial number {serial_number} doesn't exist."),
             ));
         }
 
@@ -5811,6 +5842,30 @@ impl IamService {
         );
         Ok(AwsResponse::xml(StatusCode::OK, xml))
     }
+}
+
+/// Validate an IAM path: must start and end with `/`, contain only valid chars, no `//`.
+fn is_valid_iam_path(path: &str) -> bool {
+    if !path.starts_with('/') || !path.ends_with('/') {
+        return false;
+    }
+    if path.contains("//") {
+        return false;
+    }
+    if path.len() > 512 {
+        return false;
+    }
+    path.chars().all(|c| {
+        c.is_alphanumeric()
+            || c == '/'
+            || c == '-'
+            || c == '_'
+            || c == '.'
+            || c == '+'
+            || c == '='
+            || c == '@'
+            || c == ','
+    })
 }
 
 // ========= ListEntitiesForPolicy =========
