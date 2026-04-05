@@ -1,6 +1,7 @@
 mod helpers;
 
 use aws_sdk_eventbridge::types::{PutEventsRequestEntry, RuleState, Target};
+use aws_sdk_sqs::types::QueueAttributeName;
 use helpers::TestServer;
 
 #[tokio::test]
@@ -222,4 +223,148 @@ async fn eb_schedule_fires_to_sqs() {
     let event: serde_json::Value = serde_json::from_str(body).unwrap();
     assert_eq!(event["source"], "aws.events");
     assert_eq!(event["detail-type"], "Scheduled Event");
+}
+
+/// Verify EventBridge PutEvents delivers matching events to an SQS target.
+#[tokio::test]
+async fn eb_put_events_delivers_to_sqs_target() {
+    let server = TestServer::start().await;
+    let eb = server.eventbridge_client().await;
+    let sqs = server.sqs_client().await;
+
+    // Create SQS queue
+    let queue = sqs
+        .create_queue()
+        .queue_name("eb-delivery-queue")
+        .send()
+        .await
+        .unwrap();
+    let queue_url = queue.queue_url().unwrap().to_string();
+    let attrs = sqs
+        .get_queue_attributes()
+        .queue_url(&queue_url)
+        .attribute_names(QueueAttributeName::QueueArn)
+        .send()
+        .await
+        .unwrap();
+    let queue_arn = attrs
+        .attributes()
+        .unwrap()
+        .get(&QueueAttributeName::QueueArn)
+        .unwrap()
+        .to_string();
+
+    // Create rule matching "app.orders" source
+    eb.put_rule()
+        .name("delivery-rule")
+        .event_pattern(r#"{"source": ["app.orders"]}"#)
+        .send()
+        .await
+        .unwrap();
+
+    // Add SQS target
+    eb.put_targets()
+        .rule("delivery-rule")
+        .targets(
+            Target::builder()
+                .id("sqs-delivery")
+                .arn(&queue_arn)
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    // Put a matching event
+    let resp = eb
+        .put_events()
+        .entries(
+            PutEventsRequestEntry::builder()
+                .source("app.orders")
+                .detail_type("OrderCreated")
+                .detail(r#"{"orderId": "100"}"#)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.failed_entry_count(), 0);
+
+    // Verify the event was delivered to SQS
+    let msgs = sqs
+        .receive_message()
+        .queue_url(&queue_url)
+        .max_number_of_messages(10)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(msgs.messages().len(), 1, "expected 1 event in SQS");
+    let body: serde_json::Value = serde_json::from_str(msgs.messages()[0].body().unwrap()).unwrap();
+    assert_eq!(body["source"], "app.orders");
+    assert_eq!(body["detail-type"], "OrderCreated");
+    assert_eq!(body["detail"]["orderId"], "100");
+}
+
+/// Verify EventBridge PutEvents succeeds when targeting Lambda, Logs, and StepFunctions
+/// (stub delivery — no error, event is accepted).
+#[tokio::test]
+async fn eb_put_events_stub_targets_no_error() {
+    let server = TestServer::start().await;
+    let eb = server.eventbridge_client().await;
+
+    // Create rule
+    eb.put_rule()
+        .name("multi-target-rule")
+        .event_pattern(r#"{"source": ["test.stubs"]}"#)
+        .send()
+        .await
+        .unwrap();
+
+    // Add Lambda, Logs, and StepFunctions targets
+    eb.put_targets()
+        .rule("multi-target-rule")
+        .targets(
+            Target::builder()
+                .id("lambda-target")
+                .arn("arn:aws:lambda:us-east-1:123456789012:function:my-func")
+                .build()
+                .unwrap(),
+        )
+        .targets(
+            Target::builder()
+                .id("logs-target")
+                .arn("arn:aws:logs:us-east-1:123456789012:log-group:/aws/events/my-log")
+                .build()
+                .unwrap(),
+        )
+        .targets(
+            Target::builder()
+                .id("sfn-target")
+                .arn("arn:aws:states:us-east-1:123456789012:stateMachine:my-machine")
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    // Put a matching event — should succeed without errors
+    let resp = eb
+        .put_events()
+        .entries(
+            PutEventsRequestEntry::builder()
+                .source("test.stubs")
+                .detail_type("TestEvent")
+                .detail(r#"{"key": "value"}"#)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.failed_entry_count(), 0);
+    assert_eq!(resp.entries().len(), 1);
+    assert!(resp.entries()[0].event_id().is_some());
 }

@@ -204,6 +204,9 @@ impl ResetState {
             eb.api_destinations.clear();
             eb.replays.clear();
             eb.buses.retain(|name, _| name == "default");
+            eb.lambda_invocations.clear();
+            eb.log_deliveries.clear();
+            eb.step_function_executions.clear();
         }
         self.ssm.write().reset();
         self.s3.write().reset();
