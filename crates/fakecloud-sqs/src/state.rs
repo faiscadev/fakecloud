@@ -56,6 +56,10 @@ pub struct SqsQueue {
     pub tags: HashMap<String, String>,
     /// FIFO: next sequence number counter
     pub next_sequence_number: u64,
+    /// Permission labels stored on the queue
+    pub permission_labels: Vec<String>,
+    /// Tracks message_id -> list of all receipt handles ever issued for that message
+    pub receipt_handle_map: HashMap<String, Vec<String>>,
 }
 
 // TODO: SQS needs ListQueueTags and TagQueue action handlers.

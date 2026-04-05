@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use chrono::Utc;
 use http::StatusCode;
-use md5::{Digest, Md5};
+use md5::Md5;
 use serde_json::{json, Value};
 use sha2::Sha256;
 use std::collections::{HashMap, VecDeque};
@@ -532,6 +532,40 @@ impl SqsService {
             })
         });
 
+        // Validate that the DLQ actually exists
+        if let Some(ref rp) = redrive_policy {
+            let dlq_exists = state
+                .queues
+                .values()
+                .any(|q| q.arn == rp.dead_letter_target_arn);
+            if !dlq_exists {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "AWS.SimpleQueueService.NonExistentQueue",
+                    format!(
+                        "Dead letter target does not exist: {}",
+                        rp.dead_letter_target_arn
+                    ),
+                ));
+            }
+            // Validate FIFO queue can only use FIFO DLQ
+            if is_fifo {
+                let dlq_is_fifo = state
+                    .queues
+                    .values()
+                    .find(|q| q.arn == rp.dead_letter_target_arn)
+                    .map(|q| q.is_fifo)
+                    .unwrap_or(false);
+                if !dlq_is_fifo {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "InvalidParameterValue",
+                        "Dead-letter queue must be the same type of queue as the source.",
+                    ));
+                }
+            }
+        }
+
         // Normalize RedrivePolicy JSON (convert maxReceiveCount to integer)
         if let Some(ref rp) = redrive_policy {
             // Format like Python json.dumps: {"key": value, "key": value}
@@ -584,6 +618,8 @@ impl SqsService {
             redrive_policy,
             tags,
             next_sequence_number: 0,
+            permission_labels: Vec::new(),
+            receipt_handle_map: HashMap::new(),
         };
 
         state.name_to_url.insert(queue_name, queue_url.clone());
@@ -605,9 +641,10 @@ impl SqsService {
             .to_string();
 
         let mut state = self.state.write();
+        let resolved_url = resolve_queue_url(&queue_url, &state).ok_or_else(queue_not_found)?;
         let queue = state
             .queues
-            .remove(&queue_url)
+            .remove(&resolved_url)
             .ok_or_else(queue_not_found)?;
         state.name_to_url.remove(&queue.queue_name);
 
@@ -666,7 +703,11 @@ impl SqsService {
             .ok_or_else(|| missing_param("QueueUrl"))?;
 
         let state = self.state.read();
-        let queue = state.queues.get(queue_url).ok_or_else(queue_not_found)?;
+        let resolved_url = resolve_queue_url(queue_url, &state).ok_or_else(queue_not_found)?;
+        let queue = state
+            .queues
+            .get(&resolved_url)
+            .ok_or_else(queue_not_found)?;
 
         // Check what attributes were requested
         let requested_names = body["AttributeNames"]
@@ -800,6 +841,9 @@ impl SqsService {
 
         // Validate message attributes
         validate_message_attributes(&message_attributes)?;
+
+        // Parse MessageSystemAttributes (e.g., AWSTraceHeader)
+        let system_attributes = parse_message_system_attributes(&body);
 
         let mut state = self.state.write();
         let resolved_url = resolve_queue_url(&queue_url, &state).ok_or_else(queue_not_found)?;
@@ -956,7 +1000,7 @@ impl SqsService {
             md5_of_body: md5_hex(&message_body),
             body: message_body,
             sent_timestamp: now.timestamp_millis(),
-            attributes: HashMap::new(),
+            attributes: system_attributes,
             message_attributes,
             visible_at,
             receive_count: 0,
@@ -988,10 +1032,16 @@ impl SqsService {
 
     async fn receive_message(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = parse_body(req);
-        let queue_url = body["QueueUrl"]
+        let queue_url_input = body["QueueUrl"]
             .as_str()
             .ok_or_else(|| missing_param("QueueUrl"))?
             .to_string();
+
+        // Resolve the queue URL (might be a name)
+        let queue_url = {
+            let state = self.state.read();
+            resolve_queue_url(&queue_url_input, &state).ok_or_else(queue_not_found)?
+        };
 
         let max_messages_raw = val_as_i64(&body["MaxNumberOfMessages"]);
         if let Some(max) = max_messages_raw {
@@ -1086,9 +1136,10 @@ impl SqsService {
         req_visibility_timeout: Option<i64>,
     ) -> Result<Vec<SqsMessage>, AwsServiceError> {
         let mut state = self.state.write();
+        let resolved_url = resolve_queue_url(queue_url, &state).ok_or_else(queue_not_found)?;
         let queue = state
             .queues
-            .get_mut(queue_url)
+            .get_mut(&resolved_url)
             .ok_or_else(queue_not_found)?;
 
         let visibility_timeout: i64 = req_visibility_timeout
@@ -1129,7 +1180,8 @@ impl SqsService {
         });
         for mut m in returned {
             m.visible_at = None;
-            m.receipt_handle = None;
+            // Don't clear the receipt handle - keep it so we can still find
+            // the message by old handles. A new handle will be assigned on receive.
             queue.messages.push_back(m);
         }
 
@@ -1175,7 +1227,13 @@ impl SqsService {
                             continue;
                         }
                     }
-                    msg.receipt_handle = Some(uuid::Uuid::new_v4().to_string());
+                    let new_handle = uuid::Uuid::new_v4().to_string();
+                    queue
+                        .receipt_handle_map
+                        .entry(msg.message_id.clone())
+                        .or_default()
+                        .push(new_handle.clone());
+                    msg.receipt_handle = Some(new_handle);
                     msg.visible_at = Some(now + chrono::Duration::seconds(visibility_timeout));
                     received.push(msg);
                 } else {
@@ -1233,7 +1291,13 @@ impl SqsService {
                             continue;
                         }
                     }
-                    msg.receipt_handle = Some(uuid::Uuid::new_v4().to_string());
+                    let new_handle = uuid::Uuid::new_v4().to_string();
+                    queue
+                        .receipt_handle_map
+                        .entry(msg.message_id.clone())
+                        .or_default()
+                        .push(new_handle.clone());
+                    msg.receipt_handle = Some(new_handle);
                     msg.visible_at = Some(now + chrono::Duration::seconds(visibility_timeout));
                     received.push(msg);
                 } else {
@@ -1270,18 +1334,28 @@ impl SqsService {
             .ok_or_else(|| missing_param("ReceiptHandle"))?;
 
         let mut state = self.state.write();
+        let resolved_url = resolve_queue_url(queue_url, &state).ok_or_else(queue_not_found)?;
         let queue = state
             .queues
-            .get_mut(queue_url)
+            .get_mut(&resolved_url)
             .ok_or_else(queue_not_found)?;
 
-        // Delete is idempotent - silently succeed even if handle not found
-        queue
-            .inflight
-            .retain(|m| m.receipt_handle.as_deref() != Some(receipt_handle));
-        queue
-            .messages
-            .retain(|m| m.receipt_handle.as_deref() != Some(receipt_handle));
+        // Find the message_id associated with this receipt handle
+        let message_id = find_message_id_for_receipt(queue, receipt_handle);
+
+        if let Some(msg_id) = message_id {
+            // Delete by message_id (any receipt handle for this message works)
+            // Keep the receipt_handle_map entry so subsequent deletes are idempotent
+            queue.inflight.retain(|m| m.message_id != msg_id);
+            queue.messages.retain(|m| m.message_id != msg_id);
+        } else {
+            // Receipt handle not found - error
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ReceiptHandleIsInvalid",
+                "The input receipt handle is invalid.",
+            ));
+        }
 
         Ok(sqs_response(
             "DeleteMessage",
@@ -1298,9 +1372,10 @@ impl SqsService {
             .ok_or_else(|| missing_param("QueueUrl"))?;
 
         let mut state = self.state.write();
+        let resolved_url = resolve_queue_url(queue_url, &state).ok_or_else(queue_not_found)?;
         let queue = state
             .queues
-            .get_mut(queue_url)
+            .get_mut(&resolved_url)
             .ok_or_else(queue_not_found)?;
 
         queue.messages.clear();
@@ -1326,36 +1401,49 @@ impl SqsService {
             .ok_or_else(|| missing_param("VisibilityTimeout"))?;
 
         let mut state = self.state.write();
+        let resolved_url = resolve_queue_url(queue_url, &state).ok_or_else(queue_not_found)?;
         let queue = state
             .queues
-            .get_mut(queue_url)
+            .get_mut(&resolved_url)
             .ok_or_else(queue_not_found)?;
 
         let now = Utc::now();
-        let mut found = false;
 
-        // First check inflight messages
-        for msg in &mut queue.inflight {
-            if msg.receipt_handle.as_deref() == Some(receipt_handle) {
-                msg.visible_at = Some(now + chrono::Duration::seconds(visibility_timeout));
-                found = true;
-                break;
-            }
-        }
+        // Find the message_id associated with this receipt handle
+        let message_id = find_message_id_for_receipt(queue, receipt_handle);
 
-        // Also check messages queue (message may have become visible again)
-        if !found {
-            for msg in &mut queue.messages {
-                if msg.receipt_handle.as_deref() == Some(receipt_handle) {
-                    // Move back to inflight with new visibility timeout
-                    msg.visible_at = Some(now + chrono::Duration::seconds(visibility_timeout));
+        if let Some(msg_id) = message_id {
+            let new_visible_at = Some(now + chrono::Duration::seconds(visibility_timeout));
+            let mut found = false;
+
+            // Check inflight messages
+            for msg in &mut queue.inflight {
+                if msg.message_id == msg_id {
+                    msg.visible_at = new_visible_at;
                     found = true;
                     break;
                 }
             }
-        }
 
-        if !found {
+            // Also check messages queue (message may have become visible again)
+            if !found {
+                for msg in &mut queue.messages {
+                    if msg.message_id == msg_id {
+                        msg.visible_at = new_visible_at;
+                        found = true;
+                        break;
+                    }
+                }
+            }
+
+            if !found {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ReceiptHandleIsInvalid",
+                    "The input receipt handle is invalid.",
+                ));
+            }
+        } else {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "ReceiptHandleIsInvalid",
@@ -1425,17 +1513,40 @@ impl SqsService {
                 }
             };
 
-            let mut found = false;
-            for msg in &mut queue.inflight {
-                if msg.receipt_handle.as_deref() == Some(receipt_handle) {
-                    msg.visible_at = Some(now + chrono::Duration::seconds(visibility_timeout));
-                    found = true;
-                    break;
-                }
-            }
+            let message_id = find_message_id_for_receipt(queue, receipt_handle);
 
-            if found {
-                successful.push(json!({ "Id": id }));
+            if let Some(msg_id) = message_id {
+                let new_visible_at = Some(now + chrono::Duration::seconds(visibility_timeout));
+                let mut found = false;
+
+                for msg in &mut queue.inflight {
+                    if msg.message_id == msg_id {
+                        msg.visible_at = new_visible_at;
+                        found = true;
+                        break;
+                    }
+                }
+
+                if !found {
+                    for msg in &mut queue.messages {
+                        if msg.message_id == msg_id {
+                            msg.visible_at = new_visible_at;
+                            found = true;
+                            break;
+                        }
+                    }
+                }
+
+                if found {
+                    successful.push(json!({ "Id": id }));
+                } else {
+                    failed.push(json!({
+                        "Id": id,
+                        "SenderFault": true,
+                        "Code": "ReceiptHandleIsInvalid",
+                        "Message": "The input receipt handle is invalid.",
+                    }));
+                }
             } else {
                 failed.push(json!({
                     "Id": id,
@@ -1464,9 +1575,10 @@ impl SqsService {
             .ok_or_else(|| missing_param("QueueUrl"))?;
 
         let mut state = self.state.write();
+        let resolved_url = resolve_queue_url(queue_url, &state).ok_or_else(queue_not_found)?;
         let queue = state
             .queues
-            .get_mut(queue_url)
+            .get_mut(&resolved_url)
             .ok_or_else(queue_not_found)?;
 
         if let Some(attrs) = body["Attributes"].as_object() {
@@ -1546,24 +1658,63 @@ impl SqsService {
             ));
         }
 
-        // Check for duplicate IDs
-        let mut seen_ids = std::collections::HashSet::new();
+        // Max 10 entries
+        if entries.len() > 10 {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "AWS.SimpleQueueService.TooManyEntriesInBatchRequest",
+                format!(
+                    "Maximum number of entries per request are 10. You have sent {}.",
+                    entries.len()
+                ),
+            ));
+        }
+
+        // Validate entry IDs and check for duplicates
+        let mut seen_ids: Vec<String> = Vec::new();
         for entry in &entries {
             if let Some(id) = entry["Id"].as_str() {
-                if !seen_ids.insert(id.to_string()) {
+                // Validate ID format
+                if !is_valid_batch_id(id) {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "AWS.SimpleQueueService.InvalidBatchEntryId",
+                        "A batch entry id can only contain alphanumeric characters, hyphens and underscores. It can be at most 80 letters long.",
+                    ));
+                }
+                if seen_ids.contains(&id.to_string()) {
                     return Err(AwsServiceError::aws_error(
                         StatusCode::BAD_REQUEST,
                         "AWS.SimpleQueueService.BatchEntryIdsNotDistinct",
-                        "Two or more batch entries in the operation have the same Id.",
+                        format!("Id {} repeated.", id),
                     ));
                 }
+                seen_ids.push(id.to_string());
             }
         }
 
+        // Validate total batch size
+        let total_size: usize = entries
+            .iter()
+            .filter_map(|e| e["MessageBody"].as_str())
+            .map(|b| b.len())
+            .sum();
+        if total_size > 1_048_576 {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "AWS.SimpleQueueService.BatchRequestTooLong",
+                format!(
+                    "Batch requests cannot be longer than 1048576 bytes. You have sent {} bytes.",
+                    total_size
+                ),
+            ));
+        }
+
         let mut state = self.state.write();
+        let resolved_url = resolve_queue_url(&queue_url, &state).ok_or_else(queue_not_found)?;
         let queue = state
             .queues
-            .get_mut(&queue_url)
+            .get_mut(&resolved_url)
             .ok_or_else(queue_not_found)?;
 
         let now = Utc::now();
@@ -1756,9 +1907,10 @@ impl SqsService {
         }
 
         let mut state = self.state.write();
+        let resolved_url = resolve_queue_url(queue_url, &state).ok_or_else(queue_not_found)?;
         let queue = state
             .queues
-            .get_mut(queue_url)
+            .get_mut(&resolved_url)
             .ok_or_else(queue_not_found)?;
 
         let mut successful = Vec::new();
@@ -1782,20 +1934,21 @@ impl SqsService {
                 }
             };
 
-            let before = queue.inflight.len();
-            queue
-                .inflight
-                .retain(|m| m.receipt_handle.as_deref() != Some(receipt_handle));
-            let deleted = queue.inflight.len() != before;
+            let message_id = find_message_id_for_receipt(queue, receipt_handle);
 
-            if deleted {
+            if let Some(msg_id) = message_id {
+                queue.inflight.retain(|m| m.message_id != msg_id);
+                queue.messages.retain(|m| m.message_id != msg_id);
                 successful.push(json!({ "Id": id }));
             } else {
                 failed.push(json!({
                     "Id": id,
                     "SenderFault": true,
                     "Code": "ReceiptHandleIsInvalid",
-                    "Message": "The input receipt handle is invalid.",
+                    "Message": format!(
+                        "The input receipt handle \"{}\" is not a valid receipt handle.",
+                        receipt_handle
+                    ),
                 }));
             }
         }
@@ -1818,7 +1971,11 @@ impl SqsService {
             .ok_or_else(|| missing_param("QueueUrl"))?;
 
         let state = self.state.read();
-        let queue = state.queues.get(queue_url).ok_or_else(queue_not_found)?;
+        let resolved_url = resolve_queue_url(queue_url, &state).ok_or_else(queue_not_found)?;
+        let queue = state
+            .queues
+            .get(&resolved_url)
+            .ok_or_else(queue_not_found)?;
         let tags = &queue.tags;
 
         Ok(sqs_response(
@@ -1836,18 +1993,38 @@ impl SqsService {
             .ok_or_else(|| missing_param("QueueUrl"))?;
         let tags = body["Tags"].as_object();
 
+        // Validate tags are not empty
+        if tags.is_none() || tags.map(|t| t.is_empty()) == Some(true) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "MissingParameter",
+                "The request must contain the parameter Tags.",
+            ));
+        }
+
         let mut state = self.state.write();
+        let resolved_url = resolve_queue_url(queue_url, &state).ok_or_else(queue_not_found)?;
         let queue = state
             .queues
-            .get_mut(queue_url)
+            .get_mut(&resolved_url)
             .ok_or_else(queue_not_found)?;
 
         if let Some(tags_obj) = tags {
+            // Check total tag count after adding
+            let mut merged = queue.tags.clone();
             for (k, v) in tags_obj {
                 if let Some(s) = v.as_str() {
-                    queue.tags.insert(k.clone(), s.to_string());
+                    merged.insert(k.clone(), s.to_string());
                 }
             }
+            if merged.len() > 50 {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterValue",
+                    format!("Too many tags added for queue {}.", queue.queue_name),
+                ));
+            }
+            queue.tags = merged;
         }
 
         Ok(sqs_response(
@@ -1865,10 +2042,20 @@ impl SqsService {
             .ok_or_else(|| missing_param("QueueUrl"))?;
         let tag_keys = body["TagKeys"].as_array();
 
+        // Validate tag keys are not empty
+        if tag_keys.is_none() || tag_keys.map(|t| t.is_empty()) == Some(true) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterValue",
+                "Tag keys must be between 1 and 128 characters in length.",
+            ));
+        }
+
         let mut state = self.state.write();
+        let resolved_url = resolve_queue_url(queue_url, &state).ok_or_else(queue_not_found)?;
         let queue = state
             .queues
-            .get_mut(queue_url)
+            .get_mut(&resolved_url)
             .ok_or_else(queue_not_found)?;
 
         if let Some(keys) = tag_keys {
@@ -1892,11 +2079,160 @@ impl SqsService {
         let queue_url = body["QueueUrl"]
             .as_str()
             .ok_or_else(|| missing_param("QueueUrl"))?;
+        let label = body["Label"]
+            .as_str()
+            .ok_or_else(|| missing_param("Label"))?;
 
-        let state = self.state.read();
-        let _queue = state.queues.get(queue_url).ok_or_else(queue_not_found)?;
+        // Parse Actions - may come as array or query params
+        let actions: Vec<String> = if let Some(arr) = body["Actions"].as_array() {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        } else {
+            parse_numbered_params(&body, "ActionName")
+        };
 
-        // Stub: just validate queue exists and return success
+        // Parse AWSAccountIds
+        let account_ids: Vec<String> = if let Some(arr) = body["AWSAccountIds"].as_array() {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        } else {
+            let mut ids = Vec::new();
+            if let Some(obj) = body.as_object() {
+                for i in 1..=20 {
+                    let key = format!("AWSAccountId.{i}");
+                    if let Some(v) = obj.get(&key).and_then(|v| v.as_str()) {
+                        ids.push(v.to_string());
+                    }
+                }
+            }
+            ids
+        };
+
+        // Validate actions not empty
+        if actions.is_empty() {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "MissingParameter",
+                "The request must contain the parameter Actions.",
+            ));
+        }
+
+        // Validate account IDs not empty
+        if account_ids.is_empty() {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterValue",
+                "Value [] for parameter PrincipalId is invalid. Reason: Unable to verify.",
+            ));
+        }
+
+        // Validate max 7 actions
+        if actions.len() > 7 {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::FORBIDDEN,
+                "OverLimit",
+                format!(
+                    "{} Actions were found, maximum allowed is 7.",
+                    actions.len()
+                ),
+            ));
+        }
+
+        // Validate no owner-only actions
+        let owner_only = [
+            "AddPermission",
+            "RemovePermission",
+            "CreateQueue",
+            "DeleteQueue",
+            "SetQueueAttributes",
+            "TagQueue",
+            "UntagQueue",
+        ];
+        for action in &actions {
+            if owner_only.contains(&action.as_str()) {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterValue",
+                    format!(
+                        "Value SQS:{action} for parameter ActionName is invalid. Reason: Only the queue owner is allowed to invoke this action."
+                    ),
+                ));
+            }
+        }
+
+        let mut state = self.state.write();
+        let resolved_url = resolve_queue_url(queue_url, &state).ok_or_else(queue_not_found)?;
+        let queue = state
+            .queues
+            .get_mut(&resolved_url)
+            .ok_or_else(queue_not_found)?;
+
+        // Check for duplicate label
+        if queue.permission_labels.contains(&label.to_string()) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterValue",
+                format!("Value {label} for parameter Label is invalid. Reason: Already exists."),
+            ));
+        }
+
+        queue.permission_labels.push(label.to_string());
+
+        // Build policy
+        let mut statements: Vec<Value> = Vec::new();
+
+        // Load existing policy
+        if let Some(policy_str) = queue.attributes.get("Policy") {
+            if let Ok(policy) = serde_json::from_str::<Value>(policy_str) {
+                if let Some(stmts) = policy["Statement"].as_array() {
+                    statements = stmts.clone();
+                }
+            }
+        }
+
+        // Add new statement for each account/action pair
+        for account_id in &account_ids {
+            let action_values: Vec<String> = actions
+                .iter()
+                .map(|a| {
+                    if a == "*" {
+                        "SQS:*".to_string()
+                    } else {
+                        format!("SQS:{a}")
+                    }
+                })
+                .collect();
+
+            let action_value = if action_values.len() == 1 {
+                json!(action_values[0])
+            } else {
+                json!(action_values)
+            };
+
+            statements.push(json!({
+                "Sid": label,
+                "Effect": "Allow",
+                "Principal": {
+                    "AWS": format!("arn:aws:iam::{account_id}:root")
+                },
+                "Action": action_value,
+                "Resource": queue.arn,
+            }));
+        }
+
+        let policy = json!({
+            "Version": "2012-10-17",
+            "Id": format!("{}/SQSDefaultPolicy", queue.arn),
+            "Statement": statements,
+        });
+
+        queue.attributes.insert(
+            "Policy".to_string(),
+            serde_json::to_string(&policy).unwrap(),
+        );
+
         Ok(sqs_response(
             "AddPermission",
             json!({}),
@@ -1910,11 +2246,48 @@ impl SqsService {
         let queue_url = body["QueueUrl"]
             .as_str()
             .ok_or_else(|| missing_param("QueueUrl"))?;
+        let label = body["Label"]
+            .as_str()
+            .ok_or_else(|| missing_param("Label"))?;
 
-        let state = self.state.read();
-        let _queue = state.queues.get(queue_url).ok_or_else(queue_not_found)?;
+        let mut state = self.state.write();
+        let resolved_url = resolve_queue_url(queue_url, &state).ok_or_else(queue_not_found)?;
+        let queue = state
+            .queues
+            .get_mut(&resolved_url)
+            .ok_or_else(queue_not_found)?;
 
-        // Stub: just validate queue exists and return success
+        // Check label exists
+        if !queue.permission_labels.contains(&label.to_string()) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterValue",
+                format!(
+                    "Value {label} for parameter Label is invalid. Reason: can't find label on existing policy."
+                ),
+            ));
+        }
+
+        queue.permission_labels.retain(|l| l != label);
+
+        // Remove from policy
+        if let Some(policy_str) = queue.attributes.get("Policy").cloned() {
+            if let Ok(mut policy) = serde_json::from_str::<Value>(&policy_str) {
+                if let Some(stmts) = policy["Statement"].as_array() {
+                    let filtered: Vec<Value> = stmts
+                        .iter()
+                        .filter(|s| s["Sid"].as_str() != Some(label))
+                        .cloned()
+                        .collect();
+                    policy["Statement"] = json!(filtered);
+                    queue.attributes.insert(
+                        "Policy".to_string(),
+                        serde_json::to_string(&policy).unwrap(),
+                    );
+                }
+            }
+        }
+
         Ok(sqs_response(
             "RemovePermission",
             json!({}),
@@ -1933,7 +2306,11 @@ impl SqsService {
             .ok_or_else(|| missing_param("QueueUrl"))?;
 
         let state = self.state.read();
-        let queue = state.queues.get(queue_url).ok_or_else(queue_not_found)?;
+        let resolved_url = resolve_queue_url(queue_url, &state).ok_or_else(queue_not_found)?;
+        let queue = state
+            .queues
+            .get(&resolved_url)
+            .ok_or_else(queue_not_found)?;
         let queue_arn = queue.arn.clone();
 
         // Find all queues whose redrive policy targets this queue
@@ -2090,7 +2467,8 @@ fn format_receive_response(
         })
         .collect();
 
-    let body = if messages.is_empty() {
+    let body = if messages.is_empty() && !is_query {
+        // For JSON protocol, omit Messages key when empty
         json!({})
     } else {
         json!({ "Messages": messages })
@@ -2210,6 +2588,7 @@ fn is_valid_queue_name(name: &str) -> bool {
 /// name bytes, data type length (4 bytes BE), data type bytes,
 /// then transport type (1=String, 2=Binary) and value length + value bytes.
 fn md5_of_message_attributes(attrs: &HashMap<String, MessageAttribute>) -> String {
+    use md5::Digest;
     let mut sorted: Vec<(&String, &MessageAttribute)> = attrs.iter().collect();
     sorted.sort_by_key(|(k, _)| k.as_str());
 
@@ -2246,6 +2625,7 @@ fn md5_of_message_attributes(attrs: &HashMap<String, MessageAttribute>) -> Strin
 
 /// Same as md5_of_message_attributes but works with borrowed references
 fn md5_of_message_attributes_from_refs(attrs: &HashMap<String, &MessageAttribute>) -> String {
+    use md5::Digest;
     let mut sorted: Vec<(&String, &&MessageAttribute)> = attrs.iter().collect();
     sorted.sort_by_key(|(k, _)| k.as_str());
 
@@ -2312,13 +2692,92 @@ fn queue_not_found() -> AwsServiceError {
 }
 
 pub fn md5_hex(input: &str) -> String {
+    use md5::Digest;
     let mut hasher = Md5::new();
     hasher.update(input.as_bytes());
     format!("{:032x}", hasher.finalize())
 }
 
 pub fn sha256_hex(input: &str) -> String {
+    use sha2::Digest;
     let mut hasher = Sha256::new();
     hasher.update(input.as_bytes());
     format!("{:064x}", hasher.finalize())
+}
+
+/// Find the message_id associated with a receipt handle by checking both the
+/// receipt_handle_map (historical handles) and current message receipt handles.
+fn find_message_id_for_receipt(
+    queue: &crate::state::SqsQueue,
+    receipt_handle: &str,
+) -> Option<String> {
+    // Check the receipt handle map for any historical handle
+    for (msg_id, handles) in &queue.receipt_handle_map {
+        if handles.iter().any(|h| h == receipt_handle) {
+            return Some(msg_id.clone());
+        }
+    }
+    // Also check current messages/inflight directly
+    for msg in &queue.inflight {
+        if msg.receipt_handle.as_deref() == Some(receipt_handle) {
+            return Some(msg.message_id.clone());
+        }
+    }
+    for msg in &queue.messages {
+        if msg.receipt_handle.as_deref() == Some(receipt_handle) {
+            return Some(msg.message_id.clone());
+        }
+    }
+    None
+}
+
+/// Parse MessageSystemAttributes (e.g., AWSTraceHeader) from the request body.
+fn parse_message_system_attributes(body: &Value) -> HashMap<String, String> {
+    let mut result = HashMap::new();
+
+    // JSON protocol
+    if let Some(attrs) = body["MessageSystemAttributes"].as_object() {
+        for (name, val) in attrs {
+            if let Some(sv) = val["StringValue"].as_str() {
+                result.insert(name.clone(), sv.to_string());
+            }
+        }
+    }
+
+    // Query protocol: MessageSystemAttribute.N.Name/Value
+    if let Some(body_obj) = body.as_object() {
+        for i in 1..=20 {
+            let name_key = format!("MessageSystemAttribute.{i}.Name");
+            let str_key = format!("MessageSystemAttribute.{i}.Value.StringValue");
+
+            if let Some(name) = body_obj.get(&name_key).and_then(|v| v.as_str()) {
+                if let Some(value) = body_obj.get(&str_key).and_then(|v| v.as_str()) {
+                    result.insert(name.to_string(), value.to_string());
+                }
+            }
+        }
+    }
+
+    result
+}
+
+fn is_valid_batch_id(id: &str) -> bool {
+    if id.is_empty() || id.len() > 80 {
+        return false;
+    }
+    id.chars()
+        .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+}
+
+fn parse_numbered_params(body: &Value, prefix: &str) -> Vec<String> {
+    let mut result = Vec::new();
+    if let Some(obj) = body.as_object() {
+        for i in 1..=20 {
+            let key = format!("{prefix}.{i}");
+            if let Some(v) = obj.get(&key).and_then(|v| v.as_str()) {
+                result.push(v.to_string());
+            }
+        }
+    }
+    result
 }
