@@ -21,24 +21,26 @@ Part of the [faisca project family](https://github.com/faiscadev).
 
 ## Why FakeCloud?
 
-In March 2026, LocalStack dropped its free Community Edition, leaving developers
-without a reliable open-source option for local AWS emulation. FakeCloud was
-built to fill that gap -- with a focus on correctness and simplicity.
+In March 2026, LocalStack replaced its open-source Community Edition with a
+proprietary single image that requires an account and auth token to run. A free
+"Hobby" tier exists but is restricted to non-commercial use. FakeCloud is a fully
+open-source alternative -- no account, no auth, no restrictions.
 
 ### Comparison
 
 | Feature | FakeCloud | LocalStack |
 |---|---|---|
-| License | AGPL-3.0 | Proprietary (was open) |
-| Auth required | No | Yes (since March 2026) |
-| Free tier | Fully open source | Removed (was Community Ed.) |
+| License | AGPL-3.0 | Proprietary |
+| Auth required | No | Yes (account + token) |
+| Free tier | Fully open source | Non-commercial only |
+| Commercial use | Free | Paid plans only |
 | Single port | Yes (4566) | Yes (4566) |
-| SQS | 20 actions | Paid |
-| SNS | 16 actions | Paid |
-| EventBridge | 15 actions | Paid |
-| IAM / STS | 100+ actions | Paid |
-| SSM Parameter Store | 28 actions | Paid |
-| S3 | 16 actions | Paid |
+| S3 | 16 actions | All plans |
+| SQS | 20 actions | All plans |
+| SNS | 16 actions | All plans |
+| EventBridge | 15 actions | All plans |
+| IAM / STS | 100+ actions | All plans |
+| SSM Parameter Store | 28 actions | All plans |
 | Cross-service delivery | Yes | Yes |
 | Scheduled rules fire | Yes | Yes |
 
