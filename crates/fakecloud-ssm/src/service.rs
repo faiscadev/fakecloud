@@ -234,12 +234,26 @@ fn param_arn(region: &str, account_id: &str, name: &str) -> String {
     }
 }
 
-fn param_to_json(p: &SsmParameter, with_value: bool, with_decryption: bool) -> Value {
+/// Rewrite the region component of a parameter ARN.
+fn rewrite_arn_region(arn: &str, region: &str) -> String {
+    let parts: Vec<&str> = arn.splitn(6, ':').collect();
+    if parts.len() == 6 {
+        format!(
+            "{}:{}:{}:{}:{}:{}",
+            parts[0], parts[1], parts[2], region, parts[4], parts[5]
+        )
+    } else {
+        arn.to_string()
+    }
+}
+
+fn param_to_json(p: &SsmParameter, with_value: bool, with_decryption: bool, region: &str) -> Value {
+    let arn = rewrite_arn_region(&p.arn, region);
     let mut v = json!({
         "Name": p.name,
         "Type": p.param_type,
         "Version": p.version,
-        "ARN": p.arn,
+        "ARN": arn,
         "LastModifiedDate": p.last_modified.timestamp_millis() as f64 / 1000.0,
         "DataType": p.data_type,
     });
@@ -260,12 +274,13 @@ fn param_to_json(p: &SsmParameter, with_value: bool, with_decryption: bool) -> V
     v
 }
 
-fn param_to_describe_json(p: &SsmParameter) -> Value {
+fn param_to_describe_json(p: &SsmParameter, region: &str) -> Value {
+    let arn = rewrite_arn_region(&p.arn, region);
     let mut v = json!({
         "Name": p.name,
         "Type": p.param_type,
         "Version": p.version,
-        "ARN": p.arn,
+        "ARN": arn,
         "LastModifiedDate": p.last_modified.timestamp_millis() as f64 / 1000.0,
         "LastModifiedUser": "N/A",
         "DataType": p.data_type,
@@ -557,7 +572,7 @@ impl SsmService {
         };
 
         let now = Utc::now();
-        let arn = param_arn(&state.region, &state.account_id, &name);
+        let arn = param_arn(&req.region, &state.account_id, &name);
 
         let mut tag_map = HashMap::new();
         if let Some(tag_list) = tags {
@@ -611,7 +626,7 @@ impl SsmService {
         if raw_name.starts_with("arn:aws:ssm:") {
             let param = resolve_param_by_name_or_arn(&state, raw_name)?;
             return Ok(json_resp(json!({
-                "Parameter": param_to_json(param, true, with_decryption),
+                "Parameter": param_to_json(param, true, with_decryption, &req.region),
             })));
         }
 
@@ -623,17 +638,30 @@ impl SsmService {
         }
 
         // Try looking up by name or by ARN - use raw_name in error for full context
-        let param = resolve_param_by_name_or_arn(&state, base_name)
-            .map_err(|_| param_not_found(raw_name))?;
+        let param = resolve_param_by_name_or_arn(&state, base_name).map_err(|_| {
+            if raw_name.starts_with("/aws/reference/secretsmanager/") {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ParameterNotFound",
+                    format!(
+                        "An error occurred (ParameterNotFound) when referencing \
+                         Secrets Manager: Secret {} not found.",
+                        raw_name
+                    ),
+                )
+            } else {
+                param_not_found(raw_name)
+            }
+        })?;
 
         match selector {
             ParamSelector::None => Ok(json_resp(json!({
-                "Parameter": param_to_json(param, true, with_decryption),
+                "Parameter": param_to_json(param, true, with_decryption, &req.region),
             }))),
             ParamSelector::Version(ver) => {
                 if param.version == ver {
                     return Ok(json_resp(json!({
-                        "Parameter": param_to_json(param, true, with_decryption),
+                        "Parameter": param_to_json(param, true, with_decryption, &req.region),
                     })));
                 }
                 // Look in history
@@ -642,7 +670,7 @@ impl SsmService {
                         "Name": param.name,
                         "Type": hist.param_type,
                         "Version": hist.version,
-                        "ARN": param.arn,
+                        "ARN": rewrite_arn_region(&param.arn, &req.region),
                         "LastModifiedDate": hist.last_modified.timestamp_millis() as f64 / 1000.0,
                         "DataType": param.data_type,
                     });
@@ -669,7 +697,7 @@ impl SsmService {
                     if labels.contains(&label) {
                         if *ver == param.version {
                             return Ok(json_resp(json!({
-                                "Parameter": param_to_json(param, true, with_decryption),
+                                "Parameter": param_to_json(param, true, with_decryption, &req.region),
                             })));
                         }
                         if let Some(hist) = param.history.iter().find(|h| h.version == *ver) {
@@ -677,7 +705,7 @@ impl SsmService {
                                 "Name": param.name,
                                 "Type": hist.param_type,
                                 "Version": hist.version,
-                                "ARN": param.arn,
+                                "ARN": rewrite_arn_region(&param.arn, &req.region),
                                 "LastModifiedDate": hist.last_modified.timestamp_millis() as f64 / 1000.0,
                                 "DataType": param.data_type,
                             });
@@ -744,7 +772,12 @@ impl SsmService {
                     }
                     ParamSelector::None => {
                         if let Some(param) = lookup_param(&state.parameters, base_name) {
-                            parameters.push(param_to_json(param, true, with_decryption));
+                            parameters.push(param_to_json(
+                                param,
+                                true,
+                                with_decryption,
+                                &req.region,
+                            ));
                         } else {
                             invalid.push(raw_name.to_string());
                         }
@@ -752,7 +785,12 @@ impl SsmService {
                     ParamSelector::Version(ver) => {
                         if let Some(param) = lookup_param(&state.parameters, base_name) {
                             if param.version == ver {
-                                parameters.push(param_to_json(param, true, with_decryption));
+                                parameters.push(param_to_json(
+                                    param,
+                                    true,
+                                    with_decryption,
+                                    &req.region,
+                                ));
                             } else if let Some(hist) =
                                 param.history.iter().find(|h| h.version == ver)
                             {
@@ -760,7 +798,7 @@ impl SsmService {
                                     "Name": param.name,
                                     "Type": hist.param_type,
                                     "Version": hist.version,
-                                    "ARN": param.arn,
+                                    "ARN": rewrite_arn_region(&param.arn, &req.region),
                                     "LastModifiedDate": hist.last_modified.timestamp_millis() as f64 / 1000.0,
                                     "DataType": param.data_type,
                                 });
@@ -783,6 +821,7 @@ impl SsmService {
                                             param,
                                             true,
                                             with_decryption,
+                                            &req.region,
                                         ));
                                     } else if let Some(hist) =
                                         param.history.iter().find(|h| h.version == *ver)
@@ -791,7 +830,7 @@ impl SsmService {
                                             "Name": param.name,
                                             "Type": hist.param_type,
                                             "Version": hist.version,
-                                            "ARN": param.arn,
+                                            "ARN": rewrite_arn_region(&param.arn, &req.region),
                                             "LastModifiedDate": hist.last_modified.timestamp_millis() as f64 / 1000.0,
                                             "DataType": param.data_type,
                                         });
@@ -914,7 +953,7 @@ impl SsmService {
         let parameters: Vec<Value> = page
             .iter()
             .take(max_results)
-            .map(|p| param_to_json(p, true, with_decryption))
+            .map(|p| param_to_json(p, true, with_decryption, &req.region))
             .collect();
 
         let mut resp = json!({ "Parameters": parameters });
@@ -1034,7 +1073,7 @@ impl SsmService {
         let parameters: Vec<Value> = page
             .iter()
             .take(max_results)
-            .map(|p| param_to_describe_json(p))
+            .map(|p| param_to_describe_json(p, &req.region))
             .collect();
 
         let mut resp = json!({ "Parameters": parameters });
@@ -1450,7 +1489,9 @@ impl SsmService {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "ParameterVersionLabelLimitExceeded",
-                "A parameter version can have maximum 10 labels. \
+                "An error occurred (ParameterVersionLabelLimitExceeded) when \
+                 calling the LabelParameterVersion operation: \
+                 A parameter version can have maximum 10 labels.\
                  Move one or more labels to another version and try again.",
             ));
         }
@@ -1578,6 +1619,15 @@ impl SsmService {
             ));
         }
 
+        // Validate content matches declared format
+        if doc_format == "JSON" && serde_json::from_str::<Value>(&content).is_err() {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidDocumentContent",
+                "The content for the document is not valid.",
+            ));
+        }
+
         let now = Utc::now();
         let content_hash = format!("{:x}", Sha256::digest(content.as_bytes()));
 
@@ -1617,7 +1667,6 @@ impl SsmService {
             "Name": name,
             "DocumentType": doc_type,
             "DocumentFormat": doc_format,
-            "TargetType": target_type,
             "DocumentVersion": "1",
             "LatestVersion": "1",
             "DefaultVersion": "1",
@@ -1629,11 +1678,32 @@ impl SsmService {
             "Hash": content_hash,
             "HashType": "Sha256",
         });
+        if let Some(tt) = &target_type {
+            desc_json["TargetType"] = json!(tt);
+        }
+        if let Some(vn) = state
+            .documents
+            .get(&name)
+            .and_then(|d| d.version_name.as_ref())
+        {
+            desc_json["VersionName"] = json!(vn);
+        }
         if let Some(d) = doc_description {
             desc_json["Description"] = json!(d);
         }
         if !doc_params.is_empty() {
             desc_json["Parameters"] = json!(doc_params);
+        }
+        // Include tags if present
+        if let Some(doc) = state.documents.get(&name) {
+            if !doc.tags.is_empty() {
+                let tags_list: Vec<Value> = doc
+                    .tags
+                    .iter()
+                    .map(|(k, v)| json!({"Key": k, "Value": v}))
+                    .collect();
+                desc_json["Tags"] = json!(tags_list);
+            }
         }
 
         Ok(json_resp(json!({ "DocumentDescription": desc_json })))
@@ -1825,11 +1895,7 @@ impl SsmService {
                 return Err(AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
                     "DuplicateDocumentVersionName",
-                    format!(
-                        "The specified version name is a duplicate. \
-                         Specify a unique version name, and try again. \
-                         Version name: {vn}."
-                    ),
+                    "The specified version name is a duplicate.",
                 ));
             }
         }
@@ -1872,6 +1938,12 @@ impl SsmService {
         if !doc_params.is_empty() {
             desc_json["Parameters"] = json!(doc_params);
         }
+        // Include VersionName from the newly created version
+        if let Some(ver) = doc.versions.last() {
+            if let Some(ref vn) = ver.version_name {
+                desc_json["VersionName"] = json!(vn);
+            }
+        }
 
         Ok(json_resp(json!({ "DocumentDescription": desc_json })))
     }
@@ -1886,14 +1958,25 @@ impl SsmService {
             .get(name)
             .ok_or_else(|| doc_not_found(name))?;
 
+        // Use the default version's content for the hash and metadata
+        let default_ver = doc
+            .versions
+            .iter()
+            .find(|v| v.document_version == doc.default_version);
+        let content_for_hash = default_ver
+            .map(|v| v.content.as_str())
+            .unwrap_or(&doc.content);
+        let format_for_hash = default_ver
+            .map(|v| v.document_format.as_str())
+            .unwrap_or(&doc.document_format);
+
         let (doc_description, schema_ver, doc_params) =
-            extract_document_metadata(&doc.content, &doc.document_format);
+            extract_document_metadata(content_for_hash, format_for_hash);
 
         let mut desc_json = json!({
             "Name": doc.name,
             "DocumentType": doc.document_type,
-            "DocumentFormat": doc.document_format,
-            "TargetType": doc.target_type,
+            "DocumentFormat": format_for_hash,
             "DocumentVersion": doc.default_version,
             "LatestVersion": doc.latest_version,
             "DefaultVersion": doc.default_version,
@@ -1902,9 +1985,12 @@ impl SsmService {
             "Owner": doc.owner,
             "SchemaVersion": schema_ver.as_deref().unwrap_or("2.2"),
             "PlatformTypes": ["Linux", "MacOS", "Windows"],
-            "Hash": format!("{:x}", Sha256::digest(doc.content.as_bytes())),
+            "Hash": format!("{:x}", Sha256::digest(content_for_hash.as_bytes())),
             "HashType": "Sha256",
         });
+        if let Some(tt) = &doc.target_type {
+            desc_json["TargetType"] = json!(tt);
+        }
         if let Some(d) = doc_description {
             desc_json["Description"] = json!(d);
         }
@@ -1981,13 +2067,49 @@ impl SsmService {
             .as_str()
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
+        let filters = body["Filters"].as_array();
 
         let state = self.state.read();
         let all_docs: Vec<Value> = state
             .documents
             .values()
+            .filter(|doc| {
+                if let Some(filters) = filters {
+                    for filter in filters {
+                        let key = filter["Key"].as_str().unwrap_or("");
+                        let values: Vec<&str> = filter["Values"]
+                            .as_array()
+                            .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+                            .unwrap_or_default();
+                        match key {
+                            "Owner" => {
+                                // "Self" means owned by current account
+                                if values.contains(&"Self") && doc.owner != state.account_id {
+                                    return false;
+                                }
+                            }
+                            "TargetType" => {
+                                if let Some(tt) = &doc.target_type {
+                                    if !values.contains(&tt.as_str()) {
+                                        return false;
+                                    }
+                                } else {
+                                    return false;
+                                }
+                            }
+                            "Name" => {
+                                if !values.contains(&doc.name.as_str()) {
+                                    return false;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                true
+            })
             .map(|doc| {
-                json!({
+                let mut v = json!({
                     "Name": doc.name,
                     "DocumentType": doc.document_type,
                     "DocumentFormat": doc.document_format,
@@ -1995,7 +2117,11 @@ impl SsmService {
                     "Owner": doc.owner,
                     "SchemaVersion": "2.2",
                     "PlatformTypes": ["Linux", "MacOS", "Windows"],
-                })
+                });
+                if let Some(tt) = &doc.target_type {
+                    v["TargetType"] = json!(tt);
+                }
+                v
             })
             .collect();
 
@@ -2004,7 +2130,7 @@ impl SsmService {
         } else {
             &[]
         };
-        let has_more = page.len() >= max_results;
+        let has_more = page.len() > max_results;
         let result: Vec<Value> = page.iter().take(max_results).cloned().collect();
 
         let mut resp = json!({ "DocumentIdentifiers": result });
@@ -2312,6 +2438,7 @@ impl SsmService {
         let instance_id = body["InstanceId"]
             .as_str()
             .ok_or_else(|| missing("InstanceId"))?;
+        let plugin_name = body["PluginName"].as_str();
 
         let state = self.state.read();
         let cmd = state
@@ -2333,6 +2460,18 @@ impl SsmService {
                 "InvocationDoesNotExist",
                 "An error occurred (InvocationDoesNotExist) when calling the GetCommandInvocation operation",
             ));
+        }
+
+        // Validate plugin name if provided
+        if let Some(pn) = plugin_name {
+            let known_plugins = ["aws:runShellScript", "aws:runPowerShellScript"];
+            if !known_plugins.contains(&pn) {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvocationDoesNotExist",
+                    "An error occurred (InvocationDoesNotExist) when calling the GetCommandInvocation operation",
+                ));
+            }
         }
 
         Ok(json_resp(json!({
@@ -3151,17 +3290,21 @@ impl SsmService {
             .patch_groups
             .iter()
             .any(|pg| pg.baseline_id == baseline_id && pg.patch_group == patch_group);
-        if !exists {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "DoesNotExistException",
-                "Patch Baseline to be retrieved does not exist.",
-            ));
+        if exists {
+            state
+                .patch_groups
+                .retain(|pg| !(pg.baseline_id == baseline_id && pg.patch_group == patch_group));
+        } else {
+            // Allow deregistering default baselines (they are implicitly registered)
+            let is_default = is_default_patch_baseline(baseline_id);
+            if !is_default {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "DoesNotExistException",
+                    "Patch Baseline to be retrieved does not exist.",
+                ));
+            }
         }
-
-        state
-            .patch_groups
-            .retain(|pg| !(pg.baseline_id == baseline_id && pg.patch_group == patch_group));
 
         Ok(json_resp(json!({
             "BaselineId": baseline_id,
@@ -3197,10 +3340,15 @@ impl SsmService {
                 "OperatingSystem": operating_system,
             })))
         } else {
-            Ok(json_resp(json!({
+            // Fall back to default baseline for the region/OS
+            let mut resp = json!({
                 "PatchGroup": patch_group,
                 "OperatingSystem": operating_system,
-            })))
+            });
+            if let Some(baseline_id) = default_patch_baseline(&req.region, operating_system) {
+                resp["BaselineId"] = json!(baseline_id);
+            }
+            Ok(json_resp(resp))
         }
     }
 
@@ -3525,7 +3673,7 @@ fn validate_parameter_filters(filters: &[Value]) -> Result<(), AwsServiceError> 
 
         if key == "Name" {
             if let Some(opt) = option {
-                if !["BeginsWith", "Equals"].contains(&opt) {
+                if !["BeginsWith", "Equals", "Contains"].contains(&opt) {
                     return Err(AwsServiceError::aws_error(
                         StatusCode::BAD_REQUEST,
                         "ValidationException",
@@ -3588,7 +3736,16 @@ fn apply_parameter_filters(param: &SsmParameter, filters: Option<&Vec<Value>>) -
                         normalized_name.starts_with(normalized_v)
                     }
                 }),
-                "Contains" => values.iter().any(|v| param.name.contains(v)),
+                "Contains" => {
+                    // Normalize name to always have leading /
+                    let what = if param.name.starts_with('/') {
+                        param.name.clone()
+                    } else {
+                        format!("/{}", param.name)
+                    };
+                    // Values NOT normalized for Contains (unlike Equals/BeginsWith)
+                    values.iter().any(|v| what.contains(v))
+                }
                 "Equals" => values.iter().any(|v| {
                     param.name == *v || {
                         // Normalize: /foo matches foo, foo matches /foo
@@ -3665,9 +3822,14 @@ fn apply_parameter_filters(param: &SsmParameter, filters: Option<&Vec<Value>>) -
                 if values.is_empty() {
                     effective_key_id.is_some()
                 } else {
-                    effective_key_id
-                        .as_ref()
-                        .is_some_and(|kid| values.contains(&kid.as_str()))
+                    match option {
+                        "BeginsWith" => effective_key_id
+                            .as_ref()
+                            .is_some_and(|kid| values.iter().any(|v| kid.starts_with(v))),
+                        _ => effective_key_id
+                            .as_ref()
+                            .is_some_and(|kid| values.contains(&kid.as_str())),
+                    }
                 }
             }
             "Tier" => values.iter().any(|v| param.tier == *v),
@@ -3855,7 +4017,7 @@ fn extract_document_metadata(
                         Value::String(s) => s.clone(),
                         Value::Number(n) => n.to_string(),
                         Value::Bool(b) => if *b { "True" } else { "False" }.to_string(),
-                        other => serde_json::to_string(other).unwrap_or_default(),
+                        other => json_dumps(other),
                     };
                     param["DefaultValue"] = json!(default_str);
                 }
@@ -3867,4 +4029,62 @@ fn extract_document_metadata(
     };
 
     (description, schema_version, parameters)
+}
+
+/// Look up the default patch baseline for a given region and OS.
+fn default_patch_baseline(region: &str, operating_system: &str) -> Option<String> {
+    static DEFAULT_BASELINES: std::sync::LazyLock<Value> = std::sync::LazyLock::new(|| {
+        serde_json::from_str(include_str!("default_baselines.json")).unwrap_or(json!({}))
+    });
+    DEFAULT_BASELINES
+        .get(region)
+        .and_then(|r| r.get(operating_system))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
+/// Check if a baseline ID is a known default baseline.
+fn is_default_patch_baseline(baseline_id: &str) -> bool {
+    static DEFAULT_BASELINES: std::sync::LazyLock<Value> = std::sync::LazyLock::new(|| {
+        serde_json::from_str(include_str!("default_baselines.json")).unwrap_or(json!({}))
+    });
+    if let Some(obj) = DEFAULT_BASELINES.as_object() {
+        for region_data in obj.values() {
+            if let Some(region_obj) = region_data.as_object() {
+                for val in region_obj.values() {
+                    if val.as_str() == Some(baseline_id) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Serialize a JSON value with Python-style separators (`, ` and `: `).
+fn json_dumps(val: &Value) -> String {
+    match val {
+        Value::Null => "null".to_string(),
+        Value::Bool(b) => if *b { "true" } else { "false" }.to_string(),
+        Value::Number(n) => n.to_string(),
+        Value::String(s) => format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")),
+        Value::Array(arr) => {
+            let items: Vec<String> = arr.iter().map(json_dumps).collect();
+            format!("[{}]", items.join(", "))
+        }
+        Value::Object(obj) => {
+            let items: Vec<String> = obj
+                .iter()
+                .map(|(k, v)| {
+                    format!(
+                        "\"{}\": {}",
+                        k.replace('\\', "\\\\").replace('"', "\\\""),
+                        json_dumps(v)
+                    )
+                })
+                .collect();
+            format!("{{{}}}", items.join(", "))
+        }
+    }
 }
