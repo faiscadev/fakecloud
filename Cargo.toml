@@ -10,6 +10,7 @@ members = [
     "crates/fakecloud-ssm",
     "crates/fakecloud-s3",
     "crates/fakecloud-dynamodb",
+    "crates/fakecloud-lambda",
     "crates/fakecloud-logs",
     "crates/fakecloud-kms",
     "crates/fakecloud-e2e",
@@ -63,5 +64,6 @@ fakecloud-iam = { path = "crates/fakecloud-iam", version = "0.1.1" }
 fakecloud-ssm = { path = "crates/fakecloud-ssm", version = "0.1.1" }
 fakecloud-s3 = { path = "crates/fakecloud-s3", version = "0.1.1" }
 fakecloud-dynamodb = { path = "crates/fakecloud-dynamodb", version = "0.1.1" }
+fakecloud-lambda = { path = "crates/fakecloud-lambda", version = "0.1.1" }
 fakecloud-logs = { path = "crates/fakecloud-logs", version = "0.1.1" }
 fakecloud-kms = { path = "crates/fakecloud-kms", version = "0.1.1" }

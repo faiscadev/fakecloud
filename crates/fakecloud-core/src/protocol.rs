@@ -17,7 +17,8 @@ pub enum AwsProtocol {
 }
 
 /// Services that use REST protocol (detected from SigV4 credential scope).
-const REST_SERVICES: &[&str] = &["s3"];
+/// Lambda uses REST-style routing (method + path) rather than X-Amz-Target.
+const REST_SERVICES: &[&str] = &["s3", "lambda"];
 
 /// Detected service name and action from an incoming HTTP request.
 #[derive(Debug)]
