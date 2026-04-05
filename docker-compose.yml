@@ -1,6 +1,6 @@
 services:
   fakecloud:
-    image: faiscadev/fakecloud
+    image: ghcr.io/faiscadev/fakecloud:latest
     build:
       context: .
       dockerfile: Dockerfile

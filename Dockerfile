@@ -1,5 +1,14 @@
-FROM rust:latest AS builder
+FROM rust:1.85-bookworm AS chef
+RUN cargo install cargo-chef
 WORKDIR /build
+
+FROM chef AS planner
+COPY . .
+RUN cargo chef prepare --recipe-path recipe.json
+
+FROM chef AS builder
+COPY --from=planner /build/recipe.json recipe.json
+RUN cargo chef cook --release --recipe-path recipe.json
 COPY . .
 RUN cargo build --release --bin fakecloud-server
 

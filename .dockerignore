@@ -1,0 +1,12 @@
+target/
+.git/
+.github/
+examples/
+tests/
+docs/
+*.md
+LICENSE*
+docker-compose*.yml
+.gitignore
+.dockerignore
+.env*
