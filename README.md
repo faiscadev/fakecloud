@@ -33,7 +33,7 @@ alternatives have emerged since then. Here's how they compare:
 | Language | Rust | Python | Java (Quarkus Native) | Python |
 | Auth required | No | Yes (account + token) | No | No |
 | Commercial use | Free | Paid plans only | Free | Free |
-| AWS services | 6 | 80+ | 25 | 38 |
+| AWS services | 7 | 80+ | 25 | 38 |
 | Cross-service delivery | Yes | Yes | Yes | Yes |
 | Scheduled rules fire | Yes | Yes | -- | -- |
 
@@ -88,38 +88,82 @@ with message group ordering and content-based deduplication, dead-letter queues,
 message attributes with MD5 computation, batch operations, system attribute
 filtering.
 
-### SNS (16 actions)
+### SNS (34 actions)
 
-CreateTopic, DeleteTopic, ListTopics, GetTopicAttributes, SetTopicAttributes,
-Subscribe, ConfirmSubscription, Unsubscribe, Publish, ListSubscriptions,
-ListSubscriptionsByTopic, GetSubscriptionAttributes, SetSubscriptionAttributes,
-TagResource, UntagResource, ListTagsForResource
+**Topics:** CreateTopic, DeleteTopic, ListTopics, GetTopicAttributes,
+SetTopicAttributes
+
+**Subscriptions:** Subscribe, ConfirmSubscription, Unsubscribe,
+ListSubscriptions, ListSubscriptionsByTopic, GetSubscriptionAttributes,
+SetSubscriptionAttributes
+
+**Publishing:** Publish, PublishBatch
+
+**Tags & Permissions:** TagResource, UntagResource, ListTagsForResource,
+AddPermission, RemovePermission
+
+**Platform Applications:** CreatePlatformApplication, DeletePlatformApplication,
+GetPlatformApplicationAttributes, SetPlatformApplicationAttributes,
+ListPlatformApplications
+
+**Platform Endpoints:** CreatePlatformEndpoint, DeleteEndpoint,
+GetEndpointAttributes, SetEndpointAttributes, ListEndpointsByPlatformApplication
+
+**SMS:** SetSMSAttributes, GetSMSAttributes, CheckIfPhoneNumberIsOptedOut,
+ListPhoneNumbersOptedOut, OptInPhoneNumber
 
 Key features: SQS fan-out delivery, HTTP/HTTPS endpoint delivery, subscription
-filter policies (exact match, prefix, anything-but, numeric, exists).
+filter policies (exact match, prefix, anything-but, numeric, exists), platform
+application and endpoint management, SMS attributes.
 
-### EventBridge (15 actions)
+### EventBridge (41 actions)
 
-CreateEventBus, DeleteEventBus, ListEventBuses, DescribeEventBus, PutRule,
-DeleteRule, ListRules, DescribeRule, PutTargets, RemoveTargets,
-ListTargetsByRule, PutEvents, TagResource, UntagResource, ListTagsForResource
+**Event Buses:** CreateEventBus, DeleteEventBus, ListEventBuses,
+DescribeEventBus
+
+**Rules:** PutRule, DeleteRule, ListRules, DescribeRule, EnableRule, DisableRule,
+ListRuleNamesByTarget
+
+**Targets:** PutTargets, RemoveTargets, ListTargetsByRule
+
+**Events:** PutEvents
+
+**Permissions:** PutPermission, RemovePermission
+
+**Tags:** TagResource, UntagResource, ListTagsForResource
+
+**Archives:** CreateArchive, DescribeArchive, ListArchives, UpdateArchive,
+DeleteArchive
+
+**Connections:** CreateConnection, DescribeConnection, ListConnections,
+UpdateConnection, DeleteConnection
+
+**API Destinations:** CreateApiDestination, DescribeApiDestination,
+ListApiDestinations, UpdateApiDestination, DeleteApiDestination
+
+**Replays:** StartReplay, DescribeReplay, ListReplays, CancelReplay
+
+**Partner Event Sources:** CreatePartnerEventSource, DescribePartnerEventSource
 
 Key features: pattern-based rules (nested fields, numeric comparisons, prefix,
 exists, anything-but), scheduled rules (rate and cron expressions) that actually
-fire, targets deliver to SNS topics and SQS queues.
+fire, targets deliver to SNS topics and SQS queues, archives and replays,
+connections and API destinations.
 
-### IAM / STS (100+ actions)
+### IAM / STS (135 actions)
 
 **IAM Users:** CreateUser, GetUser, DeleteUser, ListUsers, UpdateUser, TagUser,
 UntagUser, ListUserTags, CreateAccessKey, DeleteAccessKey, ListAccessKeys,
-UpdateAccessKey, CreateLoginProfile, GetLoginProfile, UpdateLoginProfile,
-DeleteLoginProfile, AttachUserPolicy, DetachUserPolicy, ListAttachedUserPolicies,
-PutUserPolicy, GetUserPolicy, DeleteUserPolicy, ListUserPolicies
+UpdateAccessKey, GetAccessKeyLastUsed, CreateLoginProfile, GetLoginProfile,
+UpdateLoginProfile, DeleteLoginProfile, AttachUserPolicy, DetachUserPolicy,
+ListAttachedUserPolicies, PutUserPolicy, GetUserPolicy, DeleteUserPolicy,
+ListUserPolicies
 
 **IAM Roles:** CreateRole, GetRole, DeleteRole, ListRoles, UpdateRole,
 UpdateRoleDescription, UpdateAssumeRolePolicy, TagRole, UntagRole, ListRoleTags,
-AttachRolePolicy, DetachRolePolicy, ListAttachedRolePolicies, PutRolePolicy,
-GetRolePolicy, DeleteRolePolicy, ListRolePolicies, CreateServiceLinkedRole,
+PutRolePermissionsBoundary, DeleteRolePermissionsBoundary, AttachRolePolicy,
+DetachRolePolicy, ListAttachedRolePolicies, PutRolePolicy, GetRolePolicy,
+DeleteRolePolicy, ListRolePolicies, CreateServiceLinkedRole,
 DeleteServiceLinkedRole, GetServiceLinkedRoleDeletionStatus
 
 **IAM Groups:** CreateGroup, GetGroup, DeleteGroup, ListGroups, UpdateGroup,
@@ -148,6 +192,9 @@ UntagOpenIDConnectProvider, ListOpenIDConnectProviderTags
 DeleteServerCertificate, ListServerCertificates, UploadSigningCertificate,
 ListSigningCertificates, UpdateSigningCertificate, DeleteSigningCertificate
 
+**SSH Keys:** UploadSSHPublicKey, GetSSHPublicKey, ListSSHPublicKeys,
+UpdateSSHPublicKey, DeleteSSHPublicKey
+
 **MFA:** CreateVirtualMFADevice, DeleteVirtualMFADevice, ListVirtualMFADevices,
 EnableMFADevice, DeactivateMFADevice, ListMFADevices
 
@@ -156,37 +203,55 @@ DeleteAccountAlias, ListAccountAliases, UpdateAccountPasswordPolicy,
 GetAccountPasswordPolicy, DeleteAccountPasswordPolicy, GenerateCredentialReport,
 GetCredentialReport
 
-**STS:** GetCallerIdentity, AssumeRole
+**STS:** GetCallerIdentity, AssumeRole, AssumeRoleWithWebIdentity,
+AssumeRoleWithSAML, GetSessionToken, GetFederationToken, GetAccessKeyInfo
 
-### SSM Parameter Store (28 actions)
+### SSM (46 actions)
 
-**Parameters**: PutParameter, GetParameter, GetParameters, GetParametersByPath,
+**Parameters:** PutParameter, GetParameter, GetParameters, GetParametersByPath,
 DeleteParameter, DeleteParameters, DescribeParameters, GetParameterHistory,
 LabelParameterVersion, UnlabelParameterVersion
 
-**Tags**: AddTagsToResource, RemoveTagsFromResource, ListTagsForResource
+**Tags:** AddTagsToResource, RemoveTagsFromResource, ListTagsForResource
 
-**Documents**: CreateDocument, GetDocument, DeleteDocument, UpdateDocument,
+**Documents:** CreateDocument, GetDocument, DeleteDocument, UpdateDocument,
 DescribeDocument, UpdateDocumentDefaultVersion, ListDocuments,
 DescribeDocumentPermission, ModifyDocumentPermission
 
-**Commands**: SendCommand, ListCommands, GetCommandInvocation,
+**Commands:** SendCommand, ListCommands, GetCommandInvocation,
 ListCommandInvocations, CancelCommand
+
+**Maintenance Windows:** CreateMaintenanceWindow, DescribeMaintenanceWindows,
+GetMaintenanceWindow, DeleteMaintenanceWindow, UpdateMaintenanceWindow,
+RegisterTargetWithMaintenanceWindow, DeregisterTargetFromMaintenanceWindow,
+DescribeMaintenanceWindowTargets, RegisterTaskWithMaintenanceWindow,
+DeregisterTaskFromMaintenanceWindow, DescribeMaintenanceWindowTasks
+
+**Patch Baselines:** CreatePatchBaseline, DeletePatchBaseline,
+DescribePatchBaselines, GetPatchBaseline, RegisterPatchBaselineForPatchGroup,
+DeregisterPatchBaselineForPatchGroup, GetPatchBaselineForPatchGroup,
+DescribePatchGroups
 
 Key features: String / StringList / SecureString types, automatic versioning,
 parameter history, hierarchical path queries with recursive option, pagination
 with NextToken, labels, version limits, parameter name normalization (leading
-slash optional), tag-based filtering.
+slash optional), tag-based filtering, document management with permissions,
+maintenance windows with targets and tasks, patch baselines and patch groups.
 
-### S3 (16 actions)
+### S3 (20 actions)
 
-CreateBucket, DeleteBucket, HeadBucket, ListBuckets, GetBucketLocation,
-PutObject, GetObject, DeleteObject, HeadObject, CopyObject, DeleteObjects,
-ListObjectsV2, GetBucketTagging, PutBucketTagging, DeleteBucketTagging
+**Buckets:** ListBuckets, CreateBucket, DeleteBucket, HeadBucket,
+GetBucketLocation
+
+**Objects:** PutObject, GetObject, DeleteObject, HeadObject, CopyObject,
+DeleteObjects, ListObjectsV2, ListObjects, ListObjectVersions
+
+**Multipart Uploads:** CreateMultipartUpload, UploadPart,
+CompleteMultipartUpload, AbortMultipartUpload, ListParts, ListMultipartUploads
 
 Key features: path-style addressing, nested key paths, prefix/delimiter listing
 with common prefixes, pagination with continuation tokens, user metadata,
-cross-bucket copy, batch delete, ETag (MD5) computation.
+cross-bucket copy, batch delete, ETag (MD5) computation, multipart uploads.
 
 ### Cross-Service Delivery
 

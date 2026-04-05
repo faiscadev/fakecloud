@@ -45,7 +45,7 @@ jobs:
 
       - name: Run Node demo
         run: |
-          npm install @aws-sdk/client-sqs @aws-sdk/client-sns @aws-sdk/client-ssm
+          npm install @aws-sdk/client-sqs @aws-sdk/client-sns @aws-sdk/client-ssm @aws-sdk/client-s3
           node examples/node/demo.js
 
       - name: Run sample app

@@ -1,5 +1,5 @@
 """
-FakeCloud demo: SQS + SNS + SSM using boto3.
+FakeCloud demo: S3 + SQS + SNS + SSM using boto3.
 
 Prerequisites:
     pip install boto3
@@ -24,13 +24,33 @@ session = boto3.Session(
     region_name=REGION,
 )
 
+s3 = session.client("s3", endpoint_url=ENDPOINT)
 sqs = session.client("sqs", endpoint_url=ENDPOINT)
 sns = session.client("sns", endpoint_url=ENDPOINT)
 ssm = session.client("ssm", endpoint_url=ENDPOINT)
 
 
 def main():
-    print("=== FakeCloud Demo: SQS + SNS + SSM ===\n")
+    print("=== FakeCloud Demo: S3 + SQS + SNS + SSM ===\n")
+
+    # --- S3 ---
+    print("[S3] Creating bucket and uploading objects...")
+    s3.create_bucket(Bucket="demo-bucket")
+
+    s3.put_object(Bucket="demo-bucket", Key="hello.txt", Body=b"Hello from FakeCloud!")
+    s3.put_object(Bucket="demo-bucket", Key="data/config.json", Body=json.dumps({"env": "local"}).encode())
+
+    response = s3.get_object(Bucket="demo-bucket", Key="hello.txt")
+    content = response["Body"].read().decode()
+    print(f"  get hello.txt: {content}")
+
+    objects = s3.list_objects_v2(Bucket="demo-bucket")
+    print(f"  objects in bucket: {[obj['Key'] for obj in objects.get('Contents', [])]}")
+
+    s3.delete_object(Bucket="demo-bucket", Key="hello.txt")
+    s3.delete_object(Bucket="demo-bucket", Key="data/config.json")
+    s3.delete_bucket(Bucket="demo-bucket")
+    print("  bucket cleaned up")
 
     # --- SSM Parameter Store ---
     print("[SSM] Storing application config...")

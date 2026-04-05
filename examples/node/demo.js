@@ -1,13 +1,23 @@
 /**
- * FakeCloud demo: SQS + SNS + SSM using AWS SDK v3.
+ * FakeCloud demo: S3 + SQS + SNS + SSM using AWS SDK v3.
  *
  * Prerequisites:
- *   npm install @aws-sdk/client-sqs @aws-sdk/client-sns @aws-sdk/client-ssm
+ *   npm install @aws-sdk/client-s3 @aws-sdk/client-sqs @aws-sdk/client-sns @aws-sdk/client-ssm
  *
  * Usage:
  *   1. Start FakeCloud: cargo run --bin fakecloud-server
  *   2. Run this script: node examples/node/demo.js
  */
+
+import {
+  S3Client,
+  CreateBucketCommand,
+  PutObjectCommand,
+  GetObjectCommand,
+  ListObjectsV2Command,
+  DeleteObjectCommand,
+  DeleteBucketCommand,
+} from "@aws-sdk/client-s3";
 
 import {
   SQSClient,
@@ -38,12 +48,41 @@ const REGION = "us-east-1";
 const ACCOUNT_ID = "123456789012";
 const credentials = { accessKeyId: "test", secretAccessKey: "test" };
 
+const s3 = new S3Client({ endpoint: ENDPOINT, region: REGION, credentials, forcePathStyle: true });
 const sqs = new SQSClient({ endpoint: ENDPOINT, region: REGION, credentials });
 const sns = new SNSClient({ endpoint: ENDPOINT, region: REGION, credentials });
 const ssm = new SSMClient({ endpoint: ENDPOINT, region: REGION, credentials });
 
 async function main() {
-  console.log("=== FakeCloud Demo: SQS + SNS + SSM ===\n");
+  console.log("=== FakeCloud Demo: S3 + SQS + SNS + SSM ===\n");
+
+  // --- S3 ---
+  console.log("[S3] Creating bucket and uploading objects...");
+  await s3.send(new CreateBucketCommand({ Bucket: "demo-bucket" }));
+
+  await s3.send(new PutObjectCommand({
+    Bucket: "demo-bucket",
+    Key: "hello.txt",
+    Body: "Hello from FakeCloud!",
+  }));
+  await s3.send(new PutObjectCommand({
+    Bucket: "demo-bucket",
+    Key: "data/config.json",
+    Body: JSON.stringify({ env: "local" }),
+  }));
+
+  const getResp = await s3.send(new GetObjectCommand({ Bucket: "demo-bucket", Key: "hello.txt" }));
+  const content = await getResp.Body.transformToString();
+  console.log(`  get hello.txt: ${content}`);
+
+  const listResp = await s3.send(new ListObjectsV2Command({ Bucket: "demo-bucket" }));
+  const keys = (listResp.Contents || []).map((o) => o.Key);
+  console.log(`  objects in bucket: ${JSON.stringify(keys)}`);
+
+  await s3.send(new DeleteObjectCommand({ Bucket: "demo-bucket", Key: "hello.txt" }));
+  await s3.send(new DeleteObjectCommand({ Bucket: "demo-bucket", Key: "data/config.json" }));
+  await s3.send(new DeleteBucketCommand({ Bucket: "demo-bucket" }));
+  console.log("  bucket cleaned up");
 
   // --- SSM Parameter Store ---
   console.log("[SSM] Storing application config...");
