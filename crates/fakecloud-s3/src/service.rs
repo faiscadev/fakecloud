@@ -236,7 +236,7 @@ impl S3Service {
         } else if req.query_params.get("list-type").map(|s| s.as_str()) == Some("2") {
             self.list_objects_v2(req, bucket)
         } else {
-            self.list_objects(req, bucket)
+            self.list_objects_v1(req, bucket)
         }
     }
 
@@ -921,7 +921,11 @@ impl S3Service {
 
     // ---- List operations ----
 
-    fn list_objects(&self, req: &AwsRequest, bucket: &str) -> Result<AwsResponse, AwsServiceError> {
+    fn list_objects_v1(
+        &self,
+        req: &AwsRequest,
+        bucket: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
         let state = self.state.read();
         let b = state
             .buckets
@@ -929,17 +933,14 @@ impl S3Service {
             .ok_or_else(|| no_such_bucket(bucket))?;
 
         let prefix = req.query_params.get("prefix").cloned().unwrap_or_default();
-        let delimiter = req
-            .query_params
-            .get("delimiter")
-            .cloned()
-            .unwrap_or_default();
+        let delimiter = req.query_params.get("delimiter").cloned();
         let max_keys: usize = req
             .query_params
             .get("max-keys")
             .and_then(|v| v.parse().ok())
             .unwrap_or(1000);
         let marker = req.query_params.get("marker").cloned().unwrap_or_default();
+        let encoding_type = req.query_params.get("encoding-type").cloned();
 
         let mut contents = String::new();
         let mut common_prefixes: Vec<String> = Vec::new();
@@ -958,20 +959,23 @@ impl S3Service {
                 continue;
             }
 
-            if !delimiter.is_empty() {
-                let suffix = &key[prefix.len()..];
-                if let Some(pos) = suffix.find(&delimiter) {
-                    let cp = format!("{}{}", prefix, &suffix[..=pos]);
-                    if !common_prefixes.contains(&cp) {
-                        if count >= max_keys {
-                            is_truncated = true;
-                            break;
+            // Handle delimiter-based grouping
+            if let Some(ref delim) = delimiter {
+                if !delim.is_empty() {
+                    let suffix = &key[prefix.len()..];
+                    if let Some(pos) = suffix.find(delim.as_str()) {
+                        let cp = format!("{}{}", prefix, &suffix[..pos + delim.len()]);
+                        if !common_prefixes.contains(&cp) {
+                            if count >= max_keys {
+                                is_truncated = true;
+                                break;
+                            }
+                            common_prefixes.push(cp);
+                            last_key = key.clone();
+                            count += 1;
                         }
-                        common_prefixes.push(cp);
-                        last_key = key.clone();
-                        count += 1;
+                        continue;
                     }
-                    continue;
                 }
             }
 
@@ -979,6 +983,12 @@ impl S3Service {
                 is_truncated = true;
                 break;
             }
+
+            let display_key = if encoding_type.as_deref() == Some("url") {
+                url_encode_key(key)
+            } else {
+                xml_escape(key)
+            };
 
             contents.push_str(&format!(
                 "<Contents>\
@@ -988,7 +998,7 @@ impl S3Service {
                  <Size>{}</Size>\
                  <StorageClass>{}</StorageClass>\
                  </Contents>",
-                xml_escape(key),
+                display_key,
                 obj.last_modified.format("%Y-%m-%dT%H:%M:%S%.3fZ"),
                 obj.etag,
                 obj.size,
@@ -1000,9 +1010,13 @@ impl S3Service {
 
         let mut common_prefixes_xml = String::new();
         for cp in &common_prefixes {
+            let display_cp = if encoding_type.as_deref() == Some("url") {
+                url_encode_key(cp)
+            } else {
+                xml_escape(cp)
+            };
             common_prefixes_xml.push_str(&format!(
-                "<CommonPrefixes><Prefix>{}</Prefix></CommonPrefixes>",
-                xml_escape(cp),
+                "<CommonPrefixes><Prefix>{display_cp}</Prefix></CommonPrefixes>",
             ));
         }
 
@@ -1012,14 +1026,30 @@ impl S3Service {
             String::new()
         };
 
-        let marker_xml = if !marker.is_empty() {
-            format!("<Marker>{}</Marker>", xml_escape(&marker))
-        } else {
-            "<Marker/>".to_string()
+        let delimiter_xml = match &delimiter {
+            Some(d) if !d.is_empty() => format!("<Delimiter>{}</Delimiter>", xml_escape(d)),
+            _ => String::new(),
         };
 
-        let delimiter_xml = if !delimiter.is_empty() {
-            format!("<Delimiter>{}</Delimiter>", xml_escape(&delimiter))
+        let prefix_xml = if prefix.is_empty() {
+            String::new()
+        } else {
+            let display_prefix = if encoding_type.as_deref() == Some("url") {
+                url_encode_key(&prefix)
+            } else {
+                xml_escape(&prefix)
+            };
+            format!("<Prefix>{display_prefix}</Prefix>")
+        };
+
+        let marker_xml = if marker.is_empty() {
+            String::new()
+        } else {
+            format!("<Marker>{}</Marker>", xml_escape(&marker))
+        };
+
+        let encoding_xml = if encoding_type.as_deref() == Some("url") {
+            "<EncodingType>url</EncodingType>".to_string()
         } else {
             String::new()
         };
@@ -1028,16 +1058,16 @@ impl S3Service {
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
              <ListBucketResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
              <Name>{bucket}</Name>\
-             <Prefix>{prefix}</Prefix>\
+             {prefix_xml}\
              {marker_xml}\
              <MaxKeys>{max_keys}</MaxKeys>\
              {delimiter_xml}\
+             {encoding_xml}\
              <IsTruncated>{is_truncated}</IsTruncated>\
-             {next_marker}\
              {contents}\
              {common_prefixes_xml}\
+             {next_marker}\
              </ListBucketResult>",
-            prefix = xml_escape(&prefix),
         );
         Ok(AwsResponse::xml(StatusCode::OK, body))
     }
@@ -1331,6 +1361,11 @@ impl S3Service {
             .unwrap_or("application/octet-stream")
             .to_string();
         let metadata = extract_user_metadata(&req.headers);
+        let content_encoding = req
+            .headers
+            .get("content-encoding")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
 
         let versioning_enabled = b.versioning_status.as_deref() == Some("Enabled");
         let version_id = if versioning_enabled {
@@ -1350,6 +1385,7 @@ impl S3Service {
             storage_class: "STANDARD".to_string(),
             version_id: version_id.clone(),
             is_delete_marker: false,
+            content_encoding,
         };
 
         if versioning_enabled {
@@ -1408,6 +1444,9 @@ impl S3Service {
         if let Some(vid) = &obj.version_id {
             headers.insert("x-amz-version-id", vid.parse().unwrap());
         }
+        if let Some(ref enc) = obj.content_encoding {
+            headers.insert("content-encoding", enc.parse().unwrap());
+        }
         for (k, v) in &obj.metadata {
             if let (Ok(name), Ok(val)) = (
                 format!("x-amz-meta-{k}").parse::<http::header::HeaderName>(),
@@ -1416,6 +1455,43 @@ impl S3Service {
                 headers.insert(name, val);
             }
         }
+
+        // Handle Range header
+        let range_header = req
+            .headers
+            .get("range")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+
+        if let Some(ref range_str) = range_header {
+            if let Some(range) = parse_range(range_str, obj.size) {
+                match range {
+                    ParsedRange::Satisfiable { start, end } => {
+                        let len = end - start + 1;
+                        headers.insert("content-length", len.to_string().parse().unwrap());
+                        headers.insert(
+                            "content-range",
+                            format!("bytes {start}-{end}/{}", obj.size).parse().unwrap(),
+                        );
+                        let body = obj.data.slice(start as usize..(end + 1) as usize);
+                        return Ok(AwsResponse {
+                            status: StatusCode::PARTIAL_CONTENT,
+                            content_type: obj.content_type.clone(),
+                            body,
+                            headers,
+                        });
+                    }
+                    ParsedRange::NotSatisfiable => {
+                        return Ok(invalid_range_response(range_str, obj.size, &req.request_id));
+                    }
+                    ParsedRange::Ignored => {
+                        // Invalid range format like "bytes=1-0", return full object
+                    }
+                }
+            }
+        }
+
+        headers.insert("content-length", obj.size.to_string().parse().unwrap());
 
         Ok(AwsResponse {
             status: StatusCode::OK,
@@ -1510,6 +1586,46 @@ impl S3Service {
                 .parse()
                 .unwrap(),
         );
+        if let Some(ref enc) = obj.content_encoding {
+            headers.insert("content-encoding", enc.parse().unwrap());
+        }
+
+        // Handle Range header for HEAD requests
+        let range_header = req
+            .headers
+            .get("range")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+
+        if let Some(ref range_str) = range_header {
+            if let Some(range) = parse_range(range_str, obj.size) {
+                match range {
+                    ParsedRange::Satisfiable { start, end } => {
+                        let len = end - start + 1;
+                        headers.insert("content-length", len.to_string().parse().unwrap());
+                        headers.insert(
+                            "content-range",
+                            format!("bytes {start}-{end}/{}", obj.size).parse().unwrap(),
+                        );
+                        return Ok(AwsResponse {
+                            status: StatusCode::PARTIAL_CONTENT,
+                            content_type: obj.content_type.clone(),
+                            body: Bytes::new(),
+                            headers,
+                        });
+                    }
+                    ParsedRange::NotSatisfiable => {
+                        return Err(AwsServiceError::aws_error(
+                            StatusCode::RANGE_NOT_SATISFIABLE,
+                            "InvalidRange",
+                            "The requested range is not satisfiable",
+                        ));
+                    }
+                    ParsedRange::Ignored => {}
+                }
+            }
+        }
+
         headers.insert("content-length", obj.size.to_string().parse().unwrap());
         if obj.storage_class != "STANDARD" {
             headers.insert("x-amz-storage-class", obj.storage_class.parse().unwrap());
@@ -1879,6 +1995,7 @@ impl S3Service {
                 .unwrap_or_else(|| "STANDARD".to_string()),
             version_id: version_id.clone(),
             is_delete_marker: false,
+            content_encoding: None,
         };
 
         if versioning_enabled {
@@ -2091,8 +2208,25 @@ fn is_valid_bucket_name(name: &str) -> bool {
     if !bytes[0].is_ascii_alphanumeric() || !bytes[bytes.len() - 1].is_ascii_alphanumeric() {
         return false;
     }
-    name.chars()
+    if !name
+        .chars()
         .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '.')
+    {
+        return false;
+    }
+    // No consecutive dots
+    if name.contains("..") {
+        return false;
+    }
+    // No IP-address-like names
+    if name.split('.').count() == 4
+        && name
+            .split('.')
+            .all(|part| part.parse::<u8>().is_ok() && !part.is_empty())
+    {
+        return false;
+    }
+    true
 }
 
 fn resolve_object<'a>(
@@ -2123,6 +2257,7 @@ fn make_delete_marker(key: &str, dm_id: &str) -> S3Object {
         storage_class: "STANDARD".to_string(),
         version_id: Some(dm_id.to_string()),
         is_delete_marker: true,
+        content_encoding: None,
     }
 }
 
@@ -2199,6 +2334,129 @@ fn parse_complete_multipart_xml(xml: &str) -> Vec<i32> {
     parts
 }
 
+/// Build an S3-style XML error response with extra fields, returned as an OK AwsResponse
+/// with error status code (bypasses the dispatch error formatting).
+#[allow(dead_code)]
+fn s3_error_response(
+    status: StatusCode,
+    code: &str,
+    message: &str,
+    request_id: &str,
+    extra_fields: &[(&str, &str)],
+) -> AwsResponse {
+    let mut extra = String::new();
+    for (k, v) in extra_fields {
+        extra.push_str(&format!("<{k}>{}</{k}>", xml_escape(v)));
+    }
+    let body = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+         <Error>\
+         <Code>{code}</Code>\
+         <Message>{}</Message>\
+         {extra}\
+         <RequestId>{request_id}</RequestId>\
+         </Error>",
+        xml_escape(message),
+    );
+    AwsResponse {
+        status,
+        content_type: "application/xml".to_string(),
+        body: Bytes::from(body),
+        headers: HeaderMap::new(),
+    }
+}
+
+/// Build a 416 InvalidRange error response with extra S3-specific fields.
+fn invalid_range_response(range_str: &str, actual_size: u64, request_id: &str) -> AwsResponse {
+    let body = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+         <Error>\
+         <Code>InvalidRange</Code>\
+         <Message>The requested range is not satisfiable</Message>\
+         <RangeRequested>{}</RangeRequested>\
+         <ActualObjectSize>{actual_size}</ActualObjectSize>\
+         <RequestId>{request_id}</RequestId>\
+         </Error>",
+        xml_escape(range_str),
+    );
+    AwsResponse {
+        status: StatusCode::RANGE_NOT_SATISFIABLE,
+        content_type: "application/xml".to_string(),
+        body: Bytes::from(body),
+        headers: HeaderMap::new(),
+    }
+}
+
+/// URL-encode a key for encoding-type=url responses.
+fn url_encode_key(key: &str) -> String {
+    percent_encoding::utf8_percent_encode(key, percent_encoding::NON_ALPHANUMERIC).to_string()
+}
+
+/// Parsed range result.
+enum ParsedRange {
+    /// A satisfiable range with inclusive start and end byte positions.
+    Satisfiable { start: u64, end: u64 },
+    /// Range is not satisfiable (416).
+    NotSatisfiable,
+    /// Range should be ignored (e.g., invalid format like "bytes=1-0").
+    Ignored,
+}
+
+/// Parse an HTTP Range header value like "bytes=0-99", "bytes=50-", "bytes=-10".
+fn parse_range(range_str: &str, total: u64) -> Option<ParsedRange> {
+    let range_str = range_str.trim();
+    if range_str.is_empty() {
+        return None;
+    }
+    let spec = range_str.strip_prefix("bytes=")?;
+    if total == 0 {
+        return Some(ParsedRange::NotSatisfiable);
+    }
+
+    if let Some(suffix) = spec.strip_prefix('-') {
+        // Suffix range: bytes=-N (last N bytes)
+        let n: u64 = suffix.parse().ok()?;
+        if n == 0 {
+            return Some(ParsedRange::NotSatisfiable);
+        }
+        let start = total.saturating_sub(n);
+        Some(ParsedRange::Satisfiable {
+            start,
+            end: total - 1,
+        })
+    } else if let Some(prefix) = spec.strip_suffix('-') {
+        // Open-ended range: bytes=N-
+        let start: u64 = prefix.parse().ok()?;
+        if start >= total {
+            return Some(ParsedRange::NotSatisfiable);
+        }
+        Some(ParsedRange::Satisfiable {
+            start,
+            end: total - 1,
+        })
+    } else {
+        // Explicit range: bytes=start-end
+        let (start_str, end_str) = spec.split_once('-')?;
+        let start: u64 = start_str.parse().ok()?;
+        let end: u64 = end_str.parse().ok()?;
+
+        if start > end {
+            // Invalid range like "bytes=1-0" -- S3 returns full object
+            return Some(ParsedRange::Ignored);
+        }
+
+        if start >= total {
+            return Some(ParsedRange::NotSatisfiable);
+        }
+
+        let effective_end = end.min(total - 1);
+        Some(ParsedRange::Satisfiable {
+            start,
+            end: effective_end,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2212,6 +2470,10 @@ mod tests {
         assert!(!is_valid_bucket_name("-bucket"));
         assert!(!is_valid_bucket_name("Bucket"));
         assert!(!is_valid_bucket_name("bucket-"));
+        // No consecutive dots
+        assert!(!is_valid_bucket_name("my..bucket"));
+        // No IP address format
+        assert!(!is_valid_bucket_name("192.168.1.1"));
     }
 
     #[test]
@@ -2240,5 +2502,45 @@ mod tests {
         let xml = r#"<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>"abc"</ETag></Part><Part><PartNumber>2</PartNumber><ETag>"def"</ETag></Part></CompleteMultipartUpload>"#;
         let parts = parse_complete_multipart_xml(xml);
         assert_eq!(parts, vec![1, 2]);
+    }
+
+    #[test]
+    fn range_parsing() {
+        // Open-ended
+        assert!(matches!(
+            parse_range("bytes=0-", 100),
+            Some(ParsedRange::Satisfiable { start: 0, end: 99 })
+        ));
+        assert!(matches!(
+            parse_range("bytes=50-", 100),
+            Some(ParsedRange::Satisfiable { start: 50, end: 99 })
+        ));
+        // Suffix
+        assert!(matches!(
+            parse_range("bytes=-10", 100),
+            Some(ParsedRange::Satisfiable { start: 90, end: 99 })
+        ));
+        // Explicit
+        assert!(matches!(
+            parse_range("bytes=0-9", 100),
+            Some(ParsedRange::Satisfiable { start: 0, end: 9 })
+        ));
+        // Beyond end
+        assert!(matches!(
+            parse_range("bytes=0-200", 100),
+            Some(ParsedRange::Satisfiable { start: 0, end: 99 })
+        ));
+        // Reversed (ignored)
+        assert!(matches!(
+            parse_range("bytes=1-0", 100),
+            Some(ParsedRange::Ignored)
+        ));
+        // Not satisfiable
+        assert!(matches!(
+            parse_range("bytes=100-", 100),
+            Some(ParsedRange::NotSatisfiable)
+        ));
+        // Empty
+        assert!(parse_range("", 100).is_none());
     }
 }

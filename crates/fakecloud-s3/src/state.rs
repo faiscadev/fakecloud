@@ -16,6 +16,7 @@ pub struct S3Object {
     pub storage_class: String,
     pub version_id: Option<String>,
     pub is_delete_marker: bool,
+    pub content_encoding: Option<String>,
 }
 
 #[derive(Debug, Clone)]
