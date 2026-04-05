@@ -909,6 +909,35 @@ impl SnsService {
             .filter(|s| matches_filter_policy(s, &message_attributes, &message))
             .map(|s| s.endpoint.clone())
             .collect();
+
+        let lambda_subscribers: Vec<String> = state
+            .subscriptions
+            .values()
+            .filter(|s| s.topic_arn == topic_arn && s.protocol == "lambda" && s.confirmed)
+            .filter(|s| matches_filter_policy(s, &message_attributes, &message))
+            .map(|s| s.endpoint.clone())
+            .collect();
+
+        let email_subscribers: Vec<String> = state
+            .subscriptions
+            .values()
+            .filter(|s| {
+                s.topic_arn == topic_arn
+                    && (s.protocol == "email" || s.protocol == "email-json")
+                    && s.confirmed
+            })
+            .filter(|s| matches_filter_policy(s, &message_attributes, &message))
+            .map(|s| s.endpoint.clone())
+            .collect();
+
+        let sms_subscribers: Vec<String> = state
+            .subscriptions
+            .values()
+            .filter(|s| s.topic_arn == topic_arn && s.protocol == "sms" && s.confirmed)
+            .filter(|s| matches_filter_policy(s, &message_attributes, &message))
+            .map(|s| s.endpoint.clone())
+            .collect();
+
         drop(state);
 
         // Determine actual message content per protocol
@@ -1013,6 +1042,63 @@ impl SnsService {
                     tracing::warn!(endpoint = %endpoint_url, error = %e, "SNS HTTP delivery failed");
                 }
             });
+        }
+
+        // Deliver to Lambda subscribers (stub — log and store)
+        if !lambda_subscribers.is_empty() {
+            let now = Utc::now();
+            let mut state = self.state.write();
+            for function_arn in lambda_subscribers {
+                tracing::info!(
+                    function_arn = %function_arn,
+                    message = %default_message,
+                    topic_arn = %topic_arn,
+                    "SNS delivering to Lambda function (stub)"
+                );
+                state
+                    .lambda_invocations
+                    .push(crate::state::LambdaInvocation {
+                        function_arn,
+                        message: default_message.clone(),
+                        subject: subject.clone(),
+                        timestamp: now,
+                    });
+            }
+        }
+
+        // Deliver to email subscribers (stub — log and store)
+        if !email_subscribers.is_empty() {
+            let now = Utc::now();
+            let mut state = self.state.write();
+            for email_address in email_subscribers {
+                tracing::info!(
+                    email = %email_address,
+                    topic_arn = %topic_arn,
+                    "SNS delivering to email (stub)"
+                );
+                state.sent_emails.push(crate::state::SentEmail {
+                    email_address,
+                    message: default_message.clone(),
+                    subject: subject.clone(),
+                    topic_arn: topic_arn.clone(),
+                    timestamp: now,
+                });
+            }
+        }
+
+        // Deliver to SMS subscribers (stub — log and store)
+        if !sms_subscribers.is_empty() {
+            let mut state = self.state.write();
+            for phone_number in sms_subscribers {
+                tracing::info!(
+                    phone_number = %phone_number,
+                    topic_arn = %topic_arn,
+                    "SNS delivering to SMS (stub)"
+                );
+                state
+                    .sms_messages
+                    .push((phone_number, default_message.clone()));
+            }
         }
 
         Ok(xml_resp(

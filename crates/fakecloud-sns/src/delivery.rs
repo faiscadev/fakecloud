@@ -48,6 +48,78 @@ impl SnsDelivery for SnsDeliveryImpl {
             .map(|s| s.endpoint.clone())
             .collect();
 
+        // Collect Lambda, email, and SMS subscribers
+        let lambda_subscribers: Vec<String> = state
+            .subscriptions
+            .values()
+            .filter(|s| s.topic_arn == topic_arn && s.protocol == "lambda" && s.confirmed)
+            .map(|s| s.endpoint.clone())
+            .collect();
+
+        let email_subscribers: Vec<String> = state
+            .subscriptions
+            .values()
+            .filter(|s| {
+                s.topic_arn == topic_arn
+                    && (s.protocol == "email" || s.protocol == "email-json")
+                    && s.confirmed
+            })
+            .map(|s| s.endpoint.clone())
+            .collect();
+
+        let sms_subscribers: Vec<String> = state
+            .subscriptions
+            .values()
+            .filter(|s| s.topic_arn == topic_arn && s.protocol == "sms" && s.confirmed)
+            .map(|s| s.endpoint.clone())
+            .collect();
+
+        // Store Lambda invocations
+        let now = Utc::now();
+        for function_arn in &lambda_subscribers {
+            tracing::info!(
+                function_arn = %function_arn,
+                topic_arn = %topic_arn,
+                "SNS cross-service delivering to Lambda (stub)"
+            );
+            state
+                .lambda_invocations
+                .push(crate::state::LambdaInvocation {
+                    function_arn: function_arn.clone(),
+                    message: message.to_string(),
+                    subject: subject.map(|s| s.to_string()),
+                    timestamp: now,
+                });
+        }
+
+        // Store email deliveries
+        for email_address in &email_subscribers {
+            tracing::info!(
+                email = %email_address,
+                topic_arn = %topic_arn,
+                "SNS cross-service delivering to email (stub)"
+            );
+            state.sent_emails.push(crate::state::SentEmail {
+                email_address: email_address.clone(),
+                message: message.to_string(),
+                subject: subject.map(|s| s.to_string()),
+                topic_arn: topic_arn.to_string(),
+                timestamp: now,
+            });
+        }
+
+        // Store SMS deliveries
+        for phone_number in &sms_subscribers {
+            tracing::info!(
+                phone_number = %phone_number,
+                topic_arn = %topic_arn,
+                "SNS cross-service delivering to SMS (stub)"
+            );
+            state
+                .sms_messages
+                .push((phone_number.clone(), message.to_string()));
+        }
+
         // Drop the lock before calling into SQS delivery
         drop(state);
 
