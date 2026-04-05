@@ -9,6 +9,9 @@ use std::sync::Arc;
 use fakecloud_core::delivery::DeliveryBus;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 
+use fakecloud_lambda::state::{LambdaInvocation, SharedLambdaState};
+use fakecloud_logs::state::SharedLogsState;
+
 use crate::state::{
     ApiDestination, Archive, Connection, EventBus, EventRule, EventTarget, PutEvent, Replay,
     SharedEventBridgeState,
@@ -17,11 +20,28 @@ use crate::state::{
 pub struct EventBridgeService {
     state: SharedEventBridgeState,
     delivery: Arc<DeliveryBus>,
+    lambda_state: Option<SharedLambdaState>,
+    logs_state: Option<SharedLogsState>,
 }
 
 impl EventBridgeService {
     pub fn new(state: SharedEventBridgeState, delivery: Arc<DeliveryBus>) -> Self {
-        Self { state, delivery }
+        Self {
+            state,
+            delivery,
+            lambda_state: None,
+            logs_state: None,
+        }
+    }
+
+    pub fn with_lambda(mut self, lambda_state: SharedLambdaState) -> Self {
+        self.lambda_state = Some(lambda_state);
+        self
+    }
+
+    pub fn with_logs(mut self, logs_state: SharedLogsState) -> Self {
+        self.logs_state = Some(logs_state);
+        self
     }
 }
 
@@ -1182,28 +1202,45 @@ impl EventBridgeService {
                     tracing::info!(
                         function_arn = %arn,
                         payload = %body_str,
-                        "EventBridge delivering to Lambda function (stub)"
+                        "EventBridge delivering to Lambda function"
                     );
+                    let now = Utc::now();
                     let mut state = self.state.write();
                     state
                         .lambda_invocations
                         .push(crate::state::LambdaInvocation {
                             function_arn: arn.clone(),
                             payload: body_str.clone(),
-                            timestamp: Utc::now(),
+                            timestamp: now,
                         });
+                    drop(state);
+                    // Record in Lambda state for cross-service visibility
+                    if let Some(ref ls) = self.lambda_state {
+                        ls.write().invocations.push(LambdaInvocation {
+                            function_arn: arn.clone(),
+                            payload: body_str.clone(),
+                            timestamp: now,
+                            source: "aws:events".to_string(),
+                        });
+                    }
                 } else if arn.contains(":logs:") {
                     tracing::info!(
                         log_group_arn = %arn,
                         payload = %body_str,
-                        "EventBridge delivering to CloudWatch Logs (stub)"
+                        "EventBridge delivering to CloudWatch Logs"
                     );
+                    let now = Utc::now();
                     let mut state = self.state.write();
                     state.log_deliveries.push(crate::state::LogDelivery {
                         log_group_arn: arn.clone(),
                         payload: body_str.clone(),
-                        timestamp: Utc::now(),
+                        timestamp: now,
                     });
+                    drop(state);
+                    // Write event to CloudWatch Logs state
+                    if let Some(ref log_state) = self.logs_state {
+                        deliver_to_logs(log_state, arn, &body_str, now);
+                    }
                 } else if arn.contains(":states:") {
                     tracing::info!(
                         state_machine_arn = %arn,
@@ -2567,6 +2604,73 @@ fn missing(name: &str) -> AwsServiceError {
         "ValidationException",
         format!("The request must contain the parameter {name}"),
     )
+}
+
+/// Deliver an EventBridge event to CloudWatch Logs by writing a log event
+/// to the appropriate log group and stream.
+pub fn deliver_to_logs(
+    logs_state: &SharedLogsState,
+    log_group_arn: &str,
+    payload: &str,
+    timestamp: chrono::DateTime<chrono::Utc>,
+) {
+    // Extract log group name from ARN: arn:aws:logs:region:account:log-group:NAME
+    // or just the name if it's not an ARN
+    let group_name = if log_group_arn.contains(":log-group:") {
+        log_group_arn
+            .split(":log-group:")
+            .nth(1)
+            .unwrap_or(log_group_arn)
+            .trim_end_matches(":*")
+    } else {
+        log_group_arn
+    };
+
+    let stream_name = "events".to_string();
+    let ts_millis = timestamp.timestamp_millis();
+
+    let mut state = logs_state.write();
+    let region = state.region.clone();
+    let account_id = state.account_id.clone();
+
+    // Auto-create log group and stream if they don't exist
+    let group = state
+        .log_groups
+        .entry(group_name.to_string())
+        .or_insert_with(|| fakecloud_logs::state::LogGroup {
+            name: group_name.to_string(),
+            arn: format!("arn:aws:logs:{region}:{account_id}:log-group:{group_name}"),
+            creation_time: ts_millis,
+            retention_in_days: None,
+            tags: HashMap::new(),
+            log_streams: HashMap::new(),
+            stored_bytes: 0,
+        });
+
+    let stream = group
+        .log_streams
+        .entry(stream_name.clone())
+        .or_insert_with(|| fakecloud_logs::state::LogStream {
+            name: stream_name,
+            arn: format!("{}:log-stream:events", group.arn),
+            creation_time: ts_millis,
+            first_event_timestamp: None,
+            last_event_timestamp: None,
+            last_ingestion_time: None,
+            upload_sequence_token: "1".to_string(),
+            events: Vec::new(),
+        });
+
+    stream.events.push(fakecloud_logs::state::LogEvent {
+        timestamp: ts_millis,
+        message: payload.to_string(),
+        ingestion_time: ts_millis,
+    });
+    stream.last_event_timestamp = Some(ts_millis);
+    stream.last_ingestion_time = Some(ts_millis);
+    if stream.first_event_timestamp.is_none() {
+        stream.first_event_timestamp = Some(ts_millis);
+    }
 }
 
 #[cfg(test)]

@@ -6,6 +6,8 @@ use chrono::{Datelike, Timelike, Utc};
 use serde_json::json;
 
 use fakecloud_core::delivery::DeliveryBus;
+use fakecloud_lambda::state::{LambdaInvocation, SharedLambdaState};
+use fakecloud_logs::state::SharedLogsState;
 
 use crate::state::SharedEventBridgeState;
 
@@ -105,11 +107,28 @@ fn cron_matches_now(cron: &CronExpr) -> bool {
 pub struct Scheduler {
     state: SharedEventBridgeState,
     delivery: Arc<DeliveryBus>,
+    lambda_state: Option<SharedLambdaState>,
+    logs_state: Option<SharedLogsState>,
 }
 
 impl Scheduler {
     pub fn new(state: SharedEventBridgeState, delivery: Arc<DeliveryBus>) -> Self {
-        Self { state, delivery }
+        Self {
+            state,
+            delivery,
+            lambda_state: None,
+            logs_state: None,
+        }
+    }
+
+    pub fn with_lambda(mut self, lambda_state: SharedLambdaState) -> Self {
+        self.lambda_state = Some(lambda_state);
+        self
+    }
+
+    pub fn with_logs(mut self, logs_state: SharedLogsState) -> Self {
+        self.logs_state = Some(logs_state);
+        self
     }
 
     pub async fn run(self) {
@@ -222,7 +241,7 @@ impl Scheduler {
                     tracing::info!(
                         function_arn = %arn,
                         payload = %event_str,
-                        "Scheduler delivering to Lambda function (stub)"
+                        "Scheduler delivering to Lambda function"
                     );
                     let mut state = self.state.write();
                     state
@@ -232,11 +251,20 @@ impl Scheduler {
                             payload: event_str.clone(),
                             timestamp: now,
                         });
+                    drop(state);
+                    if let Some(ref ls) = self.lambda_state {
+                        ls.write().invocations.push(LambdaInvocation {
+                            function_arn: arn.clone(),
+                            payload: event_str.clone(),
+                            timestamp: now,
+                            source: "aws:events".to_string(),
+                        });
+                    }
                 } else if arn.contains(":logs:") {
                     tracing::info!(
                         log_group_arn = %arn,
                         payload = %event_str,
-                        "Scheduler delivering to CloudWatch Logs (stub)"
+                        "Scheduler delivering to CloudWatch Logs"
                     );
                     let mut state = self.state.write();
                     state.log_deliveries.push(crate::state::LogDelivery {
@@ -244,6 +272,10 @@ impl Scheduler {
                         payload: event_str.clone(),
                         timestamp: now,
                     });
+                    drop(state);
+                    if let Some(ref log_state) = self.logs_state {
+                        crate::service::deliver_to_logs(log_state, arn, &event_str, now);
+                    }
                 } else if arn.contains(":states:") {
                     tracing::info!(
                         state_machine_arn = %arn,

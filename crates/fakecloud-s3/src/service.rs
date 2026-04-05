@@ -9,6 +9,7 @@ use uuid::Uuid;
 
 use fakecloud_core::delivery::DeliveryBus;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
+use fakecloud_kms::state::SharedKmsState;
 
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
@@ -18,11 +19,21 @@ use crate::state::{AclGrant, MultipartUpload, S3Bucket, S3Object, SharedS3State,
 pub struct S3Service {
     state: SharedS3State,
     delivery: Arc<DeliveryBus>,
+    kms_state: Option<SharedKmsState>,
 }
 
 impl S3Service {
     pub fn new(state: SharedS3State, delivery: Arc<DeliveryBus>) -> Self {
-        Self { state, delivery }
+        Self {
+            state,
+            delivery,
+            kms_state: None,
+        }
+    }
+
+    pub fn with_kms(mut self, kms_state: SharedKmsState) -> Self {
+        self.kms_state = Some(kms_state);
+        self
     }
 }
 
@@ -2347,12 +2358,12 @@ impl S3Service {
         };
 
         // SSE headers
-        let sse_algorithm = req
+        let mut sse_algorithm = req
             .headers
             .get("x-amz-server-side-encryption")
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
-        let sse_kms_key_id = req
+        let mut sse_kms_key_id = req
             .headers
             .get("x-amz-server-side-encryption-aws-kms-key-id")
             .and_then(|v| v.to_str().ok())
@@ -2362,6 +2373,59 @@ impl S3Service {
             .get("x-amz-server-side-encryption-bucket-key-enabled")
             .and_then(|v| v.to_str().ok())
             .map(|s| s.eq_ignore_ascii_case("true"));
+
+        // Apply bucket default encryption if no explicit SSE header
+        if sse_algorithm.is_none() {
+            if let Some(ref config) = b.encryption_config {
+                if config.contains("aws:kms") {
+                    sse_algorithm = Some("aws:kms".to_string());
+                    // Extract KMS key ID from encryption config
+                    if sse_kms_key_id.is_none() {
+                        sse_kms_key_id = extract_xml_value(config, "KMSMasterKeyID");
+                    }
+                }
+            }
+        }
+
+        // Validate KMS key exists when using aws:kms encryption
+        if sse_algorithm.as_deref() == Some("aws:kms") {
+            if let Some(ref kms) = self.kms_state {
+                if let Some(ref key_id) = sse_kms_key_id {
+                    let kms_state = kms.read();
+                    let key_exists = kms_state
+                        .keys
+                        .values()
+                        .any(|k| k.key_id == *key_id || k.arn == *key_id)
+                        || kms_state
+                            .aliases
+                            .values()
+                            .any(|a| a.alias_name == *key_id || a.alias_arn == *key_id);
+                    if !key_exists {
+                        // Still allow it — AWS doesn't always reject unknown keys
+                        // for emulation purposes, just set the key ID
+                        tracing::debug!(
+                            key_id = %key_id,
+                            "KMS key not found in state, proceeding anyway"
+                        );
+                    } else {
+                        // Resolve alias to key ARN if needed
+                        if let Some(alias) = kms_state
+                            .aliases
+                            .values()
+                            .find(|a| a.alias_name == *key_id || a.alias_arn == *key_id)
+                        {
+                            if let Some(key) = kms_state.keys.get(&alias.target_key_id) {
+                                sse_kms_key_id = Some(key.arn.clone());
+                            }
+                        } else if let Some(key) =
+                            kms_state.keys.values().find(|k| k.key_id == *key_id)
+                        {
+                            sse_kms_key_id = Some(key.arn.clone());
+                        }
+                    }
+                }
+            }
+        }
 
         // Checksum: detect algorithm from various headers
         let checksum_algorithm = req

@@ -26,5 +26,5 @@ aws-sdk-cloudwatchlogs = "1"
 aws-sdk-kms = "1"
 aws-credential-types = "1"
 aws-types = "1"
-reqwest = "0.12"
+reqwest = { version = "0.12", features = ["json"] }
 chrono = { workspace = true }
