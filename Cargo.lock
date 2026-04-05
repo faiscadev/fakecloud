@@ -198,6 +198,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "aws-sdk-cloudwatchlogs"
+version = "1.125.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c199e081d1da738083d275340cb0af4613cd21e25a67d519f538d15d6ed11cd"
+dependencies = [
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-eventstream",
+ "aws-smithy-http",
+ "aws-smithy-json",
+ "aws-smithy-observability",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-types",
+ "aws-types",
+ "bytes",
+ "fastrand",
+ "http 0.2.12",
+ "http 1.4.0",
+ "regex-lite",
+ "tracing",
+]
+
+[[package]]
 name = "aws-sdk-eventbridge"
 version = "1.104.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -239,6 +264,30 @@ dependencies = [
  "aws-smithy-types",
  "aws-smithy-xml",
  "aws-types",
+ "fastrand",
+ "http 0.2.12",
+ "http 1.4.0",
+ "regex-lite",
+ "tracing",
+]
+
+[[package]]
+name = "aws-sdk-kms"
+version = "1.104.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c41ae6a33da941457e89075ef8ca5b4870c8009fe4dceeba82fce2f30f313ac6"
+dependencies = [
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-http",
+ "aws-smithy-json",
+ "aws-smithy-observability",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-types",
+ "aws-types",
+ "bytes",
  "fastrand",
  "http 0.2.12",
  "http 1.4.0",
@@ -1151,7 +1200,9 @@ dependencies = [
  "fakecloud-core",
  "fakecloud-eventbridge",
  "fakecloud-iam",
+ "fakecloud-kms",
  "fakecloud-lambda",
+ "fakecloud-logs",
  "fakecloud-s3",
  "fakecloud-secretsmanager",
  "fakecloud-sns",
@@ -1206,8 +1257,10 @@ version = "0.1.1"
 dependencies = [
  "aws-config",
  "aws-credential-types",
+ "aws-sdk-cloudwatchlogs",
  "aws-sdk-eventbridge",
  "aws-sdk-iam",
+ "aws-sdk-kms",
  "aws-sdk-lambda",
  "aws-sdk-s3",
  "aws-sdk-secretsmanager",
@@ -1259,6 +1312,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "fakecloud-kms"
+version = "0.1.1"
+dependencies = [
+ "async-trait",
+ "base64",
+ "chrono",
+ "fakecloud-core",
+ "http 1.4.0",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "uuid",
+]
+
+[[package]]
 name = "fakecloud-lambda"
 version = "0.1.1"
 dependencies = [
@@ -1275,6 +1344,21 @@ dependencies = [
  "sha2",
  "thiserror",
  "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "fakecloud-logs"
+version = "0.1.1"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "fakecloud-core",
+ "http 1.4.0",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "thiserror",
  "uuid",
 ]
 
