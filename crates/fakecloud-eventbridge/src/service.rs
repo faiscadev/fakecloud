@@ -1054,13 +1054,27 @@ impl EventBridgeService {
             // Archive matching events
             let archive_keys: Vec<String> = state.archives.keys().cloned().collect();
             for akey in archive_keys {
-                let archive_bus = {
+                let (archive_bus, archive_pattern, archive_enabled) = {
                     let a = &state.archives[&akey];
-                    state.resolve_bus_name(&a.event_source_arn)
+                    (
+                        state.resolve_bus_name(&a.event_source_arn),
+                        a.event_pattern.clone(),
+                        a.state == "ENABLED",
+                    )
                 };
-                if archive_bus == event_bus_name {
-                    if let Some(archive) = state.archives.get_mut(&akey) {
-                        if archive.state == "ENABLED" {
+                if archive_bus == event_bus_name && archive_enabled {
+                    // Check if event matches archive's event pattern
+                    let pattern_matches = matches_pattern(
+                        archive_pattern.as_deref(),
+                        &source,
+                        &detail_type,
+                        &detail,
+                        &req.account_id,
+                        &req.region,
+                        &resources,
+                    );
+                    if pattern_matches {
+                        if let Some(archive) = state.archives.get_mut(&akey) {
                             archive.event_count += 1;
                             archive.size_bytes += detail.len() as i64;
                             archive.events.push(event.clone());
@@ -1328,6 +1342,22 @@ impl EventBridgeService {
             serde_json::to_string(&merged).unwrap_or_default()
         };
 
+        // Build the archive target with InputTransformer
+        let archive_target = EventTarget {
+            id: name.clone(),
+            arn: format!("arn:aws:events:{}:::", req.region),
+            input: None,
+            input_path: None,
+            input_transformer: Some(json!({
+                "InputPathsMap": {},
+                "InputTemplate": format!(
+                    "{{\"archive-arn\": \"{}\", \"event\": <aws.events.event.json>, \"ingestion-time\": <aws.events.event.ingestion-time>}}",
+                    arn
+                )
+            })),
+            sqs_parameters: None,
+        };
+
         let archive_rule = EventRule {
             name: rule_name.clone(),
             arn: rule_arn,
@@ -1339,7 +1369,7 @@ impl EventBridgeService {
             role_arn: None,
             managed_by: Some("prod.vhs.events.aws.internal".to_string()),
             created_by: Some(state.account_id.clone()),
-            targets: Vec::new(),
+            targets: vec![archive_target],
             tags: HashMap::new(),
             last_fired: None,
         };

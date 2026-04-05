@@ -3102,29 +3102,165 @@ fn validate_filter_policy_value(value: &Value) -> Result<(), AwsServiceError> {
             // Validate numeric filter operands
             if let Some(numeric_val) = obj.get("numeric") {
                 if let Some(arr) = numeric_val.as_array() {
-                    let mut i = 0;
-                    while i < arr.len() {
-                        if let Some(op) = arr[i].as_str() {
-                            if i + 1 >= arr.len() {
-                                break;
-                            }
-                            if !arr[i + 1].is_number() {
-                                return Err(AwsServiceError::aws_error(
-                                    StatusCode::BAD_REQUEST,
-                                    "InvalidParameter",
-                                    format!(
-                                        "Invalid parameter: Attributes Reason: FilterPolicy: Value of {op} must be numeric\n at ..."
-                                    ),
-                                ));
-                            }
-                            i += 2;
-                        } else {
-                            break;
-                        }
-                    }
+                    validate_numeric_filter(arr)?;
                 }
             }
             Ok(())
         }
     }
+}
+
+const VALID_NUMERIC_OPS: &[&str] = &["=", "<", "<=", ">", ">="];
+const LOWER_OPS: &[&str] = &[">", ">="];
+const UPPER_OPS: &[&str] = &["<", "<="];
+
+fn validate_numeric_filter(arr: &[Value]) -> Result<(), AwsServiceError> {
+    // Empty array
+    if arr.is_empty() {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidParameter",
+            "Invalid parameter: Attributes Reason: FilterPolicy: Invalid member in numeric match: ]\n at ...",
+        ));
+    }
+
+    // First element must be a string operator
+    let first_op = match arr[0].as_str() {
+        Some(s) => s,
+        None => {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameter",
+                format!(
+                    "Invalid parameter: Attributes Reason: FilterPolicy: Invalid member in numeric match: {}\n at ...",
+                    arr[0]
+                ),
+            ));
+        }
+    };
+
+    // Must be a recognized operator
+    if !VALID_NUMERIC_OPS.contains(&first_op) {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidParameter",
+            format!(
+                "Invalid parameter: Attributes Reason: FilterPolicy: Unrecognized numeric range operator: {first_op}\n at ..."
+            ),
+        ));
+    }
+
+    // Must have a value after the operator
+    if arr.len() < 2 {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidParameter",
+            format!(
+                "Invalid parameter: Attributes Reason: FilterPolicy: Value of {first_op} must be numeric\n at ..."
+            ),
+        ));
+    }
+
+    // Value must be numeric
+    if !arr[1].is_number() {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidParameter",
+            format!(
+                "Invalid parameter: Attributes Reason: FilterPolicy: Value of {first_op} must be numeric\n at ..."
+            ),
+        ));
+    }
+
+    // Single comparison (2 elements): valid
+    if arr.len() == 2 {
+        return Ok(());
+    }
+
+    // Range expression: must have exactly 4 elements
+    if arr.len() > 4 {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidParameter",
+            "Invalid parameter: Attributes Reason: FilterPolicy: Too many elements in numeric expression\n at ...",
+        ));
+    }
+
+    if arr.len() < 4 {
+        // 3 elements: op, val, op_missing_value
+        if let Some(op2) = arr[2].as_str() {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameter",
+                format!(
+                    "Invalid parameter: Attributes Reason: FilterPolicy: Value of {op2} must be numeric\n at ..."
+                ),
+            ));
+        }
+        return Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidParameter",
+            "Invalid parameter: Attributes Reason: FilterPolicy: Too many elements in numeric expression\n at ...",
+        ));
+    }
+
+    // Exactly 4 elements: range expression
+    let second_op = match arr[2].as_str() {
+        Some(s) => s,
+        None => {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameter",
+                format!(
+                    "Invalid parameter: Attributes Reason: FilterPolicy: Invalid member in numeric match: {}\n at ...",
+                    arr[2]
+                ),
+            ));
+        }
+    };
+
+    if !arr[3].is_number() {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidParameter",
+            format!(
+                "Invalid parameter: Attributes Reason: FilterPolicy: Value of {second_op} must be numeric\n at ..."
+            ),
+        ));
+    }
+
+    // For a range, first op must be lower bound (> or >=) and second op must be upper bound (< or <=)
+    let first_is_lower = LOWER_OPS.contains(&first_op);
+    let second_is_upper = UPPER_OPS.contains(&second_op);
+
+    if first_is_lower && !second_is_upper {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidParameter",
+            format!(
+                "Invalid parameter: Attributes Reason: FilterPolicy: Bad numeric range operator: {second_op}\n at ..."
+            ),
+        ));
+    }
+
+    if !first_is_lower {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidParameter",
+            "Invalid parameter: Attributes Reason: FilterPolicy: Too many elements in numeric expression\n at ...",
+        ));
+    }
+
+    // Bottom must be less than top
+    let bottom = arr[1].as_f64().unwrap_or(0.0);
+    let top = arr[3].as_f64().unwrap_or(0.0);
+    if bottom >= top {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidParameter",
+            "Invalid parameter: Attributes Reason: FilterPolicy: Bottom must be less than top\n at ...",
+        ));
+    }
+
+    Ok(())
 }

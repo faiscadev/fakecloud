@@ -552,13 +552,17 @@ impl SqsService {
                 .values()
                 .any(|q| q.arn == rp.dead_letter_target_arn);
             if !dlq_exists {
-                return Err(AwsServiceError::aws_error(
+                return Err(AwsServiceError::aws_error_with_headers(
                     StatusCode::BAD_REQUEST,
-                    "AWS.SimpleQueueService.NonExistentQueue",
+                    "QueueDoesNotExist",
                     format!(
                         "Dead letter target does not exist: {}",
                         rp.dead_letter_target_arn
                     ),
+                    vec![(
+                        "x-amzn-query-error".to_string(),
+                        "AWS.SimpleQueueService.NonExistentQueue;Sender".to_string(),
+                    )],
                 ));
             }
             // Validate FIFO queue can only use FIFO DLQ
@@ -2719,10 +2723,14 @@ fn missing_param(name: &str) -> AwsServiceError {
 }
 
 fn queue_not_found() -> AwsServiceError {
-    AwsServiceError::aws_error(
+    AwsServiceError::aws_error_with_headers(
         StatusCode::BAD_REQUEST,
-        "AWS.SimpleQueueService.NonExistentQueue",
+        "QueueDoesNotExist",
         "The specified queue does not exist.",
+        vec![(
+            "x-amzn-query-error".to_string(),
+            "AWS.SimpleQueueService.NonExistentQueue;Sender".to_string(),
+        )],
     )
 }
 
