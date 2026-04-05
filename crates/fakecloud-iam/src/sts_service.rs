@@ -114,22 +114,8 @@ impl StsService {
             }
         }
 
-        // Default identity
-        let arn = match &state.default_caller_arn {
-            Some(override_arn) => {
-                // Replace the partition in the override ARN to match the request's region
-                if let Some(rest) = override_arn.strip_prefix("arn:") {
-                    if let Some(pos) = rest.find(':') {
-                        format!("arn:{}{}", partition, &rest[pos..])
-                    } else {
-                        override_arn.clone()
-                    }
-                } else {
-                    override_arn.clone()
-                }
-            }
-            None => format!("arn:{}:iam::{}:root", partition, state.account_id),
-        };
+        // Default identity — matches real AWS root credentials
+        let arn = format!("arn:{}:iam::{}:root", partition, state.account_id);
         let user_id = "FKIAIOSFODNN7EXAMPLE";
         let xml = xml_responses::get_caller_identity_response(
             &state.account_id,

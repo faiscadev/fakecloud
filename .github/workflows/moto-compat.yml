@@ -56,8 +56,7 @@ jobs:
 
       - name: Start FakeCloud
         run: |
-          FAKECLOUD_DEFAULT_CALLER_ARN="arn:aws:sts::123456789012:user/moto" \
-            ./target/release/fakecloud-server --log-level warn > /tmp/fakecloud.log 2>&1 &
+          ./target/release/fakecloud-server --log-level warn > /tmp/fakecloud.log 2>&1 &
           echo "FAKECLOUD_PID=$!" >> "$GITHUB_ENV"
 
       - name: Wait for FakeCloud health check

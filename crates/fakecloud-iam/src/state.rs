@@ -213,8 +213,6 @@ pub struct IamState {
     pub service_linked_role_deletions: HashMap<String, ServiceLinkedRoleDeletion>,
     /// Maps access key ID to the identity that should be returned by GetCallerIdentity.
     pub credential_identities: HashMap<String, CredentialIdentity>,
-    /// Override ARN for GetCallerIdentity when no user/role matches.
-    pub default_caller_arn: Option<String>,
     pub credential_report_generated: bool,
 }
 
@@ -242,7 +240,6 @@ impl IamState {
             virtual_mfa_devices: HashMap::new(),
             service_linked_role_deletions: HashMap::new(),
             credential_identities: HashMap::new(),
-            default_caller_arn: None,
             credential_report_generated: false,
         }
     }
