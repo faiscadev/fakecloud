@@ -209,16 +209,21 @@ fn convert_document_content(content: &str, from_format: &str, to_format: &str) -
         return content.to_string();
     }
 
-    // Try to parse as JSON regardless of declared format
-    // (most content round-trips through JSON in tests)
-    if to_format == "JSON" {
-        if let Ok(val) = serde_json::from_str::<serde_json::Value>(content) {
-            return serde_json::to_string(&val).unwrap_or_else(|_| content.to_string());
-        }
-    }
+    // Parse the content from its source format
+    let parsed: Option<serde_json::Value> = match from_format {
+        "YAML" => serde_yaml::from_str(content).ok(),
+        _ => serde_json::from_str(content).ok(),
+    };
 
-    // Return content as-is for other conversions
-    content.to_string()
+    if let Some(val) = parsed {
+        match to_format {
+            "JSON" => serde_json::to_string(&val).unwrap_or_else(|_| content.to_string()),
+            "YAML" => serde_yaml::to_string(&val).unwrap_or_else(|_| content.to_string()),
+            _ => content.to_string(),
+        }
+    } else {
+        content.to_string()
+    }
 }
 
 fn param_arn(region: &str, account_id: &str, name: &str) -> String {
@@ -591,6 +596,15 @@ impl SsmService {
         let raw_name = body["Name"].as_str().ok_or_else(|| missing("Name"))?;
         let with_decryption = body["WithDecryption"].as_bool().unwrap_or(false);
 
+        // Check for Secrets Manager references - require WithDecryption=true
+        if raw_name.starts_with("/aws/reference/secretsmanager/") && !with_decryption {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ValidationException",
+                "WithDecryption flag must be True for retrieving a Secret Manager secret.",
+            ));
+        }
+
         let state = self.state.read();
 
         // Handle ARN-style names directly (they contain many colons)
@@ -608,8 +622,9 @@ impl SsmService {
             return Err(param_not_found(&n));
         }
 
-        // Try looking up by name or by ARN
-        let param = resolve_param_by_name_or_arn(&state, base_name)?;
+        // Try looking up by name or by ARN - use raw_name in error for full context
+        let param = resolve_param_by_name_or_arn(&state, base_name)
+            .map_err(|_| param_not_found(raw_name))?;
 
         match selector {
             ParamSelector::None => Ok(json_resp(json!({
@@ -848,10 +863,18 @@ impl SsmService {
         };
 
         let is_root = path == "/";
+        let targets_aws = path.starts_with("/aws/") || path.starts_with("/aws");
 
         let all_params: Vec<&SsmParameter> = state
             .parameters
             .values()
+            .filter(|p| {
+                // Exclude /aws/ prefix params unless path explicitly targets them
+                if !targets_aws && p.name.starts_with("/aws/") {
+                    return false;
+                }
+                true
+            })
             .filter(|p| {
                 if is_root {
                     if recursive {
@@ -963,9 +986,41 @@ impl SsmService {
         }
 
         let state = self.state.read();
+
+        // Check if any filter explicitly targets /aws/ prefix paths
+        let targets_aws_prefix = param_filters.as_ref().is_some_and(|filters| {
+            filters.iter().any(|f| {
+                let key = f["Key"].as_str().unwrap_or("");
+                if key == "Path" {
+                    f["Values"].as_array().is_some_and(|vals| {
+                        vals.iter()
+                            .any(|v| v.as_str().is_some_and(|s| s.starts_with("/aws")))
+                    })
+                } else if key == "Name" {
+                    f["Values"].as_array().is_some_and(|vals| {
+                        vals.iter().any(|v| {
+                            v.as_str().is_some_and(|s| {
+                                let n = s.strip_prefix('/').unwrap_or(s);
+                                n.starts_with("aws/") || n.starts_with("aws")
+                            })
+                        })
+                    })
+                } else {
+                    false
+                }
+            })
+        });
+
         let all_params: Vec<&SsmParameter> = state
             .parameters
             .values()
+            .filter(|p| {
+                // Exclude /aws/ prefix params from user queries unless explicitly targeted
+                if !targets_aws_prefix && p.name.starts_with("/aws/") {
+                    return false;
+                }
+                true
+            })
             .filter(|p| apply_parameter_filters(p, param_filters.as_ref()))
             .filter(|p| apply_old_filters(p, old_filters.as_ref()))
             .collect();
@@ -1538,7 +1593,7 @@ impl SsmService {
 
         let doc = SsmDocument {
             name: name.clone(),
-            content,
+            content: content.clone(),
             document_type: doc_type.clone(),
             document_format: doc_format.clone(),
             target_type: target_type.clone(),
@@ -1555,24 +1610,33 @@ impl SsmService {
 
         state.documents.insert(name.clone(), doc);
 
-        Ok(json_resp(json!({
-            "DocumentDescription": {
-                "Name": name,
-                "DocumentType": doc_type,
-                "DocumentFormat": doc_format,
-                "TargetType": target_type,
-                "DocumentVersion": "1",
-                "LatestVersion": "1",
-                "DefaultVersion": "1",
-                "Status": "Active",
-                "CreatedDate": now.timestamp_millis() as f64 / 1000.0,
-                "Owner": state.account_id,
-                "SchemaVersion": "2.2",
-                "PlatformTypes": ["Linux", "MacOS", "Windows"],
-                "Hash": content_hash,
-                "HashType": "Sha256",
-            }
-        })))
+        let (doc_description, schema_ver, doc_params) =
+            extract_document_metadata(&content, &doc_format);
+
+        let mut desc_json = json!({
+            "Name": name,
+            "DocumentType": doc_type,
+            "DocumentFormat": doc_format,
+            "TargetType": target_type,
+            "DocumentVersion": "1",
+            "LatestVersion": "1",
+            "DefaultVersion": "1",
+            "Status": "Active",
+            "CreatedDate": now.timestamp_millis() as f64 / 1000.0,
+            "Owner": state.account_id,
+            "SchemaVersion": schema_ver.as_deref().unwrap_or("2.2"),
+            "PlatformTypes": ["Linux", "MacOS", "Windows"],
+            "Hash": content_hash,
+            "HashType": "Sha256",
+        });
+        if let Some(d) = doc_description {
+            desc_json["Description"] = json!(d);
+        }
+        if !doc_params.is_empty() {
+            desc_json["Parameters"] = json!(doc_params);
+        }
+
+        Ok(json_resp(json!({ "DocumentDescription": desc_json })))
     }
 
     fn get_document(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
@@ -1655,10 +1719,45 @@ impl SsmService {
     fn delete_document(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = parse_body(req);
         let name = body["Name"].as_str().ok_or_else(|| missing("Name"))?;
+        let doc_version = body["DocumentVersion"].as_str();
+        let version_name = body["VersionName"].as_str();
 
         let mut state = self.state.write();
-        if state.documents.remove(name).is_none() {
-            return Err(doc_not_found(name));
+
+        if doc_version.is_some() || version_name.is_some() {
+            // Deleting a specific version
+            let doc = state
+                .documents
+                .get_mut(name)
+                .ok_or_else(|| doc_not_found(name))?;
+
+            // Find the target version
+            let target_ver = if let Some(vn) = version_name {
+                doc.versions
+                    .iter()
+                    .find(|v| v.version_name.as_deref() == Some(vn))
+                    .map(|v| v.document_version.clone())
+            } else {
+                doc_version.map(|v| v.to_string())
+            };
+
+            if let Some(ver) = target_ver {
+                if ver == doc.default_version {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "InvalidDocumentOperation",
+                        "Default version of the document can't be deleted.",
+                    ));
+                }
+                doc.versions.retain(|v| v.document_version != ver);
+            } else {
+                return Err(doc_not_found(name));
+            }
+        } else {
+            // Delete the entire document
+            if state.documents.remove(name).is_none() {
+                return Err(doc_not_found(name));
+            }
         }
 
         Ok(json_resp(json!({})))
@@ -1673,6 +1772,7 @@ impl SsmService {
             .to_string();
         let version_name = body["VersionName"].as_str().map(|s| s.to_string());
         let doc_format = body["DocumentFormat"].as_str();
+        let target_version = body["DocumentVersion"].as_str();
 
         let mut state = self.state.write();
         let doc = state
@@ -1680,8 +1780,55 @@ impl SsmService {
             .get_mut(name)
             .ok_or_else(|| doc_not_found(name))?;
 
+        // Validate target version exists (if specified and not $LATEST)
+        if let Some(ver) = target_version {
+            if ver != "$LATEST" && !doc.versions.iter().any(|v| v.document_version == ver) {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidDocument",
+                    "The document version is not valid or does not exist.",
+                ));
+            }
+        }
+
+        // Check for duplicate content
+        let new_hash = format!("{:x}", Sha256::digest(content.as_bytes()));
+        for v in &doc.versions {
+            let existing_hash = format!("{:x}", Sha256::digest(v.content.as_bytes()));
+            if new_hash == existing_hash {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "DuplicateDocumentContent",
+                    "The content of the association document matches another \
+                     document. Change the content of the document and try again.",
+                ));
+            }
+        }
+
+        // Check for duplicate version name
+        if let Some(ref vn) = version_name {
+            if doc
+                .versions
+                .iter()
+                .any(|v| v.version_name.as_deref() == Some(vn))
+            {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "DuplicateDocumentVersionName",
+                    format!(
+                        "The specified version name is a duplicate. \
+                         Specify a unique version name, and try again. \
+                         Version name: {vn}."
+                    ),
+                ));
+            }
+        }
+
         let new_version_num = (doc.versions.len() + 1).to_string();
         let format = doc_format.unwrap_or(&doc.document_format).to_string();
+
+        let (doc_description, schema_ver, doc_params) =
+            extract_document_metadata(&content, &format);
 
         let version = SsmDocumentVersion {
             content: content.clone(),
@@ -1697,20 +1844,26 @@ impl SsmService {
         doc.latest_version = new_version_num.clone();
         doc.content = content;
 
-        Ok(json_resp(json!({
-            "DocumentDescription": {
-                "Name": doc.name,
-                "DocumentType": doc.document_type,
-                "DocumentFormat": format,
-                "DocumentVersion": new_version_num,
-                "LatestVersion": doc.latest_version,
-                "DefaultVersion": doc.default_version,
-                "Status": "Active",
-                "CreatedDate": doc.created_date.timestamp_millis() as f64 / 1000.0,
-                "Owner": doc.owner,
-                "SchemaVersion": "2.2",
-            }
-        })))
+        let mut desc_json = json!({
+            "Name": doc.name,
+            "DocumentType": doc.document_type,
+            "DocumentFormat": format,
+            "DocumentVersion": new_version_num,
+            "LatestVersion": doc.latest_version,
+            "DefaultVersion": doc.default_version,
+            "Status": "Active",
+            "CreatedDate": doc.created_date.timestamp_millis() as f64 / 1000.0,
+            "Owner": doc.owner,
+            "SchemaVersion": schema_ver.as_deref().unwrap_or("2.2"),
+        });
+        if let Some(d) = doc_description {
+            desc_json["Description"] = json!(d);
+        }
+        if !doc_params.is_empty() {
+            desc_json["Parameters"] = json!(doc_params);
+        }
+
+        Ok(json_resp(json!({ "DocumentDescription": desc_json })))
     }
 
     fn describe_document(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
@@ -1723,24 +1876,46 @@ impl SsmService {
             .get(name)
             .ok_or_else(|| doc_not_found(name))?;
 
-        Ok(json_resp(json!({
-            "Document": {
-                "Name": doc.name,
-                "DocumentType": doc.document_type,
-                "DocumentFormat": doc.document_format,
-                "TargetType": doc.target_type,
-                "DocumentVersion": doc.default_version,
-                "LatestVersion": doc.latest_version,
-                "DefaultVersion": doc.default_version,
-                "Status": doc.status,
-                "CreatedDate": doc.created_date.timestamp_millis() as f64 / 1000.0,
-                "Owner": doc.owner,
-                "SchemaVersion": "2.2",
-                "PlatformTypes": ["Linux", "MacOS", "Windows"],
-                "Hash": format!("{:x}", Sha256::digest(doc.content.as_bytes())),
-                "HashType": "Sha256",
+        let (doc_description, schema_ver, doc_params) =
+            extract_document_metadata(&doc.content, &doc.document_format);
+
+        let mut desc_json = json!({
+            "Name": doc.name,
+            "DocumentType": doc.document_type,
+            "DocumentFormat": doc.document_format,
+            "TargetType": doc.target_type,
+            "DocumentVersion": doc.default_version,
+            "LatestVersion": doc.latest_version,
+            "DefaultVersion": doc.default_version,
+            "Status": doc.status,
+            "CreatedDate": doc.created_date.timestamp_millis() as f64 / 1000.0,
+            "Owner": doc.owner,
+            "SchemaVersion": schema_ver.as_deref().unwrap_or("2.2"),
+            "PlatformTypes": ["Linux", "MacOS", "Windows"],
+            "Hash": format!("{:x}", Sha256::digest(doc.content.as_bytes())),
+            "HashType": "Sha256",
+        });
+        if let Some(d) = doc_description {
+            desc_json["Description"] = json!(d);
+        }
+        if !doc_params.is_empty() {
+            desc_json["Parameters"] = json!(doc_params);
+        }
+        if let Some(ref vn) = doc.version_name {
+            desc_json["VersionName"] = json!(vn);
+        }
+        // Find default version name
+        if let Some(ver) = doc
+            .versions
+            .iter()
+            .find(|v| v.document_version == doc.default_version)
+        {
+            if let Some(ref vn) = ver.version_name {
+                desc_json["DefaultVersionName"] = json!(vn);
             }
-        })))
+        }
+
+        Ok(json_resp(json!({ "Document": desc_json })))
     }
 
     fn update_document_default_version(
@@ -1771,12 +1946,22 @@ impl SsmService {
             v.is_default_version = v.document_version == version;
         }
 
-        Ok(json_resp(json!({
-            "Description": {
-                "Name": name,
-                "DefaultVersion": version,
-            }
-        })))
+        // Find version name for the new default version
+        let version_name = doc
+            .versions
+            .iter()
+            .find(|v| v.document_version == version)
+            .and_then(|v| v.version_name.clone());
+
+        let mut desc = json!({
+            "Name": name,
+            "DefaultVersion": version,
+        });
+        if let Some(vn) = version_name {
+            desc["DefaultVersionName"] = json!(vn);
+        }
+
+        Ok(json_resp(json!({ "Description": desc })))
     }
 
     fn list_documents(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
@@ -1815,6 +2000,8 @@ impl SsmService {
         let mut resp = json!({ "DocumentIdentifiers": result });
         if has_more {
             resp["NextToken"] = json!((next_token_offset + max_results).to_string());
+        } else {
+            resp["NextToken"] = json!("");
         }
 
         Ok(json_resp(resp))
@@ -2895,12 +3082,12 @@ impl SsmService {
 
         let mut state = self.state.write();
 
-        // Check baseline exists
+        // Check baseline exists (AWS returns "Maintenance window" in this error, not "Patch baseline")
         if !state.patch_baselines.contains_key(&baseline_id) {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "DoesNotExistException",
-                format!("Patch baseline {baseline_id} does not exist"),
+                format!("Maintenance window {baseline_id} does not exist"),
             ));
         }
 
@@ -3215,11 +3402,11 @@ fn validate_parameter_filters(filters: &[Value]) -> Result<(), AwsServiceError> 
         }
     }
 
-    // Check for missing values
+    // Check for missing values (tag: filters are allowed without values - means "tag exists")
     for filter in filters {
         let key = filter["Key"].as_str().unwrap_or("");
         let values = filter["Values"].as_array();
-        if values.is_none() || values.is_some_and(|v| v.is_empty()) {
+        if !key.starts_with("tag:") && (values.is_none() || values.is_some_and(|v| v.is_empty())) {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "ValidationException",
@@ -3383,9 +3570,23 @@ fn apply_parameter_filters(param: &SsmParameter, filters: Option<&Vec<Value>>) -
 
         let matches = match key {
             "Name" => match option {
-                "BeginsWith" => values.iter().any(|v| param.name.starts_with(v)),
+                "BeginsWith" => values.iter().any(|v| {
+                    param.name.starts_with(v) || {
+                        // Normalize: /foo matches foo, foo matches /foo
+                        let normalized_v = v.strip_prefix('/').unwrap_or(v);
+                        let normalized_name = param.name.strip_prefix('/').unwrap_or(&param.name);
+                        normalized_name.starts_with(normalized_v)
+                    }
+                }),
                 "Contains" => values.iter().any(|v| param.name.contains(v)),
-                "Equals" => values.iter().any(|v| param.name == *v),
+                "Equals" => values.iter().any(|v| {
+                    param.name == *v || {
+                        // Normalize: /foo matches foo, foo matches /foo
+                        let normalized_v = v.strip_prefix('/').unwrap_or(v);
+                        let normalized_name = param.name.strip_prefix('/').unwrap_or(&param.name);
+                        normalized_name == normalized_v
+                    }
+                }),
                 _ => true,
             },
             "Path" => {
@@ -3439,11 +3640,22 @@ fn apply_parameter_filters(param: &SsmParameter, filters: Option<&Vec<Value>>) -
                 }
             }
             "KeyId" => {
-                if values.is_empty() {
-                    param.key_id.is_some()
+                // For SecureString params without explicit KeyId, default is alias/aws/ssm
+                let effective_key_id = if param.param_type == "SecureString" {
+                    Some(
+                        param
+                            .key_id
+                            .as_deref()
+                            .unwrap_or("alias/aws/ssm")
+                            .to_string(),
+                    )
                 } else {
-                    param
-                        .key_id
+                    param.key_id.clone()
+                };
+                if values.is_empty() {
+                    effective_key_id.is_some()
+                } else {
+                    effective_key_id
                         .as_ref()
                         .is_some_and(|kid| values.contains(&kid.as_str()))
                 }
@@ -3589,4 +3801,60 @@ fn mw_not_found(id: &str) -> AwsServiceError {
         "DoesNotExistException",
         format!("Maintenance window {id} does not exist"),
     )
+}
+
+/// Parse a document content string (JSON or YAML) and extract metadata fields.
+/// Returns (description, schema_version, parameters_json).
+fn extract_document_metadata(
+    content: &str,
+    format: &str,
+) -> (Option<String>, Option<String>, Vec<Value>) {
+    let parsed: Option<Value> = match format {
+        "YAML" => serde_yaml::from_str(content).ok(),
+        _ => serde_json::from_str(content).ok(),
+    };
+
+    let parsed = match parsed {
+        Some(v) => v,
+        None => return (None, None, Vec::new()),
+    };
+
+    let description = parsed
+        .get("description")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let schema_version = parsed
+        .get("schemaVersion")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let parameters = if let Some(params_obj) = parsed.get("parameters").and_then(|v| v.as_object())
+    {
+        params_obj
+            .iter()
+            .map(|(name, def)| {
+                let mut param = json!({ "Name": name });
+                if let Some(t) = def.get("type").and_then(|v| v.as_str()) {
+                    param["Type"] = json!(t);
+                }
+                if let Some(d) = def.get("description").and_then(|v| v.as_str()) {
+                    param["Description"] = json!(d);
+                }
+                if let Some(dv) = def.get("default") {
+                    let default_str = match dv {
+                        Value::String(s) => s.clone(),
+                        Value::Number(n) => n.to_string(),
+                        Value::Bool(b) => if *b { "True" } else { "False" }.to_string(),
+                        other => serde_json::to_string(other).unwrap_or_default(),
+                    };
+                    param["DefaultValue"] = json!(default_str);
+                }
+                param
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    (description, schema_version, parameters)
 }
