@@ -1032,8 +1032,33 @@ impl IamService {
 
 impl IamService {
     fn create_access_key(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        let user_name = required_param(&req.query_params, "UserName")?;
         let mut state = self.state.write();
+
+        // UserName is optional; if not specified, infer from the caller's access key
+        let user_name = match req.query_params.get("UserName") {
+            Some(name) => name.clone(),
+            None => {
+                // Look up user by access key ID from the request credentials
+                let access_key_id = req.access_key_id.as_deref().unwrap_or("");
+                state
+                    .access_keys
+                    .iter()
+                    .find_map(|(user, keys)| {
+                        if keys.iter().any(|k| k.access_key_id == access_key_id) {
+                            Some(user.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .ok_or_else(|| {
+                        AwsServiceError::aws_error(
+                            StatusCode::BAD_REQUEST,
+                            "MissingParameter",
+                            "The request must contain the parameter UserName".to_string(),
+                        )
+                    })?
+            }
+        };
 
         if !state.users.contains_key(&user_name) {
             return Err(AwsServiceError::aws_error(
