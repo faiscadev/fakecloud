@@ -1178,6 +1178,66 @@ impl EventBridgeService {
                 } else if arn.contains(":sns:") {
                     self.delivery
                         .publish_to_sns(arn, &body_str, Some(&detail_type));
+                } else if arn.contains(":lambda:") {
+                    tracing::info!(
+                        function_arn = %arn,
+                        payload = %body_str,
+                        "EventBridge delivering to Lambda function (stub)"
+                    );
+                    let mut state = self.state.write();
+                    state
+                        .lambda_invocations
+                        .push(crate::state::LambdaInvocation {
+                            function_arn: arn.clone(),
+                            payload: body_str.clone(),
+                            timestamp: Utc::now(),
+                        });
+                } else if arn.contains(":logs:") {
+                    tracing::info!(
+                        log_group_arn = %arn,
+                        payload = %body_str,
+                        "EventBridge delivering to CloudWatch Logs (stub)"
+                    );
+                    let mut state = self.state.write();
+                    state.log_deliveries.push(crate::state::LogDelivery {
+                        log_group_arn: arn.clone(),
+                        payload: body_str.clone(),
+                        timestamp: Utc::now(),
+                    });
+                } else if arn.contains(":states:") {
+                    tracing::info!(
+                        state_machine_arn = %arn,
+                        payload = %body_str,
+                        "EventBridge delivering to Step Functions (stub)"
+                    );
+                    let mut state = self.state.write();
+                    state
+                        .step_function_executions
+                        .push(crate::state::StepFunctionExecution {
+                            state_machine_arn: arn.clone(),
+                            payload: body_str.clone(),
+                            timestamp: Utc::now(),
+                        });
+                } else if arn.starts_with("https://") || arn.starts_with("http://") {
+                    // HTTP/API destination target — fire-and-forget POST
+                    let url = arn.clone();
+                    let payload = body_str.clone();
+                    tokio::spawn(async move {
+                        let client = reqwest::Client::new();
+                        let result = client
+                            .post(&url)
+                            .header("Content-Type", "application/json")
+                            .body(payload)
+                            .send()
+                            .await;
+                        if let Err(e) = result {
+                            tracing::warn!(
+                                endpoint = %url,
+                                error = %e,
+                                "EventBridge HTTP target delivery failed"
+                            );
+                        }
+                    });
                 }
             }
         }

@@ -62,6 +62,25 @@ pub struct PlatformEndpoint {
     pub messages: Vec<PublishedMessage>,
 }
 
+/// A recorded Lambda invocation from SNS delivery.
+#[derive(Debug, Clone)]
+pub struct LambdaInvocation {
+    pub function_arn: String,
+    pub message: String,
+    pub subject: Option<String>,
+    pub timestamp: DateTime<Utc>,
+}
+
+/// A recorded email delivery from SNS (stub).
+#[derive(Debug, Clone)]
+pub struct SentEmail {
+    pub email_address: String,
+    pub message: String,
+    pub subject: Option<String>,
+    pub topic_arn: String,
+    pub timestamp: DateTime<Utc>,
+}
+
 pub struct SnsState {
     pub account_id: String,
     pub region: String,
@@ -72,6 +91,10 @@ pub struct SnsState {
     pub sms_attributes: HashMap<String, String>,
     pub opted_out_numbers: Vec<String>,
     pub sms_messages: Vec<(String, String)>, // (phone_number, message)
+    /// Recorded Lambda invocations (stub deliveries).
+    pub lambda_invocations: Vec<LambdaInvocation>,
+    /// Recorded email deliveries (stub — not actually sent).
+    pub sent_emails: Vec<SentEmail>,
 }
 
 impl SnsState {
@@ -86,6 +109,8 @@ impl SnsState {
             sms_attributes: HashMap::new(),
             opted_out_numbers: Vec::new(),
             sms_messages: Vec::new(),
+            lambda_invocations: Vec::new(),
+            sent_emails: Vec::new(),
         }
     }
 
@@ -97,6 +122,8 @@ impl SnsState {
         self.sms_attributes.clear();
         self.opted_out_numbers.clear();
         self.sms_messages.clear();
+        self.lambda_invocations.clear();
+        self.sent_emails.clear();
     }
 
     /// Seed default opt-out phone numbers.

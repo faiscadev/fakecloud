@@ -369,3 +369,99 @@ async fn s3_nested_key_paths() {
     let body = resp.body.collect().await.unwrap().into_bytes();
     assert_eq!(body.as_ref(), b"deep");
 }
+
+/// Verify that S3 lifecycle configuration can be put and retrieved.
+#[tokio::test]
+async fn s3_lifecycle_put_get_delete() {
+    let server = TestServer::start().await;
+
+    // Use AWS CLI for lifecycle operations (SDK lifecycle types are complex)
+    let output = server
+        .aws_cli(&["s3api", "create-bucket", "--bucket", "lifecycle-bucket"])
+        .await;
+    assert!(
+        output.success(),
+        "create bucket failed: {}",
+        output.stderr_text()
+    );
+
+    // Put lifecycle configuration
+    let lifecycle_json = r#"{
+        "Rules": [
+            {
+                "ID": "expire-logs",
+                "Filter": {"Prefix": "logs/"},
+                "Status": "Enabled",
+                "Expiration": {"Days": 30}
+            },
+            {
+                "ID": "archive-data",
+                "Filter": {"Prefix": "data/"},
+                "Status": "Enabled",
+                "Transitions": [
+                    {"Days": 90, "StorageClass": "GLACIER"}
+                ]
+            }
+        ]
+    }"#;
+
+    let output = server
+        .aws_cli(&[
+            "s3api",
+            "put-bucket-lifecycle-configuration",
+            "--bucket",
+            "lifecycle-bucket",
+            "--lifecycle-configuration",
+            lifecycle_json,
+        ])
+        .await;
+    assert!(
+        output.success(),
+        "put lifecycle failed: {}",
+        output.stderr_text()
+    );
+
+    // Get lifecycle configuration
+    let output = server
+        .aws_cli(&[
+            "s3api",
+            "get-bucket-lifecycle-configuration",
+            "--bucket",
+            "lifecycle-bucket",
+        ])
+        .await;
+    assert!(
+        output.success(),
+        "get lifecycle failed: {}",
+        output.stderr_text()
+    );
+    let json = output.stdout_json();
+    let rules = json["Rules"].as_array().unwrap();
+    assert_eq!(rules.len(), 2);
+
+    // Delete lifecycle configuration
+    let output = server
+        .aws_cli(&[
+            "s3api",
+            "delete-bucket-lifecycle",
+            "--bucket",
+            "lifecycle-bucket",
+        ])
+        .await;
+    assert!(
+        output.success(),
+        "delete lifecycle failed: {}",
+        output.stderr_text()
+    );
+
+    // Verify deleted — should fail with NoSuchLifecycleConfiguration
+    let output = server
+        .aws_cli(&[
+            "s3api",
+            "get-bucket-lifecycle-configuration",
+            "--bucket",
+            "lifecycle-bucket",
+        ])
+        .await;
+    assert!(!output.success(), "expected error after lifecycle deletion");
+}

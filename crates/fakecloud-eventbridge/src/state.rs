@@ -115,6 +115,30 @@ pub struct Replay {
     pub replay_end_time: Option<DateTime<Utc>>,
 }
 
+/// A recorded Lambda invocation from EventBridge delivery.
+#[derive(Debug, Clone)]
+pub struct LambdaInvocation {
+    pub function_arn: String,
+    pub payload: String,
+    pub timestamp: DateTime<Utc>,
+}
+
+/// A recorded CloudWatch Logs delivery from EventBridge.
+#[derive(Debug, Clone)]
+pub struct LogDelivery {
+    pub log_group_arn: String,
+    pub payload: String,
+    pub timestamp: DateTime<Utc>,
+}
+
+/// A recorded Step Functions invocation from EventBridge delivery.
+#[derive(Debug, Clone)]
+pub struct StepFunctionExecution {
+    pub state_machine_arn: String,
+    pub payload: String,
+    pub timestamp: DateTime<Utc>,
+}
+
 pub struct EventBridgeState {
     pub account_id: String,
     pub region: String,
@@ -127,6 +151,12 @@ pub struct EventBridgeState {
     pub replays: HashMap<String, Replay>,
     /// Partner event sources: name -> account
     pub partner_event_sources: HashMap<String, String>,
+    /// Recorded Lambda invocations (stub deliveries).
+    pub lambda_invocations: Vec<LambdaInvocation>,
+    /// Recorded CloudWatch Logs deliveries (stub deliveries).
+    pub log_deliveries: Vec<LogDelivery>,
+    /// Recorded Step Functions executions (stub deliveries).
+    pub step_function_executions: Vec<StepFunctionExecution>,
 }
 
 impl EventBridgeState {
@@ -160,6 +190,9 @@ impl EventBridgeState {
             api_destinations: HashMap::new(),
             replays: HashMap::new(),
             partner_event_sources: HashMap::new(),
+            lambda_invocations: Vec::new(),
+            log_deliveries: Vec::new(),
+            step_function_executions: Vec::new(),
         }
     }
 
@@ -181,6 +214,9 @@ impl EventBridgeState {
         self.rules.clear();
         self.events.clear();
         self.partner_event_sources.clear();
+        self.lambda_invocations.clear();
+        self.log_deliveries.clear();
+        self.step_function_executions.clear();
         // Re-create default bus
         let default_bus_arn = format!(
             "arn:aws:events:{}:{}:event-bus/default",

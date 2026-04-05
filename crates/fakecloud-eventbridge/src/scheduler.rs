@@ -218,6 +218,65 @@ impl Scheduler {
                 } else if arn.contains(":sns:") {
                     self.delivery
                         .publish_to_sns(arn, &event_str, Some("Scheduled Event"));
+                } else if arn.contains(":lambda:") {
+                    tracing::info!(
+                        function_arn = %arn,
+                        payload = %event_str,
+                        "Scheduler delivering to Lambda function (stub)"
+                    );
+                    let mut state = self.state.write();
+                    state
+                        .lambda_invocations
+                        .push(crate::state::LambdaInvocation {
+                            function_arn: arn.clone(),
+                            payload: event_str.clone(),
+                            timestamp: now,
+                        });
+                } else if arn.contains(":logs:") {
+                    tracing::info!(
+                        log_group_arn = %arn,
+                        payload = %event_str,
+                        "Scheduler delivering to CloudWatch Logs (stub)"
+                    );
+                    let mut state = self.state.write();
+                    state.log_deliveries.push(crate::state::LogDelivery {
+                        log_group_arn: arn.clone(),
+                        payload: event_str.clone(),
+                        timestamp: now,
+                    });
+                } else if arn.contains(":states:") {
+                    tracing::info!(
+                        state_machine_arn = %arn,
+                        payload = %event_str,
+                        "Scheduler delivering to Step Functions (stub)"
+                    );
+                    let mut state = self.state.write();
+                    state
+                        .step_function_executions
+                        .push(crate::state::StepFunctionExecution {
+                            state_machine_arn: arn.clone(),
+                            payload: event_str.clone(),
+                            timestamp: now,
+                        });
+                } else if arn.starts_with("https://") || arn.starts_with("http://") {
+                    let url = arn.clone();
+                    let payload = event_str.clone();
+                    tokio::spawn(async move {
+                        let client = reqwest::Client::new();
+                        let result = client
+                            .post(&url)
+                            .header("Content-Type", "application/json")
+                            .body(payload)
+                            .send()
+                            .await;
+                        if let Err(e) = result {
+                            tracing::warn!(
+                                endpoint = %url,
+                                error = %e,
+                                "Scheduler HTTP target delivery failed"
+                            );
+                        }
+                    });
                 }
             }
         }

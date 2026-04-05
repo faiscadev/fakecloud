@@ -1,5 +1,6 @@
 mod helpers;
 
+use aws_sdk_sqs::types::QueueAttributeName;
 use helpers::TestServer;
 
 #[tokio::test]
@@ -188,4 +189,138 @@ async fn sns_fifo_topic_creation() {
         attributes.get("FifoTopic").map(|s| s.as_str()),
         Some("true")
     );
+}
+
+/// Publish to SNS topic with SQS subscriber and verify delivery.
+#[tokio::test]
+async fn sns_publish_delivers_to_sqs_subscriber() {
+    let server = TestServer::start().await;
+    let sns = server.sns_client().await;
+    let sqs = server.sqs_client().await;
+
+    // Create SQS queue
+    let queue = sqs
+        .create_queue()
+        .queue_name("sns-delivery-queue")
+        .send()
+        .await
+        .unwrap();
+    let queue_url = queue.queue_url().unwrap().to_string();
+    let attrs = sqs
+        .get_queue_attributes()
+        .queue_url(&queue_url)
+        .attribute_names(QueueAttributeName::QueueArn)
+        .send()
+        .await
+        .unwrap();
+    let queue_arn = attrs
+        .attributes()
+        .unwrap()
+        .get(&QueueAttributeName::QueueArn)
+        .unwrap()
+        .to_string();
+
+    // Create topic and subscribe SQS
+    let topic = sns
+        .create_topic()
+        .name("delivery-topic")
+        .send()
+        .await
+        .unwrap();
+    let topic_arn = topic.topic_arn().unwrap().to_string();
+
+    sns.subscribe()
+        .topic_arn(&topic_arn)
+        .protocol("sqs")
+        .endpoint(&queue_arn)
+        .send()
+        .await
+        .unwrap();
+
+    // Publish
+    sns.publish()
+        .topic_arn(&topic_arn)
+        .message("delivery test message")
+        .subject("Test Subject")
+        .send()
+        .await
+        .unwrap();
+
+    // Verify delivery
+    let msgs = sqs
+        .receive_message()
+        .queue_url(&queue_url)
+        .max_number_of_messages(10)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(msgs.messages().len(), 1, "expected 1 message in SQS");
+    let body = msgs.messages()[0].body().unwrap();
+    let envelope: serde_json::Value = serde_json::from_str(body).unwrap();
+    assert_eq!(envelope["Type"], "Notification");
+    assert_eq!(envelope["Message"], "delivery test message");
+    assert_eq!(envelope["TopicArn"], topic_arn);
+}
+
+/// Subscribing Lambda/email/sms protocols should succeed (stub delivery).
+#[tokio::test]
+async fn sns_subscribe_lambda_email_sms() {
+    let server = TestServer::start().await;
+    let sns = server.sns_client().await;
+
+    let topic = sns.create_topic().name("stub-topic").send().await.unwrap();
+    let topic_arn = topic.topic_arn().unwrap().to_string();
+
+    // Subscribe Lambda
+    let resp = sns
+        .subscribe()
+        .topic_arn(&topic_arn)
+        .protocol("lambda")
+        .endpoint("arn:aws:lambda:us-east-1:123456789012:function:my-func")
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.subscription_arn().is_some());
+
+    // Subscribe email
+    let resp = sns
+        .subscribe()
+        .topic_arn(&topic_arn)
+        .protocol("email")
+        .endpoint("user@example.com")
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.subscription_arn().is_some());
+
+    // Subscribe SMS
+    let resp = sns
+        .subscribe()
+        .topic_arn(&topic_arn)
+        .protocol("sms")
+        .endpoint("+15551234567")
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.subscription_arn().is_some());
+
+    // Publish to the topic — should not error despite stub targets
+    let resp = sns
+        .publish()
+        .topic_arn(&topic_arn)
+        .message("message to all subscribers")
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.message_id().is_some());
+
+    // Verify all subscriptions are listed
+    let subs = sns
+        .list_subscriptions_by_topic()
+        .topic_arn(&topic_arn)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(subs.subscriptions().len(), 3);
 }

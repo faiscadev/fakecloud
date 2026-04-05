@@ -117,7 +117,11 @@ async fn main() {
     registry.register(Arc::new(IamService::new(iam_state.clone())));
     registry.register(Arc::new(StsService::new(iam_state)));
     registry.register(Arc::new(SsmService::new(ssm_state)));
-    registry.register(Arc::new(S3Service::new(s3_state)));
+    registry.register(Arc::new(S3Service::new(s3_state.clone())));
+
+    // Spawn the S3 lifecycle processor as a background task
+    let lifecycle_processor = fakecloud_s3::lifecycle::LifecycleProcessor::new(s3_state);
+    tokio::spawn(lifecycle_processor.run());
 
     let services: Vec<&str> = registry.service_names();
     tracing::info!(services = ?services, "registered services");
@@ -204,6 +208,9 @@ impl ResetState {
             eb.api_destinations.clear();
             eb.replays.clear();
             eb.buses.retain(|name, _| name == "default");
+            eb.lambda_invocations.clear();
+            eb.log_deliveries.clear();
+            eb.step_function_executions.clear();
         }
         self.ssm.write().reset();
         self.s3.write().reset();
