@@ -1091,34 +1091,23 @@ impl SnsService {
             ));
         }
 
+        // FIFO: all entries must have MessageGroupId — this is a top-level error
+        if is_fifo && entries.iter().any(|e| e.3.is_none()) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameter",
+                "Invalid parameter: The MessageGroupId parameter is required for FIFO topics",
+            ));
+        }
+
         let mut successful = Vec::new();
-        let mut failed = Vec::new();
+        let failed: Vec<String> = Vec::new();
 
-        for (id, message, subject, group_id, dedup_id, _structure) in &entries {
-            // FIFO validation
-            if is_fifo && group_id.is_none() {
-                failed.push(format!(
-                    r#"    <member>
-      <Id>{id}</Id>
-      <Code>InvalidParameter</Code>
-      <Message>The MessageGroupId parameter is required for FIFO topics</Message>
-      <SenderFault>true</SenderFault>
-    </member>"#
-                ));
-                continue;
-            }
-
-            if !is_fifo && group_id.is_some() {
-                failed.push(format!(
-                    r#"    <member>
-      <Id>{id}</Id>
-      <Code>InvalidParameter</Code>
-      <Message>MessageGroupId is not valid for non-FIFO topics</Message>
-      <SenderFault>true</SenderFault>
-    </member>"#
-                ));
-                continue;
-            }
+        for (idx, (id, message, subject, group_id, dedup_id, structure)) in
+            entries.iter().enumerate()
+        {
+            // Parse per-entry message attributes
+            let batch_attrs = parse_batch_message_attributes(req, idx + 1);
 
             let msg_id = uuid::Uuid::new_v4().to_string();
             let mut state = self.state.write();
@@ -1127,11 +1116,27 @@ impl SnsService {
                 topic_arn: topic_arn.clone(),
                 message: message.clone(),
                 subject: subject.clone(),
-                message_attributes: HashMap::new(),
+                message_attributes: batch_attrs.clone(),
                 message_group_id: group_id.clone(),
                 message_dedup_id: dedup_id.clone(),
                 timestamp: Utc::now(),
             });
+
+            // Resolve message for SQS via MessageStructure=json
+            let parsed_structure: Option<Value> = if structure.as_deref() == Some("json") {
+                serde_json::from_str(message).ok()
+            } else {
+                None
+            };
+            let sqs_message = if let Some(ref s) = parsed_structure {
+                s.get("sqs")
+                    .or_else(|| s.get("default"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(message)
+                    .to_string()
+            } else {
+                message.clone()
+            };
 
             // Deliver to SQS subscribers
             let sqs_subscribers: Vec<(String, bool)> = state
@@ -1149,33 +1154,55 @@ impl SnsService {
                 .collect();
             drop(state);
 
+            // Build envelope attributes
+            let mut envelope_attrs = serde_json::Map::new();
+            for (key, attr) in &batch_attrs {
+                let mut attr_obj = serde_json::Map::new();
+                attr_obj.insert("Type".to_string(), Value::String(attr.data_type.clone()));
+                if let Some(ref sv) = attr.string_value {
+                    attr_obj.insert("Value".to_string(), Value::String(sv.clone()));
+                }
+                if let Some(ref bv) = attr.binary_value {
+                    attr_obj.insert(
+                        "Value".to_string(),
+                        Value::String(base64::engine::general_purpose::STANDARD.encode(bv)),
+                    );
+                }
+                envelope_attrs.insert(key.clone(), Value::Object(attr_obj));
+            }
+
             for (queue_arn, raw) in &sqs_subscribers {
                 if *raw {
+                    let mut sqs_msg_attrs = HashMap::new();
+                    for (k, v) in &batch_attrs {
+                        let mut attr = fakecloud_core::delivery::SqsMessageAttribute {
+                            data_type: v.data_type.clone(),
+                            string_value: v.string_value.clone(),
+                            binary_value: None,
+                        };
+                        if let Some(ref bv) = v.binary_value {
+                            attr.binary_value =
+                                Some(base64::engine::general_purpose::STANDARD.encode(bv));
+                        }
+                        sqs_msg_attrs.insert(k.clone(), attr);
+                    }
                     self.delivery.send_to_sqs_with_attrs(
                         queue_arn,
-                        message,
-                        &HashMap::new(),
+                        &sqs_message,
+                        &sqs_msg_attrs,
                         if is_fifo { group_id.as_deref() } else { None },
                         if is_fifo { dedup_id.as_deref() } else { None },
                     );
                 } else {
-                    let sns_envelope = serde_json::json!({
-                        "Type": "Notification",
-                        "MessageId": msg_id,
-                        "TopicArn": topic_arn,
-                        "Subject": subject.as_deref().unwrap_or(""),
-                        "Message": message,
-                        "Timestamp": Utc::now().to_rfc3339(),
-                        "SignatureVersion": "1",
-                        "Signature": "FAKE_SIGNATURE",
-                        "SigningCertURL": "https://sns.us-east-1.amazonaws.com/SimpleNotificationService-0000000000000000000000.pem",
-                        "UnsubscribeURL": format!("http://localhost:4566/?Action=Unsubscribe&SubscriptionArn={}", topic_arn),
-                    });
-                    self.delivery.send_to_sqs(
-                        queue_arn,
-                        &sns_envelope.to_string(),
-                        &HashMap::new(),
+                    let envelope_str = build_sns_envelope(
+                        &msg_id,
+                        &topic_arn,
+                        subject,
+                        &sqs_message,
+                        &envelope_attrs,
                     );
+                    self.delivery
+                        .send_to_sqs(queue_arn, &envelope_str, &HashMap::new());
                 }
             }
 
@@ -1236,7 +1263,7 @@ impl SnsService {
         if !ep.enabled {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
-                "EndpointDisabledException",
+                "EndpointDisabled",
                 "Endpoint is disabled",
             ));
         }
@@ -2451,6 +2478,44 @@ fn parse_message_attributes(req: &AwsRequest) -> HashMap<String, MessageAttribut
     attrs
 }
 
+/// Parse MessageAttributes for a specific PublishBatch entry.
+/// Format: PublishBatchRequestEntries.member.M.MessageAttributes.entry.N.Name/...
+fn parse_batch_message_attributes(
+    req: &AwsRequest,
+    member_idx: usize,
+) -> HashMap<String, MessageAttribute> {
+    let mut attrs = HashMap::new();
+    for n in 1..=10 {
+        let prefix =
+            format!("PublishBatchRequestEntries.member.{member_idx}.MessageAttributes.entry.{n}");
+        let name_key = format!("{prefix}.Name");
+        let data_type_key = format!("{prefix}.Value.DataType");
+        if let (Some(name), Some(data_type)) = (
+            req.query_params.get(&name_key),
+            req.query_params.get(&data_type_key),
+        ) {
+            let sv_key = format!("{prefix}.Value.StringValue");
+            let string_value = req.query_params.get(&sv_key).cloned();
+            let bv_key = format!("{prefix}.Value.BinaryValue");
+            let binary_value = req
+                .query_params
+                .get(&bv_key)
+                .and_then(|b| base64::engine::general_purpose::STANDARD.decode(b).ok());
+            attrs.insert(
+                name.clone(),
+                MessageAttribute {
+                    data_type: data_type.clone(),
+                    string_value,
+                    binary_value,
+                },
+            );
+        } else {
+            break;
+        }
+    }
+    attrs
+}
+
 /// Parse tags from query params.
 /// Format: Tags.member.N.Key / Tags.member.N.Value
 fn parse_tags(req: &AwsRequest) -> Vec<(String, String)> {
@@ -2657,6 +2722,7 @@ fn matches_filter_policy(
         };
 
         let attr_value = msg_attr.string_value.as_deref().unwrap_or("");
+        let is_numeric_type = msg_attr.data_type == "Number";
 
         // Handle String.Array data type: parse the JSON array and check each element
         if msg_attr.data_type.starts_with("String.Array") || msg_attr.data_type == "String.Array" {
@@ -2676,7 +2742,7 @@ fn matches_filter_policy(
             }
         }
 
-        let matched = check_filter_values(allowed, attr_value);
+        let matched = check_filter_values_typed(allowed, attr_value, Some(is_numeric_type));
         if !matched {
             return false;
         }
@@ -2726,6 +2792,7 @@ fn matches_filter_policy_nested(filter: &HashMap<String, Value>, body: &Value) -
             // If the body value is an array, check if ANY element matches
             if let Some(body_arr) = body_value.as_array() {
                 let any_match = body_arr.iter().any(|elem| {
+                    let is_elem_numeric = elem.is_number();
                     let elem_str = match elem {
                         Value::String(s) => s.clone(),
                         Value::Number(n) => n.to_string(),
@@ -2733,12 +2800,13 @@ fn matches_filter_policy_nested(filter: &HashMap<String, Value>, body: &Value) -
                         Value::Null => "null".to_string(),
                         _ => elem.to_string(),
                     };
-                    check_filter_values(arr, &elem_str)
+                    check_filter_values_typed(arr, &elem_str, Some(is_elem_numeric))
                 });
                 if !any_match {
                     return false;
                 }
             } else {
+                let is_body_numeric = body_value.is_number();
                 let value_str = match body_value {
                     Value::String(s) => s.clone(),
                     Value::Number(n) => n.to_string(),
@@ -2746,7 +2814,7 @@ fn matches_filter_policy_nested(filter: &HashMap<String, Value>, body: &Value) -
                     Value::Null => "null".to_string(),
                     _ => body_value.to_string(),
                 };
-                if !check_filter_values(arr, &value_str) {
+                if !check_filter_values_typed(arr, &value_str, Some(is_body_numeric)) {
                     return false;
                 }
             }
@@ -2756,7 +2824,15 @@ fn matches_filter_policy_nested(filter: &HashMap<String, Value>, body: &Value) -
                 .iter()
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect();
-            if !matches_filter_policy_nested(&nested_map, body_value) {
+            // If body_value is an array, check if ANY element matches
+            if let Some(body_arr) = body_value.as_array() {
+                let any_match = body_arr
+                    .iter()
+                    .any(|elem| matches_filter_policy_nested(&nested_map, elem));
+                if !any_match {
+                    return false;
+                }
+            } else if !matches_filter_policy_nested(&nested_map, body_value) {
                 return false;
             }
         }
@@ -2765,11 +2841,33 @@ fn matches_filter_policy_nested(filter: &HashMap<String, Value>, body: &Value) -
     true
 }
 
+/// Untyped filter check - used for String.Array elements, $or, and body array elements
+/// where both string and numeric comparisons are allowed.
 fn check_filter_values(allowed: &[Value], attr_value: &str) -> bool {
+    check_filter_values_typed(allowed, attr_value, None)
+}
+
+/// Type-aware filter check. When `is_numeric` is Some(true), only Number filters match.
+/// When Some(false), only String filters match. When None, both match (original behavior).
+fn check_filter_values_typed(
+    allowed: &[Value],
+    attr_value: &str,
+    is_numeric: Option<bool>,
+) -> bool {
     allowed.iter().any(|v| match v {
-        Value::String(s) => s == attr_value,
+        Value::String(s) => {
+            // If we know the attribute is numeric, string filters don't match
+            if is_numeric == Some(true) {
+                false
+            } else {
+                s == attr_value
+            }
+        }
         Value::Number(n) => {
-            // Number comparison: try to parse the attribute value as a number too
+            // If we know the attribute is a string, number filters don't match
+            if is_numeric == Some(false) {
+                return false;
+            }
             if let Ok(attr_num) = attr_value.parse::<f64>() {
                 if let Some(filter_num) = n.as_f64() {
                     numbers_equal(attr_num, filter_num)
@@ -2777,7 +2875,7 @@ fn check_filter_values(allowed: &[Value], attr_value: &str) -> bool {
                     false
                 }
             } else {
-                n.to_string() == attr_value
+                false
             }
         }
         Value::Bool(_) | Value::Null => false,
@@ -2788,8 +2886,19 @@ fn check_filter_values(allowed: &[Value], attr_value: &str) -> bool {
                 attr_value.ends_with(suffix)
             } else if let Some(anything_but) = obj.get("anything-but") {
                 match anything_but {
-                    Value::String(s) => attr_value != s,
+                    Value::String(s) => {
+                        // String anything-but only excludes string-type attrs
+                        if is_numeric == Some(true) {
+                            true
+                        } else {
+                            attr_value != s
+                        }
+                    }
                     Value::Number(n) => {
+                        // Number anything-but only excludes number-type attrs
+                        if is_numeric == Some(false) {
+                            return true;
+                        }
                         if let Ok(attr_num) = attr_value.parse::<f64>() {
                             if let Some(filter_num) = n.as_f64() {
                                 (attr_num - filter_num).abs() >= f64::EPSILON
@@ -2801,10 +2910,19 @@ fn check_filter_values(allowed: &[Value], attr_value: &str) -> bool {
                         }
                     }
                     Value::Array(arr) => {
-                        // anything-but with array of values
+                        // anything-but with array: type must match for exclusion
                         !arr.iter().any(|av| match av {
-                            Value::String(s) => s == attr_value,
+                            Value::String(s) => {
+                                if is_numeric == Some(true) {
+                                    false
+                                } else {
+                                    s == attr_value
+                                }
+                            }
                             Value::Number(n) => {
+                                if is_numeric == Some(false) {
+                                    return false;
+                                }
                                 if let Ok(attr_num) = attr_value.parse::<f64>() {
                                     if let Some(filter_num) = n.as_f64() {
                                         numbers_equal(attr_num, filter_num)
