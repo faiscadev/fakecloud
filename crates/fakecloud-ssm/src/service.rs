@@ -747,6 +747,25 @@ impl SsmService {
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
 
+        // Validate MaxResults
+        if max_results > 10 {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ValidationException",
+                format!(
+                    "1 validation error detected: \
+                     Value {} at 'maxResults' failed to satisfy constraint: \
+                     Member must have value less than or equal to 10",
+                    max_results
+                ),
+            ));
+        }
+
+        // Validate ParameterFilters for by-path (only Type, KeyId, Label, tag:* allowed)
+        if let Some(ref f) = filters {
+            validate_parameter_filters_by_path(f)?;
+        }
+
         let state = self.state.read();
         let prefix = if path.ends_with('/') {
             path.to_string()
@@ -854,6 +873,20 @@ impl SsmService {
             .as_str()
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
+
+        // Can't use both Filters and ParameterFilters
+        if param_filters.is_some() && old_filters.is_some() {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ValidationException",
+                "You can use either Filters or ParameterFilters in a single request.",
+            ));
+        }
+
+        // Validate ParameterFilters
+        if let Some(ref filters) = param_filters {
+            validate_parameter_filters(filters)?;
+        }
 
         let state = self.state.read();
         let all_params: Vec<&SsmParameter> = state
@@ -1910,6 +1943,304 @@ impl SsmService {
     }
 }
 
+/// Validate a path value for parameter path filters.
+fn is_valid_param_path(path: &str) -> bool {
+    if !path.starts_with('/') {
+        return false;
+    }
+    if path == "//" {
+        return false;
+    }
+    // Each segment between slashes must contain only letters, numbers, . - _
+    let segments: Vec<&str> = path.split('/').collect();
+    for seg in &segments[1..] {
+        if seg.is_empty() {
+            continue;
+        }
+        if !seg
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '.' || c == '-' || c == '_')
+        {
+            return false;
+        }
+    }
+    true
+}
+
+/// Full invalid-path error message (matches AWS format).
+fn invalid_path_error(value: &str) -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::BAD_REQUEST,
+        "ValidationException",
+        format!(
+            "The parameter doesn't meet the parameter name requirements. \
+             The parameter name must begin with a forward slash \"/\". \
+             It can't be prefixed with \"aws\" or \"ssm\" (case-insensitive). \
+             It must use only letters, numbers, or the following symbols: . \
+             (period), - (hyphen), _ (underscore). \
+             Special characters are not allowed. All sub-paths, if specified, \
+             must use the forward slash symbol \"/\". \
+             Valid example: /get/parameters2-/by1./path0_. \
+             Invalid parameter name: {value}"
+        ),
+    )
+}
+
+/// Validate ParameterFilters for DescribeParameters.
+fn validate_parameter_filters(filters: &[Value]) -> Result<(), AwsServiceError> {
+    let valid_keys = ["Path", "Name", "Type", "KeyId", "Tier"];
+    let valid_key_pattern = "tag:.+|Name|Type|KeyId|Path|Label|Tier";
+
+    // Collect structural validation errors first
+    let mut errors: Vec<String> = Vec::new();
+
+    for (i, filter) in filters.iter().enumerate() {
+        let key = filter["Key"].as_str().unwrap_or("");
+        let option = filter["Option"].as_str();
+        let values = filter["Values"].as_array();
+
+        // Key must match pattern
+        let key_valid = valid_keys.contains(&key) || key.starts_with("tag:") || key == "Label";
+        if !key_valid {
+            errors.push(format!(
+                "Value '{}' at 'parameterFilters.{}.key' failed to satisfy constraint: \
+                 Member must satisfy regular expression pattern: {}",
+                key,
+                i + 1,
+                valid_key_pattern
+            ));
+        }
+
+        // Key length <= 132
+        if key.len() > 132 {
+            errors.push(format!(
+                "Value '{}' at 'parameterFilters.{}.key' failed to satisfy constraint: \
+                 Member must have length less than or equal to 132",
+                key,
+                i + 1
+            ));
+        }
+
+        // Option length <= 10
+        if let Some(opt) = option {
+            if opt.len() > 10 {
+                errors.push(format!(
+                    "Value '{}' at 'parameterFilters.{}.option' failed to satisfy constraint: \
+                     Member must have length less than or equal to 10",
+                    opt,
+                    i + 1
+                ));
+            }
+        }
+
+        // Values length <= 50
+        if let Some(vals) = values {
+            if vals.len() > 50 {
+                let vals_str: Vec<&str> = vals.iter().filter_map(|v| v.as_str()).collect();
+                errors.push(format!(
+                    "Value '[{}]' at 'parameterFilters.{}.values' failed to satisfy constraint: \
+                     Member must have length less than or equal to 50",
+                    vals_str.join(", "),
+                    i + 1
+                ));
+            }
+            // Each value <= 1024
+            for val in vals {
+                if let Some(v) = val.as_str() {
+                    if v.len() > 1024 {
+                        errors.push(format!(
+                            "Value '[{}]' at 'parameterFilters.{}.values' failed to satisfy constraint: \
+                             Member must have length less than or equal to 1024, \
+                             Member must have length greater than or equal to 1",
+                            v,
+                            i + 1
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    if !errors.is_empty() {
+        let msg = if errors.len() == 1 {
+            format!("1 validation error detected: {}", errors[0])
+        } else {
+            format!(
+                "{} validation errors detected: {}",
+                errors.len(),
+                errors.join("; ")
+            )
+        };
+        return Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "ValidationException",
+            msg,
+        ));
+    }
+
+    // Semantic validation (after structural validation passes)
+
+    // Label is not valid for DescribeParameters
+    for filter in filters {
+        let key = filter["Key"].as_str().unwrap_or("");
+        if key == "Label" {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ValidationException",
+                "The following filter key is not valid: Label. \
+                 Valid filter keys include: [Path, Name, Type, KeyId, Tier]",
+            ));
+        }
+    }
+
+    // Check for missing values
+    for filter in filters {
+        let key = filter["Key"].as_str().unwrap_or("");
+        let values = filter["Values"].as_array();
+        if values.is_none() || values.is_some_and(|v| v.is_empty()) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ValidationException",
+                format!("The following filter values are missing : null for filter key {key}"),
+            ));
+        }
+    }
+
+    // Check for duplicate keys
+    let mut seen_keys = std::collections::HashSet::new();
+    for filter in filters {
+        let key = filter["Key"].as_str().unwrap_or("");
+        if !seen_keys.insert(key) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ValidationException",
+                format!(
+                    "The following filter is duplicated in the request: {key}. \
+                     A request can contain only one occurrence of a specific filter."
+                ),
+            ));
+        }
+    }
+
+    // Validate per-key constraints
+    for filter in filters {
+        let key = filter["Key"].as_str().unwrap_or("");
+        let option = filter["Option"].as_str();
+        let values = filter["Values"].as_array();
+
+        if key == "Path" {
+            // Path option must be Recursive or OneLevel, not Equals
+            if let Some(opt) = option {
+                if opt != "Recursive" && opt != "OneLevel" {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "ValidationException",
+                        format!(
+                            "The following filter option is not valid: {opt}. \
+                             Valid options include: [Recursive, OneLevel]"
+                        ),
+                    ));
+                }
+            }
+
+            // Path values can't start with aws or ssm
+            if let Some(vals) = values {
+                for val in vals {
+                    if let Some(v) = val.as_str() {
+                        if !is_valid_param_path(v) {
+                            return Err(invalid_path_error(v));
+                        }
+                        let stripped = v.strip_prefix('/').unwrap_or(v);
+                        let first_segment = stripped.split('/').next().unwrap_or("");
+                        let lower = first_segment.to_lowercase();
+                        if lower.starts_with("aws") || lower.starts_with("ssm") {
+                            return Err(AwsServiceError::aws_error(
+                                StatusCode::BAD_REQUEST,
+                                "ValidationException",
+                                "Filters for common parameters can't be prefixed with \
+                                 \"aws\" or \"ssm\" (case-insensitive).",
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        if key == "Tier" {
+            if let Some(vals) = values {
+                for val in vals {
+                    if let Some(v) = val.as_str() {
+                        if !["Standard", "Advanced", "Intelligent-Tiering"].contains(&v) {
+                            return Err(AwsServiceError::aws_error(
+                                StatusCode::BAD_REQUEST,
+                                "ValidationException",
+                                format!(
+                                    "The following filter value is not valid: {v}. Valid \
+                                     values include: [Standard, Advanced, Intelligent-Tiering]"
+                                ),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        if key == "Type" {
+            if let Some(vals) = values {
+                for val in vals {
+                    if let Some(v) = val.as_str() {
+                        if !["String", "StringList", "SecureString"].contains(&v) {
+                            return Err(AwsServiceError::aws_error(
+                                StatusCode::BAD_REQUEST,
+                                "ValidationException",
+                                format!(
+                                    "The following filter value is not valid: {v}. Valid \
+                                     values include: [String, StringList, SecureString]"
+                                ),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        if key == "Name" {
+            if let Some(opt) = option {
+                if !["BeginsWith", "Equals"].contains(&opt) {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "ValidationException",
+                        format!(
+                            "The following filter option is not valid: {opt}. Valid \
+                             options include: [BeginsWith, Equals]."
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Validate ParameterFilters for GetParametersByPath (only Type, KeyId, Label, tag:* allowed).
+fn validate_parameter_filters_by_path(filters: &[Value]) -> Result<(), AwsServiceError> {
+    for filter in filters {
+        let key = filter["Key"].as_str().unwrap_or("");
+        if !["Type", "KeyId", "Label"].contains(&key) && !key.starts_with("tag:") {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ValidationException",
+                format!(
+                    "The following filter key is not valid: {key}. \
+                     Valid filter keys include: [Type, KeyId]."
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Apply ParameterFilters to a parameter.
 fn apply_parameter_filters(param: &SsmParameter, filters: Option<&Vec<Value>>) -> bool {
     let filters = match filters {
@@ -1996,6 +2327,25 @@ fn apply_parameter_filters(param: &SsmParameter, filters: Option<&Vec<Value>>) -
                 }
             }
             "Tier" => values.iter().any(|v| param.tier == *v),
+            "Label" => {
+                let all_labels: Vec<&String> =
+                    param.labels.values().flat_map(|v| v.iter()).collect();
+                if values.is_empty() {
+                    !all_labels.is_empty()
+                } else {
+                    match option {
+                        "BeginsWith" => values
+                            .iter()
+                            .any(|v| all_labels.iter().any(|l| l.starts_with(v))),
+                        "Contains" => values
+                            .iter()
+                            .any(|v| all_labels.iter().any(|l| l.contains(v))),
+                        _ => values
+                            .iter()
+                            .any(|v| all_labels.iter().any(|l| l.as_str() == *v)),
+                    }
+                }
+            }
             _ if key.starts_with("tag:") => {
                 let tag_key = &key[4..];
                 if let Some(tag_val) = param.tags.get(tag_key) {
