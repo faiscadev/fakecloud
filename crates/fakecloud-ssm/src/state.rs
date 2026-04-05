@@ -73,6 +73,7 @@ pub struct SsmCommand {
     pub comment: Option<String>,
     pub output_s3_bucket_name: Option<String>,
     pub output_s3_key_prefix: Option<String>,
+    pub output_s3_region: Option<String>,
     pub timeout_seconds: Option<i64>,
     pub service_role_arn: Option<String>,
     pub notification_config: Option<serde_json::Value>,

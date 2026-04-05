@@ -275,7 +275,7 @@ fn param_to_json(p: &SsmParameter, with_value: bool, with_decryption: bool, regi
                 // Decrypted: return plain value
                 v["Value"] = json!(p.value);
             } else {
-                // Not decrypted: return kms:KEY_ID:VALUE (Moto format)
+                // Not decrypted: return kms:KEY_ID:VALUE placeholder
                 v["Value"] = json!(format!("kms:{}:{}", key_id, p.value));
             }
         } else {
@@ -884,7 +884,11 @@ impl SsmService {
                                     "LastModifiedDate": hist.last_modified.timestamp_millis() as f64 / 1000.0,
                                     "DataType": param.data_type,
                                 });
-                                v["Value"] = json!(hist.value);
+                                if hist.param_type == "SecureString" && !with_decryption {
+                                    v["Value"] = json!("****");
+                                } else {
+                                    v["Value"] = json!(hist.value);
+                                }
                                 parameters.push(v);
                             } else {
                                 invalid.push(raw_name.to_string());
@@ -916,7 +920,11 @@ impl SsmService {
                                             "LastModifiedDate": hist.last_modified.timestamp_millis() as f64 / 1000.0,
                                             "DataType": param.data_type,
                                         });
-                                        v["Value"] = json!(hist.value);
+                                        if hist.param_type == "SecureString" && !with_decryption {
+                                            v["Value"] = json!("****");
+                                        } else {
+                                            v["Value"] = json!(hist.value);
+                                        }
                                         parameters.push(v);
                                     }
                                     found = true;
@@ -1403,7 +1411,17 @@ impl SsmService {
                     }
                 }
             }
-            _ => {}
+            _ => {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidResourceType",
+                    format!(
+                        "{resource_type} is not a valid resource type. \
+                         Valid resource types are: ManagedInstance, MaintenanceWindow, \
+                         Parameter, PatchBaseline, OpsItem, Document."
+                    ),
+                ));
+            }
         }
 
         Ok(json_resp(json!({})))
@@ -2418,6 +2436,7 @@ impl SsmService {
             comment: comment.clone(),
             output_s3_bucket_name: output_s3_bucket.clone(),
             output_s3_key_prefix: output_s3_prefix.clone(),
+            output_s3_region: output_s3_region.clone(),
             timeout_seconds: timeout,
             service_role_arn: service_role.clone(),
             notification_config: notification.clone(),
@@ -2490,7 +2509,7 @@ impl SsmService {
                     "RequestedDateTime": c.requested_date_time.timestamp_millis() as f64 / 1000.0,
                     "ExpiresAfter": expires.timestamp_millis() as f64 / 1000.0,
                     "Comment": c.comment,
-                    "OutputS3Region": c.output_s3_bucket_name,
+                    "OutputS3Region": c.output_s3_region,
                     "OutputS3BucketName": c.output_s3_bucket_name,
                     "OutputS3KeyPrefix": c.output_s3_key_prefix,
                     "DeliveryTimedOutCount": 0,
