@@ -132,9 +132,12 @@ pub async fn dispatch(
         Ok(resp) => {
             let mut builder = Response::builder()
                 .status(resp.status)
-                .header("content-type", &resp.content_type)
                 .header("x-amzn-requestid", &request_id)
                 .header("x-amz-request-id", &request_id);
+
+            if !resp.content_type.is_empty() {
+                builder = builder.header("content-type", &resp.content_type);
+            }
 
             for (k, v) in &resp.headers {
                 builder = builder.header(k, v);

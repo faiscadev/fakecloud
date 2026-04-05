@@ -83,6 +83,7 @@ pub struct MultipartUpload {
     pub sse_kms_key_id: Option<String>,
     pub tagging: Option<String>,
     pub acl_grants: Vec<AclGrant>,
+    pub checksum_algorithm: Option<String>,
 }
 
 #[derive(Debug, Clone)]
