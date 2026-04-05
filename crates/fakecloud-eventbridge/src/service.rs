@@ -587,7 +587,8 @@ impl EventBridgeService {
         // Pagination
         let start = next_token
             .and_then(|t| t.parse::<usize>().ok())
-            .unwrap_or(0);
+            .unwrap_or(0)
+            .min(rules.len());
         let rules_slice = &rules[start..];
 
         let (page, new_next_token) = if let Some(lim) = limit {
@@ -840,7 +841,8 @@ impl EventBridgeService {
         let all_targets = &rule.targets;
         let start = next_token
             .and_then(|t| t.parse::<usize>().ok())
-            .unwrap_or(0);
+            .unwrap_or(0)
+            .min(all_targets.len());
         let slice = &all_targets[start..];
 
         let (page, new_next_token) = if let Some(lim) = limit {
@@ -889,7 +891,8 @@ impl EventBridgeService {
 
         let start = next_token
             .and_then(|t| t.parse::<usize>().ok())
-            .unwrap_or(0);
+            .unwrap_or(0)
+            .min(rule_names.len());
         let slice = &rule_names[start..];
 
         let (page, new_next_token) = if let Some(lim) = limit {

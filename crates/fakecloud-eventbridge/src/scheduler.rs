@@ -134,7 +134,8 @@ impl Scheduler {
     pub async fn run(self) {
         let mut interval = tokio::time::interval(Duration::from_secs(1));
         // Track last-fired-minute for cron to avoid firing multiple times in the same minute
-        let mut cron_last_minute: HashMap<String, (u32, u32)> = HashMap::new();
+        // Keyed by (bus_name, rule_name) to distinguish same-named rules on different buses
+        let mut cron_last_minute: HashMap<crate::state::RuleKey, (u32, u32)> = HashMap::new();
 
         loop {
             interval.tick().await;
@@ -142,7 +143,7 @@ impl Scheduler {
         }
     }
 
-    fn tick(&self, cron_last_minute: &mut HashMap<String, (u32, u32)>) {
+    fn tick(&self, cron_last_minute: &mut HashMap<crate::state::RuleKey, (u32, u32)>) {
         let now = Utc::now();
 
         // Collect rules that need to fire (to avoid holding lock during delivery)
@@ -191,11 +192,11 @@ impl Scheduler {
                         } else {
                             // Avoid firing multiple times in the same minute
                             let current = (now.hour(), now.minute());
-                            let last = cron_last_minute.get(&name);
+                            let last = cron_last_minute.get(&key);
                             if last == Some(&current) {
                                 false
                             } else {
-                                cron_last_minute.insert(name.clone(), current);
+                                cron_last_minute.insert(key.clone(), current);
                                 true
                             }
                         }
