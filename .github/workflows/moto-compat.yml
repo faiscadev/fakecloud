@@ -109,7 +109,7 @@ jobs:
           mkdir -p tests/compat/moto/results
 
           # Only test services FakeCloud implements
-          SERVICES="sqs sns events iam sts ssm"
+          SERVICES="$(cat tests/compat/moto/services.txt)"
 
           for svc in $SERVICES; do
             dir="/tmp/moto/tests/test_$svc"

@@ -10,31 +10,31 @@ RESULTS_DIR="$SCRIPT_DIR/results"
 SERVER_PID=""
 PORT=4566
 
-QUICK_SERVICES="sqs sns events iam sts ssm"
+IMPLEMENTED_SERVICES="$(cat "$SCRIPT_DIR/services.txt")"
 
 # --- Argument parsing ---
 SERVICES=()
-QUICK=false
+IMPL_ONLY=false
 
 for arg in "$@"; do
     case "$arg" in
-        --quick)
-            QUICK=true
+        --implemented)
+            IMPL_ONLY=true
             ;;
         --help|-h)
-            echo "Usage: $0 [--quick] [service...]"
+            echo "Usage: $0 [--implemented] [service...]"
             echo ""
             echo "Run Moto's test suite against FakeCloud."
             echo ""
             echo "Options:"
-            echo "  --quick     Run only implemented services ($QUICK_SERVICES)"
+            echo "  --implemented     Run only implemented services ($IMPLEMENTED_SERVICES)"
             echo "  service...  Run specific services (e.g., sqs sns)"
             echo "  (none)      Run ALL moto test directories"
             echo ""
             echo "Examples:"
             echo "  $0                # run all services"
             echo "  $0 sqs sns        # run only SQS and SNS"
-            echo "  $0 --quick        # run implemented services only"
+            echo "  $0 --implemented        # run implemented services only"
             exit 0
             ;;
         *)
@@ -43,8 +43,8 @@ for arg in "$@"; do
     esac
 done
 
-if $QUICK; then
-    SERVICES=($QUICK_SERVICES)
+if $IMPL_ONLY; then
+    SERVICES=($IMPLEMENTED_SERVICES)
 fi
 
 # --- Cleanup ---

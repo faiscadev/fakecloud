@@ -1,0 +1,1 @@
+sqs sns events iam sts ssm s3
