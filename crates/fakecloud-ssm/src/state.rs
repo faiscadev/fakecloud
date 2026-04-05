@@ -160,7 +160,7 @@ pub struct SsmState {
 
 impl SsmState {
     pub fn new(account_id: &str, region: &str) -> Self {
-        Self {
+        let mut state = Self {
             account_id: account_id.to_string(),
             region: region.to_string(),
             parameters: BTreeMap::new(),
@@ -169,7 +169,9 @@ impl SsmState {
             maintenance_windows: HashMap::new(),
             patch_baselines: HashMap::new(),
             patch_groups: Vec::new(),
-        }
+        };
+        state.seed_defaults();
+        state
     }
 
     pub fn reset(&mut self) {
@@ -179,6 +181,171 @@ impl SsmState {
         self.maintenance_windows.clear();
         self.patch_baselines.clear();
         self.patch_groups.clear();
+        self.seed_defaults();
+    }
+
+    fn seed_defaults(&mut self) {
+        let now = chrono::Utc::now();
+
+        // Seed region parameters
+        let regions: &[(&str, &str)] = &[
+            ("af-south-1", "Africa (Cape Town)"),
+            ("ap-east-1", "Asia Pacific (Hong Kong)"),
+            ("ap-northeast-1", "Asia Pacific (Tokyo)"),
+            ("ap-northeast-2", "Asia Pacific (Seoul)"),
+            ("ap-northeast-3", "Asia Pacific (Osaka)"),
+            ("ap-south-1", "Asia Pacific (Mumbai)"),
+            ("ap-south-2", "Asia Pacific (Hyderabad)"),
+            ("ap-southeast-1", "Asia Pacific (Singapore)"),
+            ("ap-southeast-2", "Asia Pacific (Sydney)"),
+            ("ap-southeast-3", "Asia Pacific (Jakarta)"),
+            ("ca-central-1", "Canada (Central)"),
+            ("eu-central-1", "Europe (Frankfurt)"),
+            ("eu-central-2", "Europe (Zurich)"),
+            ("eu-north-1", "Europe (Stockholm)"),
+            ("eu-south-1", "Europe (Milan)"),
+            ("eu-south-2", "Europe (Spain)"),
+            ("eu-west-1", "Europe (Ireland)"),
+            ("eu-west-2", "Europe (London)"),
+            ("eu-west-3", "Europe (Paris)"),
+            ("me-central-1", "Middle East (UAE)"),
+            ("me-south-1", "Middle East (Bahrain)"),
+            ("sa-east-1", "South America (Sao Paulo)"),
+            ("us-east-1", "US East (N. Virginia)"),
+            ("us-east-2", "US East (Ohio)"),
+            ("us-west-1", "US West (N. California)"),
+            ("us-west-2", "US West (Oregon)"),
+        ];
+
+        for (region_code, long_name) in regions {
+            let base_path = format!("/aws/service/global-infrastructure/regions/{region_code}");
+            self.insert_default_param(&base_path, region_code, now);
+            self.insert_default_param(&format!("{base_path}/longName"), long_name, now);
+            self.insert_default_param(&format!("{base_path}/domain"), "amazonaws.com", now);
+            self.insert_default_param(&format!("{base_path}/geolocationRegion"), region_code, now);
+            self.insert_default_param(
+                &format!("{base_path}/geolocationCountry"),
+                &region_code
+                    .split('-')
+                    .next()
+                    .unwrap_or(region_code)
+                    .to_uppercase(),
+                now,
+            );
+            self.insert_default_param(&format!("{base_path}/partition"), "aws", now);
+        }
+
+        // Seed service parameters
+        let services = [
+            "acm",
+            "apigateway",
+            "autoscaling",
+            "cloudformation",
+            "cloudfront",
+            "cloudwatch",
+            "codebuild",
+            "codecommit",
+            "codedeploy",
+            "dynamodb",
+            "ec2",
+            "ecr",
+            "ecs",
+            "eks",
+            "elasticache",
+            "elasticbeanstalk",
+            "elasticloadbalancing",
+            "es",
+            "events",
+            "firehose",
+            "iam",
+            "kinesis",
+            "kms",
+            "lambda",
+            "logs",
+            "rds",
+            "redshift",
+            "route53",
+            "s3",
+            "ses",
+            "sns",
+            "sqs",
+            "ssm",
+            "sts",
+        ];
+        for svc in &services {
+            let name = format!("/aws/service/global-infrastructure/services/{svc}");
+            self.insert_default_param(&name, svc, now);
+        }
+
+        // Seed AMI parameters (10 entries per region)
+        let ami_names = [
+            "al2023-ami-kernel-default-x86_64",
+            "al2023-ami-kernel-default-arm64",
+            "al2023-ami-minimal-kernel-default-x86_64",
+            "al2023-ami-minimal-kernel-default-arm64",
+            "amzn2-ami-hvm-x86_64-gp2",
+            "amzn2-ami-hvm-arm64-gp2",
+            "amzn2-ami-kernel-5.10-hvm-x86_64-gp2",
+            "amzn2-ami-kernel-5.10-hvm-arm64-gp2",
+            "amzn2-ami-minimal-hvm-x86_64-ebs",
+            "amzn2-ami-minimal-hvm-arm64-ebs",
+        ];
+
+        // Generate region-specific AMI IDs using a simple hash
+        for (i, ami_name) in ami_names.iter().enumerate() {
+            let name = format!("/aws/service/ami-amazon-linux-latest/{ami_name}");
+            let ami_id = format!(
+                "ami-{:017x}",
+                // Simple region-specific hash
+                {
+                    let mut h: u64 = 0xcbf29ce484222325;
+                    for b in self.region.as_bytes() {
+                        h ^= *b as u64;
+                        h = h.wrapping_mul(0x100000001b3);
+                    }
+                    for b in ami_name.as_bytes() {
+                        h ^= *b as u64;
+                        h = h.wrapping_mul(0x100000001b3);
+                    }
+                    h.wrapping_add(i as u64)
+                }
+            );
+            self.insert_default_param(&name, &ami_id, now);
+        }
+    }
+
+    fn insert_default_param(&mut self, name: &str, value: &str, now: DateTime<Utc>) {
+        let arn = if name.starts_with('/') {
+            format!(
+                "arn:aws:ssm:{}:{}:parameter{}",
+                self.region, self.account_id, name
+            )
+        } else {
+            format!(
+                "arn:aws:ssm:{}:{}:parameter/{}",
+                self.region, self.account_id, name
+            )
+        };
+        self.parameters.insert(
+            name.to_string(),
+            SsmParameter {
+                name: name.to_string(),
+                value: value.to_string(),
+                param_type: "String".to_string(),
+                version: 1,
+                arn,
+                last_modified: now,
+                history: Vec::new(),
+                tags: HashMap::new(),
+                labels: HashMap::new(),
+                description: None,
+                allowed_pattern: None,
+                key_id: None,
+                data_type: "text".to_string(),
+                tier: "Standard".to_string(),
+                policies: None,
+            },
+        );
     }
 }
 

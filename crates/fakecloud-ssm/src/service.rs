@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use http::StatusCode;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 
@@ -1523,6 +1524,8 @@ impl SsmService {
         }
 
         let now = Utc::now();
+        let content_hash = format!("{:x}", Sha256::digest(content.as_bytes()));
+
         let version = SsmDocumentVersion {
             content: content.clone(),
             document_version: "1".to_string(),
@@ -1566,8 +1569,8 @@ impl SsmService {
                 "Owner": state.account_id,
                 "SchemaVersion": "2.2",
                 "PlatformTypes": ["Linux", "MacOS", "Windows"],
-                "Hash": format!("{:x}", md5::compute(b"placeholder")),
-                "HashType": "Md5",
+                "Hash": content_hash,
+                "HashType": "Sha256",
             }
         })))
     }
@@ -1734,8 +1737,8 @@ impl SsmService {
                 "Owner": doc.owner,
                 "SchemaVersion": "2.2",
                 "PlatformTypes": ["Linux", "MacOS", "Windows"],
-                "Hash": format!("{:x}", md5::compute(b"placeholder")),
-                "HashType": "Md5",
+                "Hash": format!("{:x}", Sha256::digest(doc.content.as_bytes())),
+                "HashType": "Sha256",
             }
         })))
     }
@@ -2090,6 +2093,17 @@ impl SsmService {
             })
             .collect();
 
+        // If a specific CommandId was requested and not found, return an error
+        if let Some(cid) = command_id {
+            if commands.is_empty() {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidCommandId",
+                    format!("Command with id {cid} does not exist."),
+                ));
+            }
+        }
+
         Ok(json_resp(json!({ "Commands": commands })))
     }
 
@@ -2114,6 +2128,15 @@ impl SsmService {
                     format!("Command {command_id} not found"),
                 )
             })?;
+
+        // Check instance is part of the command
+        if !cmd.instance_ids.contains(&instance_id.to_string()) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvocationDoesNotExist",
+                "An error occurred (InvocationDoesNotExist) when calling the GetCommandInvocation operation",
+            ));
+        }
 
         Ok(json_resp(json!({
             "CommandId": cmd.command_id,
@@ -2877,7 +2900,7 @@ impl SsmService {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "DoesNotExistException",
-                format!("Baseline {baseline_id} does not exist."),
+                format!("Maintenance window {baseline_id} does not exist"),
             ));
         }
 
@@ -2894,8 +2917,7 @@ impl SsmService {
                         StatusCode::BAD_REQUEST,
                         "AlreadyExistsException",
                         format!(
-                            "The patch group {patch_group} is already registered with baseline {}",
-                            existing.baseline_id
+                            "Patch Group baseline already has a baseline registered for OperatingSystem {os}."
                         ),
                     ));
                 }
@@ -2926,6 +2948,20 @@ impl SsmService {
             .ok_or_else(|| missing("PatchGroup"))?;
 
         let mut state = self.state.write();
+
+        // Check if the association exists
+        let exists = state
+            .patch_groups
+            .iter()
+            .any(|pg| pg.baseline_id == baseline_id && pg.patch_group == patch_group);
+        if !exists {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "DoesNotExistException",
+                "Patch Baseline to be retrieved does not exist.",
+            ));
+        }
+
         state
             .patch_groups
             .retain(|pg| !(pg.baseline_id == baseline_id && pg.patch_group == patch_group));
