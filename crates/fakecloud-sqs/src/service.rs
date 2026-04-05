@@ -898,7 +898,7 @@ impl SqsService {
                     == Some("true")
                 {
                     // Use SHA-256 of message body as dedup ID
-                    Some(md5_hex(&message_body))
+                    Some(sha256_hex(&message_body))
                 } else {
                     None
                 }
@@ -1178,11 +1178,17 @@ impl SqsService {
             }
             true
         });
-        for mut m in returned {
-            m.visible_at = None;
-            // Don't clear the receipt handle - keep it so we can still find
-            // the message by old handles. A new handle will be assigned on receive.
-            queue.messages.push_back(m);
+        // For FIFO queues, push returned messages to the FRONT to maintain order
+        if is_fifo {
+            for mut m in returned.into_iter().rev() {
+                m.visible_at = None;
+                queue.messages.push_front(m);
+            }
+        } else {
+            for mut m in returned {
+                m.visible_at = None;
+                queue.messages.push_back(m);
+            }
         }
 
         let redrive_policy = queue.redrive_policy.clone();
@@ -1222,7 +1228,7 @@ impl SqsService {
                 if received.len() < max_messages {
                     msg.receive_count += 1;
                     if let Some(ref rp) = redrive_policy {
-                        if msg.receive_count >= rp.max_receive_count {
+                        if msg.receive_count > rp.max_receive_count {
                             dlq_messages.push((rp.dead_letter_target_arn.clone(), msg));
                             continue;
                         }
@@ -1286,7 +1292,7 @@ impl SqsService {
                 if received.len() < max_messages {
                     msg.receive_count += 1;
                     if let Some(ref rp) = redrive_policy {
-                        if msg.receive_count >= rp.max_receive_count {
+                        if msg.receive_count > rp.max_receive_count {
                             dlq_messages.push((rp.dead_letter_target_arn.clone(), msg));
                             continue;
                         }
