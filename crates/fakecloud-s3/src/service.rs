@@ -333,7 +333,11 @@ impl AwsService for S3Service {
                 } else if req.query_params.contains_key("ownershipControls") {
                     self.get_bucket_ownership_controls(b)
                 } else if req.query_params.contains_key("inventory") {
-                    self.get_bucket_inventory(&req, b)
+                    if req.query_params.contains_key("id") {
+                        self.get_bucket_inventory(&req, b)
+                    } else {
+                        self.list_bucket_inventory_configurations(b)
+                    }
                 } else if req.query_params.get("list-type").map(|s| s.as_str()) == Some("2") {
                     self.list_objects_v2(&req, b)
                 } else {
@@ -775,7 +779,17 @@ impl S3Service {
             .buckets
             .get_mut(bucket)
             .ok_or_else(|| no_such_bucket(bucket))?;
-        b.encryption_config = Some(body_str);
+        // Normalize: add BucketKeyEnabled=false to each Rule if missing
+        let normalized = if body_str.contains("<Rule>") && !body_str.contains("<BucketKeyEnabled>")
+        {
+            body_str.replace(
+                "</Rule>",
+                "<BucketKeyEnabled>false</BucketKeyEnabled></Rule>",
+            )
+        } else {
+            body_str
+        };
+        b.encryption_config = Some(normalized);
         Ok(empty_response(StatusCode::OK))
     }
 
@@ -925,6 +939,39 @@ impl S3Service {
         bucket: &str,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body_str = std::str::from_utf8(&req.body).unwrap_or("").to_string();
+
+        // Validate CORS configuration
+        let rule_count = body_str.matches("<CORSRule>").count();
+        if rule_count == 0 || rule_count > 100 {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "MalformedXML",
+                "The XML you provided was not well-formed or did not validate against our published schema",
+            ));
+        }
+
+        // Validate HTTP methods
+        let valid_methods = ["GET", "PUT", "POST", "DELETE", "HEAD"];
+        let mut remaining = body_str.as_str();
+        while let Some(start) = remaining.find("<AllowedMethod>") {
+            let after = &remaining[start + 15..];
+            if let Some(end) = after.find("</AllowedMethod>") {
+                let method = after[..end].trim();
+                if !valid_methods.contains(&method) {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "InvalidRequest",
+                        format!(
+                            "Found unsupported HTTP method in CORS config. Unsupported method is {method}"
+                        ),
+                    ));
+                }
+                remaining = &after[end + 16..];
+            } else {
+                break;
+            }
+        }
+
         let mut state = self.state.write();
         let b = state
             .buckets
@@ -974,7 +1021,9 @@ impl S3Service {
             .buckets
             .get_mut(bucket)
             .ok_or_else(|| no_such_bucket(bucket))?;
-        b.notification_config = Some(body_str);
+        // Auto-generate Id for each configuration element if missing
+        let normalized = normalize_notification_ids(&body_str);
+        b.notification_config = Some(normalized);
         Ok(empty_response(StatusCode::OK))
     }
 
@@ -2037,7 +2086,7 @@ impl S3Service {
             ));
         }
 
-        b.replication_config = Some(body_str);
+        b.replication_config = Some(normalize_replication_xml(&body_str));
         Ok(empty_response(StatusCode::OK))
     }
 
@@ -2119,7 +2168,10 @@ impl S3Service {
         bucket: &str,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body_str = std::str::from_utf8(&req.body).unwrap_or("").to_string();
-        let inv_id = req.query_params.get("id").cloned().unwrap_or_default();
+        // Use the Id from the XML body if available, otherwise fall back to query param
+        let inv_id = extract_xml_value(&body_str, "Id")
+            .or_else(|| req.query_params.get("id").cloned())
+            .unwrap_or_default();
         let mut state = self.state.write();
         let b = state
             .buckets
@@ -2148,6 +2200,32 @@ impl S3Service {
                 format!("The specified configuration does not exist: {inv_id}"),
             )),
         }
+    }
+
+    fn list_bucket_inventory_configurations(
+        &self,
+        bucket: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let state = self.state.read();
+        let b = state
+            .buckets
+            .get(bucket)
+            .ok_or_else(|| no_such_bucket(bucket))?;
+
+        let mut body = String::from(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+             <ListInventoryConfigurationsResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
+             <IsTruncated>false</IsTruncated>",
+        );
+        let mut sorted_keys: Vec<_> = b.inventory_configs.keys().collect();
+        sorted_keys.sort();
+        for key in sorted_keys {
+            if let Some(config) = b.inventory_configs.get(key) {
+                body.push_str(config);
+            }
+        }
+        body.push_str("</ListInventoryConfigurationsResult>");
+        Ok(s3_xml(StatusCode::OK, body))
     }
 
     fn delete_bucket_inventory(
@@ -2250,19 +2328,6 @@ impl S3Service {
             .buckets
             .get_mut(bucket)
             .ok_or_else(|| no_such_bucket(bucket))?;
-
-        // Check object lock: overwriting a locked object is forbidden
-        if let Some(existing) = b.objects.get(key) {
-            if !existing.is_delete_marker {
-                if let Some(code) = check_object_lock_for_overwrite(existing, req) {
-                    return Err(AwsServiceError::aws_error(
-                        StatusCode::FORBIDDEN,
-                        code,
-                        "Access Denied",
-                    ));
-                }
-            }
-        }
 
         // Handle If-Match: check existing object etag
         if let Some(ref if_match_val) = if_match {
@@ -2374,15 +2439,14 @@ impl S3Service {
             .and_then(|v| v.to_str().ok())
             .map(|s| s.eq_ignore_ascii_case("true"));
 
-        // Apply bucket default encryption if no explicit SSE header
+        // Apply bucket default encryption if no explicit SSE headers
         if sse_algorithm.is_none() {
-            if let Some(ref config) = b.encryption_config {
-                if config.contains("aws:kms") {
-                    sse_algorithm = Some("aws:kms".to_string());
-                    // Extract KMS key ID from encryption config
-                    if sse_kms_key_id.is_none() {
-                        sse_kms_key_id = extract_xml_value(config, "KMSMasterKeyID");
+            if let Some(ref enc_config) = b.encryption_config {
+                if let Some(algo) = extract_xml_value(enc_config, "SSEAlgorithm") {
+                    if algo == "aws:kms" && sse_kms_key_id.is_none() {
+                        sse_kms_key_id = extract_xml_value(enc_config, "KMSMasterKeyID");
                     }
+                    sse_algorithm = Some(algo);
                 }
             }
         }
@@ -2428,24 +2492,24 @@ impl S3Service {
         }
 
         // Checksum: detect algorithm from various headers
-        let checksum_algorithm = req
+        let explicit_checksum_algo = req
             .headers
             .get("x-amz-checksum-algorithm")
             .or_else(|| req.headers.get("x-amz-sdk-checksum-algorithm"))
             .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_uppercase())
-            .or_else(|| {
-                // Also detect from checksum value headers
-                if req.headers.contains_key("x-amz-checksum-crc32") {
-                    Some("CRC32".to_string())
-                } else if req.headers.contains_key("x-amz-checksum-sha1") {
-                    Some("SHA1".to_string())
-                } else if req.headers.contains_key("x-amz-checksum-sha256") {
-                    Some("SHA256".to_string())
-                } else {
-                    None
-                }
-            });
+            .map(|s| s.to_uppercase());
+        let checksum_algorithm = explicit_checksum_algo.clone().or_else(|| {
+            // Also detect from checksum value headers
+            if req.headers.contains_key("x-amz-checksum-crc32") {
+                Some("CRC32".to_string())
+            } else if req.headers.contains_key("x-amz-checksum-sha1") {
+                Some("SHA1".to_string())
+            } else if req.headers.contains_key("x-amz-checksum-sha256") {
+                Some("SHA256".to_string())
+            } else {
+                None
+            }
+        });
         let checksum_value = checksum_algorithm
             .as_deref()
             .map(|algo| compute_checksum(algo, &data));
@@ -2576,6 +2640,10 @@ impl S3Service {
                 if let Ok(hval) = val.parse() {
                     headers.insert(name, hval);
                 }
+            }
+            // Echo back the checksum algorithm only when explicitly requested
+            if explicit_checksum_algo.is_some() {
+                headers.insert("x-amz-sdk-checksum-algorithm", algo.parse().unwrap());
             }
         }
 
@@ -2722,18 +2790,9 @@ impl S3Service {
             };
             headers.insert("x-amz-restore", rv.parse().unwrap());
         }
-        if let Some(algo) = &obj.checksum_algorithm {
-            if let Some(val) = &obj.checksum_value {
-                let hn = format!("x-amz-checksum-{}", algo.to_lowercase());
-                if let Ok(name) = hn.parse::<http::header::HeaderName>() {
-                    if let Ok(hv) = val.parse() {
-                        headers.insert(name, hv);
-                    }
-                }
-            }
-        }
         let mut response_status = StatusCode::OK;
         let response_body;
+        let mut is_range_request = false;
         if let Some(range_str) = req.headers.get("range").and_then(|v| v.to_str().ok()) {
             if let Some(rr) = parse_range_header(range_str, total_size) {
                 match rr {
@@ -2748,12 +2807,17 @@ impl S3Service {
                         );
                         response_body = obj.data.slice(start..=end);
                         response_status = StatusCode::PARTIAL_CONTENT;
+                        is_range_request = true;
                     }
                     RangeResult::NotSatisfiable => {
-                        return Err(AwsServiceError::aws_error(
+                        return Err(AwsServiceError::aws_error_with_fields(
                             StatusCode::RANGE_NOT_SATISFIABLE,
                             "InvalidRange",
                             "The requested range is not satisfiable",
+                            vec![
+                                ("ActualObjectSize".to_string(), total_size.to_string()),
+                                ("RangeRequested".to_string(), range_str.to_string()),
+                            ],
                         ));
                     }
                     RangeResult::Ignored => {
@@ -2809,6 +2873,19 @@ impl S3Service {
         } else {
             headers.insert("content-length", total_size.to_string().parse().unwrap());
             response_body = obj.data.clone();
+        }
+        // Only include checksum headers for full (non-range) responses
+        if !is_range_request {
+            if let Some(algo) = &obj.checksum_algorithm {
+                if let Some(val) = &obj.checksum_value {
+                    let hn = format!("x-amz-checksum-{}", algo.to_lowercase());
+                    if let Ok(name) = hn.parse::<http::header::HeaderName>() {
+                        if let Ok(hv) = val.parse() {
+                            headers.insert(name, hv);
+                        }
+                    }
+                }
+            }
         }
         Ok(AwsResponse {
             status: response_status,
@@ -3276,21 +3353,22 @@ impl S3Service {
                 )
             })?;
 
-        let decoded = percent_encoding::percent_decode_str(copy_source)
-            .decode_utf8_lossy()
-            .to_string();
-        let source = decoded.strip_prefix('/').unwrap_or(&decoded);
-        let (source_path, src_version_id) = if let Some((path, query)) = source.split_once('?') {
+        // Split on '?' BEFORE percent-decoding so keys containing literal '?' are preserved
+        let raw_source = copy_source.strip_prefix('/').unwrap_or(copy_source);
+        let (raw_path, src_version_id) = if let Some((path, query)) = raw_source.split_once('?') {
             let vid = query
                 .split('&')
                 .find_map(|p| p.strip_prefix("versionId="))
                 .map(|s| s.to_string());
             (path, vid)
         } else {
-            (source, None)
+            (raw_source, None)
         };
+        let decoded_path = percent_encoding::percent_decode_str(raw_path)
+            .decode_utf8_lossy()
+            .to_string();
 
-        let (src_bucket, src_key) = source_path.split_once('/').ok_or_else(|| {
+        let (src_bucket, src_key) = decoded_path.split_once('/').ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "InvalidArgument",
@@ -3936,21 +4014,95 @@ impl S3Service {
             ));
         }
 
+        let version_id = req.query_params.get("versionId").map(|s| s.to_string());
+
         let mut state = self.state.write();
         let b = state
             .buckets
             .get_mut(bucket)
             .ok_or_else(|| no_such_bucket(bucket))?;
-        let obj = b
-            .objects
-            .get_mut(key)
-            .ok_or_else(|| no_such_key_with_detail(key))?;
-        obj.tags = tags.into_iter().collect();
+
+        let mut response_headers = HeaderMap::new();
+
+        if let Some(ref vid) = version_id {
+            // Version-specific tagging
+            let mut found = false;
+
+            // Check versioned objects
+            if let Some(versions) = b.object_versions.get_mut(key) {
+                if let Some(obj) = versions
+                    .iter_mut()
+                    .find(|o| o.version_id.as_deref() == Some(vid.as_str()))
+                {
+                    if obj.is_delete_marker {
+                        return Err(AwsServiceError::aws_error_with_fields(
+                            StatusCode::METHOD_NOT_ALLOWED,
+                            "MethodNotAllowed",
+                            "The specified method is not allowed against this resource.",
+                            vec![
+                                ("Method".to_string(), "PUT".to_string()),
+                                ("ResourceType".to_string(), "DeleteMarker".to_string()),
+                            ],
+                        ));
+                    }
+                    obj.tags = tags.clone().into_iter().collect();
+                    response_headers.insert("x-amz-version-id", vid.parse().unwrap());
+                    found = true;
+                }
+            }
+
+            // Also check current object
+            if !found {
+                if let Some(obj) = b.objects.get_mut(key) {
+                    if obj.version_id.as_deref() == Some(vid.as_str()) {
+                        if obj.is_delete_marker {
+                            return Err(AwsServiceError::aws_error_with_fields(
+                                StatusCode::METHOD_NOT_ALLOWED,
+                                "MethodNotAllowed",
+                                "The specified method is not allowed against this resource.",
+                                vec![
+                                    ("Method".to_string(), "PUT".to_string()),
+                                    ("ResourceType".to_string(), "DeleteMarker".to_string()),
+                                ],
+                            ));
+                        }
+                        obj.tags = tags.into_iter().collect();
+                        response_headers.insert("x-amz-version-id", vid.parse().unwrap());
+                        found = true;
+                    }
+                }
+            }
+
+            if !found {
+                return Err(AwsServiceError::aws_error_with_fields(
+                    StatusCode::NOT_FOUND,
+                    "NoSuchVersion",
+                    "The specified version does not exist.",
+                    vec![
+                        ("Key".to_string(), key.to_string()),
+                        ("VersionId".to_string(), vid.to_string()),
+                    ],
+                ));
+            }
+        } else {
+            let obj = b
+                .objects
+                .get_mut(key)
+                .ok_or_else(|| no_such_key_with_detail(key))?;
+            if obj.is_delete_marker {
+                return Err(no_such_key_with_detail(key));
+            }
+            obj.tags = tags.into_iter().collect();
+            if let Some(ref vid) = obj.version_id {
+                response_headers.insert("x-amz-version-id", vid.parse().unwrap());
+            }
+        }
+
         Ok(AwsResponse {
             status: StatusCode::OK,
             content_type: "application/xml".to_string(),
             body: Bytes::new(),
-            headers: HeaderMap::new(),
+            headers: response_headers,
         })
     }
 
@@ -4147,20 +4299,21 @@ impl S3Service {
                 )
             })?;
 
-        let decoded = percent_encoding::percent_decode_str(copy_source)
-            .decode_utf8_lossy()
-            .to_string();
-        let source = decoded.strip_prefix('/').unwrap_or(&decoded);
+        // Split on '?' BEFORE percent-decoding so keys containing literal '?' are preserved
+        let raw_source = copy_source.strip_prefix('/').unwrap_or(copy_source);
 
         // Parse versionId from ?versionId=X
-        let (source_path, source_version_id) = if let Some(idx) = source.find("?versionId=") {
-            let vid = source[idx + 11..].to_string();
-            (&source[..idx], Some(vid))
+        let (raw_path, source_version_id) = if let Some(idx) = raw_source.find("?versionId=") {
+            let vid = raw_source[idx + 11..].to_string();
+            (&raw_source[..idx], Some(vid))
         } else {
-            (source, None)
+            (raw_source, None)
         };
+        let decoded_path = percent_encoding::percent_decode_str(raw_path)
+            .decode_utf8_lossy()
+            .to_string();
 
-        let (src_bucket, src_key) = source_path.split_once('/').ok_or_else(|| {
+        let (src_bucket, src_key) = decoded_path.split_once('/').ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "InvalidArgument",
@@ -4255,6 +4408,13 @@ impl S3Service {
             ));
         }
 
+        let if_none_match = req
+            .headers
+            .get("x-amz-if-none-match")
+            .or_else(|| req.headers.get("if-none-match"))
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+
         let mut state = self.state.write();
         let b = state
             .buckets
@@ -4265,6 +4425,7 @@ impl S3Service {
             Some(u) => u.clone(),
             None => {
                 // Upload already completed - return existing object if it exists
+                // IfNoneMatch does NOT apply to re-completions
                 if let Some(obj) = b.objects.get(key) {
                     let etag = obj.etag.clone();
                     let body = format!(
@@ -4291,6 +4452,13 @@ impl S3Service {
 
         if upload.key != key {
             return Err(no_such_upload(upload_id));
+        }
+
+        // IfNoneMatch: if "*" and object already exists, reject (only for real completions)
+        if let Some(ref inm) = if_none_match {
+            if inm == "*" && b.objects.contains_key(key) {
+                return Err(precondition_failed("If-None-Match"));
+            }
         }
 
         // Use parts in submitted order (AWS requires ascending, but we don't enforce)
@@ -5575,19 +5743,35 @@ fn resolve_object<'a>(
     version_id: Option<&String>,
 ) -> Result<&'a S3Object, AwsServiceError> {
     if let Some(vid) = version_id {
-        // When a specific versionId is requested, check versions first
-        if let Some(versions) = b.object_versions.get(key) {
-            if let Some(obj) = versions
-                .iter()
-                .find(|o| o.version_id.as_deref() == Some(vid))
-            {
-                return Ok(obj);
+        // "null" version ID refers to an object with no version_id (pre-versioning)
+        if vid == "null" {
+            // Check versions for a pre-versioning object (version_id == None)
+            if let Some(versions) = b.object_versions.get(key) {
+                if let Some(obj) = versions.iter().find(|o| o.version_id.is_none()) {
+                    return Ok(obj);
+                }
             }
-        }
-        // Also check current object
-        if let Some(obj) = b.objects.get(key) {
-            if obj.version_id.as_deref() == Some(vid) {
-                return Ok(obj);
+            // Also check current object if it has no version_id
+            if let Some(obj) = b.objects.get(key) {
+                if obj.version_id.is_none() {
+                    return Ok(obj);
+                }
+            }
+        } else {
+            // When a specific versionId is requested, check versions first
+            if let Some(versions) = b.object_versions.get(key) {
+                if let Some(obj) = versions
+                    .iter()
+                    .find(|o| o.version_id.as_deref() == Some(vid.as_str()))
+                {
+                    return Ok(obj);
+                }
+            }
+            // Also check current object
+            if let Some(obj) = b.objects.get(key) {
+                if obj.version_id.as_deref() == Some(vid.as_str()) {
+                    return Ok(obj);
+                }
             }
         }
         // For versioned buckets, return NoSuchVersion; for non-versioned, return 400
@@ -5860,6 +6044,31 @@ fn validate_lifecycle_xml(xml: &str) -> Result<(), AwsServiceError> {
                 }
             }
 
+            // Filter validation
+            if has_filter {
+                if let Some(fs) = rule_body.find("<Filter>") {
+                    if let Some(fe) = rule_body.find("</Filter>") {
+                        let filter_body = &rule_body[fs + 8..fe];
+                        let has_prefix_in_filter = filter_body.contains("<Prefix");
+                        let has_tag_in_filter = filter_body.contains("<Tag>");
+                        let has_and_in_filter = filter_body.contains("<And>");
+                        // Can't have both Prefix and Tag without And
+                        if has_prefix_in_filter && has_tag_in_filter && !has_and_in_filter {
+                            return Err(malformed());
+                        }
+                        // Can't have Tag and And simultaneously at the Filter level
+                        if has_tag_in_filter && has_and_in_filter {
+                            // Check if the <Tag> is outside <And>
+                            let and_start = filter_body.find("<And>").unwrap_or(0);
+                            let tag_pos = filter_body.find("<Tag>").unwrap_or(0);
+                            if tag_pos < and_start {
+                                return Err(malformed());
+                            }
+                        }
+                    }
+                }
+            }
+
             // NoncurrentVersionTransition must have NoncurrentDays and StorageClass
             if rule_body.contains("<NoncurrentVersionTransition>") {
                 let mut nvt_remaining = rule_body;
@@ -5887,6 +6096,140 @@ fn validate_lifecycle_xml(xml: &str) -> Result<(), AwsServiceError> {
     }
 
     Ok(())
+}
+
+/// Normalize replication configuration XML to include defaults AWS adds.
+/// Auto-generate `<Id>` for notification configuration elements that lack one.
+fn normalize_notification_ids(xml: &str) -> String {
+    let config_tags = [
+        "TopicConfiguration",
+        "QueueConfiguration",
+        "CloudFunctionConfiguration",
+    ];
+    let mut result = xml.to_string();
+    for tag in &config_tags {
+        let open = format!("<{tag}>");
+        let close = format!("</{tag}>");
+        let mut output = String::new();
+        let mut remaining = result.as_str();
+        while let Some(start) = remaining.find(&open) {
+            output.push_str(&remaining[..start]);
+            let after = &remaining[start + open.len()..];
+            if let Some(end) = after.find(&close) {
+                let body = &after[..end];
+                output.push_str(&open);
+                if !body.contains("<Id>") {
+                    output.push_str(&format!("<Id>{}</Id>", uuid::Uuid::new_v4()));
+                }
+                output.push_str(body);
+                output.push_str(&close);
+                remaining = &after[end + close.len()..];
+            } else {
+                output.push_str(&open);
+                output.push_str(after);
+                remaining = "";
+                break;
+            }
+        }
+        output.push_str(remaining);
+        result = output;
+    }
+    result
+}
+
+fn normalize_replication_xml(xml: &str) -> String {
+    let mut result = String::new();
+    let mut remaining = xml;
+    let mut auto_priority: u32 = 0;
+
+    // Find and process everything before the first <Rule>
+    if let Some(first_rule) = remaining.find("<Rule>") {
+        result.push_str(&remaining[..first_rule]);
+        remaining = &remaining[first_rule..];
+    } else {
+        return xml.to_string();
+    }
+
+    // Process each <Rule>
+    while let Some(rule_start) = remaining.find("<Rule>") {
+        let after = &remaining[rule_start + 6..];
+        if let Some(rule_end) = after.find("</Rule>") {
+            let rule_body = &after[..rule_end];
+
+            // Extract fields from the rule
+            let id = extract_xml_value(rule_body, "ID");
+            let priority = extract_xml_value(rule_body, "Priority");
+            let status =
+                extract_xml_value(rule_body, "Status").unwrap_or_else(|| "Enabled".to_string());
+
+            // Extract Destination block (keep as-is)
+            let destination = rule_body.find("<Destination>").and_then(|ds| {
+                rule_body
+                    .find("</Destination>")
+                    .map(|de| rule_body[ds..de + 14].to_string())
+            });
+
+            // Extract existing Filter if any
+            let filter_block = rule_body.find("<Filter>").and_then(|fs| {
+                rule_body
+                    .find("</Filter>")
+                    .map(|fe| rule_body[fs..fe + 9].to_string())
+            });
+
+            // Extract DeleteMarkerReplication if any
+            let dmr_block = rule_body.find("<DeleteMarkerReplication>").and_then(|ds| {
+                rule_body
+                    .find("</DeleteMarkerReplication>")
+                    .map(|de| rule_body[ds..de + 25].to_string())
+            });
+
+            // Build normalized rule
+            result.push_str("<Rule>");
+
+            // DeleteMarkerReplication (default to Disabled)
+            result.push_str(dmr_block.as_deref().unwrap_or(
+                "<DeleteMarkerReplication><Status>Disabled</Status></DeleteMarkerReplication>",
+            ));
+
+            // Destination
+            if let Some(ref dest) = destination {
+                result.push_str(dest);
+            }
+
+            // Filter (default to empty prefix)
+            result.push_str(
+                filter_block
+                    .as_deref()
+                    .unwrap_or("<Filter><Prefix></Prefix></Filter>"),
+            );
+
+            // ID (auto-generate if missing)
+            let rule_id = id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+            result.push_str(&format!("<ID>{}</ID>", xml_escape(&rule_id)));
+
+            // Priority (auto-assign if missing)
+            auto_priority += 1;
+            let p = priority
+                .and_then(|v| v.parse::<u32>().ok())
+                .unwrap_or(auto_priority);
+            result.push_str(&format!("<Priority>{p}</Priority>"));
+
+            // Status
+            result.push_str(&format!("<Status>{status}</Status>"));
+
+            result.push_str("</Rule>");
+
+            remaining = &after[rule_end + 7..];
+        } else {
+            result.push_str(&remaining[rule_start..]);
+            break;
+        }
+    }
+
+    // Append anything after the last </Rule>
+    result.push_str(remaining);
+
+    result
 }
 
 /// Build an S3 event notification JSON payload.
