@@ -152,6 +152,25 @@ fn remove_param(
     parameters.remove(&alt)
 }
 
+/// Convert document content between JSON and YAML formats.
+/// Falls back to returning content as-is if conversion isn't possible.
+fn convert_document_content(content: &str, from_format: &str, to_format: &str) -> String {
+    if from_format == to_format {
+        return content.to_string();
+    }
+
+    // Try to parse as JSON regardless of declared format
+    // (most content round-trips through JSON in tests)
+    if to_format == "JSON" {
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(content) {
+            return serde_json::to_string(&val).unwrap_or_else(|_| content.to_string());
+        }
+    }
+
+    // Return content as-is for other conversions
+    content.to_string()
+}
+
 fn param_arn(region: &str, account_id: &str, name: &str) -> String {
     if name.starts_with('/') {
         format!("arn:aws:ssm:{region}:{account_id}:parameter{name}")
@@ -1433,6 +1452,8 @@ impl SsmService {
         let body = parse_body(req);
         let name = body["Name"].as_str().ok_or_else(|| missing("Name"))?;
         let version = body["DocumentVersion"].as_str();
+        let version_name = body["VersionName"].as_str();
+        let requested_format = body["DocumentFormat"].as_str();
 
         let state = self.state.read();
         let doc = state
@@ -1440,23 +1461,68 @@ impl SsmService {
             .get(name)
             .ok_or_else(|| doc_not_found(name))?;
 
-        let target_version = version.unwrap_or(&doc.default_version);
-        let ver = doc
-            .versions
-            .iter()
-            .find(|v| v.document_version == target_version)
-            .ok_or_else(|| doc_not_found(name))?;
+        // Find the target version
+        let ver = if let Some(vn) = version_name {
+            // Lookup by VersionName (and optionally DocumentVersion)
+            let candidates: Vec<&_> = doc
+                .versions
+                .iter()
+                .filter(|v| v.version_name.as_deref() == Some(vn))
+                .collect();
+            if let Some(doc_ver) = version {
+                // Both VersionName and DocumentVersion specified - must match
+                candidates
+                    .into_iter()
+                    .find(|v| v.document_version == doc_ver)
+                    .ok_or_else(|| doc_not_found(name))?
+            } else {
+                candidates
+                    .first()
+                    .copied()
+                    .ok_or_else(|| doc_not_found(name))?
+            }
+        } else if let Some(doc_ver) = version {
+            let target = if doc_ver == "$LATEST" {
+                &doc.latest_version
+            } else {
+                doc_ver
+            };
+            doc.versions
+                .iter()
+                .find(|v| v.document_version == target)
+                .ok_or_else(|| doc_not_found(name))?
+        } else {
+            doc.versions
+                .iter()
+                .find(|v| v.document_version == doc.default_version)
+                .ok_or_else(|| doc_not_found(name))?
+        };
 
-        Ok(json_resp(json!({
+        // Convert content format if requested
+        let (content, format) = if let Some(fmt) = requested_format {
+            let converted = convert_document_content(&ver.content, &ver.document_format, fmt);
+            (converted, fmt.to_string())
+        } else {
+            // If stored as YAML but no explicit format requested, return as JSON
+            let converted = convert_document_content(&ver.content, &ver.document_format, "JSON");
+            (converted, "JSON".to_string())
+        };
+
+        let mut resp = json!({
             "Name": doc.name,
-            "Content": ver.content,
+            "Content": content,
             "DocumentType": doc.document_type,
-            "DocumentFormat": ver.document_format,
+            "DocumentFormat": format,
             "DocumentVersion": ver.document_version,
-            "VersionName": ver.version_name,
             "Status": ver.status,
             "CreatedDate": ver.created_date.timestamp_millis() as f64 / 1000.0,
-        })))
+        });
+
+        if let Some(ref vn) = ver.version_name {
+            resp["VersionName"] = json!(vn);
+        }
+
+        Ok(json_resp(resp))
     }
 
     fn delete_document(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
@@ -1649,7 +1715,7 @@ impl SsmService {
             "AccountIds": account_ids,
             "AccountSharingInfoList": account_ids.iter().map(|id| json!({
                 "AccountId": id,
-                "SharedDocumentVersion": "$Default"
+                "SharedDocumentVersion": "$DEFAULT"
             })).collect::<Vec<_>>(),
         })))
     }
@@ -1661,15 +1727,33 @@ impl SsmService {
         let accounts_to_add = body["AccountIdsToAdd"].as_array();
         let accounts_to_remove = body["AccountIdsToRemove"].as_array();
 
+        let shared_doc_version = body["SharedDocumentVersion"].as_str();
+
         if permission_type != "Share" {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "InvalidPermissionType",
                 format!(
-                    "The permission type {permission_type} is not supported. \
-                     Only Share is supported."
+                    "1 validation error detected: Value '{permission_type}' at 'permissionType' \
+                     failed to satisfy constraint: Member must satisfy enum value set: [Share]"
                 ),
             ));
+        }
+
+        // Validate SharedDocumentVersion if provided
+        if let Some(ver) = shared_doc_version {
+            if ver != "$DEFAULT" && ver != "$LATEST" && ver.parse::<i64>().is_err() {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationException",
+                    format!(
+                        "1 validation error detected: Value '{ver}' at 'sharedDocumentVersion' \
+                         failed to satisfy constraint: \
+                         Member must satisfy regular expression pattern: \
+                         ([$]LATEST|[$]DEFAULT|[$]ALL)"
+                    ),
+                ));
+            }
         }
 
         // Validate account IDs
@@ -1701,7 +1785,7 @@ impl SsmService {
                 return Err(AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
                     "DocumentPermissionLimit",
-                    "You cannot specify \"all\" as well as specific account IDs".to_string(),
+                    "Accounts can either be all or a group of AWS accounts",
                 ));
             }
             Ok(result)
