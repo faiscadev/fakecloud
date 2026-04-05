@@ -288,6 +288,7 @@ impl S3Service {
                             break;
                         }
                         common_prefixes.push(cp);
+                        last_key = key.clone();
                         count += 1;
                     }
                     continue;
