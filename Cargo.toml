@@ -43,6 +43,7 @@ tower-http = { version = "0.6", features = ["trace"] }
 async-trait = "0.1"
 parking_lot = "0.12"
 md-5 = "0.10"
+sha2 = "0.10"
 reqwest = { version = "0.12", features = ["json"] }
 
 # Internal crates

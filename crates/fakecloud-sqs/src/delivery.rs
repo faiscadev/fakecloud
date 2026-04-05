@@ -63,8 +63,8 @@ impl SqsDelivery for SqsDeliveryImpl {
             let effective_dedup_id = if message_dedup_id.is_some() {
                 message_dedup_id.map(|s| s.to_string())
             } else if queue.is_fifo {
-                // Content-based dedup: use MD5 of body
-                Some(crate::service::md5_hex(message_body))
+                // Content-based dedup: use SHA-256 of body (matches real SQS behavior)
+                Some(crate::service::sha256_hex(message_body))
             } else {
                 None
             };

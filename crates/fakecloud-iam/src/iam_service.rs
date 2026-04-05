@@ -474,6 +474,7 @@ fn paginated_tags_response(action: &str, tags: &[Tag], req: &AwsRequest) -> Stri
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
 
+    let offset = offset.min(tags.len());
     let page = &tags[offset..tags.len().min(offset + max_items)];
     let is_truncated = offset + max_items < tags.len();
     let members = tags_xml(page);
@@ -1358,7 +1359,6 @@ impl IamService {
     fn tag_role(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let role_name = required_param(&req.query_params, "RoleName")?;
         let new_tags = parse_tags(&req.query_params);
-        validate_tags(&new_tags, 0)?;
         let mut state = self.state.write();
 
         let role = state.roles.get_mut(&role_name).ok_or_else(|| {
@@ -1368,6 +1368,14 @@ impl IamService {
                 format!("Role {role_name} not found"),
             )
         })?;
+
+        // Count existing tags that won't be overwritten by new tags
+        let existing_count = role
+            .tags
+            .iter()
+            .filter(|t| !new_tags.iter().any(|nt| nt.key == t.key))
+            .count();
+        validate_tags(&new_tags, existing_count)?;
 
         for new_tag in new_tags {
             if let Some(existing) = role.tags.iter_mut().find(|t| t.key == new_tag.key) {

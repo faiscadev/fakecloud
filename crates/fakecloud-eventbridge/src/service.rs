@@ -904,6 +904,13 @@ impl EventBridgeService {
             .to_string();
 
         let mut state = self.state.write();
+        if state.partner_event_sources.contains_key(&name) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::CONFLICT,
+                "ResourceAlreadyExistsException",
+                format!("Partner event source {name} already exists."),
+            ));
+        }
         state
             .partner_event_sources
             .insert(name.clone(), account.clone());
