@@ -61,9 +61,11 @@ async fn main() {
     let sqs_state = Arc::new(parking_lot::RwLock::new(
         fakecloud_sqs::state::SqsState::new(&cli.account_id, &cli.region, "http://localhost:4566"),
     ));
-    let sns_state = Arc::new(parking_lot::RwLock::new(
-        fakecloud_sns::state::SnsState::new(&cli.account_id, &cli.region),
-    ));
+    let sns_state = Arc::new(parking_lot::RwLock::new({
+        let mut s = fakecloud_sns::state::SnsState::new(&cli.account_id, &cli.region);
+        s.seed_default_opted_out();
+        s
+    }));
     let eb_state = Arc::new(parking_lot::RwLock::new(
         fakecloud_eventbridge::state::EventBridgeState::new(&cli.account_id, &cli.region),
     ));
@@ -184,9 +186,11 @@ impl ResetState {
         self.iam.write().reset();
         self.sqs.write().queues.clear();
         self.sqs.write().name_to_url.clear();
-        self.sns.write().topics.clear();
-        self.sns.write().subscriptions.clear();
-        self.sns.write().published.clear();
+        {
+            let mut sns = self.sns.write();
+            sns.reset();
+            sns.seed_default_opted_out();
+        }
         {
             let mut eb = self.eb.write();
             eb.rules.clear();

@@ -93,6 +93,18 @@ impl SnsState {
         self.topics.clear();
         self.subscriptions.clear();
         self.published.clear();
+        self.platform_applications.clear();
+        self.sms_attributes.clear();
+        self.opted_out_numbers.clear();
+        self.sms_messages.clear();
+    }
+
+    /// Seed default opt-out phone numbers.
+    pub fn seed_default_opted_out(&mut self) {
+        if self.opted_out_numbers.is_empty() {
+            self.opted_out_numbers.push("+15005550099".to_string());
+            self.opted_out_numbers.push("+447428545399".to_string());
+        }
     }
 }
 
