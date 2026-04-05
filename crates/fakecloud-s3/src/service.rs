@@ -2168,7 +2168,10 @@ impl S3Service {
         bucket: &str,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body_str = std::str::from_utf8(&req.body).unwrap_or("").to_string();
-        let inv_id = req.query_params.get("id").cloned().unwrap_or_default();
+        // Use the Id from the XML body if available, otherwise fall back to query param
+        let inv_id = extract_xml_value(&body_str, "Id")
+            .or_else(|| req.query_params.get("id").cloned())
+            .unwrap_or_default();
         let mut state = self.state.write();
         let b = state
             .buckets
@@ -2214,8 +2217,12 @@ impl S3Service {
              <ListInventoryConfigurationsResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
              <IsTruncated>false</IsTruncated>",
         );
-        for config in b.inventory_configs.values() {
-            body.push_str(config);
+        let mut sorted_keys: Vec<_> = b.inventory_configs.keys().collect();
+        sorted_keys.sort();
+        for key in sorted_keys {
+            if let Some(config) = b.inventory_configs.get(key) {
+                body.push_str(config);
+            }
         }
         body.push_str("</ListInventoryConfigurationsResult>");
         Ok(s3_xml(StatusCode::OK, body))
