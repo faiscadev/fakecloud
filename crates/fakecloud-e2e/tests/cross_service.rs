@@ -4,6 +4,17 @@ use aws_sdk_eventbridge::types::{PutEventsRequestEntry, Target};
 use aws_sdk_s3::primitives::ByteStream;
 use helpers::TestServer;
 
+/// Query recorded Lambda invocations via internal API.
+async fn get_lambda_invocations(endpoint: &str) -> serde_json::Value {
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("{endpoint}/_fakecloud/lambda/invocations"))
+        .send()
+        .await
+        .unwrap();
+    resp.json().await.unwrap()
+}
+
 async fn get_queue_arn(sqs: &aws_sdk_sqs::Client, queue_url: &str) -> String {
     let attrs = sqs
         .get_queue_attributes()
@@ -451,4 +462,93 @@ async fn ssm_secretsmanager_parameter_resolution() {
         .send()
         .await;
     assert!(err.is_err(), "expected error for non-existent secret");
+}
+
+/// SQS -> Lambda: event source mapping triggers Lambda invocation.
+#[tokio::test]
+async fn sqs_lambda_event_source_mapping() {
+    let server = TestServer::start().await;
+    let sqs = server.sqs_client().await;
+    let lambda = server.lambda_client().await;
+
+    // Create SQS queue
+    let queue = sqs
+        .create_queue()
+        .queue_name("lambda-trigger-queue")
+        .send()
+        .await
+        .unwrap();
+    let queue_url = queue.queue_url().unwrap().to_string();
+    let queue_arn = get_queue_arn(&sqs, &queue_url).await;
+
+    // Create Lambda function
+    lambda
+        .create_function()
+        .function_name("sqs-processor")
+        .runtime(aws_sdk_lambda::types::Runtime::Nodejs18x)
+        .role("arn:aws:iam::123456789012:role/lambda-role")
+        .handler("index.handler")
+        .code(
+            aws_sdk_lambda::types::FunctionCode::builder()
+                .zip_file(aws_sdk_lambda::primitives::Blob::new(b"fake-code"))
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    // Create event source mapping
+    lambda
+        .create_event_source_mapping()
+        .event_source_arn(&queue_arn)
+        .function_name("sqs-processor")
+        .batch_size(10)
+        .enabled(true)
+        .send()
+        .await
+        .unwrap();
+
+    // Send a message to the queue
+    sqs.send_message()
+        .queue_url(&queue_url)
+        .message_body(r#"{"order_id": "12345"}"#)
+        .send()
+        .await
+        .unwrap();
+
+    // Wait for the poller to pick it up
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+    // Check that Lambda was invoked
+    let invocations = get_lambda_invocations(server.endpoint()).await;
+    let inv_list = invocations["invocations"].as_array().unwrap();
+    assert!(
+        !inv_list.is_empty(),
+        "expected at least one Lambda invocation"
+    );
+
+    // Verify the invocation payload contains the SQS message
+    let inv = &inv_list[inv_list.len() - 1];
+    assert!(inv["functionArn"]
+        .as_str()
+        .unwrap()
+        .contains("sqs-processor"));
+    assert_eq!(inv["source"], "aws:sqs");
+    let payload: serde_json::Value =
+        serde_json::from_str(inv["payload"].as_str().unwrap()).unwrap();
+    assert_eq!(payload["Records"][0]["body"], r#"{"order_id": "12345"}"#);
+    assert_eq!(payload["Records"][0]["eventSource"], "aws:sqs");
+
+    // The message should be consumed (not available in SQS anymore)
+    let msgs = sqs
+        .receive_message()
+        .queue_url(&queue_url)
+        .wait_time_seconds(1)
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        msgs.messages().is_empty(),
+        "message should have been consumed by Lambda poller"
+    );
 }

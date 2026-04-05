@@ -10,6 +10,9 @@ use fakecloud_core::delivery::DeliveryBus;
 use fakecloud_core::dispatch::{self, DispatchConfig};
 use fakecloud_core::registry::ServiceRegistry;
 
+mod sqs_lambda_poller;
+use sqs_lambda_poller::SqsLambdaPoller;
+
 use fakecloud_dynamodb::service::DynamoDbService;
 use fakecloud_eventbridge::service::EventBridgeService;
 use fakecloud_iam::iam_service::IamService;
@@ -119,6 +122,9 @@ async fn main() {
             .with_sns(sns_delivery),
     );
 
+    // Clone state refs for internal endpoints
+    let lambda_invocations_state = lambda_state.clone();
+
     // Clone state for reset endpoint before moving into services
     let reset_state = ResetState {
         iam: iam_state.clone(),
@@ -136,7 +142,7 @@ async fn main() {
 
     // Register services
     let mut registry = ServiceRegistry::new();
-    registry.register(Arc::new(SqsService::new(sqs_state)));
+    registry.register(Arc::new(SqsService::new(sqs_state.clone())));
     registry.register(Arc::new(SnsService::new(sns_state, delivery_for_sns)));
     registry.register(Arc::new(EventBridgeService::new(
         eb_state.clone(),
@@ -152,15 +158,18 @@ async fn main() {
         SsmService::new(ssm_state).with_secretsmanager(secretsmanager_state.clone()),
     ));
     registry.register(Arc::new(DynamoDbService::new(dynamodb_state)));
-    registry.register(Arc::new(LambdaService::new(lambda_state)));
+    registry.register(Arc::new(LambdaService::new(lambda_state.clone())));
     registry.register(Arc::new(SecretsManagerService::new(secretsmanager_state)));
     registry.register(Arc::new(LogsService::new(logs_state)));
     registry.register(Arc::new(KmsService::new(kms_state)));
     registry.register(Arc::new(S3Service::new(s3_state.clone(), delivery_for_s3)));
 
-    // Spawn the S3 lifecycle processor as a background task
+    // Spawn background tasks
     let lifecycle_processor = fakecloud_s3::lifecycle::LifecycleProcessor::new(s3_state);
     tokio::spawn(lifecycle_processor.run());
+
+    let sqs_lambda_poller = SqsLambdaPoller::new(sqs_state, lambda_state);
+    tokio::spawn(sqs_lambda_poller.run());
 
     let services: Vec<&str> = registry.service_names();
     tracing::info!(services = ?services, "registered services");
@@ -202,6 +211,28 @@ async fn main() {
             axum::routing::post({
                 let s = reset_state;
                 move || async move { s.reset() }
+            }),
+        )
+        .route(
+            "/_fakecloud/lambda/invocations",
+            axum::routing::get({
+                let ls = lambda_invocations_state.clone();
+                move || async move {
+                    let state = ls.read();
+                    let invocations: Vec<serde_json::Value> = state
+                        .invocations
+                        .iter()
+                        .map(|inv| {
+                            serde_json::json!({
+                                "functionArn": inv.function_arn,
+                                "payload": inv.payload,
+                                "source": inv.source,
+                                "timestamp": inv.timestamp.to_rfc3339(),
+                            })
+                        })
+                        .collect();
+                    axum::Json(serde_json::json!({ "invocations": invocations }))
+                }
             }),
         )
         .fallback(dispatch::dispatch)
