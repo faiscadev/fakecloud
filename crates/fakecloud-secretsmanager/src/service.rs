@@ -706,9 +706,10 @@ impl AwsService for SecretsManagerService {
             "TagResource" => self.tag_resource(&req),
             "UntagResource" => self.untag_resource(&req),
             "ListSecretVersionIds" => self.list_secret_version_ids(&req),
-            "GetResourcePolicy" => {
-                Ok(AwsResponse::json(StatusCode::OK, r#"{"ARN":null,"Name":null}"#))
-            }
+            "GetResourcePolicy" => Ok(AwsResponse::json(
+                StatusCode::OK,
+                r#"{"ARN":null,"Name":null}"#,
+            )),
             _ => Err(AwsServiceError::action_not_implemented(
                 "secretsmanager",
                 &req.action,

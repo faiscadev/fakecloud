@@ -223,6 +223,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "aws-sdk-dynamodb"
+version = "1.110.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0c597424385739456cd04535982831c15bd58f97ca28c5bcb232c0d730d5cb39"
+dependencies = [
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-http",
+ "aws-smithy-json",
+ "aws-smithy-observability",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-types",
+ "aws-types",
+ "bytes",
+ "fastrand",
+ "http 0.2.12",
+ "http 1.4.0",
+ "regex-lite",
+ "tracing",
+]
+
+[[package]]
 name = "aws-sdk-eventbridge"
 version = "1.104.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1198,6 +1222,7 @@ dependencies = [
  "clap",
  "fakecloud-aws",
  "fakecloud-core",
+ "fakecloud-dynamodb",
  "fakecloud-eventbridge",
  "fakecloud-iam",
  "fakecloud-kms",
@@ -1252,12 +1277,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "fakecloud-dynamodb"
+version = "0.1.1"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "fakecloud-aws",
+ "fakecloud-core",
+ "http 1.4.0",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "uuid",
+]
+
+[[package]]
 name = "fakecloud-e2e"
 version = "0.1.1"
 dependencies = [
  "aws-config",
  "aws-credential-types",
  "aws-sdk-cloudwatchlogs",
+ "aws-sdk-dynamodb",
  "aws-sdk-eventbridge",
  "aws-sdk-iam",
  "aws-sdk-kms",

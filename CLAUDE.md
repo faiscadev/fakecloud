@@ -18,8 +18,7 @@ cargo fmt --check                        # format check
 - `fakecloud` — binary entry point (clap CLI, Axum server)
 - `fakecloud-core` — AwsService trait, ServiceRegistry, request dispatch, protocol parsing
 - `fakecloud-aws` — shared AWS types (ARNs, error builders, SigV4 parser)
-- `fakecloud-{sqs,sns,eventbridge,iam,ssm,dynamodb,s3,logs,kms}` — individual service implementations
-- `fakecloud-{sqs,sns,eventbridge,iam,ssm,lambda,secretsmanager,s3,logs,kms}` — individual service implementations
+- `fakecloud-{sqs,sns,eventbridge,iam,ssm,dynamodb,lambda,secretsmanager,s3,logs,kms}` — individual service implementations
 - `fakecloud-e2e` — E2E tests using aws-sdk-rust and AWS CLI
 
 ## Conventions
@@ -40,8 +39,6 @@ cargo fmt --check                        # format check
 
 ### AWS Protocol Notes
 - Query protocol (SQS, SNS, IAM, STS): form-encoded body, `Action` param, XML responses
-- JSON protocol (SSM, EventBridge, DynamoDB, CloudWatch Logs, KMS): JSON body, `X-Amz-Target` header, JSON responses
-- REST protocol (S3): HTTP method + path-based routing, XML responses
-- JSON protocol (SSM, EventBridge, Secrets Manager, CloudWatch Logs, KMS): JSON body, `X-Amz-Target` header, JSON responses
+- JSON protocol (SSM, EventBridge, DynamoDB, Secrets Manager, CloudWatch Logs, KMS): JSON body, `X-Amz-Target` header, JSON responses
 - REST protocol (S3, Lambda): HTTP method + path-based routing, XML/JSON responses
 - SigV4 signatures are parsed for routing but never validated

@@ -76,6 +76,7 @@ async fn main() {
     ));
     let dynamodb_state = Arc::new(parking_lot::RwLock::new(
         fakecloud_dynamodb::state::DynamoDbState::new(&cli.account_id, &cli.region),
+    ));
     let lambda_state = Arc::new(parking_lot::RwLock::new(
         fakecloud_lambda::state::LambdaState::new(&cli.account_id, &cli.region),
     ));
