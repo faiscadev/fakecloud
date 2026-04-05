@@ -838,3 +838,84 @@ async fn iam_tag_user() {
         .unwrap();
     assert!(tags.tags().is_empty());
 }
+
+/// Regression: ListVirtualMFADevices should only return virtual MFA devices,
+/// excluding hardware MFA devices created via EnableMFADevice with a non-virtual serial.
+#[tokio::test]
+async fn iam_list_virtual_mfa_excludes_hardware() {
+    let server = TestServer::start().await;
+
+    // Create a virtual MFA device via CLI (SDK doesn't have this API directly)
+    let tmp_dir = std::env::temp_dir();
+    let outfile = tmp_dir.join("mfa-bootstrap.png");
+    let output = server
+        .aws_cli(&[
+            "iam",
+            "create-virtual-mfa-device",
+            "--virtual-mfa-device-name",
+            "my-virtual-mfa",
+            "--outfile",
+            outfile.to_str().unwrap(),
+            "--bootstrap-method",
+            "QRCodePNG",
+        ])
+        .await;
+    let _ = std::fs::remove_file(&outfile);
+    assert!(
+        output.success(),
+        "create-virtual-mfa-device failed: {}",
+        output.stderr_text()
+    );
+
+    // Create a user and enable a hardware MFA device on that user
+    let iam = server.iam_client().await;
+    iam.create_user()
+        .user_name("mfa-user")
+        .send()
+        .await
+        .unwrap();
+
+    // Enable a "hardware" MFA by providing a non-virtual serial number
+    let output = server
+        .aws_cli(&[
+            "iam",
+            "enable-mfa-device",
+            "--user-name",
+            "mfa-user",
+            "--serial-number",
+            "arn:aws:iam::123456789012:mfa/hardware-token",
+            "--authentication-code1",
+            "123456",
+            "--authentication-code2",
+            "654321",
+        ])
+        .await;
+    assert!(
+        output.success(),
+        "enable-mfa-device failed: {}",
+        output.stderr_text()
+    );
+
+    // List virtual MFA devices - should only include the virtual one
+    let output = server.aws_cli(&["iam", "list-virtual-mfa-devices"]).await;
+    assert!(
+        output.success(),
+        "list-virtual-mfa-devices failed: {}",
+        output.stderr_text()
+    );
+    let json = output.stdout_json();
+    let devices = json["VirtualMFADevices"].as_array().unwrap();
+
+    // Should contain only the virtual MFA device, not the hardware one
+    assert_eq!(
+        devices.len(),
+        1,
+        "expected 1 virtual MFA device, got {}",
+        devices.len()
+    );
+    let serial = devices[0]["SerialNumber"].as_str().unwrap();
+    assert!(
+        serial.contains("my-virtual-mfa"),
+        "expected virtual MFA serial containing 'my-virtual-mfa', got: {serial}"
+    );
+}

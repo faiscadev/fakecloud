@@ -1,5 +1,6 @@
 mod helpers;
 
+use aws_sdk_sns::primitives::Blob;
 use aws_sdk_sqs::types::QueueAttributeName;
 use helpers::TestServer;
 
@@ -626,4 +627,101 @@ async fn sns_confirm_subscription() {
         .await
         .unwrap();
     assert!(resp.subscription_arn().is_some());
+}
+
+/// Regression: binary message attributes should be preserved when delivered to SQS
+/// via raw message delivery.
+#[tokio::test]
+async fn sns_binary_message_attribute_delivery() {
+    let server = TestServer::start().await;
+    let sns = server.sns_client().await;
+    let sqs = server.sqs_client().await;
+
+    // Create SQS queue
+    let queue = sqs
+        .create_queue()
+        .queue_name("binary-attr-queue")
+        .send()
+        .await
+        .unwrap();
+    let queue_url = queue.queue_url().unwrap().to_string();
+    let attrs = sqs
+        .get_queue_attributes()
+        .queue_url(&queue_url)
+        .attribute_names(QueueAttributeName::QueueArn)
+        .send()
+        .await
+        .unwrap();
+    let queue_arn = attrs
+        .attributes()
+        .unwrap()
+        .get(&QueueAttributeName::QueueArn)
+        .unwrap()
+        .to_string();
+
+    // Create topic, subscribe SQS with raw message delivery
+    let topic = sns
+        .create_topic()
+        .name("binary-attr-topic")
+        .send()
+        .await
+        .unwrap();
+    let topic_arn = topic.topic_arn().unwrap().to_string();
+
+    let sub = sns
+        .subscribe()
+        .topic_arn(&topic_arn)
+        .protocol("sqs")
+        .endpoint(&queue_arn)
+        .send()
+        .await
+        .unwrap();
+    let sub_arn = sub.subscription_arn().unwrap().to_string();
+
+    // Enable raw message delivery
+    sns.set_subscription_attributes()
+        .subscription_arn(&sub_arn)
+        .attribute_name("RawMessageDelivery")
+        .attribute_value("true")
+        .send()
+        .await
+        .unwrap();
+
+    // Publish with a binary attribute
+    let binary_data = vec![0xDE, 0xAD, 0xBE, 0xEF];
+    let bin_attr = aws_sdk_sns::types::MessageAttributeValue::builder()
+        .data_type("Binary")
+        .binary_value(Blob::new(binary_data.clone()))
+        .build()
+        .unwrap();
+
+    sns.publish()
+        .topic_arn(&topic_arn)
+        .message("binary attr test")
+        .message_attributes("binData", bin_attr)
+        .send()
+        .await
+        .unwrap();
+
+    // Receive from SQS and verify the binary attribute is present
+    let msgs = sqs
+        .receive_message()
+        .queue_url(&queue_url)
+        .message_attribute_names("All")
+        .max_number_of_messages(10)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(msgs.messages().len(), 1, "expected 1 message in SQS");
+    let msg = &msgs.messages()[0];
+    assert_eq!(msg.body().unwrap(), "binary attr test");
+
+    let msg_attrs = msg.message_attributes().unwrap();
+    assert!(
+        msg_attrs.contains_key("binData"),
+        "expected 'binData' attribute in SQS message"
+    );
+    let attr = msg_attrs.get("binData").unwrap();
+    assert_eq!(attr.data_type(), "Binary");
 }

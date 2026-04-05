@@ -959,3 +959,120 @@ async fn sqs_add_remove_permission() {
         .await
         .unwrap();
 }
+
+/// Regression: GetQueueAttributes via query protocol (AWS CLI) should return attributes.
+#[tokio::test]
+async fn sqs_get_queue_attributes_via_query_protocol() {
+    let server = TestServer::start().await;
+
+    // Create queue via CLI
+    let output = server
+        .aws_cli(&["sqs", "create-queue", "--queue-name", "query-attrs-queue"])
+        .await;
+    assert!(output.success(), "create failed: {}", output.stderr_text());
+    let json = output.stdout_json();
+    let queue_url = json["QueueUrl"].as_str().unwrap();
+
+    // GetQueueAttributes via CLI (uses query protocol)
+    let output = server
+        .aws_cli(&[
+            "sqs",
+            "get-queue-attributes",
+            "--queue-url",
+            queue_url,
+            "--attribute-names",
+            "All",
+        ])
+        .await;
+    assert!(
+        output.success(),
+        "get-queue-attributes failed: {}",
+        output.stderr_text()
+    );
+    let json = output.stdout_json();
+    let attrs = json["Attributes"].as_object().unwrap();
+    assert!(
+        attrs.contains_key("QueueArn"),
+        "expected QueueArn in attributes, got: {attrs:?}"
+    );
+    assert!(
+        attrs.contains_key("VisibilityTimeout"),
+        "expected VisibilityTimeout in attributes"
+    );
+}
+
+/// Regression: CreateQueue with invalid DelaySeconds should return an error.
+#[tokio::test]
+async fn sqs_create_queue_invalid_delay_seconds() {
+    let server = TestServer::start().await;
+    let client = server.sqs_client().await;
+
+    // DelaySeconds must be 0..=900; 9999 is invalid
+    let result = client
+        .create_queue()
+        .queue_name("bad-delay-queue")
+        .attributes(QueueAttributeName::DelaySeconds, "9999")
+        .send()
+        .await;
+    assert!(
+        result.is_err(),
+        "Expected error for invalid DelaySeconds value"
+    );
+}
+
+/// Regression: ListDeadLetterSourceQueues returns queues that use this queue as DLQ.
+#[tokio::test]
+async fn sqs_list_dead_letter_source_queues() {
+    let server = TestServer::start().await;
+    let client = server.sqs_client().await;
+
+    // Create DLQ
+    let dlq = client
+        .create_queue()
+        .queue_name("regression-dlq")
+        .send()
+        .await
+        .unwrap();
+    let dlq_url = dlq.queue_url().unwrap().to_string();
+    let dlq_attrs = client
+        .get_queue_attributes()
+        .queue_url(&dlq_url)
+        .attribute_names(QueueAttributeName::QueueArn)
+        .send()
+        .await
+        .unwrap();
+    let dlq_arn = dlq_attrs
+        .attributes()
+        .unwrap()
+        .get(&QueueAttributeName::QueueArn)
+        .unwrap()
+        .to_string();
+
+    // Create source queue with redrive policy
+    let redrive = format!(
+        r#"{{"deadLetterTargetArn":"{}","maxReceiveCount":"3"}}"#,
+        dlq_arn
+    );
+    client
+        .create_queue()
+        .queue_name("regression-src")
+        .attributes(QueueAttributeName::RedrivePolicy, &redrive)
+        .send()
+        .await
+        .unwrap();
+
+    // ListDeadLetterSourceQueues should list the source queue
+    let sources = client
+        .list_dead_letter_source_queues()
+        .queue_url(&dlq_url)
+        .send()
+        .await
+        .unwrap();
+    let urls = sources.queue_urls();
+    assert_eq!(urls.len(), 1, "expected 1 source queue, got {}", urls.len());
+    assert!(
+        urls[0].contains("regression-src"),
+        "expected source queue URL to contain 'regression-src', got: {}",
+        urls[0]
+    );
+}

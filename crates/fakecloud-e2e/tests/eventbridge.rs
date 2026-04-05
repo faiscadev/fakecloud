@@ -680,3 +680,31 @@ async fn eb_rule_with_multiple_targets() {
         .unwrap();
     assert_eq!(targets.targets().len(), 2);
 }
+
+/// Regression: ListRules with an out-of-range NextToken should not panic.
+#[tokio::test]
+async fn eb_list_rules_pagination_out_of_range() {
+    let server = TestServer::start().await;
+    let client = server.eventbridge_client().await;
+
+    // Create one rule so the list is non-empty
+    client
+        .put_rule()
+        .name("pagination-rule")
+        .event_pattern(r#"{"source": ["test"]}"#)
+        .send()
+        .await
+        .unwrap();
+
+    // Use a NextToken far beyond the number of rules (should return empty, not panic)
+    let resp = client.list_rules().next_token("9999").send().await.unwrap();
+    assert!(
+        resp.rules().is_empty(),
+        "expected empty rules with out-of-range token, got {} rules",
+        resp.rules().len()
+    );
+    assert!(
+        resp.next_token().is_none(),
+        "expected no next token for out-of-range pagination"
+    );
+}

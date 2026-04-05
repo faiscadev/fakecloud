@@ -651,3 +651,73 @@ async fn ssm_describe_parameters() {
         .iter()
         .any(|p| p.name().unwrap() == "/desc/param1"));
 }
+
+/// Regression: SecureString returned via GetParameters (batch) without WithDecryption
+/// should have the value masked (kms: prefix), not the plaintext.
+#[tokio::test]
+async fn ssm_secure_string_masked_without_decryption() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+
+    client
+        .put_parameter()
+        .name("/secret/api-key")
+        .value("my-api-key-12345")
+        .r#type(ParameterType::SecureString)
+        .send()
+        .await
+        .unwrap();
+
+    // Get without WithDecryption (default false) via GetParameters batch API
+    let resp = client
+        .get_parameters()
+        .names("/secret/api-key")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.parameters().len(), 1);
+    let value = resp.parameters()[0].value().unwrap();
+    assert!(
+        value.starts_with("kms:"),
+        "expected masked value starting with 'kms:', got: {value}"
+    );
+    assert!(
+        !value.contains("my-api-key-12345") || value.starts_with("kms:"),
+        "value should be masked without WithDecryption"
+    );
+
+    // With decryption should return plaintext
+    let resp = client
+        .get_parameters()
+        .names("/secret/api-key")
+        .with_decryption(true)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.parameters()[0].value().unwrap(), "my-api-key-12345");
+}
+
+/// Regression: RemoveTagsFromResource with an invalid ResourceType should return error.
+#[tokio::test]
+async fn ssm_remove_tags_invalid_resource_type() {
+    let server = TestServer::start().await;
+
+    // Use CLI to send a raw request with invalid resource type since the SDK
+    // enforces enum values. We call via aws_cli with ssm remove-tags-from-resource.
+    let output = server
+        .aws_cli(&[
+            "ssm",
+            "remove-tags-from-resource",
+            "--resource-type",
+            "InvalidType",
+            "--resource-id",
+            "some-resource",
+            "--tag-keys",
+            "SomeKey",
+        ])
+        .await;
+    assert!(
+        !output.success(),
+        "expected error for invalid resource type, but got success"
+    );
+}
