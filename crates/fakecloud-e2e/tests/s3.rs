@@ -878,9 +878,10 @@ async fn s3_object_lock_prevents_overwrite() {
         .body(ByteStream::from_static(b"overwritten"))
         .send()
         .await;
-    assert!(result.is_err(), "Overwrite of locked object should fail");
+    // AWS S3 object lock does NOT prevent overwrites — only deletes
+    assert!(result.is_ok(), "Overwrite of locked object should succeed");
 
-    // Verify original data is still there
+    // Verify data was overwritten
     let resp = s3
         .get_object()
         .bucket("overwrite-lock-bucket")
@@ -889,7 +890,7 @@ async fn s3_object_lock_prevents_overwrite() {
         .await
         .unwrap();
     let body = resp.body.collect().await.unwrap().into_bytes();
-    assert_eq!(body.as_ref(), b"original");
+    assert_eq!(body.as_ref(), b"overwritten");
 }
 
 // ---- S3 Multipart Upload Tests ----
