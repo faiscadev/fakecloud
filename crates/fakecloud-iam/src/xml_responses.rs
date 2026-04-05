@@ -154,19 +154,14 @@ pub fn list_users_response(users: &[IamUser], request_id: &str) -> String {
     let members: String = users
         .iter()
         .map(|u| {
-            let tags_section = if u.tags.is_empty() {
-                String::new()
-            } else {
-                let tags_members = tags_xml(&u.tags);
-                format!("\n        <Tags>\n{tags_members}\n        </Tags>")
-            };
+            // ListUsers never includes Tags or PermissionsBoundary (AWS behavior)
             format!(
                 r#"      <member>
         <Path>{path}</Path>
         <UserName>{name}</UserName>
         <UserId>{id}</UserId>
         <Arn>{arn}</Arn>
-        <CreateDate>{date}</CreateDate>{tags_section}
+        <CreateDate>{date}</CreateDate>
       </member>"#,
                 path = u.path,
                 name = u.user_name,
@@ -436,12 +431,7 @@ pub fn list_policies_response(policies: &[IamPolicy], request_id: &str) -> Strin
     let members: String = policies
         .iter()
         .map(|p| {
-            let tags_section = if p.tags.is_empty() {
-                String::new()
-            } else {
-                let tags_members = tags_xml(&p.tags);
-                format!("\n        <Tags>\n{tags_members}\n        </Tags>")
-            };
+            // ListPolicies never includes Tags or Description (AWS behavior)
             format!(
                 r#"      <member>
         <PolicyName>{name}</PolicyName>
@@ -451,7 +441,7 @@ pub fn list_policies_response(policies: &[IamPolicy], request_id: &str) -> Strin
         <DefaultVersionId>{default_version}</DefaultVersionId>
         <AttachmentCount>{attachment_count}</AttachmentCount>
         <IsAttachable>true</IsAttachable>
-        <CreateDate>{date}</CreateDate>{tags_section}
+        <CreateDate>{date}</CreateDate>
       </member>"#,
                 name = p.policy_name,
                 id = p.policy_id,
@@ -482,8 +472,9 @@ pub fn list_policies_response(policies: &[IamPolicy], request_id: &str) -> Strin
 }
 
 pub fn get_policy_response(policy: &IamPolicy, request_id: &str) -> String {
+    // GetPolicy always includes Tags, even if empty (AWS behavior)
     let tags_section = if policy.tags.is_empty() {
-        String::new()
+        "\n      <Tags/>".to_string()
     } else {
         let tags_members = tags_xml(&policy.tags);
         format!("\n      <Tags>\n{tags_members}\n      </Tags>")

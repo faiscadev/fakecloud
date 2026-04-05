@@ -463,10 +463,21 @@ fn resolve_calling_user(state: &crate::state::IamState, _account_id: &str) -> St
 }
 
 fn generate_id() -> String {
+    // Generate 16 uppercase hex chars (used with 4-char prefixes like FKIA, AIDA = 20 chars)
     uuid::Uuid::new_v4()
         .to_string()
         .replace('-', "")
         .to_uppercase()[..16]
+        .to_string()
+}
+
+fn generate_long_id() -> String {
+    // Generate 21 uppercase hex chars (used with 3-char prefixes like ASC = 24 chars).
+    // CertificateId requires minimum 24 characters.
+    uuid::Uuid::new_v4()
+        .to_string()
+        .replace('-', "")
+        .to_uppercase()[..21]
         .to_string()
 }
 
@@ -3886,7 +3897,65 @@ impl IamService {
             i += 1;
         }
 
-        let mut state = self.state.write();
+        // Collect validation errors for multi-error response
+        let mut validation_errors: Vec<String> = Vec::new();
+
+        // Check URL length (must be <= 255)
+        if url.len() > 255 {
+            validation_errors.push(
+                "Value at \"url\" failed to satisfy constraint: Member must have length less than or equal to 255".to_string()
+            );
+        }
+
+        // Check thumbprint constraints
+        if thumbprints.len() > 5 {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ValidationError",
+                "Thumbprint list must contain fewer than 5 entries.".to_string(),
+            ));
+        }
+        for tp in &thumbprints {
+            if tp.len() != 40 {
+                // AWS always reports both constraints when thumbprint length is wrong
+                validation_errors.push(
+                    "Value at \"thumbprintList\" failed to satisfy constraint: Member must have length less than or equal to 40; Member must have length greater than or equal to 40".to_string()
+                );
+                break;
+            }
+        }
+
+        // Check client ID constraints
+        if client_ids.len() > 100 {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "LimitExceeded",
+                "Cannot exceed quota for ClientIdsPerOpenIdConnectProvider: 100".to_string(),
+            ));
+        }
+        for cid in &client_ids {
+            if cid.len() > 255 || cid.is_empty() {
+                // AWS always reports both constraints when client ID length is wrong
+                validation_errors.push(
+                    "Value at \"clientIDList\" failed to satisfy constraint: Member must have length less than or equal to 255; Member must have length greater than or equal to 1".to_string()
+                );
+                break;
+            }
+        }
+
+        if !validation_errors.is_empty() {
+            let count = validation_errors.len();
+            let msg = format!(
+                "{count} validation error{} detected: {}",
+                if count == 1 { "" } else { "s" },
+                validation_errors.join("; ")
+            );
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ValidationError",
+                msg,
+            ));
+        }
 
         // Validate URL: must start with http:// or https://
         if !url.starts_with("https://") && !url.starts_with("http://") {
@@ -3896,6 +3965,8 @@ impl IamService {
                 "Invalid Open ID Connect Provider URL".to_string(),
             ));
         }
+
+        let mut state = self.state.write();
 
         // Store URL without scheme for responses (AWS behavior)
         let url_without_scheme = url
@@ -3956,7 +4027,7 @@ impl IamService {
             AwsServiceError::aws_error(
                 StatusCode::NOT_FOUND,
                 "NoSuchEntity",
-                format!("OpenIDConnect provider not found for arn {arn}"),
+                format!("OpenIDConnect Provider not found for arn {arn}"),
             )
         })?;
 
@@ -4007,13 +4078,8 @@ impl IamService {
         let arn = required_param(&req.query_params, "OpenIDConnectProviderArn")?;
         let mut state = self.state.write();
 
-        if state.oidc_providers.remove(&arn).is_none() {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::NOT_FOUND,
-                "NoSuchEntity",
-                format!("OpenIDConnect provider not found for arn {arn}"),
-            ));
-        }
+        // AWS silently succeeds when deleting a non-existing OIDC provider
+        state.oidc_providers.remove(&arn);
 
         let xml = empty_response("DeleteOpenIDConnectProvider", &req.request_id);
         Ok(AwsResponse::xml(StatusCode::OK, xml))
@@ -4067,7 +4133,7 @@ impl IamService {
             AwsServiceError::aws_error(
                 StatusCode::NOT_FOUND,
                 "NoSuchEntity",
-                format!("OpenIDConnect provider not found for arn {arn}"),
+                format!("OpenIDConnect Provider not found for arn {arn}"),
             )
         })?;
 
@@ -4087,7 +4153,7 @@ impl IamService {
             AwsServiceError::aws_error(
                 StatusCode::NOT_FOUND,
                 "NoSuchEntity",
-                format!("OpenIDConnect provider not found for arn {arn}"),
+                format!("OpenIDConnect Provider not found for arn {arn}"),
             )
         })?;
 
@@ -4109,7 +4175,7 @@ impl IamService {
             AwsServiceError::aws_error(
                 StatusCode::NOT_FOUND,
                 "NoSuchEntity",
-                format!("OpenIDConnect provider not found for arn {arn}"),
+                format!("OpenIDConnect Provider not found for arn {arn}"),
             )
         })?;
 
@@ -4128,7 +4194,7 @@ impl IamService {
             AwsServiceError::aws_error(
                 StatusCode::NOT_FOUND,
                 "NoSuchEntity",
-                format!("OpenIDConnect provider not found for arn {arn}"),
+                format!("OpenIDConnect Provider not found for arn {arn}"),
             )
         })?;
 
@@ -4153,7 +4219,7 @@ impl IamService {
             AwsServiceError::aws_error(
                 StatusCode::NOT_FOUND,
                 "NoSuchEntity",
-                format!("OpenIDConnect provider not found for arn {arn}"),
+                format!("OpenIDConnect Provider not found for arn {arn}"),
             )
         })?;
 
@@ -4171,26 +4237,11 @@ impl IamService {
             AwsServiceError::aws_error(
                 StatusCode::NOT_FOUND,
                 "NoSuchEntity",
-                format!("OpenIDConnect provider not found for arn {arn}"),
+                format!("OpenIDConnect Provider not found for arn {arn}"),
             )
         })?;
 
-        let members = tags_xml(&provider.tags);
-        let xml = format!(
-            r#"<?xml version="1.0" encoding="UTF-8"?>
-<ListOpenIDConnectProviderTagsResponse xmlns="https://iam.amazonaws.com/doc/2010-05-08/">
-  <ListOpenIDConnectProviderTagsResult>
-    <IsTruncated>false</IsTruncated>
-    <Tags>
-{members}
-    </Tags>
-  </ListOpenIDConnectProviderTagsResult>
-  <ResponseMetadata>
-    <RequestId>{}</RequestId>
-  </ResponseMetadata>
-</ListOpenIDConnectProviderTagsResponse>"#,
-            req.request_id
-        );
+        let xml = paginated_tags_response("ListOpenIDConnectProviderTags", &provider.tags, req);
         Ok(AwsResponse::xml(StatusCode::OK, xml))
     }
 }
@@ -4385,6 +4436,15 @@ impl IamService {
         let user_name = required_param(&req.query_params, "UserName")?;
         let certificate_body = required_param(&req.query_params, "CertificateBody")?;
 
+        // Validate certificate body looks like a PEM certificate
+        if !certificate_body.contains("-----BEGIN CERTIFICATE-----") {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "MalformedCertificate",
+                "Certificate body is malformed.".to_string(),
+            ));
+        }
+
         let mut state = self.state.write();
 
         if !state.users.contains_key(&user_name) {
@@ -4403,12 +4463,12 @@ impl IamService {
             return Err(AwsServiceError::aws_error(
                 StatusCode::CONFLICT,
                 "LimitExceeded",
-                "Cannot exceed quota for SigningCertificatesPerUser: 2".to_string(),
+                "Cannot exceed quota for CertificatesPerUser: 2".to_string(),
             ));
         }
 
         let cert = SigningCertificate {
-            certificate_id: format!("ASC{}", generate_id()),
+            certificate_id: format!("ASC{}", generate_long_id()),
             user_name: user_name.clone(),
             certificate_body,
             status: "Active".to_string(),

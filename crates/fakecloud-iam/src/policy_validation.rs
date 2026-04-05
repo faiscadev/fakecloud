@@ -490,7 +490,11 @@ fn validate_arn(resource: &str) -> Result<(), String> {
             );
         }
         // 3 or 4 parts: valid (e.g., "arn:aws:fdsasf" or "arn:aws:s3:fdsasf")
+        // but reject if service (parts[2]) is empty (e.g., "arn:aws::fdsasf")
         if parts.len() >= 3 && parts.len() <= 4 {
+            if parts[2].is_empty() {
+                return Err("The policy failed legacy parsing".to_string());
+            }
             return Ok(());
         }
         // 5 parts: legacy parsing error (e.g., "arn:aws:s3::example_bucket")
@@ -568,8 +572,12 @@ fn validate_condition_structure(val: &Value) -> Result<(), String> {
             _ => return Err("Syntax errors in policy.".to_string()),
         };
 
+        // AWS accepts unknown condition operators when their inner object is empty
         if !is_valid_condition_operator(op_key) {
-            return Err("Syntax errors in policy.".to_string());
+            if !inner_obj.is_empty() {
+                return Err("Syntax errors in policy.".to_string());
+            }
+            continue;
         }
 
         for (_cond_key, cond_val) in inner_obj {
@@ -687,11 +695,6 @@ fn is_valid_date_value(s: &str) -> bool {
     // YYYY-MM-DDThh:mm:ss.sssZ
     // YYYY-MM-DDThh:mm:ss+HH:MM or +HH
 
-    // Must start with YYYY-
-    if s.len() < 4 {
-        return false;
-    }
-
     // Find the 'T' or 't' separator
     let t_pos = s.find(['T', 't']);
 
@@ -699,11 +702,20 @@ fn is_valid_date_value(s: &str) -> bool {
         let date_part = &s[..t_idx];
         let time_part = &s[t_idx + 1..];
 
+        // AWS accepts short numeric prefixes before T (e.g. "01T") as valid date values
+        if date_part.chars().all(|c| c.is_ascii_digit()) && !date_part.is_empty() {
+            return is_valid_time_part(time_part);
+        }
+
         if !is_valid_date_part(date_part) {
             return false;
         }
 
         return is_valid_time_part(time_part);
+    }
+
+    if s.len() < 4 {
+        return false;
     }
 
     // No time part, just a date
