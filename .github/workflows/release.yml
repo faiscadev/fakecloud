@@ -100,37 +100,31 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
-      - name: Publish fakecloud-aws
-        run: cargo publish -p fakecloud-aws
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-
-      - name: Wait for crates.io index
-        run: sleep 60
-
-      - name: Publish fakecloud-core
-        run: cargo publish -p fakecloud-core
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-
-      - name: Wait for crates.io index
-        run: sleep 60
-
-      - name: Publish service crates
+      - name: Publish all crates
         run: |
-          for crate in fakecloud-sqs fakecloud-sns fakecloud-eventbridge fakecloud-iam fakecloud-ssm fakecloud-s3; do
-            echo "Publishing $crate..."
-            cargo publish -p "$crate" || true
+          publish() {
+            echo "Publishing $1..."
+            cargo publish -p "$1" 2>&1 || true
             echo "Waiting for crates.io index..."
             sleep 60
-          done
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          }
 
-      - name: Wait for crates.io index
-        run: sleep 60
+          # Layer 1: no internal deps
+          publish fakecloud-aws
 
-      - name: Publish fakecloud
-        run: cargo publish -p fakecloud
+          # Layer 2: depends on fakecloud-aws
+          publish fakecloud-core
+
+          # Layer 3: depend on aws + core
+          publish fakecloud-sqs
+          publish fakecloud-sns
+          publish fakecloud-eventbridge
+          publish fakecloud-iam
+          publish fakecloud-ssm
+          publish fakecloud-s3
+
+          # Layer 4: depends on all
+          echo "Publishing fakecloud..."
+          cargo publish -p fakecloud
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
