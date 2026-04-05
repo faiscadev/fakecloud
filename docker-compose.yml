@@ -9,7 +9,7 @@ services:
     environment:
       FAKECLOUD_ADDR: "0.0.0.0:4566"
       FAKECLOUD_REGION: "us-east-1"
-      FAKECLOUD_ACCOUNT_ID: "000000000000"
+      FAKECLOUD_ACCOUNT_ID: "123456789012"
       FAKECLOUD_LOG: "info"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:4566/_fakecloud/health"]

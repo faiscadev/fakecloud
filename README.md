@@ -205,15 +205,15 @@ export AWS_DEFAULT_REGION=us-east-1
 
 # SQS
 aws sqs create-queue --queue-name my-queue
-aws sqs send-message --queue-url http://localhost:4566/000000000000/my-queue \
+aws sqs send-message --queue-url http://localhost:4566/123456789012/my-queue \
     --message-body "hello"
-aws sqs receive-message --queue-url http://localhost:4566/000000000000/my-queue
+aws sqs receive-message --queue-url http://localhost:4566/123456789012/my-queue
 
 # SNS
 aws sns create-topic --name my-topic
-aws sns subscribe --topic-arn arn:aws:sns:us-east-1:000000000000:my-topic \
+aws sns subscribe --topic-arn arn:aws:sns:us-east-1:123456789012:my-topic \
     --protocol sqs \
-    --notification-endpoint arn:aws:sqs:us-east-1:000000000000:my-queue
+    --notification-endpoint arn:aws:sqs:us-east-1:123456789012:my-queue
 
 # SSM
 aws ssm put-parameter --name /app/db-host --value "localhost" --type String
@@ -329,7 +329,7 @@ FakeCloud is configured via CLI flags or environment variables.
 |---|---|---|---|
 | `--addr` | `FAKECLOUD_ADDR` | `0.0.0.0:4566` | Listen address and port |
 | `--region` | `FAKECLOUD_REGION` | `us-east-1` | AWS region to advertise |
-| `--account-id` | `FAKECLOUD_ACCOUNT_ID` | `000000000000` | AWS account ID |
+| `--account-id` | `FAKECLOUD_ACCOUNT_ID` | `123456789012` | AWS account ID |
 | `--log-level` | `FAKECLOUD_LOG` | `info` | Log level (trace, debug, info, warn, error) |
 
 ```sh

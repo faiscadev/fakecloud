@@ -35,7 +35,7 @@ import {
 
 const ENDPOINT = "http://localhost:4566";
 const REGION = "us-east-1";
-const ACCOUNT_ID = "000000000000";
+const ACCOUNT_ID = "123456789012";
 const credentials = { accessKeyId: "test", secretAccessKey: "test" };
 
 const sqs = new SQSClient({ endpoint: ENDPOINT, region: REGION, credentials });

@@ -39,12 +39,12 @@ services:
 
         echo "--- Sending message ---"
         aws sqs send-message \
-          --queue-url http://fakecloud:4566/000000000000/demo-queue \
+          --queue-url http://fakecloud:4566/123456789012/demo-queue \
           --message-body '{"hello": "from docker compose"}'
 
         echo "--- Receiving message ---"
         aws sqs receive-message \
-          --queue-url http://fakecloud:4566/000000000000/demo-queue
+          --queue-url http://fakecloud:4566/123456789012/demo-queue
 
         echo "--- Storing SSM parameter ---"
         aws ssm put-parameter --name /demo/greeting --value "hello world" --type String

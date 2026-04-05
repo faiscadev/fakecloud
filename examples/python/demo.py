@@ -16,7 +16,7 @@ import boto3
 
 ENDPOINT = "http://localhost:4566"
 REGION = "us-east-1"
-ACCOUNT_ID = "000000000000"
+ACCOUNT_ID = "123456789012"
 
 session = boto3.Session(
     aws_access_key_id="test",
