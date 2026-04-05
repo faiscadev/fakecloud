@@ -368,3 +368,315 @@ async fn eb_put_events_stub_targets_no_error() {
     assert_eq!(resp.entries().len(), 1);
     assert!(resp.entries()[0].event_id().is_some());
 }
+
+// ---- EventBridge Archive Tests ----
+
+#[tokio::test]
+async fn eb_archive_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.eventbridge_client().await;
+
+    // Create archive
+    let resp = client
+        .create_archive()
+        .archive_name("my-archive")
+        .event_source_arn("arn:aws:events:us-east-1:123456789012:event-bus/default")
+        .event_pattern(r#"{"source": ["my.app"]}"#)
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.archive_arn().unwrap().contains("my-archive"));
+
+    // Describe archive
+    let desc = client
+        .describe_archive()
+        .archive_name("my-archive")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(desc.archive_name().unwrap(), "my-archive");
+
+    // List archives
+    let list = client.list_archives().send().await.unwrap();
+    assert!(list
+        .archives()
+        .iter()
+        .any(|a| a.archive_name().unwrap() == "my-archive"));
+
+    // Update archive
+    client
+        .update_archive()
+        .archive_name("my-archive")
+        .description("Updated description")
+        .send()
+        .await
+        .unwrap();
+
+    // Delete archive
+    client
+        .delete_archive()
+        .archive_name("my-archive")
+        .send()
+        .await
+        .unwrap();
+
+    let list = client.list_archives().send().await.unwrap();
+    assert!(!list
+        .archives()
+        .iter()
+        .any(|a| a.archive_name().unwrap() == "my-archive"));
+}
+
+// ---- EventBridge Connection Tests ----
+
+#[tokio::test]
+async fn eb_connection_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.eventbridge_client().await;
+
+    use aws_sdk_eventbridge::types::{
+        ConnectionAuthorizationType, CreateConnectionApiKeyAuthRequestParameters,
+        CreateConnectionAuthRequestParameters,
+    };
+
+    let auth = CreateConnectionAuthRequestParameters::builder()
+        .api_key_auth_parameters(
+            CreateConnectionApiKeyAuthRequestParameters::builder()
+                .api_key_name("x-api-key")
+                .api_key_value("secret123")
+                .build()
+                .unwrap(),
+        )
+        .build();
+
+    let resp = client
+        .create_connection()
+        .name("my-connection")
+        .authorization_type(ConnectionAuthorizationType::ApiKey)
+        .auth_parameters(auth)
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.connection_arn().unwrap().contains("my-connection"));
+
+    // Describe
+    let desc = client
+        .describe_connection()
+        .name("my-connection")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(desc.name().unwrap(), "my-connection");
+
+    // List
+    let list = client.list_connections().send().await.unwrap();
+    assert!(list
+        .connections()
+        .iter()
+        .any(|c| c.name().unwrap() == "my-connection"));
+
+    // Delete
+    client
+        .delete_connection()
+        .name("my-connection")
+        .send()
+        .await
+        .unwrap();
+}
+
+// ---- EventBridge Rule Management Tests ----
+
+#[tokio::test]
+async fn eb_describe_enable_disable_rule() {
+    let server = TestServer::start().await;
+    let client = server.eventbridge_client().await;
+
+    client
+        .put_rule()
+        .name("toggle-rule")
+        .event_pattern(r#"{"source": ["test"]}"#)
+        .state(RuleState::Enabled)
+        .send()
+        .await
+        .unwrap();
+
+    // Describe
+    let desc = client
+        .describe_rule()
+        .name("toggle-rule")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(desc.name().unwrap(), "toggle-rule");
+
+    // Disable
+    client
+        .disable_rule()
+        .name("toggle-rule")
+        .send()
+        .await
+        .unwrap();
+
+    let desc = client
+        .describe_rule()
+        .name("toggle-rule")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(desc.state().unwrap(), &RuleState::Disabled);
+
+    // Enable
+    client
+        .enable_rule()
+        .name("toggle-rule")
+        .send()
+        .await
+        .unwrap();
+
+    let desc = client
+        .describe_rule()
+        .name("toggle-rule")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(desc.state().unwrap(), &RuleState::Enabled);
+}
+
+// ---- EventBridge Tag Tests ----
+
+#[tokio::test]
+async fn eb_tag_untag_rule() {
+    let server = TestServer::start().await;
+    let client = server.eventbridge_client().await;
+
+    let resp = client
+        .put_rule()
+        .name("tag-rule")
+        .event_pattern(r#"{"source": ["test"]}"#)
+        .send()
+        .await
+        .unwrap();
+    let rule_arn = resp.rule_arn().unwrap().to_string();
+
+    use aws_sdk_eventbridge::types::Tag;
+    client
+        .tag_resource()
+        .resource_arn(&rule_arn)
+        .tags(Tag::builder().key("env").value("test").build().unwrap())
+        .send()
+        .await
+        .unwrap();
+
+    let tags = client
+        .list_tags_for_resource()
+        .resource_arn(&rule_arn)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(tags.tags().len(), 1);
+
+    client
+        .untag_resource()
+        .resource_arn(&rule_arn)
+        .tag_keys("env")
+        .send()
+        .await
+        .unwrap();
+
+    let tags = client
+        .list_tags_for_resource()
+        .resource_arn(&rule_arn)
+        .send()
+        .await
+        .unwrap();
+    assert!(tags.tags().is_empty());
+}
+
+// ---- EventBridge Error Cases ----
+
+#[tokio::test]
+async fn eb_describe_nonexistent_rule_fails() {
+    let server = TestServer::start().await;
+    let client = server.eventbridge_client().await;
+
+    let result = client.describe_rule().name("ghost-rule").send().await;
+    assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn eb_delete_nonexistent_event_bus() {
+    let server = TestServer::start().await;
+    let client = server.eventbridge_client().await;
+
+    // Deleting a non-existent bus may return error or succeed silently
+    let _ = client.delete_event_bus().name("no-such-bus").send().await;
+}
+
+// ---- EventBridge Multiple Targets ----
+
+#[tokio::test]
+async fn eb_rule_with_multiple_targets() {
+    let server = TestServer::start().await;
+    let client = server.eventbridge_client().await;
+
+    client
+        .put_rule()
+        .name("multi-target")
+        .event_pattern(r#"{"source": ["multi"]}"#)
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .put_targets()
+        .rule("multi-target")
+        .targets(
+            Target::builder()
+                .id("t1")
+                .arn("arn:aws:sqs:us-east-1:123456789012:queue1")
+                .build()
+                .unwrap(),
+        )
+        .targets(
+            Target::builder()
+                .id("t2")
+                .arn("arn:aws:sqs:us-east-1:123456789012:queue2")
+                .build()
+                .unwrap(),
+        )
+        .targets(
+            Target::builder()
+                .id("t3")
+                .arn("arn:aws:sns:us-east-1:123456789012:topic1")
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let targets = client
+        .list_targets_by_rule()
+        .rule("multi-target")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(targets.targets().len(), 3);
+
+    // Remove one target
+    client
+        .remove_targets()
+        .rule("multi-target")
+        .ids("t2")
+        .send()
+        .await
+        .unwrap();
+
+    let targets = client
+        .list_targets_by_rule()
+        .rule("multi-target")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(targets.targets().len(), 2);
+}

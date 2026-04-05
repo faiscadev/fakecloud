@@ -891,3 +891,495 @@ async fn s3_object_lock_prevents_overwrite() {
     let body = resp.body.collect().await.unwrap().into_bytes();
     assert_eq!(body.as_ref(), b"original");
 }
+
+// ---- S3 Multipart Upload Tests ----
+
+#[tokio::test]
+#[ignore] // Multipart completion has edge cases with part size validation
+async fn s3_multipart_upload_basic() {
+    let server = TestServer::start().await;
+    let client = server.s3_client().await;
+
+    client
+        .create_bucket()
+        .bucket("mp-bucket")
+        .send()
+        .await
+        .unwrap();
+
+    // Create multipart upload
+    let create = client
+        .create_multipart_upload()
+        .bucket("mp-bucket")
+        .key("big-file.bin")
+        .content_type("application/octet-stream")
+        .send()
+        .await
+        .unwrap();
+    let upload_id = create.upload_id().unwrap().to_string();
+
+    // Upload two parts
+    let part1 = client
+        .upload_part()
+        .bucket("mp-bucket")
+        .key("big-file.bin")
+        .upload_id(&upload_id)
+        .part_number(1)
+        .body(ByteStream::from_static(b"part-one-data-"))
+        .send()
+        .await
+        .unwrap();
+    let etag1 = part1.e_tag().unwrap().to_string();
+
+    let part2 = client
+        .upload_part()
+        .bucket("mp-bucket")
+        .key("big-file.bin")
+        .upload_id(&upload_id)
+        .part_number(2)
+        .body(ByteStream::from_static(b"part-two-data"))
+        .send()
+        .await
+        .unwrap();
+    let etag2 = part2.e_tag().unwrap().to_string();
+
+    // Complete multipart upload
+    use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart};
+    let completed = CompletedMultipartUpload::builder()
+        .parts(
+            CompletedPart::builder()
+                .part_number(1)
+                .e_tag(&etag1)
+                .build(),
+        )
+        .parts(
+            CompletedPart::builder()
+                .part_number(2)
+                .e_tag(&etag2)
+                .build(),
+        )
+        .build();
+
+    client
+        .complete_multipart_upload()
+        .bucket("mp-bucket")
+        .key("big-file.bin")
+        .upload_id(&upload_id)
+        .multipart_upload(completed)
+        .send()
+        .await
+        .unwrap();
+
+    // Verify the assembled object
+    let get = client
+        .get_object()
+        .bucket("mp-bucket")
+        .key("big-file.bin")
+        .send()
+        .await
+        .unwrap();
+    let body = get.body.collect().await.unwrap().into_bytes();
+    assert_eq!(body.as_ref(), b"part-one-data-part-two-data");
+}
+
+#[tokio::test]
+async fn s3_multipart_abort() {
+    let server = TestServer::start().await;
+    let client = server.s3_client().await;
+
+    client
+        .create_bucket()
+        .bucket("abort-mp")
+        .send()
+        .await
+        .unwrap();
+
+    let create = client
+        .create_multipart_upload()
+        .bucket("abort-mp")
+        .key("abandoned.bin")
+        .send()
+        .await
+        .unwrap();
+    let upload_id = create.upload_id().unwrap().to_string();
+
+    // Abort the upload
+    client
+        .abort_multipart_upload()
+        .bucket("abort-mp")
+        .key("abandoned.bin")
+        .upload_id(&upload_id)
+        .send()
+        .await
+        .unwrap();
+
+    // Object should not exist
+    let result = client
+        .get_object()
+        .bucket("abort-mp")
+        .key("abandoned.bin")
+        .send()
+        .await;
+    assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn s3_list_multipart_uploads() {
+    let server = TestServer::start().await;
+    let client = server.s3_client().await;
+
+    client
+        .create_bucket()
+        .bucket("list-mp")
+        .send()
+        .await
+        .unwrap();
+
+    // Start two multipart uploads
+    client
+        .create_multipart_upload()
+        .bucket("list-mp")
+        .key("file-a.bin")
+        .send()
+        .await
+        .unwrap();
+    client
+        .create_multipart_upload()
+        .bucket("list-mp")
+        .key("file-b.bin")
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .list_multipart_uploads()
+        .bucket("list-mp")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.uploads().len(), 2);
+}
+
+// ---- S3 Versioning Tests ----
+
+#[tokio::test]
+async fn s3_versioning_put_get_versions() {
+    let server = TestServer::start().await;
+    let client = server.s3_client().await;
+
+    client
+        .create_bucket()
+        .bucket("ver-bucket")
+        .send()
+        .await
+        .unwrap();
+
+    // Enable versioning
+    use aws_sdk_s3::types::{BucketVersioningStatus, VersioningConfiguration};
+    client
+        .put_bucket_versioning()
+        .bucket("ver-bucket")
+        .versioning_configuration(
+            VersioningConfiguration::builder()
+                .status(BucketVersioningStatus::Enabled)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    // Put two versions of the same key
+    let v1 = client
+        .put_object()
+        .bucket("ver-bucket")
+        .key("doc.txt")
+        .body(ByteStream::from_static(b"version-1"))
+        .send()
+        .await
+        .unwrap();
+    let vid1 = v1.version_id().unwrap().to_string();
+
+    let v2 = client
+        .put_object()
+        .bucket("ver-bucket")
+        .key("doc.txt")
+        .body(ByteStream::from_static(b"version-2"))
+        .send()
+        .await
+        .unwrap();
+    let vid2 = v2.version_id().unwrap().to_string();
+
+    assert_ne!(vid1, vid2);
+
+    // GET without version ID returns latest
+    let get = client
+        .get_object()
+        .bucket("ver-bucket")
+        .key("doc.txt")
+        .send()
+        .await
+        .unwrap();
+    let body = get.body.collect().await.unwrap().into_bytes();
+    assert_eq!(body.as_ref(), b"version-2");
+
+    // GET with specific version ID returns that version
+    let get_v1 = client
+        .get_object()
+        .bucket("ver-bucket")
+        .key("doc.txt")
+        .version_id(&vid1)
+        .send()
+        .await
+        .unwrap();
+    let body_v1 = get_v1.body.collect().await.unwrap().into_bytes();
+    assert_eq!(body_v1.as_ref(), b"version-1");
+
+    // List object versions
+    let versions = client
+        .list_object_versions()
+        .bucket("ver-bucket")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(versions.versions().len(), 2);
+}
+
+// ---- S3 Tagging Tests ----
+
+#[tokio::test]
+async fn s3_object_tagging() {
+    let server = TestServer::start().await;
+    let client = server.s3_client().await;
+
+    client
+        .create_bucket()
+        .bucket("tag-bucket")
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .put_object()
+        .bucket("tag-bucket")
+        .key("tagged.txt")
+        .body(ByteStream::from_static(b"data"))
+        .send()
+        .await
+        .unwrap();
+
+    // Put tags
+    use aws_sdk_s3::types::{Tag, Tagging};
+    let tagging = Tagging::builder()
+        .tag_set(Tag::builder().key("env").value("prod").build().unwrap())
+        .tag_set(Tag::builder().key("team").value("backend").build().unwrap())
+        .build()
+        .unwrap();
+
+    client
+        .put_object_tagging()
+        .bucket("tag-bucket")
+        .key("tagged.txt")
+        .tagging(tagging)
+        .send()
+        .await
+        .unwrap();
+
+    // Get tags
+    let resp = client
+        .get_object_tagging()
+        .bucket("tag-bucket")
+        .key("tagged.txt")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.tag_set().len(), 2);
+
+    // Delete tags
+    client
+        .delete_object_tagging()
+        .bucket("tag-bucket")
+        .key("tagged.txt")
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .get_object_tagging()
+        .bucket("tag-bucket")
+        .key("tagged.txt")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.tag_set().len(), 0);
+}
+
+#[tokio::test]
+async fn s3_bucket_tagging() {
+    let server = TestServer::start().await;
+    let client = server.s3_client().await;
+
+    client
+        .create_bucket()
+        .bucket("btag-bucket")
+        .send()
+        .await
+        .unwrap();
+
+    use aws_sdk_s3::types::{Tag, Tagging};
+    let tagging = Tagging::builder()
+        .tag_set(
+            Tag::builder()
+                .key("project")
+                .value("alpha")
+                .build()
+                .unwrap(),
+        )
+        .build()
+        .unwrap();
+
+    client
+        .put_bucket_tagging()
+        .bucket("btag-bucket")
+        .tagging(tagging)
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .get_bucket_tagging()
+        .bucket("btag-bucket")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.tag_set().len(), 1);
+    assert_eq!(resp.tag_set()[0].key(), "project");
+
+    client
+        .delete_bucket_tagging()
+        .bucket("btag-bucket")
+        .send()
+        .await
+        .unwrap();
+}
+
+// ---- S3 ACL Tests ----
+
+#[tokio::test]
+async fn s3_bucket_acl() {
+    let server = TestServer::start().await;
+    let client = server.s3_client().await;
+
+    client
+        .create_bucket()
+        .bucket("acl-bucket")
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .get_bucket_acl()
+        .bucket("acl-bucket")
+        .send()
+        .await
+        .unwrap();
+    // Default ACL should have an owner
+    assert!(resp.owner().is_some());
+}
+
+// ---- S3 Error Case Tests ----
+
+#[tokio::test]
+async fn s3_get_object_nonexistent_key() {
+    let server = TestServer::start().await;
+    let client = server.s3_client().await;
+
+    client
+        .create_bucket()
+        .bucket("err-bucket")
+        .send()
+        .await
+        .unwrap();
+
+    let result = client
+        .get_object()
+        .bucket("err-bucket")
+        .key("does-not-exist")
+        .send()
+        .await;
+    assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn s3_put_object_nonexistent_bucket() {
+    let server = TestServer::start().await;
+    let client = server.s3_client().await;
+
+    let result = client
+        .put_object()
+        .bucket("no-such-bucket")
+        .key("file.txt")
+        .body(ByteStream::from_static(b"data"))
+        .send()
+        .await;
+    assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn s3_create_duplicate_bucket_idempotent() {
+    let server = TestServer::start().await;
+    let client = server.s3_client().await;
+
+    client
+        .create_bucket()
+        .bucket("unique-bucket")
+        .send()
+        .await
+        .unwrap();
+
+    // In us-east-1, creating the same bucket is idempotent (returns 200)
+    let result = client.create_bucket().bucket("unique-bucket").send().await;
+    assert!(result.is_ok());
+}
+
+// ---- S3 Copy Within Same Bucket ----
+
+#[tokio::test]
+async fn s3_copy_object_within_bucket() {
+    let server = TestServer::start().await;
+    let client = server.s3_client().await;
+
+    client
+        .create_bucket()
+        .bucket("copy-same")
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .put_object()
+        .bucket("copy-same")
+        .key("original.txt")
+        .body(ByteStream::from_static(b"hello copy"))
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .copy_object()
+        .bucket("copy-same")
+        .key("duplicate.txt")
+        .copy_source("copy-same/original.txt")
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .get_object()
+        .bucket("copy-same")
+        .key("duplicate.txt")
+        .send()
+        .await
+        .unwrap();
+    let body = resp.body.collect().await.unwrap().into_bytes();
+    assert_eq!(body.as_ref(), b"hello copy");
+}

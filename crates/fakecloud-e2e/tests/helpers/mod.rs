@@ -97,6 +97,16 @@ impl TestServer {
         aws_sdk_ssm::Client::new(&self.aws_config().await)
     }
 
+    /// Create a CloudWatch Logs client.
+    pub async fn logs_client(&self) -> aws_sdk_cloudwatchlogs::Client {
+        aws_sdk_cloudwatchlogs::Client::new(&self.aws_config().await)
+    }
+
+    /// Create a KMS client.
+    pub async fn kms_client(&self) -> aws_sdk_kms::Client {
+        aws_sdk_kms::Client::new(&self.aws_config().await)
+    }
+
     /// Create an S3 client (path-style addressing for single-endpoint emulator).
     pub async fn s3_client(&self) -> aws_sdk_s3::Client {
         let config = self.aws_config().await;

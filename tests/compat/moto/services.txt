@@ -1,1 +1,1 @@
-sqs sns events iam sts ssm s3
+sqs sns events iam sts ssm s3 logs kms

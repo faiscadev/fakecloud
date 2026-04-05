@@ -656,3 +656,306 @@ async fn sqs_fair_queues_prioritize_quiet_groups() {
         "fair queues should prioritize the quiet tenant's message"
     );
 }
+
+#[tokio::test]
+async fn sqs_delete_nonexistent_queue_fails() {
+    let server = TestServer::start().await;
+    let client = server.sqs_client().await;
+
+    let result = client
+        .delete_queue()
+        .queue_url("http://localhost:4566/000000000000/no-such-queue")
+        .send()
+        .await;
+    assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn sqs_get_queue_url_nonexistent_fails() {
+    let server = TestServer::start().await;
+    let client = server.sqs_client().await;
+
+    let result = client
+        .get_queue_url()
+        .queue_name("nonexistent-queue")
+        .send()
+        .await;
+    assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn sqs_tag_untag_list_queue_tags() {
+    let server = TestServer::start().await;
+    let client = server.sqs_client().await;
+
+    let resp = client
+        .create_queue()
+        .queue_name("tag-queue")
+        .send()
+        .await
+        .unwrap();
+    let queue_url = resp.queue_url().unwrap().to_string();
+
+    // Tag the queue
+    client
+        .tag_queue()
+        .queue_url(&queue_url)
+        .tags("env", "prod")
+        .tags("team", "backend")
+        .send()
+        .await
+        .unwrap();
+
+    // List tags
+    let tags_resp = client
+        .list_queue_tags()
+        .queue_url(&queue_url)
+        .send()
+        .await
+        .unwrap();
+    let tags = tags_resp.tags().unwrap();
+    assert_eq!(tags.get("env").unwrap(), "prod");
+    assert_eq!(tags.get("team").unwrap(), "backend");
+
+    // Untag
+    client
+        .untag_queue()
+        .queue_url(&queue_url)
+        .tag_keys("team")
+        .send()
+        .await
+        .unwrap();
+
+    let tags_resp = client
+        .list_queue_tags()
+        .queue_url(&queue_url)
+        .send()
+        .await
+        .unwrap();
+    let tags = tags_resp.tags().unwrap();
+    assert_eq!(tags.len(), 1);
+    assert!(tags.get("team").is_none());
+}
+
+#[tokio::test]
+async fn sqs_fifo_deduplication() {
+    let server = TestServer::start().await;
+    let client = server.sqs_client().await;
+
+    let resp = client
+        .create_queue()
+        .queue_name("dedup.fifo")
+        .attributes(QueueAttributeName::FifoQueue, "true")
+        .send()
+        .await
+        .unwrap();
+    let queue_url = resp.queue_url().unwrap().to_string();
+
+    // Send two messages with the same deduplication ID
+    for _ in 0..2 {
+        client
+            .send_message()
+            .queue_url(&queue_url)
+            .message_body("dedup-msg")
+            .message_group_id("group-1")
+            .message_deduplication_id("same-dedup-id")
+            .send()
+            .await
+            .unwrap();
+    }
+
+    let recv = client
+        .receive_message()
+        .queue_url(&queue_url)
+        .max_number_of_messages(10)
+        .send()
+        .await
+        .unwrap();
+
+    // Only one message should be received due to deduplication
+    assert_eq!(recv.messages().len(), 1);
+}
+
+#[tokio::test]
+async fn sqs_change_message_visibility() {
+    let server = TestServer::start().await;
+    let client = server.sqs_client().await;
+
+    let resp = client
+        .create_queue()
+        .queue_name("vis-queue")
+        .attributes(QueueAttributeName::VisibilityTimeout, "30")
+        .send()
+        .await
+        .unwrap();
+    let queue_url = resp.queue_url().unwrap().to_string();
+
+    client
+        .send_message()
+        .queue_url(&queue_url)
+        .message_body("vis-test")
+        .send()
+        .await
+        .unwrap();
+
+    let recv = client
+        .receive_message()
+        .queue_url(&queue_url)
+        .send()
+        .await
+        .unwrap();
+    let receipt = recv.messages()[0].receipt_handle().unwrap().to_string();
+
+    // Make message immediately visible again
+    client
+        .change_message_visibility()
+        .queue_url(&queue_url)
+        .receipt_handle(&receipt)
+        .visibility_timeout(0)
+        .send()
+        .await
+        .unwrap();
+
+    // Should be receivable again
+    let recv2 = client
+        .receive_message()
+        .queue_url(&queue_url)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(recv2.messages().len(), 1);
+}
+
+#[tokio::test]
+async fn sqs_dead_letter_queue() {
+    let server = TestServer::start().await;
+    let client = server.sqs_client().await;
+
+    // Create DLQ
+    let dlq = client
+        .create_queue()
+        .queue_name("my-dlq")
+        .send()
+        .await
+        .unwrap();
+    let dlq_url = dlq.queue_url().unwrap().to_string();
+    let dlq_attrs = client
+        .get_queue_attributes()
+        .queue_url(&dlq_url)
+        .attribute_names(QueueAttributeName::QueueArn)
+        .send()
+        .await
+        .unwrap();
+    let dlq_arn = dlq_attrs
+        .attributes()
+        .unwrap()
+        .get(&QueueAttributeName::QueueArn)
+        .unwrap()
+        .to_string();
+
+    // Create source queue with redrive policy pointing to DLQ
+    let redrive_policy = format!(
+        r#"{{"deadLetterTargetArn":"{}","maxReceiveCount":"1"}}"#,
+        dlq_arn
+    );
+    let src = client
+        .create_queue()
+        .queue_name("src-queue")
+        .attributes(QueueAttributeName::RedrivePolicy, &redrive_policy)
+        .send()
+        .await
+        .unwrap();
+    let src_url = src.queue_url().unwrap().to_string();
+
+    // List dead letter source queues for the DLQ
+    let sources = client
+        .list_dead_letter_source_queues()
+        .queue_url(&dlq_url)
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        sources.queue_urls().iter().any(|u| u.contains("src-queue")),
+        "DLQ should list the source queue"
+    );
+
+    // Verify redrive policy is set
+    let attrs = client
+        .get_queue_attributes()
+        .queue_url(&src_url)
+        .attribute_names(QueueAttributeName::RedrivePolicy)
+        .send()
+        .await
+        .unwrap();
+    let rp = attrs
+        .attributes()
+        .unwrap()
+        .get(&QueueAttributeName::RedrivePolicy)
+        .unwrap();
+    assert!(rp.contains(&dlq_arn));
+}
+
+#[tokio::test]
+async fn sqs_list_queues_prefix() {
+    let server = TestServer::start().await;
+    let client = server.sqs_client().await;
+
+    client
+        .create_queue()
+        .queue_name("prefix-alpha")
+        .send()
+        .await
+        .unwrap();
+    client
+        .create_queue()
+        .queue_name("prefix-beta")
+        .send()
+        .await
+        .unwrap();
+    client
+        .create_queue()
+        .queue_name("other-queue")
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .list_queues()
+        .queue_name_prefix("prefix-")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.queue_urls().len(), 2);
+}
+
+#[tokio::test]
+async fn sqs_add_remove_permission() {
+    let server = TestServer::start().await;
+    let client = server.sqs_client().await;
+
+    let resp = client
+        .create_queue()
+        .queue_name("perm-queue")
+        .send()
+        .await
+        .unwrap();
+    let queue_url = resp.queue_url().unwrap().to_string();
+
+    client
+        .add_permission()
+        .queue_url(&queue_url)
+        .label("my-permission")
+        .aws_account_ids("123456789012")
+        .actions("SendMessage")
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .remove_permission()
+        .queue_url(&queue_url)
+        .label("my-permission")
+        .send()
+        .await
+        .unwrap();
+}

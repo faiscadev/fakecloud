@@ -324,3 +324,306 @@ async fn sns_subscribe_lambda_email_sms() {
         .unwrap();
     assert_eq!(subs.subscriptions().len(), 3);
 }
+
+#[tokio::test]
+async fn sns_get_set_topic_attributes() {
+    let server = TestServer::start().await;
+    let client = server.sns_client().await;
+
+    let topic = client
+        .create_topic()
+        .name("attrs-topic")
+        .send()
+        .await
+        .unwrap();
+    let topic_arn = topic.topic_arn().unwrap().to_string();
+
+    // Get attributes
+    let attrs = client
+        .get_topic_attributes()
+        .topic_arn(&topic_arn)
+        .send()
+        .await
+        .unwrap();
+    let map = attrs.attributes().unwrap();
+    assert_eq!(map.get("TopicArn").unwrap(), &topic_arn);
+
+    // Set display name attribute
+    client
+        .set_topic_attributes()
+        .topic_arn(&topic_arn)
+        .attribute_name("DisplayName")
+        .attribute_value("My Display Name")
+        .send()
+        .await
+        .unwrap();
+
+    let attrs = client
+        .get_topic_attributes()
+        .topic_arn(&topic_arn)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        attrs.attributes().unwrap().get("DisplayName").unwrap(),
+        "My Display Name"
+    );
+}
+
+#[tokio::test]
+async fn sns_delete_nonexistent_topic_succeeds() {
+    let server = TestServer::start().await;
+    let client = server.sns_client().await;
+
+    // Deleting a non-existent topic should not error (AWS behavior)
+    client
+        .delete_topic()
+        .topic_arn("arn:aws:sns:us-east-1:123456789012:no-such-topic")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn sns_tag_untag_topic() {
+    let server = TestServer::start().await;
+    let client = server.sns_client().await;
+
+    let topic = client
+        .create_topic()
+        .name("tag-topic")
+        .send()
+        .await
+        .unwrap();
+    let topic_arn = topic.topic_arn().unwrap().to_string();
+
+    use aws_sdk_sns::types::Tag;
+    client
+        .tag_resource()
+        .resource_arn(&topic_arn)
+        .tags(Tag::builder().key("env").value("staging").build().unwrap())
+        .send()
+        .await
+        .unwrap();
+
+    let tags = client
+        .list_tags_for_resource()
+        .resource_arn(&topic_arn)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(tags.tags().len(), 1);
+    assert_eq!(tags.tags()[0].key(), "env");
+
+    client
+        .untag_resource()
+        .resource_arn(&topic_arn)
+        .tag_keys("env")
+        .send()
+        .await
+        .unwrap();
+
+    let tags = client
+        .list_tags_for_resource()
+        .resource_arn(&topic_arn)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(tags.tags().len(), 0);
+}
+
+#[tokio::test]
+async fn sns_get_set_subscription_attributes() {
+    let server = TestServer::start().await;
+    let client = server.sns_client().await;
+
+    let topic = client
+        .create_topic()
+        .name("sub-attrs-topic")
+        .send()
+        .await
+        .unwrap();
+    let topic_arn = topic.topic_arn().unwrap().to_string();
+
+    let sub = client
+        .subscribe()
+        .topic_arn(&topic_arn)
+        .protocol("sqs")
+        .endpoint("arn:aws:sqs:us-east-1:123456789012:my-queue")
+        .send()
+        .await
+        .unwrap();
+    let sub_arn = sub.subscription_arn().unwrap().to_string();
+
+    // Get subscription attributes
+    let attrs = client
+        .get_subscription_attributes()
+        .subscription_arn(&sub_arn)
+        .send()
+        .await
+        .unwrap();
+    let map = attrs.attributes().unwrap();
+    assert_eq!(map.get("Protocol").unwrap(), "sqs");
+    assert_eq!(map.get("TopicArn").unwrap(), &topic_arn);
+
+    // Set RawMessageDelivery
+    client
+        .set_subscription_attributes()
+        .subscription_arn(&sub_arn)
+        .attribute_name("RawMessageDelivery")
+        .attribute_value("true")
+        .send()
+        .await
+        .unwrap();
+
+    let attrs = client
+        .get_subscription_attributes()
+        .subscription_arn(&sub_arn)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        attrs
+            .attributes()
+            .unwrap()
+            .get("RawMessageDelivery")
+            .unwrap(),
+        "true"
+    );
+}
+
+#[tokio::test]
+async fn sns_publish_batch() {
+    let server = TestServer::start().await;
+    let client = server.sns_client().await;
+
+    let topic = client
+        .create_topic()
+        .name("batch-topic")
+        .send()
+        .await
+        .unwrap();
+    let topic_arn = topic.topic_arn().unwrap().to_string();
+
+    use aws_sdk_sns::types::PublishBatchRequestEntry;
+    let entries = vec![
+        PublishBatchRequestEntry::builder()
+            .id("msg-1")
+            .message("batch message 1")
+            .build()
+            .unwrap(),
+        PublishBatchRequestEntry::builder()
+            .id("msg-2")
+            .message("batch message 2")
+            .build()
+            .unwrap(),
+        PublishBatchRequestEntry::builder()
+            .id("msg-3")
+            .message("batch message 3")
+            .build()
+            .unwrap(),
+    ];
+
+    let resp = client
+        .publish_batch()
+        .topic_arn(&topic_arn)
+        .set_publish_batch_request_entries(Some(entries))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.successful().len(), 3);
+    assert!(resp.failed().is_empty());
+}
+
+#[tokio::test]
+async fn sns_platform_application_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.sns_client().await;
+
+    // Create platform application
+    let app = client
+        .create_platform_application()
+        .name("my-app")
+        .platform("GCM")
+        .attributes("PlatformCredential", "fake-api-key")
+        .send()
+        .await
+        .unwrap();
+    let app_arn = app.platform_application_arn().unwrap().to_string();
+
+    // List platform applications
+    let list = client.list_platform_applications().send().await.unwrap();
+    assert_eq!(list.platform_applications().len(), 1);
+
+    // Create platform endpoint
+    let endpoint = client
+        .create_platform_endpoint()
+        .platform_application_arn(&app_arn)
+        .token("device-token-123")
+        .send()
+        .await
+        .unwrap();
+    let endpoint_arn = endpoint.endpoint_arn().unwrap().to_string();
+
+    // List endpoints
+    let endpoints = client
+        .list_endpoints_by_platform_application()
+        .platform_application_arn(&app_arn)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(endpoints.endpoints().len(), 1);
+
+    // Get endpoint attributes
+    let attrs = client
+        .get_endpoint_attributes()
+        .endpoint_arn(&endpoint_arn)
+        .send()
+        .await
+        .unwrap();
+    assert!(attrs.attributes().is_some());
+
+    // Delete endpoint
+    client
+        .delete_endpoint()
+        .endpoint_arn(&endpoint_arn)
+        .send()
+        .await
+        .unwrap();
+
+    // Delete platform application
+    client
+        .delete_platform_application()
+        .platform_application_arn(&app_arn)
+        .send()
+        .await
+        .unwrap();
+
+    let list = client.list_platform_applications().send().await.unwrap();
+    assert!(list.platform_applications().is_empty());
+}
+
+#[tokio::test]
+async fn sns_confirm_subscription() {
+    let server = TestServer::start().await;
+    let client = server.sns_client().await;
+
+    let topic = client
+        .create_topic()
+        .name("confirm-topic")
+        .send()
+        .await
+        .unwrap();
+    let topic_arn = topic.topic_arn().unwrap().to_string();
+
+    // ConfirmSubscription with a fake token should succeed (stub)
+    let resp = client
+        .confirm_subscription()
+        .topic_arn(&topic_arn)
+        .token("fake-confirmation-token")
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.subscription_arn().is_some());
+}

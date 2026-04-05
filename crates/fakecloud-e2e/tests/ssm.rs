@@ -389,3 +389,265 @@ async fn ssm_secure_string_with_decryption() {
     let param = resp.parameter().unwrap();
     assert_eq!(param.value().unwrap(), "super-secret-123");
 }
+
+// ---- SSM Document Tests ----
+
+#[tokio::test]
+async fn ssm_document_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+
+    let doc_content = r#"{"schemaVersion":"2.2","description":"Test doc","mainSteps":[{"action":"aws:runShellScript","name":"run","inputs":{"runCommand":["echo hello"]}}]}"#;
+
+    // Create document
+    let resp = client
+        .create_document()
+        .name("TestDoc")
+        .content(doc_content)
+        .document_type(aws_sdk_ssm::types::DocumentType::Command)
+        .document_format(aws_sdk_ssm::types::DocumentFormat::Json)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.document_description().unwrap().name().unwrap(),
+        "TestDoc"
+    );
+
+    // Get document
+    let get = client.get_document().name("TestDoc").send().await.unwrap();
+    assert_eq!(get.name().unwrap(), "TestDoc");
+    assert!(get.content().is_some());
+
+    // Describe document
+    let desc = client
+        .describe_document()
+        .name("TestDoc")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(desc.document().unwrap().name().unwrap(), "TestDoc");
+
+    // List documents
+    let list = client.list_documents().send().await.unwrap();
+    assert!(list
+        .document_identifiers()
+        .iter()
+        .any(|d| d.name().unwrap() == "TestDoc"));
+
+    // Delete document
+    client
+        .delete_document()
+        .name("TestDoc")
+        .send()
+        .await
+        .unwrap();
+
+    let result = client.get_document().name("TestDoc").send().await;
+    assert!(result.is_err());
+}
+
+// ---- SSM Command Tests ----
+
+#[tokio::test]
+async fn ssm_send_list_commands() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+
+    // Create a document first
+    let doc_content = r#"{"schemaVersion":"2.2","description":"cmd","mainSteps":[{"action":"aws:runShellScript","name":"run","inputs":{"runCommand":["ls"]}}]}"#;
+    client
+        .create_document()
+        .name("CmdDoc")
+        .content(doc_content)
+        .document_type(aws_sdk_ssm::types::DocumentType::Command)
+        .document_format(aws_sdk_ssm::types::DocumentFormat::Json)
+        .send()
+        .await
+        .unwrap();
+
+    // Send command
+    let resp = client
+        .send_command()
+        .document_name("CmdDoc")
+        .instance_ids("i-1234567890abcdef0")
+        .send()
+        .await
+        .unwrap();
+    let cmd = resp.command().unwrap();
+    assert!(cmd.command_id().is_some());
+    let cmd_id = cmd.command_id().unwrap().to_string();
+
+    // List commands
+    let list = client.list_commands().send().await.unwrap();
+    assert!(list
+        .commands()
+        .iter()
+        .any(|c| c.command_id().unwrap() == cmd_id));
+
+    // Cancel command
+    client
+        .cancel_command()
+        .command_id(&cmd_id)
+        .send()
+        .await
+        .unwrap();
+}
+
+// ---- SSM Maintenance Window Tests ----
+
+#[tokio::test]
+async fn ssm_maintenance_window_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+
+    // Create maintenance window
+    let resp = client
+        .create_maintenance_window()
+        .name("test-window")
+        .schedule("cron(0 2 ? * SUN *)")
+        .duration(3)
+        .cutoff(1)
+        .allow_unassociated_targets(true)
+        .send()
+        .await
+        .unwrap();
+    let window_id = resp.window_id().unwrap().to_string();
+
+    // Get maintenance window
+    let get = client
+        .get_maintenance_window()
+        .window_id(&window_id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get.name().unwrap(), "test-window");
+
+    // Describe maintenance windows
+    let desc = client.describe_maintenance_windows().send().await.unwrap();
+    assert!(desc
+        .window_identities()
+        .iter()
+        .any(|w| w.window_id().unwrap() == window_id));
+
+    // Delete maintenance window
+    client
+        .delete_maintenance_window()
+        .window_id(&window_id)
+        .send()
+        .await
+        .unwrap();
+}
+
+// ---- SSM Error Cases ----
+
+#[tokio::test]
+async fn ssm_get_nonexistent_parameter_fails() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+
+    let result = client.get_parameter().name("/no/such/param").send().await;
+    assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn ssm_delete_nonexistent_parameter_fails() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+
+    let result = client
+        .delete_parameter()
+        .name("/no/such/param")
+        .send()
+        .await;
+    assert!(result.is_err());
+}
+
+// ---- SSM Delete Parameters (batch) ----
+
+#[tokio::test]
+async fn ssm_delete_parameters_batch() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+
+    for name in ["/batch/a", "/batch/b", "/batch/c"] {
+        client
+            .put_parameter()
+            .name(name)
+            .value("val")
+            .r#type(ParameterType::String)
+            .send()
+            .await
+            .unwrap();
+    }
+
+    let resp = client
+        .delete_parameters()
+        .names("/batch/a")
+        .names("/batch/b")
+        .names("/batch/nonexistent")
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.deleted_parameters().len(), 2);
+    assert_eq!(resp.invalid_parameters().len(), 1);
+}
+
+// ---- SSM Parameter History ----
+
+#[tokio::test]
+async fn ssm_get_parameter_history() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+
+    client
+        .put_parameter()
+        .name("/hist/param")
+        .value("v1")
+        .r#type(ParameterType::String)
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .put_parameter()
+        .name("/hist/param")
+        .value("v2")
+        .r#type(ParameterType::String)
+        .overwrite(true)
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .get_parameter_history()
+        .name("/hist/param")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.parameters().len(), 2);
+}
+
+// ---- SSM Describe Parameters ----
+
+#[tokio::test]
+async fn ssm_describe_parameters() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+
+    client
+        .put_parameter()
+        .name("/desc/param1")
+        .value("val1")
+        .r#type(ParameterType::String)
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client.describe_parameters().send().await.unwrap();
+    assert!(resp
+        .parameters()
+        .iter()
+        .any(|p| p.name().unwrap() == "/desc/param1"));
+}
