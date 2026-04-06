@@ -475,9 +475,9 @@ EC2, RDS, ECS, Elastic Load Balancing, CloudWatch Metrics, Route 53, API Gateway
 
 **FakeCloud is** a free, open-source local AWS emulator for integration testing and
 local development. For every service it implements, the goal is 100% behavioral
-parity with real AWS — verified by automated conformance testing against AWS
-Smithy models and real AWS responses. The ambition is broad: 12 services in
-the first 2 days of development, with more on the way.
+parity with real AWS — verified by 34,000+ automated conformance test variants
+against official AWS Smithy models across all 983 API operations. 13 services,
+98% conformance, and growing.
 
 **FakeCloud is not** a production-ready cloud replacement. It's not designed to
 be scalable or to handle production workloads. It's for testing — making sure

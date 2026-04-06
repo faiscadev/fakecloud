@@ -37,7 +37,7 @@ FakeCloud doesn't try to be a scalable production cloud. It's not that. It's a t
 
 What does that mean in practice? If you call `CreateQueue`, then `SendMessage`, then `ReceiveMessage` on real AWS and get back your message with specific attributes — FakeCloud should do exactly the same thing. If it doesn't, that's a FakeCloud bug.
 
-We currently verify this with 249 E2E tests that use the official `aws-sdk-rust` crate and 15,000+ auto-generated conformance test variants validated against AWS Smithy models. The plan for the near future: set up a real AWS account and run our test suite against both FakeCloud and real AWS side by side, so we can verify behavioral parity automatically.
+We currently verify this with 280+ E2E tests that use the official `aws-sdk-rust` crate and 34,000+ auto-generated conformance test variants validated against official AWS Smithy models — covering all 983 API operations across 13 services at 98% conformance. The plan for the near future: set up a real AWS account and run our test suite against both FakeCloud and real AWS side by side, so we can verify behavioral parity automatically.
 
 ## What's here today
 
