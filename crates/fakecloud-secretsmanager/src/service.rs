@@ -1991,7 +1991,6 @@ impl AwsService for SecretsManagerService {
                                             error = %e,
                                             "rotation Lambda invocation failed"
                                         );
-                                        break;
                                     }
                                     None => {
                                         tracing::warn!(

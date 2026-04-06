@@ -1421,25 +1421,6 @@ def handler(event, context):
     // 3. Create S3 bucket
     s3.create_bucket()
         .bucket("lambda-notif-bucket")
-/// SecretsManager rotation invokes the configured Lambda function with the correct payload.
-#[tokio::test]
-async fn secretsmanager_rotation_invokes_lambda() {
-    let server = TestServer::start().await;
-    let sm = server.secretsmanager_client().await;
-    let lambda = server.lambda_client().await;
-
-    // Create a Lambda function (no real code needed -- invocation is recorded regardless)
-    lambda
-        .create_function()
-        .function_name("rotation-handler")
-        .runtime(aws_sdk_lambda::types::Runtime::Python312)
-        .role("arn:aws:iam::123456789012:role/lambda-role")
-        .handler("index.handler")
-        .code(
-            aws_sdk_lambda::types::FunctionCode::builder()
-                .zip_file(aws_sdk_lambda::primitives::Blob::new(b"fake-code"))
-                .build(),
-        )
         .send()
         .await
         .unwrap();
@@ -1470,10 +1451,6 @@ async fn secretsmanager_rotation_invokes_lambda() {
         .bucket("lambda-notif-bucket")
         .key("test-file.txt")
         .body(ByteStream::from_static(b"hello from S3"))
-    // Create a secret
-    sm.create_secret()
-        .name("rotation-test-secret")
-        .secret_string("old-password")
         .send()
         .await
         .unwrap();
@@ -1491,6 +1468,57 @@ async fn secretsmanager_rotation_invokes_lambda() {
             .unwrap();
         if !msgs.messages().is_empty() {
             proof_message = Some(msgs.messages()[0].body().unwrap().to_string());
+            break;
+        }
+    }
+
+    // 7. Assert Lambda ran with the S3 event
+    let proof = proof_message
+        .expect("Lambda did not write proof to SQS — S3->Lambda notification did not execute");
+    let event: serde_json::Value = serde_json::from_str(&proof).unwrap();
+
+    // The Lambda receives an S3 event with Records array
+    assert!(
+        event["Records"].is_array(),
+        "Expected S3 event with Records array, got: {event}"
+    );
+    let record = &event["Records"][0];
+    assert_eq!(record["eventSource"], "aws:s3");
+    assert_eq!(record["s3"]["bucket"]["name"], "lambda-notif-bucket");
+    assert_eq!(record["s3"]["object"]["key"], "test-file.txt");
+}
+
+/// SecretsManager rotation invokes the configured Lambda function with the correct payload.
+#[tokio::test]
+async fn secretsmanager_rotation_invokes_lambda() {
+    let server = TestServer::start().await;
+    let sm = server.secretsmanager_client().await;
+    let lambda = server.lambda_client().await;
+
+    // Create a Lambda function (no real code needed -- invocation is recorded regardless)
+    lambda
+        .create_function()
+        .function_name("rotation-handler")
+        .runtime(aws_sdk_lambda::types::Runtime::Python312)
+        .role("arn:aws:iam::123456789012:role/lambda-role")
+        .handler("index.handler")
+        .code(
+            aws_sdk_lambda::types::FunctionCode::builder()
+                .zip_file(aws_sdk_lambda::primitives::Blob::new(b"fake-code"))
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    // Create a secret
+    sm.create_secret()
+        .name("rotation-test-secret")
+        .secret_string("old-password")
+        .send()
+        .await
+        .unwrap();
+
     let lambda_arn = "arn:aws:lambda:us-east-1:123456789012:function:rotation-handler";
     let token = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
 
@@ -1528,20 +1556,6 @@ async fn secretsmanager_rotation_invokes_lambda() {
         }
     }
 
-    // 7. Assert Lambda ran with the S3 event
-    let proof = proof_message
-        .expect("Lambda did not write proof to SQS — S3->Lambda notification did not execute");
-    let event: serde_json::Value = serde_json::from_str(&proof).unwrap();
-
-    // The Lambda receives an S3 event with Records array
-    assert!(
-        event["Records"].is_array(),
-        "Expected S3 event with Records array, got: {event}"
-    );
-    let record = &event["Records"][0];
-    assert_eq!(record["eventSource"], "aws:s3");
-    assert_eq!(record["s3"]["bucket"]["name"], "lambda-notif-bucket");
-    assert_eq!(record["s3"]["object"]["key"], "test-file.txt");
     assert_eq!(
         rotation_invocations.len(),
         expected_steps.len(),
