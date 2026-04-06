@@ -849,7 +849,11 @@ async fn iam_list_policies_validates_max_items() {
     let result = client.list_policies().max_items(0).send().await;
     let err = result.expect_err("MaxItems=0 should fail validation");
     let msg = format!("{:?}", err);
-    assert!(msg.contains("ValidationException") || msg.contains("validation"), "Expected validation error, got: {}", msg);
+    assert!(
+        msg.contains("ValidationException") || msg.contains("validation"),
+        "Expected validation error, got: {}",
+        msg
+    );
 }
 
 #[tokio::test]
@@ -860,7 +864,11 @@ async fn iam_list_users_validates_path_prefix() {
     let result = client.list_users().path_prefix("").send().await;
     let err = result.expect_err("Empty PathPrefix should fail validation");
     let msg = format!("{:?}", err);
-    assert!(msg.contains("ValidationException") || msg.contains("validation"), "Expected validation error, got: {}", msg);
+    assert!(
+        msg.contains("ValidationException") || msg.contains("validation"),
+        "Expected validation error, got: {}",
+        msg
+    );
 }
 
 #[tokio::test]
