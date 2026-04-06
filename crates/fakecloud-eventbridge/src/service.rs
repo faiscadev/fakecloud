@@ -1231,16 +1231,13 @@ impl EventBridgeService {
             .to_string();
 
         let mut state = self.state.write();
-        let ps = state
-            .partner_event_sources
-            .get_mut(&name)
-            .ok_or_else(|| {
-                AwsServiceError::aws_error(
-                    StatusCode::NOT_FOUND,
-                    "ResourceNotFoundException",
-                    format!("Event source {name} does not exist."),
-                )
-            })?;
+        let ps = state.partner_event_sources.get_mut(&name).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "ResourceNotFoundException",
+                format!("Event source {name} does not exist."),
+            )
+        })?;
         ps.state = "ACTIVE".to_string();
 
         Ok(json_resp(json!({})))
@@ -1255,16 +1252,13 @@ impl EventBridgeService {
             .to_string();
 
         let mut state = self.state.write();
-        let ps = state
-            .partner_event_sources
-            .get_mut(&name)
-            .ok_or_else(|| {
-                AwsServiceError::aws_error(
-                    StatusCode::NOT_FOUND,
-                    "ResourceNotFoundException",
-                    format!("Event source {name} does not exist."),
-                )
-            })?;
+        let ps = state.partner_event_sources.get_mut(&name).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "ResourceNotFoundException",
+                format!("Event source {name} does not exist."),
+            )
+        })?;
         ps.state = "INACTIVE".to_string();
 
         Ok(json_resp(json!({})))
@@ -4702,11 +4696,17 @@ mod tests {
         svc.create_partner_event_source(&req).unwrap();
 
         // Deactivate it
-        let req = make_request("DeactivateEventSource", json!({ "Name": "aws.partner/test" }));
+        let req = make_request(
+            "DeactivateEventSource",
+            json!({ "Name": "aws.partner/test" }),
+        );
         svc.deactivate_event_source(&req).unwrap();
         {
             let state = svc.state.read();
-            assert_eq!(state.partner_event_sources["aws.partner/test"].state, "INACTIVE");
+            assert_eq!(
+                state.partner_event_sources["aws.partner/test"].state,
+                "INACTIVE"
+            );
         }
 
         // Activate it
@@ -4714,7 +4714,10 @@ mod tests {
         svc.activate_event_source(&req).unwrap();
         {
             let state = svc.state.read();
-            assert_eq!(state.partner_event_sources["aws.partner/test"].state, "ACTIVE");
+            assert_eq!(
+                state.partner_event_sources["aws.partner/test"].state,
+                "ACTIVE"
+            );
         }
 
         // Not-found returns error
@@ -4743,7 +4746,11 @@ mod tests {
         );
         assert!(svc.delete_partner_event_source(&req).is_err());
         // Source still exists
-        assert!(svc.state.read().partner_event_sources.contains_key("aws.partner/test"));
+        assert!(svc
+            .state
+            .read()
+            .partner_event_sources
+            .contains_key("aws.partner/test"));
 
         // Deleting with correct account succeeds
         let req = make_request(
@@ -4751,7 +4758,11 @@ mod tests {
             json!({ "Name": "aws.partner/test", "Account": "123456789012" }),
         );
         svc.delete_partner_event_source(&req).unwrap();
-        assert!(!svc.state.read().partner_event_sources.contains_key("aws.partner/test"));
+        assert!(!svc
+            .state
+            .read()
+            .partner_event_sources
+            .contains_key("aws.partner/test"));
 
         // Deleting non-existent source returns error
         let req = make_request(
