@@ -1139,3 +1139,416 @@ async fn logs_anomalies_stub() {
         .send()
         .await;
 }
+
+// -- Import tasks --
+
+#[test_action("logs", "CreateImportTask", checksum = "172f0e70")]
+#[test_action("logs", "DescribeImportTasks", checksum = "d8752bf8")]
+#[test_action("logs", "DescribeImportTaskBatches", checksum = "4c175907")]
+#[test_action("logs", "CancelImportTask", checksum = "cee9735e")]
+#[tokio::test]
+async fn logs_import_tasks() {
+    let server = TestServer::start().await;
+    let client = server.logs_client().await;
+
+    let create = client
+        .create_import_task()
+        .import_source_arn("arn:aws:s3:::conf-import-bucket/logs")
+        .import_role_arn("arn:aws:iam::123456789012:role/import-role")
+        .send()
+        .await
+        .unwrap();
+    let import_id = create.import_id().unwrap().to_string();
+
+    let resp = client.describe_import_tasks().send().await.unwrap();
+    assert!(!resp.imports().is_empty());
+
+    let _ = client
+        .describe_import_task_batches()
+        .import_id(&import_id)
+        .send()
+        .await
+        .unwrap();
+
+    let _ = client
+        .cancel_import_task()
+        .import_id(&import_id)
+        .send()
+        .await;
+}
+
+// -- Integrations --
+
+#[test_action("logs", "PutIntegration", checksum = "dc83e3c0")]
+#[test_action("logs", "GetIntegration", checksum = "b12a99b4")]
+#[test_action("logs", "ListIntegrations", checksum = "1c549c84")]
+#[test_action("logs", "DeleteIntegration", checksum = "9b39c1c9")]
+#[tokio::test]
+async fn logs_integrations() {
+    let server = TestServer::start().await;
+    let client = server.logs_client().await;
+
+    client
+        .put_integration()
+        .integration_name("conf-integration")
+        .integration_type(aws_sdk_cloudwatchlogs::types::IntegrationType::Opensearch)
+        .resource_config(
+            aws_sdk_cloudwatchlogs::types::ResourceConfig::OpenSearchResourceConfig(
+                aws_sdk_cloudwatchlogs::types::OpenSearchResourceConfig::builder()
+                    .data_source_role_arn("arn:aws:iam::123456789012:role/data-source-role")
+                    .dashboard_viewer_principals("arn:aws:iam::123456789012:user/viewer")
+                    .retention_days(30)
+                    .build()
+                    .unwrap(),
+            ),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .get_integration()
+        .integration_name("conf-integration")
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client.list_integrations().send().await.unwrap();
+    assert!(!resp.integration_summaries().is_empty());
+
+    client
+        .delete_integration()
+        .integration_name("conf-integration")
+        .send()
+        .await
+        .unwrap();
+}
+
+// -- Lookup tables --
+
+#[test_action("logs", "CreateLookupTable", checksum = "359aec46")]
+#[test_action("logs", "GetLookupTable", checksum = "9088c4f3")]
+#[test_action("logs", "DescribeLookupTables", checksum = "8acf2b21")]
+#[test_action("logs", "UpdateLookupTable", checksum = "5b96c1a9")]
+#[test_action("logs", "DeleteLookupTable", checksum = "4decb352")]
+#[tokio::test]
+async fn logs_lookup_tables() {
+    let server = TestServer::start().await;
+    let client = server.logs_client().await;
+
+    let create = client
+        .create_lookup_table()
+        .lookup_table_name("conf-lt")
+        .table_body("key,value\na,b")
+        .send()
+        .await
+        .unwrap();
+    let arn = create.lookup_table_arn().unwrap().to_string();
+
+    client
+        .get_lookup_table()
+        .lookup_table_arn(&arn)
+        .send()
+        .await
+        .unwrap();
+
+    client.describe_lookup_tables().send().await.unwrap();
+
+    client
+        .update_lookup_table()
+        .lookup_table_arn(&arn)
+        .table_body("key,value\nc,d")
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .delete_lookup_table()
+        .lookup_table_arn(&arn)
+        .send()
+        .await
+        .unwrap();
+}
+
+// -- Scheduled queries --
+
+#[test_action("logs", "CreateScheduledQuery", checksum = "2d0d1ab7")]
+#[test_action("logs", "GetScheduledQuery", checksum = "b1e56420")]
+#[test_action("logs", "GetScheduledQueryHistory", checksum = "72b1e1b1")]
+#[test_action("logs", "ListScheduledQueries", checksum = "a7e75680")]
+#[test_action("logs", "UpdateScheduledQuery", checksum = "7173fef9")]
+#[test_action("logs", "DeleteScheduledQuery", checksum = "9ebf1375")]
+#[tokio::test]
+async fn logs_scheduled_queries() {
+    let server = TestServer::start().await;
+    let client = server.logs_client().await;
+
+    let create = client
+        .create_scheduled_query()
+        .name("conf-sq")
+        .query_language(aws_sdk_cloudwatchlogs::types::QueryLanguage::Cwli)
+        .query_string("fields @timestamp | limit 10")
+        .schedule_expression("rate(1 hour)")
+        .execution_role_arn("arn:aws:iam::123456789012:role/exec")
+        .send()
+        .await
+        .unwrap();
+    let arn = create.scheduled_query_arn().unwrap().to_string();
+
+    client
+        .get_scheduled_query()
+        .identifier(&arn)
+        .send()
+        .await
+        .unwrap();
+
+    let _ = client
+        .get_scheduled_query_history()
+        .identifier(&arn)
+        .start_time(0)
+        .end_time(9999999999)
+        .send()
+        .await;
+
+    client.list_scheduled_queries().send().await.unwrap();
+
+    client
+        .update_scheduled_query()
+        .identifier(&arn)
+        .query_language(aws_sdk_cloudwatchlogs::types::QueryLanguage::Cwli)
+        .query_string("fields @message | limit 5")
+        .schedule_expression("rate(2 hours)")
+        .execution_role_arn("arn:aws:iam::123456789012:role/exec")
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .delete_scheduled_query()
+        .identifier(&arn)
+        .send()
+        .await
+        .unwrap();
+}
+
+// -- Misc stubs --
+
+#[test_action("logs", "StartLiveTail", checksum = "6389cd55")]
+#[tokio::test]
+async fn logs_start_live_tail() {
+    let server = TestServer::start().await;
+    let client = server.logs_client().await;
+
+    // StartLiveTail returns a stream; just invoke and check it doesn't error
+    let _ = client
+        .start_live_tail()
+        .log_group_identifiers("/conf/livetail")
+        .send()
+        .await;
+}
+
+#[test_action("logs", "ListLogGroups", checksum = "949ce2bd")]
+#[tokio::test]
+async fn logs_list_log_groups() {
+    let server = TestServer::start().await;
+    let client = server.logs_client().await;
+
+    client
+        .create_log_group()
+        .log_group_name("/conf/listgroups")
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client.list_log_groups().send().await.unwrap();
+    assert!(!resp.log_groups().is_empty());
+}
+
+#[test_action("logs", "ListLogGroupsForQuery", checksum = "a9afd629")]
+#[tokio::test]
+async fn logs_list_log_groups_for_query() {
+    let server = TestServer::start().await;
+    let client = server.logs_client().await;
+
+    let resp = client
+        .list_log_groups_for_query()
+        .query_id("dummy-query-id")
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.log_group_identifiers().is_empty());
+}
+
+#[test_action("logs", "ListAggregateLogGroupSummaries", checksum = "06cc853e")]
+#[tokio::test]
+async fn logs_list_aggregate_summaries() {
+    let server = TestServer::start().await;
+    let client = server.logs_client().await;
+
+    let resp = client
+        .list_aggregate_log_group_summaries()
+        .group_by(
+            aws_sdk_cloudwatchlogs::types::ListAggregateLogGroupSummariesGroupBy::DataSourceNameAndType,
+        )
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.aggregate_log_group_summaries().is_empty());
+}
+
+#[test_action("logs", "PutBearerTokenAuthentication", checksum = "f2f96c60")]
+#[tokio::test]
+async fn logs_bearer_token_auth() {
+    let server = TestServer::start().await;
+    let client = server.logs_client().await;
+
+    client
+        .create_log_group()
+        .log_group_name("/conf/bearer")
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .put_bearer_token_authentication()
+        .log_group_identifier("/conf/bearer")
+        .bearer_token_authentication_enabled(true)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("logs", "GetLogObject", checksum = "8c9c41d8")]
+#[tokio::test]
+async fn logs_get_log_object() {
+    let server = TestServer::start().await;
+    let client = server.logs_client().await;
+
+    let _ = client
+        .get_log_object()
+        .log_object_pointer("some-pointer")
+        .send()
+        .await;
+}
+
+#[test_action("logs", "GetLogFields", checksum = "15902512")]
+#[tokio::test]
+async fn logs_get_log_fields() {
+    let server = TestServer::start().await;
+    let client = server.logs_client().await;
+
+    let _ = client
+        .get_log_fields()
+        .data_source_name("test-ds")
+        .data_source_type("CW_LOG")
+        .send()
+        .await;
+}
+
+// -- S3 table integration stubs --
+
+#[test_action("logs", "AssociateSourceToS3TableIntegration", checksum = "93c113e9")]
+#[test_action("logs", "ListSourcesForS3TableIntegration", checksum = "7998343b")]
+#[test_action(
+    "logs",
+    "DisassociateSourceFromS3TableIntegration",
+    checksum = "376f1099"
+)]
+#[tokio::test]
+async fn logs_s3_table_integration() {
+    let server = TestServer::start().await;
+    let client = server.logs_client().await;
+
+    client
+        .associate_source_to_s3_table_integration()
+        .integration_arn("arn:aws:logs:us-east-1:123456789012:integration:conf-int")
+        .data_source(
+            aws_sdk_cloudwatchlogs::types::DataSource::builder()
+                .name("test-source")
+                .r#type("CW_LOG")
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .list_sources_for_s3_table_integration()
+        .integration_arn("arn:aws:logs:us-east-1:123456789012:integration:conf-int")
+        .send()
+        .await
+        .unwrap();
+
+    let _ = client
+        .disassociate_source_from_s3_table_integration()
+        .identifier("arn:aws:logs:us-east-1:123456789012:integration:conf-int")
+        .send()
+        .await;
+}
+
+// -- Delivery configuration --
+
+#[test_action("logs", "UpdateDeliveryConfiguration", checksum = "1f31725e")]
+#[tokio::test]
+async fn logs_update_delivery_configuration() {
+    let server = TestServer::start().await;
+    let client = server.logs_client().await;
+
+    // Set up a delivery first
+    client
+        .put_delivery_source()
+        .name("conf-ds-upd")
+        .resource_arn("arn:aws:logs:us-east-1:123456789012:log-group:dummy")
+        .log_type("APPLICATION_LOGS")
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .put_delivery_destination()
+        .name("conf-dd-upd")
+        .delivery_destination_configuration(
+            aws_sdk_cloudwatchlogs::types::DeliveryDestinationConfiguration::builder()
+                .destination_resource_arn("arn:aws:s3:::conf-bucket-upd")
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let create = client
+        .create_delivery()
+        .delivery_source_name("conf-ds-upd")
+        .delivery_destination_arn(
+            "arn:aws:logs:us-east-1:123456789012:delivery-destination:conf-dd-upd",
+        )
+        .send()
+        .await
+        .unwrap();
+    let delivery_id = create.delivery().unwrap().id().unwrap().to_string();
+
+    client
+        .update_delivery_configuration()
+        .id(&delivery_id)
+        .send()
+        .await
+        .unwrap();
+}
+
+// -- Configuration templates --
+
+#[test_action("logs", "DescribeConfigurationTemplates", checksum = "3a59505f")]
+#[tokio::test]
+async fn logs_describe_configuration_templates() {
+    let server = TestServer::start().await;
+    let client = server.logs_client().await;
+
+    let resp = client
+        .describe_configuration_templates()
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.configuration_templates().is_empty());
+}

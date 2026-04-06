@@ -664,3 +664,215 @@ async fn logs_anomaly_detector_lifecycle() {
     let resp = client.list_log_anomaly_detectors().send().await.unwrap();
     assert!(resp.anomaly_detectors().is_empty());
 }
+
+#[tokio::test]
+async fn logs_import_task_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.logs_client().await;
+
+    // Create import task
+    let create = client
+        .create_import_task()
+        .import_source_arn("arn:aws:s3:::test-import-bucket/logs")
+        .import_role_arn("arn:aws:iam::123456789012:role/import-role")
+        .send()
+        .await
+        .unwrap();
+    let import_id = create.import_id().unwrap().to_string();
+
+    // Describe import tasks
+    let resp = client.describe_import_tasks().send().await.unwrap();
+    assert_eq!(resp.imports().len(), 1);
+
+    // Describe import task batches
+    let resp = client
+        .describe_import_task_batches()
+        .import_id(&import_id)
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.import_batches().is_empty());
+
+    // Cancel import task
+    client
+        .cancel_import_task()
+        .import_id(&import_id)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn logs_integration_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.logs_client().await;
+
+    client
+        .put_integration()
+        .integration_name("test-integration")
+        .integration_type(aws_sdk_cloudwatchlogs::types::IntegrationType::Opensearch)
+        .resource_config(
+            aws_sdk_cloudwatchlogs::types::ResourceConfig::OpenSearchResourceConfig(
+                aws_sdk_cloudwatchlogs::types::OpenSearchResourceConfig::builder()
+                    .data_source_role_arn("arn:aws:iam::123456789012:role/data-source-role")
+                    .dashboard_viewer_principals("arn:aws:iam::123456789012:user/viewer")
+                    .retention_days(30)
+                    .build()
+                    .unwrap(),
+            ),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .get_integration()
+        .integration_name("test-integration")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.integration_name().unwrap(), "test-integration");
+
+    let resp = client.list_integrations().send().await.unwrap();
+    assert_eq!(resp.integration_summaries().len(), 1);
+
+    client
+        .delete_integration()
+        .integration_name("test-integration")
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client.list_integrations().send().await.unwrap();
+    assert!(resp.integration_summaries().is_empty());
+}
+
+#[tokio::test]
+async fn logs_lookup_table_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.logs_client().await;
+
+    let create = client
+        .create_lookup_table()
+        .lookup_table_name("test-lt")
+        .table_body("key,value\na,b")
+        .send()
+        .await
+        .unwrap();
+    let arn = create.lookup_table_arn().unwrap().to_string();
+
+    let resp = client
+        .get_lookup_table()
+        .lookup_table_arn(&arn)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.lookup_table_name().unwrap(), "test-lt");
+
+    client
+        .update_lookup_table()
+        .lookup_table_arn(&arn)
+        .table_body("key,value\nc,d")
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .delete_lookup_table()
+        .lookup_table_arn(&arn)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn logs_scheduled_query_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.logs_client().await;
+
+    let create = client
+        .create_scheduled_query()
+        .name("test-sq")
+        .query_language(aws_sdk_cloudwatchlogs::types::QueryLanguage::Cwli)
+        .query_string("fields @timestamp | limit 10")
+        .schedule_expression("rate(1 hour)")
+        .execution_role_arn("arn:aws:iam::123456789012:role/exec")
+        .send()
+        .await
+        .unwrap();
+    let arn = create.scheduled_query_arn().unwrap().to_string();
+
+    let resp = client
+        .get_scheduled_query()
+        .identifier(&arn)
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.name().is_some());
+
+    let resp = client.list_scheduled_queries().send().await.unwrap();
+    assert_eq!(resp.scheduled_queries().len(), 1);
+
+    client
+        .update_scheduled_query()
+        .identifier(&arn)
+        .query_language(aws_sdk_cloudwatchlogs::types::QueryLanguage::Cwli)
+        .query_string("fields @message | limit 5")
+        .schedule_expression("rate(2 hours)")
+        .execution_role_arn("arn:aws:iam::123456789012:role/exec")
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .delete_scheduled_query()
+        .identifier(&arn)
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client.list_scheduled_queries().send().await.unwrap();
+    assert!(resp.scheduled_queries().is_empty());
+}
+
+#[tokio::test]
+async fn logs_misc_stubs() {
+    let server = TestServer::start().await;
+    let client = server.logs_client().await;
+
+    // ListLogGroups (alias for DescribeLogGroups)
+    client
+        .create_log_group()
+        .log_group_name("/misc/listgroups")
+        .send()
+        .await
+        .unwrap();
+    let resp = client.list_log_groups().send().await.unwrap();
+    assert!(!resp.log_groups().is_empty());
+
+    // ListLogGroupsForQuery
+    let resp = client
+        .list_log_groups_for_query()
+        .query_id("dummy-query")
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.log_group_identifiers().is_empty());
+
+    // DescribeConfigurationTemplates
+    let resp = client
+        .describe_configuration_templates()
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.configuration_templates().is_empty());
+
+    // PutBearerTokenAuthentication
+    client
+        .put_bearer_token_authentication()
+        .log_group_identifier("/misc/listgroups")
+        .bearer_token_authentication_enabled(true)
+        .send()
+        .await
+        .unwrap();
+}

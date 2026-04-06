@@ -8,9 +8,9 @@ use fakecloud_core::validation::*;
 
 use crate::state::{
     AccountPolicy, AnomalyDetector, DataProtectionPolicy, Delivery, DeliveryDestination,
-    DeliverySource, Destination, ExportTask, IndexPolicy, LogEvent, LogGroup, LogStream,
-    MetricFilter, MetricTransformation, QueryDefinition, QueryInfo, ResourcePolicy,
-    SharedLogsState, SubscriptionFilter, Transformer,
+    DeliverySource, Destination, ExportTask, ImportTask, IndexPolicy, Integration, LogEvent,
+    LogGroup, LogStream, LookupTable, MetricFilter, MetricTransformation, QueryDefinition,
+    QueryInfo, ResourcePolicy, ScheduledQuery, SharedLogsState, SubscriptionFilter, Transformer,
 };
 
 pub struct LogsService {
@@ -113,6 +113,41 @@ impl AwsService for LogsService {
             "GetLogRecord" => self.get_log_record(&req),
             "ListAnomalies" => self.list_anomalies(&req),
             "UpdateAnomaly" => self.update_anomaly(&req),
+            "CreateImportTask" => self.create_import_task(&req),
+            "DescribeImportTasks" => self.describe_import_tasks(&req),
+            "DescribeImportTaskBatches" => self.describe_import_task_batches(&req),
+            "CancelImportTask" => self.cancel_import_task(&req),
+            "PutIntegration" => self.put_integration(&req),
+            "GetIntegration" => self.get_integration(&req),
+            "DeleteIntegration" => self.delete_integration(&req),
+            "ListIntegrations" => self.list_integrations(&req),
+            "CreateLookupTable" => self.create_lookup_table(&req),
+            "GetLookupTable" => self.get_lookup_table(&req),
+            "DescribeLookupTables" => self.describe_lookup_tables(&req),
+            "DeleteLookupTable" => self.delete_lookup_table(&req),
+            "UpdateLookupTable" => self.update_lookup_table(&req),
+            "CreateScheduledQuery" => self.create_scheduled_query(&req),
+            "GetScheduledQuery" => self.get_scheduled_query(&req),
+            "GetScheduledQueryHistory" => self.get_scheduled_query_history(&req),
+            "ListScheduledQueries" => self.list_scheduled_queries(&req),
+            "DeleteScheduledQuery" => self.delete_scheduled_query(&req),
+            "UpdateScheduledQuery" => self.update_scheduled_query(&req),
+            "StartLiveTail" => self.start_live_tail(&req),
+            "ListLogGroups" => self.describe_log_groups(&req),
+            "ListLogGroupsForQuery" => self.list_log_groups_for_query(&req),
+            "ListAggregateLogGroupSummaries" => self.list_aggregate_log_group_summaries(&req),
+            "PutBearerTokenAuthentication" => self.put_bearer_token_authentication(&req),
+            "GetLogObject" => self.get_log_object(&req),
+            "GetLogFields" => self.get_log_fields(&req),
+            "AssociateSourceToS3TableIntegration" => {
+                self.associate_source_to_s3_table_integration(&req)
+            }
+            "ListSourcesForS3TableIntegration" => self.list_sources_for_s3_table_integration(&req),
+            "DisassociateSourceFromS3TableIntegration" => {
+                self.disassociate_source_from_s3_table_integration(&req)
+            }
+            "UpdateDeliveryConfiguration" => self.update_delivery_configuration(&req),
+            "DescribeConfigurationTemplates" => self.describe_configuration_templates(&req),
             _ => Err(AwsServiceError::action_not_implemented("logs", &req.action)),
         }
     }
@@ -201,12 +236,53 @@ impl AwsService for LogsService {
             "GetLogRecord",
             "ListAnomalies",
             "UpdateAnomaly",
+            "CreateImportTask",
+            "DescribeImportTasks",
+            "DescribeImportTaskBatches",
+            "CancelImportTask",
+            "PutIntegration",
+            "GetIntegration",
+            "DeleteIntegration",
+            "ListIntegrations",
+            "CreateLookupTable",
+            "GetLookupTable",
+            "DescribeLookupTables",
+            "DeleteLookupTable",
+            "UpdateLookupTable",
+            "CreateScheduledQuery",
+            "GetScheduledQuery",
+            "GetScheduledQueryHistory",
+            "ListScheduledQueries",
+            "DeleteScheduledQuery",
+            "UpdateScheduledQuery",
+            "StartLiveTail",
+            "ListLogGroups",
+            "ListLogGroupsForQuery",
+            "ListAggregateLogGroupSummaries",
+            "PutBearerTokenAuthentication",
+            "GetLogObject",
+            "GetLogFields",
+            "AssociateSourceToS3TableIntegration",
+            "ListSourcesForS3TableIntegration",
+            "DisassociateSourceFromS3TableIntegration",
+            "UpdateDeliveryConfiguration",
+            "DescribeConfigurationTemplates",
         ]
     }
 }
 
 fn body_json(req: &AwsRequest) -> Value {
     serde_json::from_slice(&req.body).unwrap_or(Value::Null)
+}
+
+fn require_str<'a>(body: &'a Value, field: &str) -> Result<&'a str, AwsServiceError> {
+    body[field].as_str().ok_or_else(|| {
+        AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidParameterException",
+            format!("{field} is required"),
+        )
+    })
 }
 
 /// Build a delivery destination configuration JSON object, ensuring
@@ -4607,6 +4683,567 @@ impl LogsService {
         // No-op stub
         Ok(AwsResponse::json(StatusCode::OK, "{}"))
     }
+
+    // -- Import tasks --
+
+    fn create_import_task(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = body_json(req);
+        let import_source_arn = require_str(&body, "importSourceArn")?;
+        let import_role_arn = require_str(&body, "importRoleArn")?;
+        let log_group_name = body["logGroupName"].as_str().map(|s| s.to_string());
+
+        let import_id = uuid::Uuid::new_v4().to_string();
+        let now = Utc::now().timestamp_millis();
+
+        let task = ImportTask {
+            import_id: import_id.clone(),
+            import_source_arn: import_source_arn.to_string(),
+            import_role_arn: import_role_arn.to_string(),
+            log_group_name,
+            status: "RUNNING".to_string(),
+            creation_time: now,
+        };
+
+        let mut state = self.state.write();
+        state.import_tasks.insert(import_id.clone(), task);
+
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            serde_json::to_string(&json!({ "importId": import_id })).unwrap(),
+        ))
+    }
+
+    fn describe_import_tasks(&self, _req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let state = self.state.read();
+        let tasks: Vec<Value> = state
+            .import_tasks
+            .values()
+            .map(|t| {
+                json!({
+                    "importId": t.import_id,
+                    "importSourceArn": t.import_source_arn,
+                    "importStatus": t.status,
+                    "creationTime": t.creation_time,
+                })
+            })
+            .collect();
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            serde_json::to_string(&json!({ "imports": tasks })).unwrap(),
+        ))
+    }
+
+    fn describe_import_task_batches(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = body_json(req);
+        let _import_id = require_str(&body, "importId")?;
+        // Stub: return empty batches
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            serde_json::to_string(&json!({ "importBatches": [] })).unwrap(),
+        ))
+    }
+
+    fn cancel_import_task(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = body_json(req);
+        let import_id = require_str(&body, "importId")?;
+
+        let mut state = self.state.write();
+        match state.import_tasks.get_mut(import_id) {
+            Some(task) => {
+                task.status = "CANCELLED".to_string();
+                Ok(AwsResponse::json(StatusCode::OK, "{}"))
+            }
+            None => Err(AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "ResourceNotFoundException",
+                format!("Import task not found: {import_id}"),
+            )),
+        }
+    }
+
+    // -- Integrations --
+
+    fn put_integration(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = body_json(req);
+        let integration_name = require_str(&body, "integrationName")?;
+        let integration_type = require_str(&body, "integrationType")?;
+        let resource_config = body["resourceConfig"].clone();
+
+        let now = Utc::now().timestamp_millis();
+        let integration = Integration {
+            integration_name: integration_name.to_string(),
+            integration_type: integration_type.to_string(),
+            resource_config,
+            status: "ACTIVE".to_string(),
+            creation_time: now,
+        };
+
+        let mut state = self.state.write();
+        state
+            .integrations
+            .insert(integration_name.to_string(), integration);
+
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            serde_json::to_string(&json!({
+                "integrationName": integration_name,
+                "integrationStatus": "ACTIVE"
+            }))
+            .unwrap(),
+        ))
+    }
+
+    fn get_integration(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = body_json(req);
+        let integration_name = require_str(&body, "integrationName")?;
+
+        let state = self.state.read();
+        match state.integrations.get(integration_name) {
+            Some(i) => Ok(AwsResponse::json(
+                StatusCode::OK,
+                serde_json::to_string(&json!({
+                    "integrationName": i.integration_name,
+                    "integrationType": i.integration_type,
+                    "integrationStatus": i.status,
+                }))
+                .unwrap(),
+            )),
+            None => Err(AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "ResourceNotFoundException",
+                format!("Integration not found: {integration_name}"),
+            )),
+        }
+    }
+
+    fn delete_integration(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = body_json(req);
+        let integration_name = require_str(&body, "integrationName")?;
+
+        let mut state = self.state.write();
+        state.integrations.remove(integration_name);
+        Ok(AwsResponse::json(StatusCode::OK, "{}"))
+    }
+
+    fn list_integrations(&self, _req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let state = self.state.read();
+        let integrations: Vec<Value> = state
+            .integrations
+            .values()
+            .map(|i| {
+                json!({
+                    "integrationName": i.integration_name,
+                    "integrationType": i.integration_type,
+                    "integrationStatus": i.status,
+                })
+            })
+            .collect();
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            serde_json::to_string(&json!({ "integrationSummaries": integrations })).unwrap(),
+        ))
+    }
+
+    // -- Lookup tables --
+
+    fn create_lookup_table(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = body_json(req);
+        let lookup_table_name = require_str(&body, "lookupTableName")?;
+        let table_body = require_str(&body, "tableBody")?;
+
+        let state_r = self.state.read();
+        let account_id = state_r.account_id.clone();
+        let region = state_r.region.clone();
+        drop(state_r);
+
+        let arn = format!("arn:aws:logs:{region}:{account_id}:lookup-table:{lookup_table_name}");
+        let now = Utc::now().timestamp_millis();
+
+        let table = LookupTable {
+            lookup_table_name: lookup_table_name.to_string(),
+            arn: arn.clone(),
+            table_body: table_body.to_string(),
+            creation_time: now,
+            last_modified_time: now,
+        };
+
+        let mut state = self.state.write();
+        state.lookup_tables.insert(arn.clone(), table);
+
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            serde_json::to_string(&json!({ "lookupTableArn": arn })).unwrap(),
+        ))
+    }
+
+    fn get_lookup_table(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = body_json(req);
+        let lookup_table_arn = require_str(&body, "lookupTableArn")?;
+
+        let state = self.state.read();
+        match state.lookup_tables.get(lookup_table_arn) {
+            Some(t) => Ok(AwsResponse::json(
+                StatusCode::OK,
+                serde_json::to_string(&json!({
+                    "lookupTableName": t.lookup_table_name,
+                    "lookupTableArn": t.arn,
+                    "tableBody": t.table_body,
+                    "creationTime": t.creation_time,
+                    "lastModifiedTime": t.last_modified_time,
+                }))
+                .unwrap(),
+            )),
+            None => Err(AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "ResourceNotFoundException",
+                format!("Lookup table not found: {lookup_table_arn}"),
+            )),
+        }
+    }
+
+    fn describe_lookup_tables(&self, _req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let state = self.state.read();
+        let tables: Vec<Value> = state
+            .lookup_tables
+            .values()
+            .map(|t| {
+                json!({
+                    "lookupTableName": t.lookup_table_name,
+                    "lookupTableArn": t.arn,
+                    "creationTime": t.creation_time,
+                    "lastModifiedTime": t.last_modified_time,
+                })
+            })
+            .collect();
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            serde_json::to_string(&json!({ "lookupTables": tables })).unwrap(),
+        ))
+    }
+
+    fn delete_lookup_table(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = body_json(req);
+        let lookup_table_arn = require_str(&body, "lookupTableArn")?;
+
+        let mut state = self.state.write();
+        state.lookup_tables.remove(lookup_table_arn);
+        Ok(AwsResponse::json(StatusCode::OK, "{}"))
+    }
+
+    fn update_lookup_table(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = body_json(req);
+        let lookup_table_arn = require_str(&body, "lookupTableArn")?;
+        let table_body = require_str(&body, "tableBody")?;
+
+        let mut state = self.state.write();
+        match state.lookup_tables.get_mut(lookup_table_arn) {
+            Some(t) => {
+                t.table_body = table_body.to_string();
+                t.last_modified_time = Utc::now().timestamp_millis();
+                Ok(AwsResponse::json(StatusCode::OK, "{}"))
+            }
+            None => Err(AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "ResourceNotFoundException",
+                format!("Lookup table not found: {lookup_table_arn}"),
+            )),
+        }
+    }
+
+    // -- Scheduled queries --
+
+    fn create_scheduled_query(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = body_json(req);
+        let name = require_str(&body, "name")?;
+        let query_string = require_str(&body, "queryString")?;
+        let query_language = require_str(&body, "queryLanguage")?;
+        let schedule_expression = require_str(&body, "scheduleExpression")?;
+        let execution_role_arn = require_str(&body, "executionRoleArn")?;
+
+        let state_r = self.state.read();
+        let account_id = state_r.account_id.clone();
+        let region = state_r.region.clone();
+        drop(state_r);
+
+        let arn = format!("arn:aws:logs:{region}:{account_id}:scheduled-query:{name}");
+        let now = Utc::now().timestamp_millis();
+
+        let sq = ScheduledQuery {
+            name: name.to_string(),
+            arn: arn.clone(),
+            query_string: query_string.to_string(),
+            query_language: query_language.to_string(),
+            schedule_expression: schedule_expression.to_string(),
+            execution_role_arn: execution_role_arn.to_string(),
+            status: "ACTIVE".to_string(),
+            creation_time: now,
+            last_modified_time: now,
+        };
+
+        let mut state = self.state.write();
+        state.scheduled_queries.insert(arn.clone(), sq);
+
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            serde_json::to_string(&json!({ "scheduledQueryArn": arn })).unwrap(),
+        ))
+    }
+
+    fn get_scheduled_query(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = body_json(req);
+        let identifier = require_str(&body, "identifier")?;
+
+        let state = self.state.read();
+        match state.scheduled_queries.get(identifier) {
+            Some(sq) => Ok(AwsResponse::json(
+                StatusCode::OK,
+                serde_json::to_string(&json!({
+                    "scheduledQueryArn": sq.arn,
+                    "name": sq.name,
+                    "queryString": sq.query_string,
+                    "queryLanguage": sq.query_language,
+                    "scheduleExpression": sq.schedule_expression,
+                    "executionRoleArn": sq.execution_role_arn,
+                }))
+                .unwrap(),
+            )),
+            None => Err(AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "ResourceNotFoundException",
+                format!("Scheduled query not found: {identifier}"),
+            )),
+        }
+    }
+
+    fn get_scheduled_query_history(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = body_json(req);
+        let _identifier = require_str(&body, "identifier")?;
+        // Stub: return empty history
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            serde_json::to_string(&json!({ "triggerHistory": [] })).unwrap(),
+        ))
+    }
+
+    fn list_scheduled_queries(&self, _req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let state = self.state.read();
+        let queries: Vec<Value> = state
+            .scheduled_queries
+            .values()
+            .map(|sq| {
+                json!({
+                    "name": sq.name,
+                    "scheduledQueryArn": sq.arn,
+                })
+            })
+            .collect();
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            serde_json::to_string(&json!({ "scheduledQueries": queries })).unwrap(),
+        ))
+    }
+
+    fn delete_scheduled_query(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = body_json(req);
+        let identifier = require_str(&body, "identifier")?;
+
+        let mut state = self.state.write();
+        state.scheduled_queries.remove(identifier);
+        Ok(AwsResponse::json(StatusCode::OK, "{}"))
+    }
+
+    fn update_scheduled_query(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = body_json(req);
+        let identifier = require_str(&body, "identifier")?;
+        let query_string = require_str(&body, "queryString")?;
+        let query_language = require_str(&body, "queryLanguage")?;
+        let schedule_expression = require_str(&body, "scheduleExpression")?;
+        let execution_role_arn = require_str(&body, "executionRoleArn")?;
+
+        let mut state = self.state.write();
+        match state.scheduled_queries.get_mut(identifier) {
+            Some(sq) => {
+                sq.query_string = query_string.to_string();
+                sq.query_language = query_language.to_string();
+                sq.schedule_expression = schedule_expression.to_string();
+                sq.execution_role_arn = execution_role_arn.to_string();
+                sq.last_modified_time = Utc::now().timestamp_millis();
+                Ok(AwsResponse::json(StatusCode::OK, "{}"))
+            }
+            None => Err(AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "ResourceNotFoundException",
+                format!("Scheduled query not found: {identifier}"),
+            )),
+        }
+    }
+
+    // -- Misc stubs --
+
+    fn start_live_tail(&self, _req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let session_id = uuid::Uuid::new_v4().to_string();
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            serde_json::to_string(&json!({
+                "responseStream": {
+                    "sessionStart": {
+                        "sessionId": session_id,
+                        "logGroupIdentifiers": [],
+                    }
+                }
+            }))
+            .unwrap(),
+        ))
+    }
+
+    fn list_log_groups_for_query(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = body_json(req);
+        let _query_id = require_str(&body, "queryId")?;
+        // Stub: return empty log group names
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            serde_json::to_string(&json!({ "logGroupIdentifiers": [] })).unwrap(),
+        ))
+    }
+
+    fn list_aggregate_log_group_summaries(
+        &self,
+        _req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        // Stub: return empty summaries
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            serde_json::to_string(&json!({ "aggregateLogGroupSummaries": [] })).unwrap(),
+        ))
+    }
+
+    fn put_bearer_token_authentication(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = body_json(req);
+        let log_group_identifier = require_str(&body, "logGroupIdentifier")?;
+        let enabled = body["bearerTokenAuthenticationEnabled"]
+            .as_bool()
+            .unwrap_or(false);
+
+        let mut state = self.state.write();
+        state
+            .bearer_token_auth
+            .insert(log_group_identifier.to_string(), enabled);
+        Ok(AwsResponse::json(StatusCode::OK, "{}"))
+    }
+
+    fn get_log_object(&self, _req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        // Stub: return empty log object
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            serde_json::to_string(&json!({ "logObject": {} })).unwrap(),
+        ))
+    }
+
+    fn get_log_fields(&self, _req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        // Stub: return empty log fields
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            serde_json::to_string(&json!({ "logFields": [] })).unwrap(),
+        ))
+    }
+
+    fn associate_source_to_s3_table_integration(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = body_json(req);
+        let integration_arn = require_str(&body, "integrationArn")?;
+        let data_source = body["dataSource"].clone();
+        let source_id = data_source
+            .as_object()
+            .and_then(|o| o.get("resourceArn"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+
+        let mut state = self.state.write();
+        state
+            .s3_table_sources
+            .entry(integration_arn.to_string())
+            .or_default()
+            .push(source_id);
+        Ok(AwsResponse::json(StatusCode::OK, "{}"))
+    }
+
+    fn list_sources_for_s3_table_integration(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = body_json(req);
+        let integration_arn = require_str(&body, "integrationArn")?;
+
+        let state = self.state.read();
+        let sources: Vec<Value> = state
+            .s3_table_sources
+            .get(integration_arn)
+            .map(|sources| {
+                sources
+                    .iter()
+                    .map(|s| json!({ "resourceArn": s }))
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            serde_json::to_string(&json!({ "dataSources": sources })).unwrap(),
+        ))
+    }
+
+    fn disassociate_source_from_s3_table_integration(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = body_json(req);
+        let _identifier = require_str(&body, "identifier")?;
+        // No-op stub (we don't track detailed enough to remove specific sources)
+        Ok(AwsResponse::json(StatusCode::OK, "{}"))
+    }
+
+    fn update_delivery_configuration(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = body_json(req);
+        let id = require_str(&body, "id")?;
+
+        let state = self.state.read();
+        if !state.deliveries.contains_key(id) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "ResourceNotFoundException",
+                format!("Delivery not found: {id}"),
+            ));
+        }
+        drop(state);
+
+        // No-op: delivery configuration update is accepted but not stored
+        Ok(AwsResponse::json(StatusCode::OK, "{}"))
+    }
+
+    fn describe_configuration_templates(
+        &self,
+        _req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        // Stub: return empty configuration templates
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            serde_json::to_string(&json!({ "configurationTemplates": [] })).unwrap(),
+        ))
+    }
 }
 
 /// Resolve log group name from either logGroupName or resourceIdentifier.
@@ -5381,5 +6018,360 @@ mod tests {
         let svc = make_service();
         let req = make_request("UpdateAnomaly", json!({}));
         svc.update_anomaly(&req).unwrap();
+    }
+
+    // -- Import tasks --
+
+    #[test]
+    fn import_task_lifecycle() {
+        let svc = make_service();
+
+        let req = make_request(
+            "CreateImportTask",
+            json!({
+                "importSourceArn": "arn:aws:s3:::my-bucket/logs",
+                "importRoleArn": "arn:aws:iam::123456789012:role/import-role"
+            }),
+        );
+        let resp = svc.create_import_task(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let import_id = body["importId"].as_str().unwrap().to_string();
+
+        let req = make_request("DescribeImportTasks", json!({}));
+        let resp = svc.describe_import_tasks(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["imports"].as_array().unwrap().len(), 1);
+
+        let req = make_request(
+            "DescribeImportTaskBatches",
+            json!({ "importId": import_id }),
+        );
+        let resp = svc.describe_import_task_batches(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert!(body["importBatches"].as_array().unwrap().is_empty());
+
+        let req = make_request("CancelImportTask", json!({ "importId": import_id }));
+        svc.cancel_import_task(&req).unwrap();
+
+        let req = make_request("DescribeImportTasks", json!({}));
+        let resp = svc.describe_import_tasks(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(
+            body["imports"][0]["importStatus"].as_str().unwrap(),
+            "CANCELLED"
+        );
+    }
+
+    // -- Integrations --
+
+    #[test]
+    fn integration_lifecycle() {
+        let svc = make_service();
+
+        let req = make_request(
+            "PutIntegration",
+            json!({
+                "integrationName": "test-int",
+                "integrationType": "OPENSEARCH",
+                "resourceConfig": { "openSearchResourceConfig": {} }
+            }),
+        );
+        svc.put_integration(&req).unwrap();
+
+        let req = make_request("GetIntegration", json!({ "integrationName": "test-int" }));
+        let resp = svc.get_integration(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["integrationName"].as_str().unwrap(), "test-int");
+
+        let req = make_request("ListIntegrations", json!({}));
+        let resp = svc.list_integrations(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["integrationSummaries"].as_array().unwrap().len(), 1);
+
+        let req = make_request(
+            "DeleteIntegration",
+            json!({ "integrationName": "test-int" }),
+        );
+        svc.delete_integration(&req).unwrap();
+
+        let req = make_request("ListIntegrations", json!({}));
+        let resp = svc.list_integrations(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert!(body["integrationSummaries"].as_array().unwrap().is_empty());
+    }
+
+    // -- Lookup tables --
+
+    #[test]
+    fn lookup_table_lifecycle() {
+        let svc = make_service();
+
+        let req = make_request(
+            "CreateLookupTable",
+            json!({
+                "lookupTableName": "test-table",
+                "tableBody": "key,value\na,b"
+            }),
+        );
+        let resp = svc.create_lookup_table(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let arn = body["lookupTableArn"].as_str().unwrap().to_string();
+
+        let req = make_request("GetLookupTable", json!({ "lookupTableArn": arn }));
+        let resp = svc.get_lookup_table(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["lookupTableName"].as_str().unwrap(), "test-table");
+
+        let req = make_request("DescribeLookupTables", json!({}));
+        let resp = svc.describe_lookup_tables(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["lookupTables"].as_array().unwrap().len(), 1);
+
+        let req = make_request(
+            "UpdateLookupTable",
+            json!({ "lookupTableArn": arn, "tableBody": "key,value\nc,d" }),
+        );
+        svc.update_lookup_table(&req).unwrap();
+
+        let req = make_request("DeleteLookupTable", json!({ "lookupTableArn": arn }));
+        svc.delete_lookup_table(&req).unwrap();
+
+        let req = make_request("DescribeLookupTables", json!({}));
+        let resp = svc.describe_lookup_tables(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert!(body["lookupTables"].as_array().unwrap().is_empty());
+    }
+
+    // -- Scheduled queries --
+
+    #[test]
+    fn scheduled_query_lifecycle() {
+        let svc = make_service();
+
+        let req = make_request(
+            "CreateScheduledQuery",
+            json!({
+                "name": "test-sq",
+                "queryString": "fields @timestamp | limit 10",
+                "queryLanguage": "CWLI",
+                "scheduleExpression": "rate(1 hour)",
+                "executionRoleArn": "arn:aws:iam::123456789012:role/exec"
+            }),
+        );
+        let resp = svc.create_scheduled_query(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let arn = body["scheduledQueryArn"].as_str().unwrap().to_string();
+
+        let req = make_request("GetScheduledQuery", json!({ "identifier": arn }));
+        let resp = svc.get_scheduled_query(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["name"].as_str().unwrap(), "test-sq");
+
+        let req = make_request(
+            "GetScheduledQueryHistory",
+            json!({ "identifier": arn, "startTime": 0_i64, "endTime": 9999999999_i64 }),
+        );
+        let resp = svc.get_scheduled_query_history(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert!(body["triggerHistory"].as_array().unwrap().is_empty());
+
+        let req = make_request("ListScheduledQueries", json!({}));
+        let resp = svc.list_scheduled_queries(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["scheduledQueries"].as_array().unwrap().len(), 1);
+
+        let req = make_request(
+            "UpdateScheduledQuery",
+            json!({
+                "identifier": arn,
+                "queryString": "fields @message | limit 5",
+                "queryLanguage": "CWLI",
+                "scheduleExpression": "rate(2 hours)",
+                "executionRoleArn": "arn:aws:iam::123456789012:role/exec"
+            }),
+        );
+        svc.update_scheduled_query(&req).unwrap();
+
+        let req = make_request("DeleteScheduledQuery", json!({ "identifier": arn }));
+        svc.delete_scheduled_query(&req).unwrap();
+
+        let req = make_request("ListScheduledQueries", json!({}));
+        let resp = svc.list_scheduled_queries(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert!(body["scheduledQueries"].as_array().unwrap().is_empty());
+    }
+
+    // -- Misc stubs --
+
+    #[test]
+    fn start_live_tail_returns_session() {
+        let svc = make_service();
+        let req = make_request(
+            "StartLiveTail",
+            json!({ "logGroupIdentifiers": ["/test/group"] }),
+        );
+        let resp = svc.start_live_tail(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert!(body["responseStream"]["sessionStart"]["sessionId"]
+            .as_str()
+            .is_some());
+    }
+
+    #[test]
+    fn list_log_groups_delegates_to_describe() {
+        let svc = make_service();
+        create_group(&svc, "/test/list");
+        let req = make_request("DescribeLogGroups", json!({}));
+        let resp = svc.describe_log_groups(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["logGroups"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn list_log_groups_for_query_returns_empty() {
+        let svc = make_service();
+        let req = make_request(
+            "ListLogGroupsForQuery",
+            json!({ "queryId": "some-query-id" }),
+        );
+        let resp = svc.list_log_groups_for_query(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert!(body["logGroupIdentifiers"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn list_aggregate_log_group_summaries_returns_empty() {
+        let svc = make_service();
+        let req = make_request(
+            "ListAggregateLogGroupSummaries",
+            json!({ "groupBy": "ACCOUNT" }),
+        );
+        let resp = svc.list_aggregate_log_group_summaries(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert!(body["aggregateLogGroupSummaries"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn put_bearer_token_authentication_stores_flag() {
+        let svc = make_service();
+        create_group(&svc, "/test/bearer");
+        let req = make_request(
+            "PutBearerTokenAuthentication",
+            json!({
+                "logGroupIdentifier": "/test/bearer",
+                "bearerTokenAuthenticationEnabled": true
+            }),
+        );
+        svc.put_bearer_token_authentication(&req).unwrap();
+    }
+
+    #[test]
+    fn get_log_object_returns_stub() {
+        let svc = make_service();
+        let req = make_request(
+            "GetLogObject",
+            json!({ "logObjectPointer": "some-pointer" }),
+        );
+        let resp = svc.get_log_object(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert!(body["logObject"].is_object());
+    }
+
+    #[test]
+    fn get_log_fields_returns_stub() {
+        let svc = make_service();
+        let req = make_request(
+            "GetLogFields",
+            json!({ "dataSourceName": "test", "dataSourceType": "CW_LOG" }),
+        );
+        let resp = svc.get_log_fields(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert!(body["logFields"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn s3_table_integration_stubs() {
+        let svc = make_service();
+
+        let req = make_request(
+            "AssociateSourceToS3TableIntegration",
+            json!({
+                "integrationArn": "arn:aws:logs:us-east-1:123456789012:integration:test",
+                "dataSource": { "resourceArn": "arn:aws:logs:us-east-1:123456789012:log-group:test" }
+            }),
+        );
+        svc.associate_source_to_s3_table_integration(&req).unwrap();
+
+        let req = make_request(
+            "ListSourcesForS3TableIntegration",
+            json!({
+                "integrationArn": "arn:aws:logs:us-east-1:123456789012:integration:test"
+            }),
+        );
+        let resp = svc.list_sources_for_s3_table_integration(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["dataSources"].as_array().unwrap().len(), 1);
+
+        let req = make_request(
+            "DisassociateSourceFromS3TableIntegration",
+            json!({ "identifier": "arn:aws:logs:us-east-1:123456789012:integration:test" }),
+        );
+        svc.disassociate_source_from_s3_table_integration(&req)
+            .unwrap();
+    }
+
+    #[test]
+    fn update_delivery_configuration_noop() {
+        let svc = make_service();
+        // First create a delivery setup
+        let req = make_request(
+            "PutDeliverySource",
+            json!({
+                "name": "test-ds",
+                "resourceArn": "arn:aws:logs:us-east-1:123456789012:log-group:dummy",
+                "logType": "APPLICATION_LOGS"
+            }),
+        );
+        svc.put_delivery_source(&req).unwrap();
+
+        let req = make_request(
+            "PutDeliveryDestination",
+            json!({
+                "name": "test-dd",
+                "deliveryDestinationConfiguration": {
+                    "destinationResourceArn": "arn:aws:s3:::test-bucket"
+                }
+            }),
+        );
+        svc.put_delivery_destination(&req).unwrap();
+
+        let req = make_request(
+            "CreateDelivery",
+            json!({
+                "deliverySourceName": "test-ds",
+                "deliveryDestinationArn": "arn:aws:logs:us-east-1:123456789012:delivery-destination:test-dd"
+            }),
+        );
+        let resp = svc.create_delivery(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let delivery_id = body["delivery"]["id"].as_str().unwrap().to_string();
+
+        let req = make_request("UpdateDeliveryConfiguration", json!({ "id": delivery_id }));
+        svc.update_delivery_configuration(&req).unwrap();
+    }
+
+    #[test]
+    fn describe_configuration_templates_returns_empty() {
+        let svc = make_service();
+        let req = make_request("DescribeConfigurationTemplates", json!({}));
+        let resp = svc.describe_configuration_templates(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert!(body["configurationTemplates"]
+            .as_array()
+            .unwrap()
+            .is_empty());
     }
 }

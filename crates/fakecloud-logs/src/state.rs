@@ -22,6 +22,18 @@ pub struct LogsState {
     pub account_policies: HashMap<(String, String), AccountPolicy>,
     /// Anomaly detectors keyed by detector ARN
     pub anomaly_detectors: HashMap<String, AnomalyDetector>,
+    /// Import tasks keyed by import ID
+    pub import_tasks: HashMap<String, ImportTask>,
+    /// Integrations keyed by integration name
+    pub integrations: HashMap<String, Integration>,
+    /// Lookup tables keyed by ARN
+    pub lookup_tables: HashMap<String, LookupTable>,
+    /// Scheduled queries keyed by identifier (ARN)
+    pub scheduled_queries: HashMap<String, ScheduledQuery>,
+    /// S3 table integration sources keyed by integration ARN -> list of source identifiers
+    pub s3_table_sources: HashMap<String, Vec<String>>,
+    /// Bearer token authentication flag per log group
+    pub bearer_token_auth: HashMap<String, bool>,
 }
 
 impl LogsState {
@@ -41,6 +53,12 @@ impl LogsState {
             query_definitions: HashMap::new(),
             account_policies: HashMap::new(),
             anomaly_detectors: HashMap::new(),
+            import_tasks: HashMap::new(),
+            integrations: HashMap::new(),
+            lookup_tables: HashMap::new(),
+            scheduled_queries: HashMap::new(),
+            s3_table_sources: HashMap::new(),
+            bearer_token_auth: HashMap::new(),
         }
     }
 
@@ -57,6 +75,12 @@ impl LogsState {
         self.query_definitions.clear();
         self.account_policies.clear();
         self.anomaly_detectors.clear();
+        self.import_tasks.clear();
+        self.integrations.clear();
+        self.lookup_tables.clear();
+        self.scheduled_queries.clear();
+        self.s3_table_sources.clear();
+        self.bearer_token_auth.clear();
     }
 }
 
@@ -230,4 +254,41 @@ pub struct AnomalyDetector {
     pub creation_time: i64,
     pub last_modified_time: i64,
     pub enabled: bool,
+}
+
+pub struct ImportTask {
+    pub import_id: String,
+    pub import_source_arn: String,
+    pub import_role_arn: String,
+    pub log_group_name: Option<String>,
+    pub status: String,
+    pub creation_time: i64,
+}
+
+pub struct Integration {
+    pub integration_name: String,
+    pub integration_type: String,
+    pub resource_config: serde_json::Value,
+    pub status: String,
+    pub creation_time: i64,
+}
+
+pub struct LookupTable {
+    pub lookup_table_name: String,
+    pub arn: String,
+    pub table_body: String,
+    pub creation_time: i64,
+    pub last_modified_time: i64,
+}
+
+pub struct ScheduledQuery {
+    pub name: String,
+    pub arn: String,
+    pub query_string: String,
+    pub query_language: String,
+    pub schedule_expression: String,
+    pub execution_role_arn: String,
+    pub status: String,
+    pub creation_time: i64,
+    pub last_modified_time: i64,
 }
