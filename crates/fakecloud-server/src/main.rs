@@ -179,7 +179,9 @@ async fn main() {
     registry.register(Arc::new(
         SsmService::new(ssm_state).with_secretsmanager(secretsmanager_state.clone()),
     ));
-    registry.register(Arc::new(DynamoDbService::new(dynamodb_state)));
+    registry.register(Arc::new(
+        DynamoDbService::new(dynamodb_state).with_s3(s3_state.clone()),
+    ));
     registry.register(Arc::new(LambdaService::new(lambda_state.clone())));
     registry.register(Arc::new(SecretsManagerService::new(secretsmanager_state)));
     registry.register(Arc::new(LogsService::new(logs_state, delivery_for_logs)));

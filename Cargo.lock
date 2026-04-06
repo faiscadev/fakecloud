@@ -1382,9 +1382,11 @@ name = "fakecloud-dynamodb"
 version = "0.3.0"
 dependencies = [
  "async-trait",
+ "bytes",
  "chrono",
  "fakecloud-aws",
  "fakecloud-core",
+ "fakecloud-s3",
  "http 1.4.0",
  "parking_lot",
  "serde",

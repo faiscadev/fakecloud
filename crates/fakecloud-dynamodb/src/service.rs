@@ -8,6 +8,8 @@ use serde_json::{json, Value};
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 use fakecloud_core::validation::*;
 
+use fakecloud_s3::state::SharedS3State;
+
 use crate::state::{
     attribute_type_and_value, AttributeDefinition, AttributeValue, BackupDescription, DynamoTable,
     ExportDescription, GlobalSecondaryIndex, GlobalTableDescription, ImportDescription,
@@ -17,11 +19,20 @@ use crate::state::{
 
 pub struct DynamoDbService {
     state: SharedDynamoDbState,
+    s3_state: Option<SharedS3State>,
 }
 
 impl DynamoDbService {
     pub fn new(state: SharedDynamoDbState) -> Self {
-        Self { state }
+        Self {
+            state,
+            s3_state: None,
+        }
+    }
+
+    pub fn with_s3(mut self, s3_state: SharedS3State) -> Self {
+        self.s3_state = Some(s3_state);
+        self
     }
 
     fn parse_body(req: &AwsRequest) -> Result<Value, AwsServiceError> {
@@ -2364,8 +2375,10 @@ impl DynamoDbService {
         let export_format = body["ExportFormat"].as_str().unwrap_or("DYNAMODB_JSON");
 
         let state = self.state.read();
-        // Verify table exists
-        find_table_by_arn(&state.tables, table_arn)?;
+        // Verify table exists and get items
+        let table = find_table_by_arn(&state.tables, table_arn)?;
+        let items = table.items.clone();
+        let item_count = items.len() as i64;
 
         let now = Utc::now();
         let export_arn = format!(
@@ -2376,9 +2389,76 @@ impl DynamoDbService {
             uuid::Uuid::new_v4()
         );
 
+        drop(state);
+
+        // Serialize items as JSON Lines and write to S3
+        let mut json_lines = String::new();
+        for item in &items {
+            let item_json = if export_format == "DYNAMODB_JSON" {
+                json!({ "Item": item })
+            } else {
+                json!(item)
+            };
+            json_lines.push_str(&serde_json::to_string(&item_json).unwrap_or_default());
+            json_lines.push('\n');
+        }
+        let data_size = json_lines.len() as i64;
+
+        // Build S3 key for the export data
+        let s3_key = if let Some(prefix) = s3_prefix {
+            format!("{prefix}/data/manifest-files.json")
+        } else {
+            "data/manifest-files.json".to_string()
+        };
+
+        // Write to S3 if we have access to S3 state
+        let mut export_failed = false;
+        let mut failure_reason = String::new();
+        if let Some(ref s3_state) = self.s3_state {
+            let mut s3 = s3_state.write();
+            if let Some(bucket) = s3.buckets.get_mut(s3_bucket) {
+                let etag = uuid::Uuid::new_v4().to_string().replace('-', "");
+                let obj = fakecloud_s3::state::S3Object {
+                    key: s3_key.clone(),
+                    data: bytes::Bytes::from(json_lines),
+                    content_type: "application/json".to_string(),
+                    etag,
+                    size: data_size as u64,
+                    last_modified: now,
+                    metadata: HashMap::new(),
+                    storage_class: "STANDARD".to_string(),
+                    tags: HashMap::new(),
+                    acl_grants: Vec::new(),
+                    acl_owner_id: None,
+                    parts_count: None,
+                    part_sizes: None,
+                    sse_algorithm: None,
+                    sse_kms_key_id: None,
+                    bucket_key_enabled: None,
+                    version_id: None,
+                    is_delete_marker: false,
+                    content_encoding: None,
+                    website_redirect_location: None,
+                    restore_ongoing: None,
+                    restore_expiry: None,
+                    checksum_algorithm: None,
+                    checksum_value: None,
+                    lock_mode: None,
+                    lock_retain_until: None,
+                    lock_legal_hold: None,
+                };
+                bucket.objects.insert(s3_key, obj);
+            } else {
+                export_failed = true;
+                failure_reason = format!("S3 bucket does not exist: {s3_bucket}");
+            }
+        }
+
+        let export_status = if export_failed { "FAILED" } else { "COMPLETED" };
+
         let export = ExportDescription {
             export_arn: export_arn.clone(),
-            export_status: "COMPLETED".to_string(),
+            export_status: export_status.to_string(),
             table_arn: table_arn.to_string(),
             s3_bucket: s3_bucket.to_string(),
             s3_prefix: s3_prefix.map(|s| s.to_string()),
@@ -2386,18 +2466,17 @@ impl DynamoDbService {
             start_time: now,
             end_time: now,
             export_time: now,
-            item_count: 0,
-            billed_size_bytes: 0,
+            item_count,
+            billed_size_bytes: data_size,
         };
 
-        drop(state);
         let mut state = self.state.write();
         state.exports.insert(export_arn.clone(), export);
 
-        Self::ok_json(json!({
+        let mut response = json!({
             "ExportDescription": {
                 "ExportArn": export_arn,
-                "ExportStatus": "COMPLETED",
+                "ExportStatus": export_status,
                 "TableArn": table_arn,
                 "S3Bucket": s3_bucket,
                 "S3Prefix": s3_prefix,
@@ -2405,10 +2484,15 @@ impl DynamoDbService {
                 "StartTime": now.timestamp() as f64,
                 "EndTime": now.timestamp() as f64,
                 "ExportTime": now.timestamp() as f64,
-                "ItemCount": 0,
-                "BilledSizeBytes": 0
+                "ItemCount": item_count,
+                "BilledSizeBytes": data_size
             }
-        }))
+        });
+        if export_failed {
+            response["ExportDescription"]["FailureCode"] = json!("S3NoSuchBucket");
+            response["ExportDescription"]["FailureMessage"] = json!(failure_reason);
+        }
+        Self::ok_json(response)
     }
 
     fn describe_export(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
@@ -2480,6 +2564,10 @@ impl DynamoDbService {
             .get("S3Bucket")
             .and_then(|v| v.as_str())
             .unwrap_or("");
+        let s3_key_prefix = s3_source
+            .get("S3KeyPrefix")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
 
         let table_params = body["TableCreationParameters"].as_object().ok_or_else(|| {
             AwsServiceError::aws_error(
@@ -2506,6 +2594,55 @@ impl DynamoDbService {
                 .unwrap_or(&Value::Null),
         )?;
 
+        // Read items from S3 if we have access
+        let mut imported_items: Vec<HashMap<String, Value>> = Vec::new();
+        let mut processed_size_bytes: i64 = 0;
+        if let Some(ref s3_state) = self.s3_state {
+            let s3 = s3_state.read();
+            let bucket = s3.buckets.get(s3_bucket).ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ImportConflictException",
+                    format!("S3 bucket does not exist: {s3_bucket}"),
+                )
+            })?;
+            // Find all objects under the prefix and try to parse JSON Lines from each
+            let prefix = if s3_key_prefix.is_empty() {
+                String::new()
+            } else {
+                s3_key_prefix.to_string()
+            };
+            for (key, obj) in &bucket.objects {
+                if !prefix.is_empty() && !key.starts_with(&prefix) {
+                    continue;
+                }
+                let data = std::str::from_utf8(&obj.data).unwrap_or("");
+                processed_size_bytes += obj.size as i64;
+                for line in data.lines() {
+                    let line = line.trim();
+                    if line.is_empty() {
+                        continue;
+                    }
+                    if let Ok(parsed) = serde_json::from_str::<Value>(line) {
+                        // DYNAMODB_JSON format wraps items in {"Item": {...}}
+                        let item = if input_format == "DYNAMODB_JSON" {
+                            if let Some(item_obj) = parsed.get("Item") {
+                                item_obj.as_object().cloned().unwrap_or_default()
+                            } else {
+                                parsed.as_object().cloned().unwrap_or_default()
+                            }
+                        } else {
+                            parsed.as_object().cloned().unwrap_or_default()
+                        };
+                        if !item.is_empty() {
+                            imported_items
+                                .push(item.into_iter().collect::<HashMap<String, Value>>());
+                        }
+                    }
+                }
+            }
+        }
+
         let mut state = self.state.write();
 
         if state.tables.contains_key(table_name) {
@@ -2529,7 +2666,9 @@ impl DynamoDbService {
             uuid::Uuid::new_v4()
         );
 
-        let table = DynamoTable {
+        let processed_item_count = imported_items.len() as i64;
+
+        let mut table = DynamoTable {
             name: table_name.to_string(),
             arn: table_arn.clone(),
             key_schema,
@@ -2538,7 +2677,7 @@ impl DynamoDbService {
                 read_capacity_units: 0,
                 write_capacity_units: 0,
             },
-            items: Vec::new(),
+            items: imported_items,
             gsi: Vec::new(),
             lsi: Vec::new(),
             tags: HashMap::new(),
@@ -2555,6 +2694,7 @@ impl DynamoDbService {
             contributor_insights_status: "DISABLED".to_string(),
             contributor_insights_counters: HashMap::new(),
         };
+        table.recalculate_stats();
         state.tables.insert(table_name.to_string(), table);
 
         let import_desc = ImportDescription {
@@ -2566,8 +2706,8 @@ impl DynamoDbService {
             input_format: input_format.to_string(),
             start_time: now,
             end_time: now,
-            processed_item_count: 0,
-            processed_size_bytes: 0,
+            processed_item_count,
+            processed_size_bytes,
         };
         state.imports.insert(import_arn.clone(), import_desc);
 
@@ -2600,8 +2740,8 @@ impl DynamoDbService {
                 },
                 "StartTime": now.timestamp() as f64,
                 "EndTime": now.timestamp() as f64,
-                "ProcessedItemCount": 0,
-                "ProcessedSizeBytes": 0
+                "ProcessedItemCount": processed_item_count,
+                "ProcessedSizeBytes": processed_size_bytes
             }
         }))
     }

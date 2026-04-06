@@ -1,5 +1,9 @@
 mod helpers;
 
+use aws_sdk_dynamodb::types::{
+    AttributeDefinition, AttributeValue, BillingMode, KeySchemaElement, KeyType,
+    ScalarAttributeType,
+};
 use aws_sdk_eventbridge::types::{PutEventsRequestEntry, Target};
 use aws_sdk_s3::primitives::ByteStream;
 use helpers::TestServer;
@@ -901,4 +905,149 @@ async fn logs_subscription_filter_delivers_to_sqs() {
     assert_eq!(log_events.len(), 2);
     assert_eq!(log_events[0]["message"], "hello from subscription test");
     assert_eq!(log_events[1]["message"], "second event");
+}
+
+/// DynamoDB export to S3 and import from S3 roundtrip test.
+#[tokio::test]
+async fn dynamodb_export_import_roundtrip() {
+    let server = TestServer::start().await;
+    let ddb = server.dynamodb_client().await;
+    let s3 = server.s3_client().await;
+
+    // Create source table
+    ddb.create_table()
+        .table_name("ExportSource")
+        .key_schema(
+            KeySchemaElement::builder()
+                .attribute_name("pk")
+                .key_type(KeyType::Hash)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            AttributeDefinition::builder()
+                .attribute_name("pk")
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .billing_mode(BillingMode::PayPerRequest)
+        .send()
+        .await
+        .unwrap();
+
+    // Put items
+    for i in 1..=3 {
+        ddb.put_item()
+            .table_name("ExportSource")
+            .item("pk", AttributeValue::S(format!("item-{i}")))
+            .item("data", AttributeValue::S(format!("value-{i}")))
+            .item("count", AttributeValue::N(i.to_string()))
+            .send()
+            .await
+            .unwrap();
+    }
+
+    // Create S3 bucket for export
+    s3.create_bucket()
+        .bucket("export-bucket")
+        .send()
+        .await
+        .unwrap();
+
+    // Get table ARN
+    let table_desc = ddb
+        .describe_table()
+        .table_name("ExportSource")
+        .send()
+        .await
+        .unwrap();
+    let table_arn = table_desc.table().unwrap().table_arn().unwrap().to_string();
+
+    // Export via CLI (SDK ExportTableToPointInTime is complex)
+    let export_output = server
+        .aws_cli(&[
+            "dynamodb",
+            "export-table-to-point-in-time",
+            "--table-arn",
+            &table_arn,
+            "--s3-bucket",
+            "export-bucket",
+            "--s3-prefix",
+            "exports/source",
+            "--export-format",
+            "DYNAMODB_JSON",
+        ])
+        .await;
+    assert!(
+        export_output.success(),
+        "export failed: {}",
+        export_output.stderr_text()
+    );
+    let export_json = export_output.stdout_json();
+    let item_count = export_json["ExportDescription"]["ItemCount"]
+        .as_i64()
+        .unwrap_or(0);
+    assert_eq!(item_count, 3, "Expected 3 items exported");
+
+    // Verify that data was written to S3
+    let s3_obj = s3
+        .get_object()
+        .bucket("export-bucket")
+        .key("exports/source/data/manifest-files.json")
+        .send()
+        .await
+        .unwrap();
+    let s3_body = s3_obj.body.collect().await.unwrap().into_bytes();
+    let s3_text = std::str::from_utf8(&s3_body).unwrap();
+    assert!(!s3_text.is_empty(), "Export data should be non-empty in S3");
+    // Should have 3 lines (one per item)
+    let lines: Vec<&str> = s3_text.lines().filter(|l| !l.is_empty()).collect();
+    assert_eq!(lines.len(), 3, "Expected 3 JSON Lines in export");
+
+    // Now import into a new table
+    let import_output = server
+        .aws_cli(&[
+            "dynamodb",
+            "import-table",
+            "--input-format",
+            "DYNAMODB_JSON",
+            "--s3-bucket-source",
+            r#"{"S3Bucket":"export-bucket","S3KeyPrefix":"exports/source/"}"#,
+            "--table-creation-parameters",
+            r#"{"TableName":"ImportDest","KeySchema":[{"AttributeName":"pk","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"pk","AttributeType":"S"}]}"#,
+        ])
+        .await;
+    assert!(
+        import_output.success(),
+        "import failed: {}",
+        import_output.stderr_text()
+    );
+    let import_json = import_output.stdout_json();
+    let processed = import_json["ImportTableDescription"]["ProcessedItemCount"]
+        .as_i64()
+        .unwrap_or(0);
+    assert_eq!(processed, 3, "Expected 3 items imported");
+
+    // Verify items in the imported table
+    let scan = ddb.scan().table_name("ImportDest").send().await.unwrap();
+    assert_eq!(scan.count(), 3, "Imported table should have 3 items");
+
+    // Verify item data matches
+    let items = scan.items();
+    for item in items {
+        let pk = item.get("pk").unwrap().as_s().unwrap();
+        assert!(
+            pk.starts_with("item-"),
+            "Item pk should start with 'item-': {pk}"
+        );
+        assert!(
+            item.contains_key("data"),
+            "Item should have 'data' attribute"
+        );
+        assert!(
+            item.contains_key("count"),
+            "Item should have 'count' attribute"
+        );
+    }
 }
