@@ -1216,3 +1216,509 @@ async fn ssm_service_settings() {
         .await
         .unwrap();
 }
+
+// -- Inventory --
+
+#[test_action("ssm", "PutInventory", checksum = "786481b4")]
+#[test_action("ssm", "GetInventory", checksum = "b835d42b")]
+#[test_action("ssm", "GetInventorySchema", checksum = "3e900dba")]
+#[test_action("ssm", "ListInventoryEntries", checksum = "8b96bfd7")]
+#[test_action("ssm", "DeleteInventory", checksum = "85aaa21a")]
+#[test_action("ssm", "DescribeInventoryDeletions", checksum = "14715864")]
+#[tokio::test]
+async fn ssm_inventory_lifecycle() {
+    use aws_sdk_ssm::types::InventoryItem;
+
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+
+    let item = InventoryItem::builder()
+        .type_name("Custom:ConfApp")
+        .schema_version("1.0")
+        .capture_time("2024-01-01T00:00:00Z")
+        .content({
+            let mut map = std::collections::HashMap::new();
+            map.insert("Name".to_string(), "ConfApp".to_string());
+            map
+        })
+        .build()
+        .unwrap();
+
+    client
+        .put_inventory()
+        .instance_id("i-conf001")
+        .items(item)
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client.get_inventory().send().await.unwrap();
+    assert!(!resp.entities().is_empty());
+
+    let resp = client.get_inventory_schema().send().await.unwrap();
+    assert!(!resp.schemas().is_empty());
+
+    let resp = client
+        .list_inventory_entries()
+        .instance_id("i-conf001")
+        .type_name("Custom:ConfApp")
+        .send()
+        .await
+        .unwrap();
+    assert!(!resp.entries().is_empty());
+
+    let resp = client
+        .delete_inventory()
+        .type_name("Custom:ConfApp")
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.deletion_id().is_some());
+
+    let resp = client.describe_inventory_deletions().send().await.unwrap();
+    assert!(!resp.inventory_deletions().is_empty());
+}
+
+// -- Compliance --
+
+#[test_action("ssm", "PutComplianceItems", checksum = "0aa021e4")]
+#[test_action("ssm", "ListComplianceItems", checksum = "2df340a8")]
+#[test_action("ssm", "ListComplianceSummaries", checksum = "926a1629")]
+#[test_action("ssm", "ListResourceComplianceSummaries", checksum = "ca169aac")]
+#[tokio::test]
+async fn ssm_compliance_lifecycle() {
+    use aws_sdk_ssm::types::{
+        ComplianceExecutionSummary, ComplianceItemEntry, ComplianceSeverity, ComplianceStatus,
+    };
+
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+
+    let exec_summary = ComplianceExecutionSummary::builder()
+        .execution_time(aws_sdk_ssm::primitives::DateTime::from_secs(1704067200))
+        .build()
+        .unwrap();
+
+    let item = ComplianceItemEntry::builder()
+        .severity(ComplianceSeverity::Critical)
+        .status(ComplianceStatus::Compliant)
+        .title("Conf patch")
+        .id("patch-conf-001")
+        .build()
+        .unwrap();
+
+    client
+        .put_compliance_items()
+        .resource_id("i-conf001")
+        .resource_type("ManagedInstance")
+        .compliance_type("Custom:ConfPatch")
+        .execution_summary(exec_summary)
+        .items(item)
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client.list_compliance_items().send().await.unwrap();
+    assert!(!resp.compliance_items().is_empty());
+
+    let resp = client.list_compliance_summaries().send().await.unwrap();
+    assert!(!resp.compliance_summary_items().is_empty());
+
+    let resp = client
+        .list_resource_compliance_summaries()
+        .send()
+        .await
+        .unwrap();
+    assert!(!resp.resource_compliance_summary_items().is_empty());
+}
+
+// -- Maintenance Window Details --
+
+#[test_action("ssm", "UpdateMaintenanceWindowTarget", checksum = "e4fc5bc1")]
+#[test_action("ssm", "UpdateMaintenanceWindowTask", checksum = "986d0ee9")]
+#[test_action("ssm", "GetMaintenanceWindowTask", checksum = "55896b29")]
+#[test_action("ssm", "DescribeMaintenanceWindowExecutions", checksum = "e1b44cbf")]
+#[test_action("ssm", "DescribeMaintenanceWindowSchedule", checksum = "e4fb18b6")]
+#[test_action("ssm", "DescribeMaintenanceWindowsForTarget", checksum = "e509e63a")]
+#[tokio::test]
+async fn ssm_maintenance_window_details() {
+    use aws_sdk_ssm::types::{MaintenanceWindowResourceType, MaintenanceWindowTaskType, Target};
+
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+
+    let mw = client
+        .create_maintenance_window()
+        .name("conf-mw")
+        .schedule("cron(0 2 ? * SUN *)")
+        .duration(3)
+        .cutoff(1)
+        .allow_unassociated_targets(true)
+        .send()
+        .await
+        .unwrap();
+    let window_id = mw.window_id().unwrap().to_string();
+
+    let target = Target::builder()
+        .key("InstanceIds")
+        .values("i-conf001")
+        .build();
+    let reg = client
+        .register_target_with_maintenance_window()
+        .window_id(&window_id)
+        .resource_type(MaintenanceWindowResourceType::Instance)
+        .targets(target)
+        .name("conf-target")
+        .send()
+        .await
+        .unwrap();
+    let target_id = reg.window_target_id().unwrap().to_string();
+
+    client
+        .update_maintenance_window_target()
+        .window_id(&window_id)
+        .window_target_id(&target_id)
+        .name("conf-target-updated")
+        .send()
+        .await
+        .unwrap();
+
+    let task = client
+        .register_task_with_maintenance_window()
+        .window_id(&window_id)
+        .task_arn("AWS-RunShellScript")
+        .task_type(MaintenanceWindowTaskType::RunCommand)
+        .name("conf-task")
+        .send()
+        .await
+        .unwrap();
+    let task_id = task.window_task_id().unwrap().to_string();
+
+    let resp = client
+        .get_maintenance_window_task()
+        .window_id(&window_id)
+        .window_task_id(&task_id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.task_arn().unwrap(), "AWS-RunShellScript");
+
+    client
+        .update_maintenance_window_task()
+        .window_id(&window_id)
+        .window_task_id(&task_id)
+        .name("conf-task-updated")
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .describe_maintenance_window_executions()
+        .window_id(&window_id)
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.window_executions().is_empty());
+
+    let resp = client
+        .describe_maintenance_window_schedule()
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.scheduled_window_executions().is_empty());
+
+    let target = Target::builder()
+        .key("InstanceIds")
+        .values("i-conf001")
+        .build();
+    let resp = client
+        .describe_maintenance_windows_for_target()
+        .resource_type(MaintenanceWindowResourceType::Instance)
+        .targets(target)
+        .send()
+        .await
+        .unwrap();
+    assert!(!resp.window_identities().is_empty());
+}
+
+#[test_action("ssm", "GetMaintenanceWindowExecution", checksum = "068e4bcf")]
+#[test_action("ssm", "GetMaintenanceWindowExecutionTask", checksum = "09f909cd")]
+#[test_action(
+    "ssm",
+    "GetMaintenanceWindowExecutionTaskInvocation",
+    checksum = "e3b36580"
+)]
+#[test_action(
+    "ssm",
+    "DescribeMaintenanceWindowExecutionTasks",
+    checksum = "65622cb3"
+)]
+#[test_action(
+    "ssm",
+    "DescribeMaintenanceWindowExecutionTaskInvocations",
+    checksum = "842d26d2"
+)]
+#[test_action("ssm", "CancelMaintenanceWindowExecution", checksum = "f444e670")]
+#[tokio::test]
+async fn ssm_maintenance_window_execution_details() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+
+    let mw = client
+        .create_maintenance_window()
+        .name("conf-mw-exec")
+        .schedule("cron(0 2 ? * SUN *)")
+        .duration(3)
+        .cutoff(1)
+        .allow_unassociated_targets(true)
+        .send()
+        .await
+        .unwrap();
+    let window_id = mw.window_id().unwrap().to_string();
+
+    // DescribeMaintenanceWindowExecutions (empty)
+    let resp = client
+        .describe_maintenance_window_executions()
+        .window_id(&window_id)
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.window_executions().is_empty());
+
+    // Get operations return errors for non-existent IDs
+    let result = client
+        .get_maintenance_window_execution()
+        .window_execution_id("nonexistent-exec")
+        .send()
+        .await;
+    assert!(result.is_err());
+
+    let result = client
+        .get_maintenance_window_execution_task()
+        .window_execution_id("nonexistent-exec")
+        .task_id("nonexistent-task")
+        .send()
+        .await;
+    assert!(result.is_err());
+
+    let result = client
+        .get_maintenance_window_execution_task_invocation()
+        .window_execution_id("nonexistent-exec")
+        .task_id("nonexistent-task")
+        .invocation_id("nonexistent-inv")
+        .send()
+        .await;
+    assert!(result.is_err());
+
+    // Describe operations return empty for non-existent executions
+    let resp = client
+        .describe_maintenance_window_execution_tasks()
+        .window_execution_id("nonexistent-exec")
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.window_execution_task_identities().is_empty());
+
+    let resp = client
+        .describe_maintenance_window_execution_task_invocations()
+        .window_execution_id("nonexistent-exec")
+        .task_id("nonexistent-task")
+        .send()
+        .await
+        .unwrap();
+    assert!(resp
+        .window_execution_task_invocation_identities()
+        .is_empty());
+
+    let result = client
+        .cancel_maintenance_window_execution()
+        .window_execution_id("nonexistent-exec")
+        .send()
+        .await;
+    assert!(result.is_err());
+}
+
+// -- Patch Management Details --
+
+#[test_action("ssm", "UpdatePatchBaseline", checksum = "fec284b2")]
+#[tokio::test]
+async fn ssm_update_patch_baseline() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+
+    let create = client
+        .create_patch_baseline()
+        .name("conf-update-bl")
+        .send()
+        .await
+        .unwrap();
+    let baseline_id = create.baseline_id().unwrap().to_string();
+
+    let resp = client
+        .update_patch_baseline()
+        .baseline_id(&baseline_id)
+        .name("conf-updated-bl")
+        .approved_patches("KB001")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.name().unwrap(), "conf-updated-bl");
+    assert_eq!(resp.approved_patches().len(), 1);
+}
+
+#[test_action("ssm", "DescribeInstancePatchStates", checksum = "9e721313")]
+#[tokio::test]
+async fn ssm_describe_instance_patch_states() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+    let resp = client
+        .describe_instance_patch_states()
+        .instance_ids("i-001")
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.instance_patch_states().is_empty());
+}
+
+#[test_action(
+    "ssm",
+    "DescribeInstancePatchStatesForPatchGroup",
+    checksum = "6671823d"
+)]
+#[tokio::test]
+async fn ssm_describe_instance_patch_states_for_patch_group() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+    let resp = client
+        .describe_instance_patch_states_for_patch_group()
+        .patch_group("conf-group")
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.instance_patch_states().is_empty());
+}
+
+#[test_action("ssm", "DescribeInstancePatches", checksum = "8f6af635")]
+#[tokio::test]
+async fn ssm_describe_instance_patches() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+    let resp = client
+        .describe_instance_patches()
+        .instance_id("i-001")
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.patches().is_empty());
+}
+
+#[test_action(
+    "ssm",
+    "DescribeEffectivePatchesForPatchBaseline",
+    checksum = "cfe6c8da"
+)]
+#[tokio::test]
+async fn ssm_describe_effective_patches() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+
+    let create = client
+        .create_patch_baseline()
+        .name("conf-eff-bl")
+        .send()
+        .await
+        .unwrap();
+    let baseline_id = create.baseline_id().unwrap().to_string();
+
+    let resp = client
+        .describe_effective_patches_for_patch_baseline()
+        .baseline_id(&baseline_id)
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.effective_patches().is_empty());
+}
+
+#[test_action("ssm", "GetDeployablePatchSnapshotForInstance", checksum = "b6b2fc7a")]
+#[tokio::test]
+async fn ssm_get_deployable_patch_snapshot() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+    let resp = client
+        .get_deployable_patch_snapshot_for_instance()
+        .instance_id("i-001")
+        .snapshot_id("snap-conf-001")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.instance_id().unwrap(), "i-001");
+    assert_eq!(resp.snapshot_id().unwrap(), "snap-conf-001");
+}
+
+// -- Resource Data Sync --
+
+#[test_action("ssm", "CreateResourceDataSync", checksum = "e1d94684")]
+#[test_action("ssm", "ListResourceDataSync", checksum = "52827e80")]
+#[test_action("ssm", "UpdateResourceDataSync", checksum = "6685f0eb")]
+#[test_action("ssm", "DeleteResourceDataSync", checksum = "6d74a15c")]
+#[tokio::test]
+async fn ssm_resource_data_sync() {
+    use aws_sdk_ssm::types::{ResourceDataSyncS3Destination, ResourceDataSyncSource};
+
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+
+    let source = ResourceDataSyncSource::builder()
+        .source_type("AWS")
+        .source_regions("us-east-1")
+        .include_future_regions(false)
+        .build()
+        .unwrap();
+
+    client
+        .create_resource_data_sync()
+        .sync_name("conf-sync")
+        .sync_type("SyncFromSource")
+        .sync_source(source)
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client.list_resource_data_sync().send().await.unwrap();
+    assert_eq!(resp.resource_data_sync_items().len(), 1);
+
+    let updated_source = ResourceDataSyncSource::builder()
+        .source_type("AWS")
+        .source_regions("us-east-1")
+        .source_regions("us-west-2")
+        .include_future_regions(false)
+        .build()
+        .unwrap();
+
+    client
+        .update_resource_data_sync()
+        .sync_name("conf-sync")
+        .sync_type("SyncFromSource")
+        .sync_source(updated_source)
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .delete_resource_data_sync()
+        .sync_name("conf-sync")
+        .send()
+        .await
+        .unwrap();
+}
+
+// -- GetOpsSummary --
+
+#[test_action("ssm", "GetOpsSummary", checksum = "c5144b1c")]
+#[tokio::test]
+async fn ssm_get_ops_summary() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+    let resp = client.get_ops_summary().send().await.unwrap();
+    assert!(resp.entities().is_empty());
+}

@@ -10,7 +10,8 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceErr
 use fakecloud_core::validation::*;
 
 use crate::state::{
-    MaintenanceWindow, MaintenanceWindowTarget, MaintenanceWindowTask, PatchBaseline, PatchGroup,
+    ComplianceItem, InventoryDeletion, InventoryEntry, InventoryItem, MaintenanceWindow,
+    MaintenanceWindowTarget, MaintenanceWindowTask, PatchBaseline, PatchGroup, ResourceDataSync,
     SharedSsmState, SsmAssociation, SsmAssociationVersion, SsmCommand, SsmDocument,
     SsmDocumentVersion, SsmOpsItem, SsmParameter, SsmParameterVersion, SsmResourcePolicy,
     SsmServiceSetting,
@@ -131,6 +132,61 @@ impl AwsService for SsmService {
             "PutResourcePolicy" => self.put_resource_policy(&req),
             "GetResourcePolicies" => self.get_resource_policies(&req),
             "DeleteResourcePolicy" => self.delete_resource_policy(&req),
+            // Inventory
+            "PutInventory" => self.put_inventory(&req),
+            "GetInventory" => self.get_inventory(&req),
+            "GetInventorySchema" => self.get_inventory_schema(&req),
+            "ListInventoryEntries" => self.list_inventory_entries(&req),
+            "DeleteInventory" => self.delete_inventory(&req),
+            "DescribeInventoryDeletions" => self.describe_inventory_deletions(&req),
+            // Compliance
+            "PutComplianceItems" => self.put_compliance_items(&req),
+            "ListComplianceItems" => self.list_compliance_items(&req),
+            "ListComplianceSummaries" => self.list_compliance_summaries(&req),
+            "ListResourceComplianceSummaries" => self.list_resource_compliance_summaries(&req),
+            // Maintenance window details
+            "UpdateMaintenanceWindowTarget" => self.update_maintenance_window_target(&req),
+            "UpdateMaintenanceWindowTask" => self.update_maintenance_window_task(&req),
+            "GetMaintenanceWindowTask" => self.get_maintenance_window_task(&req),
+            "GetMaintenanceWindowExecution" => self.get_maintenance_window_execution(&req),
+            "GetMaintenanceWindowExecutionTask" => self.get_maintenance_window_execution_task(&req),
+            "GetMaintenanceWindowExecutionTaskInvocation" => {
+                self.get_maintenance_window_execution_task_invocation(&req)
+            }
+            "DescribeMaintenanceWindowExecutions" => {
+                self.describe_maintenance_window_executions(&req)
+            }
+            "DescribeMaintenanceWindowExecutionTasks" => {
+                self.describe_maintenance_window_execution_tasks(&req)
+            }
+            "DescribeMaintenanceWindowExecutionTaskInvocations" => {
+                self.describe_maintenance_window_execution_task_invocations(&req)
+            }
+            "DescribeMaintenanceWindowSchedule" => self.describe_maintenance_window_schedule(&req),
+            "DescribeMaintenanceWindowsForTarget" => {
+                self.describe_maintenance_windows_for_target(&req)
+            }
+            "CancelMaintenanceWindowExecution" => self.cancel_maintenance_window_execution(&req),
+            // Patch management details
+            "UpdatePatchBaseline" => self.update_patch_baseline(&req),
+            "DescribeInstancePatchStates" => self.describe_instance_patch_states(&req),
+            "DescribeInstancePatchStatesForPatchGroup" => {
+                self.describe_instance_patch_states_for_patch_group(&req)
+            }
+            "DescribeInstancePatches" => self.describe_instance_patches(&req),
+            "DescribeEffectivePatchesForPatchBaseline" => {
+                self.describe_effective_patches_for_patch_baseline(&req)
+            }
+            "GetDeployablePatchSnapshotForInstance" => {
+                self.get_deployable_patch_snapshot_for_instance(&req)
+            }
+            // Resource data sync
+            "CreateResourceDataSync" => self.create_resource_data_sync(&req),
+            "DeleteResourceDataSync" => self.delete_resource_data_sync(&req),
+            "ListResourceDataSync" => self.list_resource_data_sync(&req),
+            "UpdateResourceDataSync" => self.update_resource_data_sync(&req),
+            // OpsMetadata extras
+            "GetOpsSummary" => self.get_ops_summary(&req),
             // Stubs
             "GetConnectionStatus" => self.get_connection_status(&req),
             "GetCalendarState" => self.get_calendar_state(&req),
@@ -220,6 +276,45 @@ impl AwsService for SsmService {
             "PutResourcePolicy",
             "GetResourcePolicies",
             "DeleteResourcePolicy",
+            // Inventory
+            "PutInventory",
+            "GetInventory",
+            "GetInventorySchema",
+            "ListInventoryEntries",
+            "DeleteInventory",
+            "DescribeInventoryDeletions",
+            // Compliance
+            "PutComplianceItems",
+            "ListComplianceItems",
+            "ListComplianceSummaries",
+            "ListResourceComplianceSummaries",
+            // Maintenance window details
+            "UpdateMaintenanceWindowTarget",
+            "UpdateMaintenanceWindowTask",
+            "GetMaintenanceWindowTask",
+            "GetMaintenanceWindowExecution",
+            "GetMaintenanceWindowExecutionTask",
+            "GetMaintenanceWindowExecutionTaskInvocation",
+            "DescribeMaintenanceWindowExecutions",
+            "DescribeMaintenanceWindowExecutionTasks",
+            "DescribeMaintenanceWindowExecutionTaskInvocations",
+            "DescribeMaintenanceWindowSchedule",
+            "DescribeMaintenanceWindowsForTarget",
+            "CancelMaintenanceWindowExecution",
+            // Patch management details
+            "UpdatePatchBaseline",
+            "DescribeInstancePatchStates",
+            "DescribeInstancePatchStatesForPatchGroup",
+            "DescribeInstancePatches",
+            "DescribeEffectivePatchesForPatchBaseline",
+            "GetDeployablePatchSnapshotForInstance",
+            // Resource data sync
+            "CreateResourceDataSync",
+            "DeleteResourceDataSync",
+            "ListResourceDataSync",
+            "UpdateResourceDataSync",
+            // OpsMetadata extras
+            "GetOpsSummary",
             // Stubs
             "GetConnectionStatus",
             "GetCalendarState",
@@ -4978,6 +5073,1337 @@ impl SsmService {
 
         Ok(json_resp(json!({})))
     }
+
+    // ── Inventory ─────────────────────────────────────────────────
+
+    fn put_inventory(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let instance_id = body["InstanceId"]
+            .as_str()
+            .ok_or_else(|| missing("InstanceId"))?
+            .to_string();
+        let items = body["Items"].as_array().ok_or_else(|| missing("Items"))?;
+
+        let mut inv_items = Vec::new();
+        for item in items {
+            let type_name = item["TypeName"]
+                .as_str()
+                .ok_or_else(|| missing("TypeName"))?
+                .to_string();
+            let schema_version = item["SchemaVersion"]
+                .as_str()
+                .ok_or_else(|| missing("SchemaVersion"))?
+                .to_string();
+            let capture_time = item["CaptureTime"]
+                .as_str()
+                .ok_or_else(|| missing("CaptureTime"))?
+                .to_string();
+            let content: Vec<HashMap<String, String>> = item["Content"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| {
+                            v.as_object().map(|obj| {
+                                obj.iter()
+                                    .filter_map(|(k, v)| {
+                                        v.as_str().map(|s| (k.clone(), s.to_string()))
+                                    })
+                                    .collect()
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let content_hash = item["ContentHash"].as_str().map(|s| s.to_string());
+            let context: Option<HashMap<String, String>> = item["Context"].as_object().map(|obj| {
+                obj.iter()
+                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                    .collect()
+            });
+
+            inv_items.push(InventoryItem {
+                type_name,
+                schema_version,
+                capture_time,
+                content,
+                content_hash,
+                context,
+            });
+        }
+
+        let mut state = self.state.write();
+        let entry = state
+            .inventory_entries
+            .entry(instance_id.clone())
+            .or_insert_with(|| InventoryEntry {
+                instance_id: instance_id.clone(),
+                items: Vec::new(),
+            });
+
+        // Merge: replace items by TypeName, add new ones
+        for new_item in inv_items {
+            if let Some(existing) = entry
+                .items
+                .iter_mut()
+                .find(|i| i.type_name == new_item.type_name)
+            {
+                *existing = new_item;
+            } else {
+                entry.items.push(new_item);
+            }
+        }
+
+        Ok(json_resp(
+            json!({ "Message": "Inventory was saved successfully" }),
+        ))
+    }
+
+    fn get_inventory(&self, _req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let state = self.state.read();
+        let entities: Vec<Value> = state
+            .inventory_entries
+            .values()
+            .map(|entry| {
+                let data: HashMap<String, Value> = entry
+                    .items
+                    .iter()
+                    .map(|item| {
+                        (
+                            item.type_name.clone(),
+                            json!({
+                                "TypeName": item.type_name,
+                                "SchemaVersion": item.schema_version,
+                                "CaptureTime": item.capture_time,
+                                "Content": item.content,
+                            }),
+                        )
+                    })
+                    .collect();
+                json!({
+                    "Id": entry.instance_id,
+                    "Data": data,
+                })
+            })
+            .collect();
+        Ok(json_resp(json!({ "Entities": entities })))
+    }
+
+    fn get_inventory_schema(&self, _req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        // Return standard inventory type schemas
+        let schemas = vec![
+            json!({
+                "TypeName": "AWS:Application",
+                "Version": "1.1",
+                "Attributes": [
+                    {"Name": "Name", "DataType": "STRING"},
+                    {"Name": "ApplicationType", "DataType": "STRING"},
+                    {"Name": "Publisher", "DataType": "STRING"},
+                    {"Name": "Version", "DataType": "STRING"},
+                    {"Name": "InstalledTime", "DataType": "STRING"},
+                    {"Name": "Architecture", "DataType": "STRING"},
+                    {"Name": "URL", "DataType": "STRING"},
+                ]
+            }),
+            json!({
+                "TypeName": "AWS:InstanceInformation",
+                "Version": "1.0",
+                "Attributes": [
+                    {"Name": "AgentType", "DataType": "STRING"},
+                    {"Name": "AgentVersion", "DataType": "STRING"},
+                    {"Name": "ComputerName", "DataType": "STRING"},
+                    {"Name": "InstanceId", "DataType": "STRING"},
+                    {"Name": "IpAddress", "DataType": "STRING"},
+                    {"Name": "PlatformName", "DataType": "STRING"},
+                    {"Name": "PlatformType", "DataType": "STRING"},
+                    {"Name": "PlatformVersion", "DataType": "STRING"},
+                    {"Name": "ResourceType", "DataType": "STRING"},
+                ]
+            }),
+            json!({
+                "TypeName": "AWS:Network",
+                "Version": "1.0",
+                "Attributes": [
+                    {"Name": "Name", "DataType": "STRING"},
+                    {"Name": "SubnetMask", "DataType": "STRING"},
+                    {"Name": "Gateway", "DataType": "STRING"},
+                    {"Name": "DHCPServer", "DataType": "STRING"},
+                    {"Name": "DNSServer", "DataType": "STRING"},
+                    {"Name": "MacAddress", "DataType": "STRING"},
+                    {"Name": "IPV4", "DataType": "STRING"},
+                    {"Name": "IPV6", "DataType": "STRING"},
+                ]
+            }),
+        ];
+        Ok(json_resp(json!({ "Schemas": schemas })))
+    }
+
+    fn list_inventory_entries(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let instance_id = body["InstanceId"]
+            .as_str()
+            .ok_or_else(|| missing("InstanceId"))?;
+        let type_name = body["TypeName"]
+            .as_str()
+            .ok_or_else(|| missing("TypeName"))?;
+
+        let state = self.state.read();
+        let entries: Vec<&HashMap<String, String>> = state
+            .inventory_entries
+            .get(instance_id)
+            .map(|entry| {
+                entry
+                    .items
+                    .iter()
+                    .filter(|item| item.type_name == type_name)
+                    .flat_map(|item| item.content.iter())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let capture_time = state
+            .inventory_entries
+            .get(instance_id)
+            .and_then(|e| e.items.iter().find(|i| i.type_name == type_name))
+            .map(|i| i.capture_time.as_str())
+            .unwrap_or("");
+        let schema_version = state
+            .inventory_entries
+            .get(instance_id)
+            .and_then(|e| e.items.iter().find(|i| i.type_name == type_name))
+            .map(|i| i.schema_version.as_str())
+            .unwrap_or("1.0");
+
+        Ok(json_resp(json!({
+            "TypeName": type_name,
+            "InstanceId": instance_id,
+            "SchemaVersion": schema_version,
+            "CaptureTime": capture_time,
+            "Entries": entries,
+        })))
+    }
+
+    fn delete_inventory(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let type_name = body["TypeName"]
+            .as_str()
+            .ok_or_else(|| missing("TypeName"))?
+            .to_string();
+
+        let mut state = self.state.write();
+
+        // Remove matching inventory items
+        for entry in state.inventory_entries.values_mut() {
+            entry.items.retain(|i| i.type_name != type_name);
+        }
+
+        state.inventory_deletion_counter += 1;
+        let deletion_id = format!("{}", uuid::Uuid::new_v4());
+        let now = Utc::now();
+
+        state.inventory_deletions.push(InventoryDeletion {
+            deletion_id: deletion_id.clone(),
+            type_name: type_name.clone(),
+            deletion_start_time: now,
+            last_status: "Complete".to_string(),
+            last_status_message: "Deletion completed successfully.".to_string(),
+            deletion_summary: json!({
+                "TotalCount": 0,
+                "RemainingCount": 0,
+                "SummaryItems": [],
+            }),
+            last_status_update_time: now,
+        });
+
+        Ok(json_resp(json!({
+            "DeletionId": deletion_id,
+            "TypeName": type_name,
+            "DeletionSummary": {
+                "TotalCount": 0,
+                "RemainingCount": 0,
+                "SummaryItems": [],
+            },
+        })))
+    }
+
+    fn describe_inventory_deletions(
+        &self,
+        _req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let state = self.state.read();
+        let deletions: Vec<Value> = state
+            .inventory_deletions
+            .iter()
+            .map(|d| {
+                json!({
+                    "DeletionId": d.deletion_id,
+                    "TypeName": d.type_name,
+                    "DeletionStartTime": d.deletion_start_time.timestamp_millis() as f64 / 1000.0,
+                    "LastStatus": d.last_status,
+                    "LastStatusMessage": d.last_status_message,
+                    "DeletionSummary": d.deletion_summary,
+                    "LastStatusUpdateTime": d.last_status_update_time.timestamp_millis() as f64 / 1000.0,
+                })
+            })
+            .collect();
+        Ok(json_resp(json!({ "InventoryDeletions": deletions })))
+    }
+
+    // ── Compliance ────────────────────────────────────────────────
+
+    fn put_compliance_items(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let resource_id = body["ResourceId"]
+            .as_str()
+            .ok_or_else(|| missing("ResourceId"))?
+            .to_string();
+        let resource_type = body["ResourceType"]
+            .as_str()
+            .ok_or_else(|| missing("ResourceType"))?
+            .to_string();
+        let compliance_type = body["ComplianceType"]
+            .as_str()
+            .ok_or_else(|| missing("ComplianceType"))?
+            .to_string();
+        let execution_summary = body
+            .get("ExecutionSummary")
+            .cloned()
+            .ok_or_else(|| missing("ExecutionSummary"))?;
+        let items = body["Items"].as_array().ok_or_else(|| missing("Items"))?;
+
+        let mut state = self.state.write();
+
+        // Remove existing compliance items for this resource/type
+        state
+            .compliance_items
+            .retain(|c| !(c.resource_id == resource_id && c.compliance_type == compliance_type));
+
+        for item in items {
+            let severity = item["Severity"]
+                .as_str()
+                .unwrap_or("UNSPECIFIED")
+                .to_string();
+            let status = item["Status"].as_str().unwrap_or("COMPLIANT").to_string();
+            let title = item["Title"].as_str().map(|s| s.to_string());
+            let id = item["Id"].as_str().map(|s| s.to_string());
+            let details: HashMap<String, String> = item["Details"]
+                .as_object()
+                .map(|obj| {
+                    obj.iter()
+                        .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            state.compliance_items.push(ComplianceItem {
+                resource_id: resource_id.clone(),
+                resource_type: resource_type.clone(),
+                compliance_type: compliance_type.clone(),
+                severity,
+                status,
+                title,
+                id,
+                details,
+                execution_summary: execution_summary.clone(),
+            });
+        }
+
+        Ok(json_resp(json!({})))
+    }
+
+    fn list_compliance_items(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let max_results = body["MaxResults"].as_i64().unwrap_or(50) as usize;
+        let next_token_offset: usize = body["NextToken"]
+            .as_str()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+
+        let resource_ids: Vec<&str> = body["ResourceIds"]
+            .as_array()
+            .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+            .unwrap_or_default();
+        let resource_types: Vec<&str> = body["ResourceTypes"]
+            .as_array()
+            .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+            .unwrap_or_default();
+
+        let state = self.state.read();
+        let all_items: Vec<Value> = state
+            .compliance_items
+            .iter()
+            .filter(|c| {
+                if !resource_ids.is_empty() && !resource_ids.contains(&c.resource_id.as_str()) {
+                    return false;
+                }
+                if !resource_types.is_empty() && !resource_types.contains(&c.resource_type.as_str())
+                {
+                    return false;
+                }
+                true
+            })
+            .map(|c| {
+                let mut v = json!({
+                    "ResourceId": c.resource_id,
+                    "ResourceType": c.resource_type,
+                    "ComplianceType": c.compliance_type,
+                    "Severity": c.severity,
+                    "Status": c.status,
+                    "ExecutionSummary": c.execution_summary,
+                });
+                if let Some(ref title) = c.title {
+                    v["Title"] = json!(title);
+                }
+                if let Some(ref id) = c.id {
+                    v["Id"] = json!(id);
+                }
+                if !c.details.is_empty() {
+                    v["Details"] = json!(c.details);
+                }
+                v
+            })
+            .collect();
+
+        let page = if next_token_offset < all_items.len() {
+            &all_items[next_token_offset..]
+        } else {
+            &[]
+        };
+        let has_more = page.len() > max_results;
+        let items: Vec<Value> = page.iter().take(max_results).cloned().collect();
+        let mut resp = json!({ "ComplianceItems": items });
+        if has_more {
+            resp["NextToken"] = json!((next_token_offset + max_results).to_string());
+        }
+        Ok(json_resp(resp))
+    }
+
+    fn list_compliance_summaries(&self, _req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let state = self.state.read();
+
+        // Group by compliance_type
+        let mut type_counts: HashMap<String, (i64, i64)> = HashMap::new(); // (compliant, non_compliant)
+        for item in &state.compliance_items {
+            let entry = type_counts
+                .entry(item.compliance_type.clone())
+                .or_insert((0, 0));
+            if item.status == "COMPLIANT" {
+                entry.0 += 1;
+            } else {
+                entry.1 += 1;
+            }
+        }
+
+        let summaries: Vec<Value> = type_counts
+            .iter()
+            .map(|(ct, (compliant, non_compliant))| {
+                json!({
+                    "ComplianceType": ct,
+                    "CompliantSummary": {
+                        "CompliantCount": compliant,
+                        "SeveritySummary": {"CriticalCount": 0, "HighCount": 0, "MediumCount": 0, "LowCount": 0, "InformationalCount": 0, "UnspecifiedCount": 0},
+                    },
+                    "NonCompliantSummary": {
+                        "NonCompliantCount": non_compliant,
+                        "SeveritySummary": {"CriticalCount": 0, "HighCount": 0, "MediumCount": 0, "LowCount": 0, "InformationalCount": 0, "UnspecifiedCount": 0},
+                    },
+                })
+            })
+            .collect();
+
+        Ok(json_resp(json!({ "ComplianceSummaryItems": summaries })))
+    }
+
+    fn list_resource_compliance_summaries(
+        &self,
+        _req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let state = self.state.read();
+
+        // Group by resource_id
+        let mut resource_status: HashMap<String, (String, String, i64, i64)> = HashMap::new();
+        for item in &state.compliance_items {
+            let entry = resource_status
+                .entry(item.resource_id.clone())
+                .or_insert_with(|| (item.resource_type.clone(), "COMPLIANT".to_string(), 0, 0));
+            if item.status == "COMPLIANT" {
+                entry.2 += 1;
+            } else {
+                entry.1 = "NON_COMPLIANT".to_string();
+                entry.3 += 1;
+            }
+        }
+
+        let summaries: Vec<Value> = resource_status
+            .iter()
+            .map(
+                |(resource_id, (resource_type, status, compliant, non_compliant))| {
+                    json!({
+                        "ResourceId": resource_id,
+                        "ResourceType": resource_type,
+                        "Status": status,
+                        "OverallSeverity": "UNSPECIFIED",
+                        "CompliantSummary": {
+                            "CompliantCount": compliant,
+                            "SeveritySummary": {"CriticalCount": 0, "HighCount": 0, "MediumCount": 0, "LowCount": 0, "InformationalCount": 0, "UnspecifiedCount": 0},
+                        },
+                        "NonCompliantSummary": {
+                            "NonCompliantCount": non_compliant,
+                            "SeveritySummary": {"CriticalCount": 0, "HighCount": 0, "MediumCount": 0, "LowCount": 0, "InformationalCount": 0, "UnspecifiedCount": 0},
+                        },
+                    })
+                },
+            )
+            .collect();
+
+        Ok(json_resp(
+            json!({ "ResourceComplianceSummaryItems": summaries }),
+        ))
+    }
+
+    // ── Maintenance Window Details ────────────────────────────────
+
+    fn update_maintenance_window_target(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let window_id = body["WindowId"]
+            .as_str()
+            .ok_or_else(|| missing("WindowId"))?;
+        let target_id = body["WindowTargetId"]
+            .as_str()
+            .ok_or_else(|| missing("WindowTargetId"))?;
+
+        let mut state = self.state.write();
+        let mw = state
+            .maintenance_windows
+            .get_mut(window_id)
+            .ok_or_else(|| mw_not_found(window_id))?;
+
+        let target = mw
+            .targets
+            .iter_mut()
+            .find(|t| t.window_target_id == target_id)
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "DoesNotExistException",
+                    format!("Target {target_id} does not exist in window {window_id}"),
+                )
+            })?;
+
+        if let Some(name) = body["Name"].as_str() {
+            target.name = Some(name.to_string());
+        }
+        if body.get("Description").is_some() {
+            target.description = body["Description"].as_str().map(|s| s.to_string());
+        }
+        if let Some(targets) = body["Targets"].as_array() {
+            target.targets = targets.clone();
+        }
+        if body.get("OwnerInformation").is_some() {
+            target.owner_information = body["OwnerInformation"].as_str().map(|s| s.to_string());
+        }
+
+        let mut resp = json!({
+            "WindowId": window_id,
+            "WindowTargetId": target_id,
+            "Targets": target.targets,
+        });
+        if let Some(ref name) = target.name {
+            resp["Name"] = json!(name);
+        }
+        if let Some(ref desc) = target.description {
+            resp["Description"] = json!(desc);
+        }
+        if let Some(ref oi) = target.owner_information {
+            resp["OwnerInformation"] = json!(oi);
+        }
+
+        Ok(json_resp(resp))
+    }
+
+    fn update_maintenance_window_task(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let window_id = body["WindowId"]
+            .as_str()
+            .ok_or_else(|| missing("WindowId"))?;
+        let task_id = body["WindowTaskId"]
+            .as_str()
+            .ok_or_else(|| missing("WindowTaskId"))?;
+
+        let mut state = self.state.write();
+        let mw = state
+            .maintenance_windows
+            .get_mut(window_id)
+            .ok_or_else(|| mw_not_found(window_id))?;
+
+        let task = mw
+            .tasks
+            .iter_mut()
+            .find(|t| t.window_task_id == task_id)
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "DoesNotExistException",
+                    format!("Task {task_id} does not exist in window {window_id}"),
+                )
+            })?;
+
+        if let Some(name) = body["Name"].as_str() {
+            task.name = Some(name.to_string());
+        }
+        if body.get("Description").is_some() {
+            task.description = body["Description"].as_str().map(|s| s.to_string());
+        }
+        if let Some(targets) = body["Targets"].as_array() {
+            task.targets = targets.clone();
+        }
+        if let Some(task_arn) = body["TaskArn"].as_str() {
+            task.task_arn = task_arn.to_string();
+        }
+        if let Some(mc) = body["MaxConcurrency"].as_str() {
+            task.max_concurrency = Some(mc.to_string());
+        }
+        if let Some(me) = body["MaxErrors"].as_str() {
+            task.max_errors = Some(me.to_string());
+        }
+        if let Some(p) = body["Priority"].as_i64() {
+            task.priority = p;
+        }
+
+        let mut resp = json!({
+            "WindowId": window_id,
+            "WindowTaskId": task_id,
+            "TaskArn": task.task_arn,
+            "TaskType": task.task_type,
+            "Targets": task.targets,
+            "Priority": task.priority,
+        });
+        if let Some(ref name) = task.name {
+            resp["Name"] = json!(name);
+        }
+        if let Some(ref desc) = task.description {
+            resp["Description"] = json!(desc);
+        }
+        if let Some(ref mc) = task.max_concurrency {
+            resp["MaxConcurrency"] = json!(mc);
+        }
+        if let Some(ref me) = task.max_errors {
+            resp["MaxErrors"] = json!(me);
+        }
+
+        Ok(json_resp(resp))
+    }
+
+    fn get_maintenance_window_task(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let window_id = body["WindowId"]
+            .as_str()
+            .ok_or_else(|| missing("WindowId"))?;
+        let task_id = body["WindowTaskId"]
+            .as_str()
+            .ok_or_else(|| missing("WindowTaskId"))?;
+
+        let state = self.state.read();
+        let mw = state
+            .maintenance_windows
+            .get(window_id)
+            .ok_or_else(|| mw_not_found(window_id))?;
+
+        let task = mw
+            .tasks
+            .iter()
+            .find(|t| t.window_task_id == task_id)
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "DoesNotExistException",
+                    format!("Task {task_id} does not exist in window {window_id}"),
+                )
+            })?;
+
+        let mut resp = json!({
+            "WindowId": window_id,
+            "WindowTaskId": task_id,
+            "TaskArn": task.task_arn,
+            "TaskType": task.task_type,
+            "Targets": task.targets,
+            "Priority": task.priority,
+        });
+        if let Some(ref name) = task.name {
+            resp["Name"] = json!(name);
+        }
+        if let Some(ref desc) = task.description {
+            resp["Description"] = json!(desc);
+        }
+        if let Some(ref mc) = task.max_concurrency {
+            resp["MaxConcurrency"] = json!(mc);
+        }
+        if let Some(ref me) = task.max_errors {
+            resp["MaxErrors"] = json!(me);
+        }
+        if let Some(ref sra) = task.service_role_arn {
+            resp["ServiceRoleArn"] = json!(sra);
+        }
+
+        Ok(json_resp(resp))
+    }
+
+    fn get_maintenance_window_execution(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let execution_id = body["WindowExecutionId"]
+            .as_str()
+            .ok_or_else(|| missing("WindowExecutionId"))?;
+
+        let state = self.state.read();
+        let exec = state
+            .maintenance_window_executions
+            .iter()
+            .find(|e| e.window_execution_id == execution_id)
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "DoesNotExistException",
+                    format!("Execution {execution_id} does not exist"),
+                )
+            })?;
+
+        let mut resp = json!({
+            "WindowExecutionId": exec.window_execution_id,
+            "WindowId": exec.window_id,
+            "Status": exec.status,
+            "StartTime": exec.start_time.timestamp_millis() as f64 / 1000.0,
+            "TaskIds": exec.tasks.iter().map(|t| &t.task_execution_id).collect::<Vec<_>>(),
+        });
+        if let Some(ref end) = exec.end_time {
+            resp["EndTime"] = json!(end.timestamp_millis() as f64 / 1000.0);
+        }
+
+        Ok(json_resp(resp))
+    }
+
+    fn get_maintenance_window_execution_task(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let execution_id = body["WindowExecutionId"]
+            .as_str()
+            .ok_or_else(|| missing("WindowExecutionId"))?;
+        let task_id = body["TaskId"].as_str().ok_or_else(|| missing("TaskId"))?;
+
+        let state = self.state.read();
+        let exec = state
+            .maintenance_window_executions
+            .iter()
+            .find(|e| e.window_execution_id == execution_id)
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "DoesNotExistException",
+                    format!("Execution {execution_id} does not exist"),
+                )
+            })?;
+
+        let task = exec
+            .tasks
+            .iter()
+            .find(|t| t.task_execution_id == task_id)
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "DoesNotExistException",
+                    format!("Task {task_id} does not exist in execution {execution_id}"),
+                )
+            })?;
+
+        let mut resp = json!({
+            "WindowExecutionId": execution_id,
+            "TaskExecutionId": task.task_execution_id,
+            "TaskArn": task.task_arn,
+            "Type": task.task_type,
+            "Status": task.status,
+            "StartTime": task.start_time.timestamp_millis() as f64 / 1000.0,
+        });
+        if let Some(ref end) = task.end_time {
+            resp["EndTime"] = json!(end.timestamp_millis() as f64 / 1000.0);
+        }
+
+        Ok(json_resp(resp))
+    }
+
+    fn get_maintenance_window_execution_task_invocation(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let execution_id = body["WindowExecutionId"]
+            .as_str()
+            .ok_or_else(|| missing("WindowExecutionId"))?;
+        let task_id = body["TaskId"].as_str().ok_or_else(|| missing("TaskId"))?;
+        let invocation_id = body["InvocationId"]
+            .as_str()
+            .ok_or_else(|| missing("InvocationId"))?;
+
+        let state = self.state.read();
+        let exec = state
+            .maintenance_window_executions
+            .iter()
+            .find(|e| e.window_execution_id == execution_id)
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "DoesNotExistException",
+                    format!("Execution {execution_id} does not exist"),
+                )
+            })?;
+
+        let task = exec
+            .tasks
+            .iter()
+            .find(|t| t.task_execution_id == task_id)
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "DoesNotExistException",
+                    format!("Task {task_id} does not exist"),
+                )
+            })?;
+
+        let inv = task
+            .invocations
+            .iter()
+            .find(|i| i.invocation_id == invocation_id)
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "DoesNotExistException",
+                    format!("Invocation {invocation_id} does not exist"),
+                )
+            })?;
+
+        let mut resp = json!({
+            "WindowExecutionId": execution_id,
+            "TaskExecutionId": task_id,
+            "InvocationId": invocation_id,
+            "Status": inv.status,
+            "StartTime": inv.start_time.timestamp_millis() as f64 / 1000.0,
+        });
+        if let Some(ref end) = inv.end_time {
+            resp["EndTime"] = json!(end.timestamp_millis() as f64 / 1000.0);
+        }
+        if let Some(ref eid) = inv.execution_id {
+            resp["ExecutionId"] = json!(eid);
+        }
+        if let Some(ref p) = inv.parameters {
+            resp["Parameters"] = json!(p);
+        }
+        if let Some(ref oi) = inv.owner_information {
+            resp["OwnerInformation"] = json!(oi);
+        }
+        if let Some(ref wtid) = inv.window_target_id {
+            resp["WindowTargetId"] = json!(wtid);
+        }
+        if let Some(ref sd) = inv.status_details {
+            resp["StatusDetails"] = json!(sd);
+        }
+
+        Ok(json_resp(resp))
+    }
+
+    fn describe_maintenance_window_executions(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let window_id = body["WindowId"]
+            .as_str()
+            .ok_or_else(|| missing("WindowId"))?;
+        let max_results = body["MaxResults"].as_i64().unwrap_or(50) as usize;
+        let next_token_offset: usize = body["NextToken"]
+            .as_str()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+
+        let state = self.state.read();
+        let all: Vec<Value> = state
+            .maintenance_window_executions
+            .iter()
+            .filter(|e| e.window_id == window_id)
+            .map(|e| {
+                let mut v = json!({
+                    "WindowId": e.window_id,
+                    "WindowExecutionId": e.window_execution_id,
+                    "Status": e.status,
+                    "StartTime": e.start_time.timestamp_millis() as f64 / 1000.0,
+                });
+                if let Some(ref end) = e.end_time {
+                    v["EndTime"] = json!(end.timestamp_millis() as f64 / 1000.0);
+                }
+                v
+            })
+            .collect();
+
+        let page = if next_token_offset < all.len() {
+            &all[next_token_offset..]
+        } else {
+            &[]
+        };
+        let has_more = page.len() > max_results;
+        let items: Vec<Value> = page.iter().take(max_results).cloned().collect();
+        let mut resp = json!({ "WindowExecutions": items });
+        if has_more {
+            resp["NextToken"] = json!((next_token_offset + max_results).to_string());
+        }
+        Ok(json_resp(resp))
+    }
+
+    fn describe_maintenance_window_execution_tasks(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let execution_id = body["WindowExecutionId"]
+            .as_str()
+            .ok_or_else(|| missing("WindowExecutionId"))?;
+
+        let state = self.state.read();
+        let tasks: Vec<Value> = state
+            .maintenance_window_executions
+            .iter()
+            .find(|e| e.window_execution_id == execution_id)
+            .map(|e| {
+                e.tasks
+                    .iter()
+                    .map(|t| {
+                        let mut v = json!({
+                            "WindowExecutionId": execution_id,
+                            "TaskExecutionId": t.task_execution_id,
+                            "TaskArn": t.task_arn,
+                            "Type": t.task_type,
+                            "Status": t.status,
+                            "StartTime": t.start_time.timestamp_millis() as f64 / 1000.0,
+                        });
+                        if let Some(ref end) = t.end_time {
+                            v["EndTime"] = json!(end.timestamp_millis() as f64 / 1000.0);
+                        }
+                        v
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        Ok(json_resp(json!({ "WindowExecutionTaskIdentities": tasks })))
+    }
+
+    fn describe_maintenance_window_execution_task_invocations(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let execution_id = body["WindowExecutionId"]
+            .as_str()
+            .ok_or_else(|| missing("WindowExecutionId"))?;
+        let task_id = body["TaskId"].as_str().ok_or_else(|| missing("TaskId"))?;
+
+        let state = self.state.read();
+        let invocations: Vec<Value> = state
+            .maintenance_window_executions
+            .iter()
+            .find(|e| e.window_execution_id == execution_id)
+            .and_then(|e| e.tasks.iter().find(|t| t.task_execution_id == task_id))
+            .map(|t| {
+                t.invocations
+                    .iter()
+                    .map(|i| {
+                        let mut v = json!({
+                            "WindowExecutionId": execution_id,
+                            "TaskExecutionId": task_id,
+                            "InvocationId": i.invocation_id,
+                            "Status": i.status,
+                            "StartTime": i.start_time.timestamp_millis() as f64 / 1000.0,
+                        });
+                        if let Some(ref end) = i.end_time {
+                            v["EndTime"] = json!(end.timestamp_millis() as f64 / 1000.0);
+                        }
+                        if let Some(ref eid) = i.execution_id {
+                            v["ExecutionId"] = json!(eid);
+                        }
+                        v
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        Ok(json_resp(
+            json!({ "WindowExecutionTaskInvocationIdentities": invocations }),
+        ))
+    }
+
+    fn describe_maintenance_window_schedule(
+        &self,
+        _req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        Ok(json_resp(json!({ "ScheduledWindowExecutions": [] })))
+    }
+
+    fn describe_maintenance_windows_for_target(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let _resource_type = body["ResourceType"]
+            .as_str()
+            .ok_or_else(|| missing("ResourceType"))?;
+        let targets = body["Targets"]
+            .as_array()
+            .ok_or_else(|| missing("Targets"))?;
+
+        // Extract instance IDs from targets
+        let target_instance_ids: Vec<&str> = targets
+            .iter()
+            .filter(|t| t["Key"].as_str() == Some("InstanceIds"))
+            .flat_map(|t| {
+                t["Values"]
+                    .as_array()
+                    .map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>())
+                    .unwrap_or_default()
+            })
+            .collect();
+
+        let state = self.state.read();
+        let windows: Vec<Value> = state
+            .maintenance_windows
+            .values()
+            .filter(|mw| {
+                if target_instance_ids.is_empty() {
+                    return true;
+                }
+                mw.targets.iter().any(|t| {
+                    t.targets.iter().any(|tgt| {
+                        tgt["Key"].as_str() == Some("InstanceIds")
+                            && tgt["Values"]
+                                .as_array()
+                                .map(|a| {
+                                    a.iter().any(|v| {
+                                        target_instance_ids.contains(&v.as_str().unwrap_or(""))
+                                    })
+                                })
+                                .unwrap_or(false)
+                    })
+                })
+            })
+            .map(|mw| {
+                json!({
+                    "WindowId": mw.id,
+                    "Name": mw.name,
+                })
+            })
+            .collect();
+
+        Ok(json_resp(json!({ "WindowIdentities": windows })))
+    }
+
+    fn cancel_maintenance_window_execution(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let execution_id = body["WindowExecutionId"]
+            .as_str()
+            .ok_or_else(|| missing("WindowExecutionId"))?;
+
+        let mut state = self.state.write();
+        let exec = state
+            .maintenance_window_executions
+            .iter_mut()
+            .find(|e| e.window_execution_id == execution_id)
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "DoesNotExistException",
+                    format!("Execution {execution_id} does not exist"),
+                )
+            })?;
+
+        exec.status = "CANCELLING".to_string();
+
+        Ok(json_resp(json!({ "WindowExecutionId": execution_id })))
+    }
+
+    // ── Patch Management Details ──────────────────────────────────
+
+    fn update_patch_baseline(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let baseline_id = body["BaselineId"]
+            .as_str()
+            .ok_or_else(|| missing("BaselineId"))?;
+
+        let mut state = self.state.write();
+        let pb = state.patch_baselines.get_mut(baseline_id).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "DoesNotExistException",
+                format!("Patch baseline {baseline_id} does not exist"),
+            )
+        })?;
+
+        if let Some(name) = body["Name"].as_str() {
+            pb.name = name.to_string();
+        }
+        if body.get("Description").is_some() {
+            pb.description = body["Description"].as_str().map(|s| s.to_string());
+        }
+        if let Some(rules) = body.get("ApprovalRules") {
+            pb.approval_rules = Some(rules.clone());
+        }
+        if let Some(arr) = body["ApprovedPatches"].as_array() {
+            pb.approved_patches = arr
+                .iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect();
+        }
+        if let Some(arr) = body["RejectedPatches"].as_array() {
+            pb.rejected_patches = arr
+                .iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect();
+        }
+        if let Some(level) = body["ApprovedPatchesComplianceLevel"].as_str() {
+            pb.approved_patches_compliance_level = level.to_string();
+        }
+        if let Some(action) = body["RejectedPatchesAction"].as_str() {
+            pb.rejected_patches_action = action.to_string();
+        }
+        if let Some(gf) = body.get("GlobalFilters") {
+            pb.global_filters = Some(gf.clone());
+        }
+        if let Some(arr) = body["Sources"].as_array() {
+            pb.sources = arr.clone();
+        }
+        if let Some(enable) = body["ApprovedPatchesEnableNonSecurity"].as_bool() {
+            pb.approved_patches_enable_non_security = enable;
+        }
+
+        let mut resp = json!({
+            "BaselineId": pb.id,
+            "Name": pb.name,
+            "OperatingSystem": pb.operating_system,
+            "ApprovedPatches": pb.approved_patches,
+            "RejectedPatches": pb.rejected_patches,
+            "ApprovedPatchesComplianceLevel": pb.approved_patches_compliance_level,
+            "RejectedPatchesAction": pb.rejected_patches_action,
+            "ApprovedPatchesEnableNonSecurity": pb.approved_patches_enable_non_security,
+            "Sources": pb.sources,
+        });
+        if let Some(ref desc) = pb.description {
+            resp["Description"] = json!(desc);
+        }
+        if let Some(ref rules) = pb.approval_rules {
+            resp["ApprovalRules"] = rules.clone();
+        }
+        if let Some(ref gf) = pb.global_filters {
+            resp["GlobalFilters"] = gf.clone();
+        }
+
+        Ok(json_resp(resp))
+    }
+
+    fn describe_instance_patch_states(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let _instance_ids = body["InstanceIds"]
+            .as_array()
+            .ok_or_else(|| missing("InstanceIds"))?;
+        // Return empty - no real instances in emulator
+        Ok(json_resp(json!({ "InstancePatchStates": [] })))
+    }
+
+    fn describe_instance_patch_states_for_patch_group(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let _patch_group = body["PatchGroup"]
+            .as_str()
+            .ok_or_else(|| missing("PatchGroup"))?;
+        Ok(json_resp(json!({ "InstancePatchStates": [] })))
+    }
+
+    fn describe_instance_patches(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let _instance_id = body["InstanceId"]
+            .as_str()
+            .ok_or_else(|| missing("InstanceId"))?;
+        Ok(json_resp(json!({ "Patches": [] })))
+    }
+
+    fn describe_effective_patches_for_patch_baseline(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let _baseline_id = body["BaselineId"]
+            .as_str()
+            .ok_or_else(|| missing("BaselineId"))?;
+        Ok(json_resp(json!({ "EffectivePatches": [] })))
+    }
+
+    fn get_deployable_patch_snapshot_for_instance(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let instance_id = body["InstanceId"]
+            .as_str()
+            .ok_or_else(|| missing("InstanceId"))?;
+        let snapshot_id = body["SnapshotId"]
+            .as_str()
+            .ok_or_else(|| missing("SnapshotId"))?;
+
+        Ok(json_resp(json!({
+            "InstanceId": instance_id,
+            "SnapshotId": snapshot_id,
+            "Product": "{}",
+            "SnapshotDownloadUrl": "",
+        })))
+    }
+
+    // ── Resource Data Sync ────────────────────────────────────────
+
+    fn create_resource_data_sync(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let sync_name = body["SyncName"]
+            .as_str()
+            .ok_or_else(|| missing("SyncName"))?
+            .to_string();
+
+        let mut state = self.state.write();
+        if state.resource_data_syncs.contains_key(&sync_name) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceDataSyncAlreadyExistsException",
+                format!("Sync {sync_name} already exists"),
+            ));
+        }
+
+        let now = Utc::now();
+        let sync = ResourceDataSync {
+            sync_name: sync_name.clone(),
+            sync_type: body["SyncType"].as_str().map(|s| s.to_string()),
+            sync_source: body.get("SyncSource").cloned(),
+            s3_destination: body.get("S3Destination").cloned(),
+            created_date: now,
+            last_sync_time: None,
+            last_successful_sync_time: None,
+            last_status: "Successful".to_string(),
+            sync_last_modified_time: now,
+        };
+        state.resource_data_syncs.insert(sync_name, sync);
+
+        Ok(json_resp(json!({})))
+    }
+
+    fn delete_resource_data_sync(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let sync_name = body["SyncName"]
+            .as_str()
+            .ok_or_else(|| missing("SyncName"))?;
+
+        let mut state = self.state.write();
+        if state.resource_data_syncs.remove(sync_name).is_none() {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceDataSyncNotFoundException",
+                format!("Sync {sync_name} not found"),
+            ));
+        }
+
+        Ok(json_resp(json!({})))
+    }
+
+    fn list_resource_data_sync(&self, _req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let state = self.state.read();
+        let syncs: Vec<Value> = state
+            .resource_data_syncs
+            .values()
+            .map(|s| {
+                let mut v = json!({
+                    "SyncName": s.sync_name,
+                    "LastStatus": s.last_status,
+                    "SyncCreatedTime": s.created_date.timestamp_millis() as f64 / 1000.0,
+                    "LastSyncStatusMessage": "",
+                    "SyncLastModifiedTime": s.sync_last_modified_time.timestamp_millis() as f64 / 1000.0,
+                });
+                if let Some(ref st) = s.sync_type {
+                    v["SyncType"] = json!(st);
+                }
+                if let Some(ref src) = s.sync_source {
+                    v["SyncSource"] = src.clone();
+                }
+                if let Some(ref dst) = s.s3_destination {
+                    v["S3Destination"] = dst.clone();
+                }
+                if let Some(ref lst) = s.last_sync_time {
+                    v["LastSyncTime"] = json!(lst.timestamp_millis() as f64 / 1000.0);
+                }
+                if let Some(ref lsst) = s.last_successful_sync_time {
+                    v["LastSuccessfulSyncTime"] =
+                        json!(lsst.timestamp_millis() as f64 / 1000.0);
+                }
+                v
+            })
+            .collect();
+        Ok(json_resp(json!({ "ResourceDataSyncItems": syncs })))
+    }
+
+    fn update_resource_data_sync(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let sync_name = body["SyncName"]
+            .as_str()
+            .ok_or_else(|| missing("SyncName"))?;
+        let _sync_type = body["SyncType"]
+            .as_str()
+            .ok_or_else(|| missing("SyncType"))?;
+        let sync_source = body
+            .get("SyncSource")
+            .cloned()
+            .ok_or_else(|| missing("SyncSource"))?;
+
+        let mut state = self.state.write();
+        let sync = state
+            .resource_data_syncs
+            .get_mut(sync_name)
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ResourceDataSyncNotFoundException",
+                    format!("Sync {sync_name} not found"),
+                )
+            })?;
+        sync.sync_source = Some(sync_source);
+        sync.sync_last_modified_time = Utc::now();
+
+        Ok(json_resp(json!({})))
+    }
+
+    // ── GetOpsSummary ─────────────────────────────────────────────
+
+    fn get_ops_summary(&self, _req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        Ok(json_resp(json!({ "Entities": [] })))
+    }
 }
 
 fn association_to_json(a: &SsmAssociation) -> Value {
@@ -6291,5 +7717,532 @@ mod tests {
         let resp = svc.describe_patch_properties(&req).unwrap();
         let body: Value = serde_json::from_slice(&resp.body).unwrap();
         assert!(body["Properties"].as_array().unwrap().is_empty());
+    }
+
+    // ── Inventory ─────────────────────────────────────────────────
+
+    #[test]
+    fn inventory_lifecycle() {
+        let svc = make_service();
+
+        // PutInventory
+        let req = make_request(
+            "PutInventory",
+            json!({
+                "InstanceId": "i-1234567890abcdef0",
+                "Items": [{
+                    "TypeName": "AWS:Application",
+                    "SchemaVersion": "1.1",
+                    "CaptureTime": "2024-01-01T00:00:00Z",
+                    "Content": [
+                        {"Name": "TestApp", "Version": "1.0"},
+                        {"Name": "AnotherApp", "Version": "2.0"},
+                    ]
+                }]
+            }),
+        );
+        svc.put_inventory(&req).unwrap();
+
+        // GetInventory
+        let req = make_request("GetInventory", json!({}));
+        let resp = svc.get_inventory(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["Entities"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            body["Entities"][0]["Id"].as_str().unwrap(),
+            "i-1234567890abcdef0"
+        );
+
+        // ListInventoryEntries
+        let req = make_request(
+            "ListInventoryEntries",
+            json!({
+                "InstanceId": "i-1234567890abcdef0",
+                "TypeName": "AWS:Application",
+            }),
+        );
+        let resp = svc.list_inventory_entries(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["Entries"].as_array().unwrap().len(), 2);
+        assert_eq!(body["TypeName"].as_str().unwrap(), "AWS:Application");
+
+        // GetInventorySchema
+        let req = make_request("GetInventorySchema", json!({}));
+        let resp = svc.get_inventory_schema(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert!(!body["Schemas"].as_array().unwrap().is_empty());
+
+        // DeleteInventory
+        let req = make_request("DeleteInventory", json!({ "TypeName": "AWS:Application" }));
+        let resp = svc.delete_inventory(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert!(body["DeletionId"].is_string());
+
+        // DescribeInventoryDeletions
+        let req = make_request("DescribeInventoryDeletions", json!({}));
+        let resp = svc.describe_inventory_deletions(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["InventoryDeletions"].as_array().unwrap().len(), 1);
+
+        // Verify inventory deleted
+        let req = make_request(
+            "ListInventoryEntries",
+            json!({
+                "InstanceId": "i-1234567890abcdef0",
+                "TypeName": "AWS:Application",
+            }),
+        );
+        let resp = svc.list_inventory_entries(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert!(body["Entries"].as_array().unwrap().is_empty());
+    }
+
+    // ── Compliance ────────────────────────────────────────────────
+
+    #[test]
+    fn compliance_lifecycle() {
+        let svc = make_service();
+
+        // PutComplianceItems
+        let req = make_request(
+            "PutComplianceItems",
+            json!({
+                "ResourceId": "i-1234567890abcdef0",
+                "ResourceType": "ManagedInstance",
+                "ComplianceType": "Custom:PatchTest",
+                "ExecutionSummary": {
+                    "ExecutionTime": "2024-01-01T00:00:00Z",
+                },
+                "Items": [
+                    {
+                        "Id": "patch-1",
+                        "Title": "Security patch 1",
+                        "Severity": "CRITICAL",
+                        "Status": "COMPLIANT",
+                    },
+                    {
+                        "Id": "patch-2",
+                        "Title": "Security patch 2",
+                        "Severity": "HIGH",
+                        "Status": "NON_COMPLIANT",
+                    },
+                ],
+            }),
+        );
+        svc.put_compliance_items(&req).unwrap();
+
+        // ListComplianceItems
+        let req = make_request("ListComplianceItems", json!({}));
+        let resp = svc.list_compliance_items(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["ComplianceItems"].as_array().unwrap().len(), 2);
+
+        // ListComplianceSummaries
+        let req = make_request("ListComplianceSummaries", json!({}));
+        let resp = svc.list_compliance_summaries(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["ComplianceSummaryItems"].as_array().unwrap().len(), 1);
+
+        // ListResourceComplianceSummaries
+        let req = make_request("ListResourceComplianceSummaries", json!({}));
+        let resp = svc.list_resource_compliance_summaries(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(
+            body["ResourceComplianceSummaryItems"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    // ── Maintenance Window Details ────────────────────────────────
+
+    fn create_mw_with_target_and_task(svc: &SsmService) -> (String, String, String) {
+        // Create a window
+        let req = make_request(
+            "CreateMaintenanceWindow",
+            json!({
+                "Name": "test-mw",
+                "Schedule": "cron(0 2 ? * SUN *)",
+                "Duration": 3,
+                "Cutoff": 1,
+                "AllowUnassociatedTargets": true,
+            }),
+        );
+        let resp = svc.create_maintenance_window(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let window_id = body["WindowId"].as_str().unwrap().to_string();
+
+        // Register target
+        let req = make_request(
+            "RegisterTargetWithMaintenanceWindow",
+            json!({
+                "WindowId": window_id,
+                "ResourceType": "INSTANCE",
+                "Targets": [{"Key": "InstanceIds", "Values": ["i-001"]}],
+                "Name": "test-target",
+            }),
+        );
+        let resp = svc.register_target_with_maintenance_window(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let target_id = body["WindowTargetId"].as_str().unwrap().to_string();
+
+        // Register task
+        let req = make_request(
+            "RegisterTaskWithMaintenanceWindow",
+            json!({
+                "WindowId": window_id,
+                "TaskArn": "AWS-RunShellScript",
+                "TaskType": "RUN_COMMAND",
+                "Targets": [{"Key": "WindowTargetIds", "Values": [target_id]}],
+                "Name": "test-task",
+            }),
+        );
+        let resp = svc.register_task_with_maintenance_window(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let task_id = body["WindowTaskId"].as_str().unwrap().to_string();
+
+        (window_id, target_id, task_id)
+    }
+
+    #[test]
+    fn maintenance_window_update_target_and_task() {
+        let svc = make_service();
+        let (window_id, target_id, task_id) = create_mw_with_target_and_task(&svc);
+
+        // Update target
+        let req = make_request(
+            "UpdateMaintenanceWindowTarget",
+            json!({
+                "WindowId": window_id,
+                "WindowTargetId": target_id,
+                "Name": "updated-target",
+            }),
+        );
+        let resp = svc.update_maintenance_window_target(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["Name"].as_str().unwrap(), "updated-target");
+
+        // Get task
+        let req = make_request(
+            "GetMaintenanceWindowTask",
+            json!({
+                "WindowId": window_id,
+                "WindowTaskId": task_id,
+            }),
+        );
+        let resp = svc.get_maintenance_window_task(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["TaskArn"].as_str().unwrap(), "AWS-RunShellScript");
+        assert_eq!(body["Name"].as_str().unwrap(), "test-task");
+
+        // Update task
+        let req = make_request(
+            "UpdateMaintenanceWindowTask",
+            json!({
+                "WindowId": window_id,
+                "WindowTaskId": task_id,
+                "Name": "updated-task",
+                "MaxConcurrency": "10",
+            }),
+        );
+        let resp = svc.update_maintenance_window_task(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["Name"].as_str().unwrap(), "updated-task");
+        assert_eq!(body["MaxConcurrency"].as_str().unwrap(), "10");
+    }
+
+    #[test]
+    fn maintenance_window_execution_lifecycle() {
+        let svc = make_service();
+        let (window_id, _, _) = create_mw_with_target_and_task(&svc);
+
+        // Manually insert an execution for testing
+        {
+            let now = chrono::Utc::now();
+            let mut state = svc.state.write();
+            let exec = crate::state::MaintenanceWindowExecution {
+                window_execution_id: "exec-001".to_string(),
+                window_id: window_id.clone(),
+                status: "IN_PROGRESS".to_string(),
+                start_time: now,
+                end_time: None,
+                tasks: vec![crate::state::MaintenanceWindowExecutionTask {
+                    task_execution_id: "task-exec-001".to_string(),
+                    window_execution_id: "exec-001".to_string(),
+                    task_arn: "AWS-RunShellScript".to_string(),
+                    task_type: "RUN_COMMAND".to_string(),
+                    status: "IN_PROGRESS".to_string(),
+                    start_time: now,
+                    end_time: None,
+                    invocations: vec![crate::state::MaintenanceWindowExecutionTaskInvocation {
+                        invocation_id: "inv-001".to_string(),
+                        task_execution_id: "task-exec-001".to_string(),
+                        window_execution_id: "exec-001".to_string(),
+                        execution_id: Some("cmd-001".to_string()),
+                        status: "IN_PROGRESS".to_string(),
+                        start_time: now,
+                        end_time: None,
+                        parameters: None,
+                        owner_information: None,
+                        window_target_id: None,
+                        status_details: None,
+                    }],
+                }],
+            };
+            state.maintenance_window_executions.push(exec);
+        }
+
+        // DescribeMaintenanceWindowExecutions
+        let req = make_request(
+            "DescribeMaintenanceWindowExecutions",
+            json!({ "WindowId": window_id }),
+        );
+        let resp = svc.describe_maintenance_window_executions(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["WindowExecutions"].as_array().unwrap().len(), 1);
+
+        // GetMaintenanceWindowExecution
+        let req = make_request(
+            "GetMaintenanceWindowExecution",
+            json!({ "WindowExecutionId": "exec-001" }),
+        );
+        let resp = svc.get_maintenance_window_execution(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["Status"].as_str().unwrap(), "IN_PROGRESS");
+
+        // DescribeMaintenanceWindowExecutionTasks
+        let req = make_request(
+            "DescribeMaintenanceWindowExecutionTasks",
+            json!({ "WindowExecutionId": "exec-001" }),
+        );
+        let resp = svc
+            .describe_maintenance_window_execution_tasks(&req)
+            .unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(
+            body["WindowExecutionTaskIdentities"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+
+        // GetMaintenanceWindowExecutionTask
+        let req = make_request(
+            "GetMaintenanceWindowExecutionTask",
+            json!({
+                "WindowExecutionId": "exec-001",
+                "TaskId": "task-exec-001",
+            }),
+        );
+        let resp = svc.get_maintenance_window_execution_task(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["TaskArn"].as_str().unwrap(), "AWS-RunShellScript");
+
+        // DescribeMaintenanceWindowExecutionTaskInvocations
+        let req = make_request(
+            "DescribeMaintenanceWindowExecutionTaskInvocations",
+            json!({
+                "WindowExecutionId": "exec-001",
+                "TaskId": "task-exec-001",
+            }),
+        );
+        let resp = svc
+            .describe_maintenance_window_execution_task_invocations(&req)
+            .unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(
+            body["WindowExecutionTaskInvocationIdentities"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+
+        // GetMaintenanceWindowExecutionTaskInvocation
+        let req = make_request(
+            "GetMaintenanceWindowExecutionTaskInvocation",
+            json!({
+                "WindowExecutionId": "exec-001",
+                "TaskId": "task-exec-001",
+                "InvocationId": "inv-001",
+            }),
+        );
+        let resp = svc
+            .get_maintenance_window_execution_task_invocation(&req)
+            .unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["ExecutionId"].as_str().unwrap(), "cmd-001");
+
+        // CancelMaintenanceWindowExecution
+        let req = make_request(
+            "CancelMaintenanceWindowExecution",
+            json!({ "WindowExecutionId": "exec-001" }),
+        );
+        let resp = svc.cancel_maintenance_window_execution(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["WindowExecutionId"].as_str().unwrap(), "exec-001");
+
+        // DescribeMaintenanceWindowSchedule
+        let req = make_request("DescribeMaintenanceWindowSchedule", json!({}));
+        let resp = svc.describe_maintenance_window_schedule(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert!(body["ScheduledWindowExecutions"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+
+        // DescribeMaintenanceWindowsForTarget
+        let req = make_request(
+            "DescribeMaintenanceWindowsForTarget",
+            json!({
+                "ResourceType": "INSTANCE",
+                "Targets": [{"Key": "InstanceIds", "Values": ["i-001"]}],
+            }),
+        );
+        let resp = svc.describe_maintenance_windows_for_target(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["WindowIdentities"].as_array().unwrap().len(), 1);
+    }
+
+    // ── Patch baseline update ─────────────────────────────────────
+
+    #[test]
+    fn update_patch_baseline_works() {
+        let svc = make_service();
+
+        // Create
+        let req = make_request(
+            "CreatePatchBaseline",
+            json!({
+                "Name": "test-baseline",
+                "OperatingSystem": "AMAZON_LINUX_2",
+                "Description": "original description",
+            }),
+        );
+        let resp = svc.create_patch_baseline(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let baseline_id = body["BaselineId"].as_str().unwrap().to_string();
+
+        // Update
+        let req = make_request(
+            "UpdatePatchBaseline",
+            json!({
+                "BaselineId": baseline_id,
+                "Name": "updated-baseline",
+                "Description": "updated description",
+                "ApprovedPatches": ["KB001", "KB002"],
+            }),
+        );
+        let resp = svc.update_patch_baseline(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["Name"].as_str().unwrap(), "updated-baseline");
+        assert_eq!(body["Description"].as_str().unwrap(), "updated description");
+        assert_eq!(body["ApprovedPatches"].as_array().unwrap().len(), 2);
+    }
+
+    // ── Resource data sync ────────────────────────────────────────
+
+    #[test]
+    fn resource_data_sync_lifecycle() {
+        let svc = make_service();
+
+        // Create
+        let req = make_request(
+            "CreateResourceDataSync",
+            json!({
+                "SyncName": "test-sync",
+                "SyncType": "SyncFromSource",
+                "SyncSource": {
+                    "SourceType": "AWS",
+                    "SourceRegions": ["us-east-1"],
+                },
+            }),
+        );
+        svc.create_resource_data_sync(&req).unwrap();
+
+        // List
+        let req = make_request("ListResourceDataSync", json!({}));
+        let resp = svc.list_resource_data_sync(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["ResourceDataSyncItems"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            body["ResourceDataSyncItems"][0]["SyncName"]
+                .as_str()
+                .unwrap(),
+            "test-sync"
+        );
+
+        // Update
+        let req = make_request(
+            "UpdateResourceDataSync",
+            json!({
+                "SyncName": "test-sync",
+                "SyncType": "SyncFromSource",
+                "SyncSource": {
+                    "SourceType": "AWS",
+                    "SourceRegions": ["us-east-1", "us-west-2"],
+                },
+            }),
+        );
+        svc.update_resource_data_sync(&req).unwrap();
+
+        // Delete
+        let req = make_request("DeleteResourceDataSync", json!({ "SyncName": "test-sync" }));
+        svc.delete_resource_data_sync(&req).unwrap();
+
+        // Verify deleted
+        let req = make_request("ListResourceDataSync", json!({}));
+        let resp = svc.list_resource_data_sync(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert!(body["ResourceDataSyncItems"].as_array().unwrap().is_empty());
+    }
+
+    // ── Patch stubs ───────────────────────────────────────────────
+
+    #[test]
+    fn describe_instance_patch_states_returns_empty() {
+        let svc = make_service();
+        let req = make_request(
+            "DescribeInstancePatchStates",
+            json!({ "InstanceIds": ["i-001"] }),
+        );
+        let resp = svc.describe_instance_patch_states(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert!(body["InstancePatchStates"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn describe_instance_patches_returns_empty() {
+        let svc = make_service();
+        let req = make_request("DescribeInstancePatches", json!({ "InstanceId": "i-001" }));
+        let resp = svc.describe_instance_patches(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert!(body["Patches"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn describe_effective_patches_returns_empty() {
+        let svc = make_service();
+        let req = make_request(
+            "DescribeEffectivePatchesForPatchBaseline",
+            json!({ "BaselineId": "pb-12345678901234567" }),
+        );
+        let resp = svc
+            .describe_effective_patches_for_patch_baseline(&req)
+            .unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert!(body["EffectivePatches"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn get_ops_summary_returns_empty() {
+        let svc = make_service();
+        let req = make_request("GetOpsSummary", json!({}));
+        let resp = svc.get_ops_summary(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert!(body["Entities"].as_array().unwrap().is_empty());
     }
 }
