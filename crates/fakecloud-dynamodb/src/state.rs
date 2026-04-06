@@ -107,6 +107,8 @@ pub struct BackupDescription {
     pub billing_mode: String,
     pub item_count: i64,
     pub size_bytes: i64,
+    /// Snapshot of the table items at backup creation time.
+    pub items: Vec<HashMap<String, AttributeValue>>,
 }
 
 #[derive(Debug, Clone)]

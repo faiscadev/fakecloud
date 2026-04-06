@@ -1466,3 +1466,172 @@ async fn dynamodb_kinesis_streaming_destination() {
         .unwrap();
     assert_eq!(resp.destination_status().unwrap().as_str(), "DISABLED");
 }
+
+#[tokio::test]
+async fn dynamodb_backup_restore_preserves_data() {
+    let server = TestServer::start().await;
+    let client = server.dynamodb_client().await;
+
+    // Create table
+    client
+        .create_table()
+        .table_name("BackupTable")
+        .key_schema(
+            KeySchemaElement::builder()
+                .attribute_name("pk")
+                .key_type(KeyType::Hash)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            AttributeDefinition::builder()
+                .attribute_name("pk")
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .billing_mode(BillingMode::PayPerRequest)
+        .send()
+        .await
+        .unwrap();
+
+    // Put 3 items
+    for i in 1..=3 {
+        client
+            .put_item()
+            .table_name("BackupTable")
+            .item("pk", AttributeValue::S(format!("key{i}")))
+            .item("data", AttributeValue::S(format!("value{i}")))
+            .send()
+            .await
+            .unwrap();
+    }
+
+    // Create backup
+    let backup_resp = client
+        .create_backup()
+        .table_name("BackupTable")
+        .backup_name("my-backup")
+        .send()
+        .await
+        .unwrap();
+    let backup_arn = backup_resp
+        .backup_details()
+        .unwrap()
+        .backup_arn()
+        .to_string();
+
+    // Delete all items from original table
+    for i in 1..=3 {
+        client
+            .delete_item()
+            .table_name("BackupTable")
+            .key("pk", AttributeValue::S(format!("key{i}")))
+            .send()
+            .await
+            .unwrap();
+    }
+
+    // Verify original table is empty
+    let scan = client
+        .scan()
+        .table_name("BackupTable")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(scan.count(), 0);
+
+    // Restore from backup
+    client
+        .restore_table_from_backup()
+        .backup_arn(&backup_arn)
+        .target_table_name("RestoredTable")
+        .send()
+        .await
+        .unwrap();
+
+    // Scan restored table — should have 3 items
+    let scan = client
+        .scan()
+        .table_name("RestoredTable")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(scan.count(), 3);
+    assert_eq!(scan.items().len(), 3);
+}
+
+#[tokio::test]
+async fn dynamodb_restore_to_point_in_time_preserves_data() {
+    let server = TestServer::start().await;
+    let client = server.dynamodb_client().await;
+
+    // Create table
+    client
+        .create_table()
+        .table_name("PitrTable")
+        .key_schema(
+            KeySchemaElement::builder()
+                .attribute_name("pk")
+                .key_type(KeyType::Hash)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            AttributeDefinition::builder()
+                .attribute_name("pk")
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .billing_mode(BillingMode::PayPerRequest)
+        .send()
+        .await
+        .unwrap();
+
+    // Put 3 items
+    for i in 1..=3 {
+        client
+            .put_item()
+            .table_name("PitrTable")
+            .item("pk", AttributeValue::S(format!("key{i}")))
+            .item("data", AttributeValue::S(format!("value{i}")))
+            .send()
+            .await
+            .unwrap();
+    }
+
+    // Enable PITR
+    client
+        .update_continuous_backups()
+        .table_name("PitrTable")
+        .point_in_time_recovery_specification(
+            PointInTimeRecoverySpecification::builder()
+                .point_in_time_recovery_enabled(true)
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    // Restore to point in time
+    client
+        .restore_table_to_point_in_time()
+        .source_table_name("PitrTable")
+        .target_table_name("PitrRestored")
+        .use_latest_restorable_time(true)
+        .send()
+        .await
+        .unwrap();
+
+    // Scan restored table — should have 3 items
+    let scan = client
+        .scan()
+        .table_name("PitrRestored")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(scan.count(), 3);
+    assert_eq!(scan.items().len(), 3);
+}
