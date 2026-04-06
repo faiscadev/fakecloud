@@ -2,7 +2,9 @@ use async_trait::async_trait;
 use chrono::Utc;
 use http::StatusCode;
 use std::collections::HashMap;
+use std::sync::Arc;
 
+use fakecloud_core::delivery::DeliveryBus;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 use fakecloud_dynamodb::state::SharedDynamoDbState;
 use fakecloud_eventbridge::state::SharedEventBridgeState;
@@ -28,6 +30,7 @@ pub struct CloudFormationService {
     eventbridge_state: SharedEventBridgeState,
     dynamodb_state: SharedDynamoDbState,
     logs_state: SharedLogsState,
+    delivery: Arc<DeliveryBus>,
 }
 
 impl CloudFormationService {
@@ -42,6 +45,7 @@ impl CloudFormationService {
         eventbridge_state: SharedEventBridgeState,
         dynamodb_state: SharedDynamoDbState,
         logs_state: SharedLogsState,
+        delivery: Arc<DeliveryBus>,
     ) -> Self {
         Self {
             state,
@@ -53,10 +57,11 @@ impl CloudFormationService {
             eventbridge_state,
             dynamodb_state,
             logs_state,
+            delivery,
         }
     }
 
-    fn provisioner(&self) -> ResourceProvisioner {
+    fn provisioner(&self, stack_id: &str) -> ResourceProvisioner {
         let cf_state = self.state.read();
         ResourceProvisioner {
             sqs_state: self.sqs_state.clone(),
@@ -67,8 +72,10 @@ impl CloudFormationService {
             eventbridge_state: self.eventbridge_state.clone(),
             dynamodb_state: self.dynamodb_state.clone(),
             logs_state: self.logs_state.clone(),
+            delivery: self.delivery.clone(),
             account_id: cf_state.account_id.clone(),
             region: cf_state.region.clone(),
+            stack_id: stack_id.to_string(),
         }
     }
 
@@ -162,7 +169,18 @@ impl CloudFormationService {
             AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "ValidationError", e)
         })?;
 
-        let provisioner = self.provisioner();
+        let stack_id = {
+            let state = self.state.read();
+            format!(
+                "arn:aws:cloudformation:{}:{}:stack/{}/{}",
+                state.region,
+                state.account_id,
+                stack_name,
+                uuid::Uuid::new_v4()
+            )
+        };
+
+        let provisioner = self.provisioner(&stack_id);
         let mut resources = Vec::new();
         let mut physical_ids: HashMap<String, String> = HashMap::new();
 
@@ -231,17 +249,6 @@ impl CloudFormationService {
             }
         }
 
-        let stack_id = {
-            let state = self.state.read();
-            format!(
-                "arn:aws:cloudformation:{}:{}:stack/{}/{}",
-                state.region,
-                state.account_id,
-                stack_name,
-                uuid::Uuid::new_v4()
-            )
-        };
-
         let stack = Stack {
             name: stack_name.clone(),
             stack_id: stack_id.clone(),
@@ -275,8 +282,6 @@ impl CloudFormationService {
             )
         })?;
 
-        let provisioner = self.provisioner();
-
         let mut state = self.state.write();
 
         // Find stack by name or stack ID
@@ -285,13 +290,25 @@ impl CloudFormationService {
         });
 
         if let Some(stack) = stack {
-            // Delete resources in reverse order
+            let stack_id = stack.stack_id.clone();
             let resources: Vec<_> = stack.resources.clone();
+
+            // Build the provisioner while we still have the stack_id
+            // Drop the write lock temporarily so the provisioner can read state
+            drop(state);
+            let provisioner = self.provisioner(&stack_id);
+
+            // Delete resources in reverse order
             for resource in resources.iter().rev() {
                 let _ = provisioner.delete_resource(resource);
             }
-            stack.status = "DELETE_COMPLETE".to_string();
-            stack.resources.clear();
+
+            // Re-acquire the write lock to update stack status
+            let mut state = self.state.write();
+            if let Some(stack) = state.stacks.values_mut().find(|s| s.stack_id == stack_id) {
+                stack.status = "DELETE_COMPLETE".to_string();
+                stack.resources.clear();
+            }
         }
 
         Ok(AwsResponse::xml(
@@ -438,7 +455,21 @@ impl CloudFormationService {
             AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "ValidationError", e)
         })?;
 
-        let provisioner = self.provisioner();
+        // Get stack_id before write lock for the provisioner
+        let found_stack_id = {
+            let state = self.state.read();
+            state
+                .stacks
+                .values()
+                .find(|s| {
+                    (s.name == *stack_name || s.stack_id == *stack_name)
+                        && s.status != "DELETE_COMPLETE"
+                })
+                .map(|s| s.stack_id.clone())
+                .unwrap_or_default()
+        };
+
+        let provisioner = self.provisioner(&found_stack_id);
 
         let mut state = self.state.write();
         let stack = state
@@ -673,6 +704,7 @@ mod tests {
                 "123456789012",
                 "us-east-1",
             ))),
+            Arc::new(DeliveryBus::new()),
         )
     }
 

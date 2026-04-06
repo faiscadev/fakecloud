@@ -182,6 +182,15 @@ async fn main() {
         container_runtime: container_runtime.clone(),
     };
 
+    // Step 5: CloudFormation delivery (custom resources can invoke Lambda)
+    let delivery_for_cf = {
+        let mut bus = DeliveryBus::new();
+        if let Some(ref ld) = lambda_delivery {
+            bus = bus.with_lambda(ld.clone());
+        }
+        Arc::new(bus)
+    };
+
     // Register services
     let mut registry = ServiceRegistry::new();
     registry.register(Arc::new(CloudFormationService::new(
@@ -194,6 +203,7 @@ async fn main() {
         eb_state.clone(),
         dynamodb_state.clone(),
         logs_state.clone(),
+        delivery_for_cf,
     )));
     registry.register(Arc::new(SqsService::new(sqs_state.clone())));
     registry.register(Arc::new(SnsService::new(sns_state, delivery_for_sns)));
