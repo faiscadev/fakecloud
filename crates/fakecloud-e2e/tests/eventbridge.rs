@@ -1,6 +1,10 @@
 mod helpers;
 
-use aws_sdk_eventbridge::types::{PutEventsRequestEntry, RuleState, Target};
+use aws_sdk_eventbridge::types::{
+    ConnectionAuthorizationType, ConnectionState, CreateConnectionApiKeyAuthRequestParameters,
+    CreateConnectionAuthRequestParameters, EndpointEventBus, FailoverConfig, Primary,
+    PutEventsRequestEntry, RoutingConfig, RuleState, Secondary, Target,
+};
 use aws_sdk_sqs::types::QueueAttributeName;
 use helpers::TestServer;
 
@@ -707,4 +711,198 @@ async fn eb_list_rules_pagination_out_of_range() {
         resp.next_token().is_none(),
         "expected no next token for out-of-range pagination"
     );
+}
+
+// ---- TestEventPattern E2E ----
+
+#[tokio::test]
+async fn eb_test_event_pattern_match() {
+    let server = TestServer::start().await;
+    let client = server.eventbridge_client().await;
+
+    let resp = client
+        .test_event_pattern()
+        .event_pattern(r#"{"source": ["my.app"]}"#)
+        .event(r#"{"source": "my.app", "detail-type": "Test", "detail": {}}"#)
+        .send()
+        .await
+        .unwrap();
+
+    assert!(resp.result());
+}
+
+#[tokio::test]
+async fn eb_test_event_pattern_no_match() {
+    let server = TestServer::start().await;
+    let client = server.eventbridge_client().await;
+
+    let resp = client
+        .test_event_pattern()
+        .event_pattern(r#"{"source": ["other.app"]}"#)
+        .event(r#"{"source": "my.app", "detail-type": "Test", "detail": {}}"#)
+        .send()
+        .await
+        .unwrap();
+
+    assert!(!resp.result());
+}
+
+// ---- Endpoint CRUD E2E ----
+
+#[tokio::test]
+async fn eb_endpoint_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.eventbridge_client().await;
+
+    let routing = RoutingConfig::builder()
+        .failover_config(
+            FailoverConfig::builder()
+                .primary(Primary::builder().health_check("").build().unwrap())
+                .secondary(Secondary::builder().route("us-west-2").build().unwrap())
+                .build(),
+        )
+        .build();
+
+    let event_buses = vec![EndpointEventBus::builder()
+        .event_bus_arn("arn:aws:events:us-east-1:123456789012:event-bus/default")
+        .build()
+        .unwrap()];
+
+    // Create
+    let resp = client
+        .create_endpoint()
+        .name("my-endpoint")
+        .routing_config(routing.clone())
+        .set_event_buses(Some(event_buses))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.name().unwrap(), "my-endpoint");
+
+    // Describe
+    let resp = client
+        .describe_endpoint()
+        .name("my-endpoint")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.name().unwrap(), "my-endpoint");
+    assert!(resp.endpoint_id().is_some());
+
+    // List
+    let resp = client.list_endpoints().send().await.unwrap();
+    assert!(resp
+        .endpoints()
+        .iter()
+        .any(|e| e.name().unwrap() == "my-endpoint"));
+
+    // Update
+    client
+        .update_endpoint()
+        .name("my-endpoint")
+        .description("updated description")
+        .routing_config(routing)
+        .send()
+        .await
+        .unwrap();
+
+    // Verify update
+    let resp = client
+        .describe_endpoint()
+        .name("my-endpoint")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.description().unwrap(), "updated description");
+
+    // Delete
+    client
+        .delete_endpoint()
+        .name("my-endpoint")
+        .send()
+        .await
+        .unwrap();
+
+    // Verify deleted
+    let result = client.describe_endpoint().name("my-endpoint").send().await;
+    assert!(result.is_err());
+}
+
+// ---- DeauthorizeConnection E2E ----
+
+#[tokio::test]
+async fn eb_deauthorize_connection() {
+    let server = TestServer::start().await;
+    let client = server.eventbridge_client().await;
+
+    let auth = CreateConnectionAuthRequestParameters::builder()
+        .api_key_auth_parameters(
+            CreateConnectionApiKeyAuthRequestParameters::builder()
+                .api_key_name("x-api-key")
+                .api_key_value("secret123")
+                .build()
+                .unwrap(),
+        )
+        .build();
+
+    client
+        .create_connection()
+        .name("deauth-test")
+        .authorization_type(ConnectionAuthorizationType::ApiKey)
+        .auth_parameters(auth)
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .deauthorize_connection()
+        .name("deauth-test")
+        .send()
+        .await
+        .unwrap();
+
+    assert!(resp.connection_arn().unwrap().contains("deauth-test"));
+
+    // Verify state changed
+    let desc = client
+        .describe_connection()
+        .name("deauth-test")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        desc.connection_state().unwrap(),
+        &ConnectionState::Deauthorizing
+    );
+}
+
+// ---- UpdateEventBus E2E ----
+
+#[tokio::test]
+async fn eb_update_event_bus() {
+    let server = TestServer::start().await;
+    let client = server.eventbridge_client().await;
+
+    client
+        .create_event_bus()
+        .name("update-bus")
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .update_event_bus()
+        .name("update-bus")
+        .description("new desc")
+        .send()
+        .await
+        .unwrap();
+
+    let desc = client
+        .describe_event_bus()
+        .name("update-bus")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(desc.description().unwrap(), "new desc");
 }

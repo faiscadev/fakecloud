@@ -14,8 +14,8 @@ use fakecloud_lambda::state::{LambdaInvocation, SharedLambdaState};
 use fakecloud_logs::state::SharedLogsState;
 
 use crate::state::{
-    ApiDestination, Archive, Connection, EventBus, EventRule, EventTarget, PutEvent, Replay,
-    SharedEventBridgeState,
+    ApiDestination, Archive, Connection, Endpoint, EventBus, EventRule, EventTarget,
+    PartnerEventSource, PutEvent, Replay, SharedEventBridgeState,
 };
 
 pub struct EventBridgeService {
@@ -94,7 +94,23 @@ impl AwsService for EventBridgeService {
             "ListReplays" => self.list_replays(&req),
             "CancelReplay" => self.cancel_replay(&req),
             "CreatePartnerEventSource" => self.create_partner_event_source(&req),
+            "DeletePartnerEventSource" => self.delete_partner_event_source(&req),
             "DescribePartnerEventSource" => self.describe_partner_event_source(&req),
+            "ListPartnerEventSources" => self.list_partner_event_sources(&req),
+            "ListPartnerEventSourceAccounts" => self.list_partner_event_source_accounts(&req),
+            "ActivateEventSource" => self.activate_event_source(&req),
+            "DeactivateEventSource" => self.deactivate_event_source(&req),
+            "DescribeEventSource" => self.describe_event_source(&req),
+            "ListEventSources" => self.list_event_sources(&req),
+            "PutPartnerEvents" => self.put_partner_events(&req),
+            "TestEventPattern" => self.test_event_pattern(&req),
+            "UpdateEventBus" => self.update_event_bus(&req),
+            "CreateEndpoint" => self.create_endpoint(&req),
+            "DeleteEndpoint" => self.delete_endpoint(&req),
+            "DescribeEndpoint" => self.describe_endpoint(&req),
+            "ListEndpoints" => self.list_endpoints(&req),
+            "UpdateEndpoint" => self.update_endpoint(&req),
+            "DeauthorizeConnection" => self.deauthorize_connection(&req),
             _ => Err(AwsServiceError::action_not_implemented(
                 "events",
                 &req.action,
@@ -144,7 +160,23 @@ impl AwsService for EventBridgeService {
             "ListReplays",
             "CancelReplay",
             "CreatePartnerEventSource",
+            "DeletePartnerEventSource",
             "DescribePartnerEventSource",
+            "ListPartnerEventSources",
+            "ListPartnerEventSourceAccounts",
+            "ActivateEventSource",
+            "DeactivateEventSource",
+            "DescribeEventSource",
+            "ListEventSources",
+            "PutPartnerEvents",
+            "TestEventPattern",
+            "UpdateEventBus",
+            "CreateEndpoint",
+            "DeleteEndpoint",
+            "DescribeEndpoint",
+            "ListEndpoints",
+            "UpdateEndpoint",
+            "DeauthorizeConnection",
         ]
     }
 }
@@ -1044,9 +1076,60 @@ impl EventBridgeService {
                 format!("Partner event source {name} already exists."),
             ));
         }
-        state
-            .partner_event_sources
-            .insert(name.clone(), account.clone());
+        let arn = format!(
+            "arn:aws:events:{}::event-source/aws.partner/{}",
+            state.region, name
+        );
+        let now = Utc::now();
+        let ps = PartnerEventSource {
+            name: name.clone(),
+            arn: arn.clone(),
+            account,
+            creation_time: now,
+            expiration_time: None,
+            state: "ACTIVE".to_string(),
+        };
+        state.partner_event_sources.insert(name.clone(), ps);
+
+        Ok(json_resp(json!({ "EventSourceArn": arn })))
+    }
+
+    fn delete_partner_event_source(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        validate_required("Name", &body["Name"])?;
+        let name = body["Name"]
+            .as_str()
+            .ok_or_else(|| missing("Name"))?
+            .to_string();
+        validate_required("Account", &body["Account"])?;
+        let account = body["Account"]
+            .as_str()
+            .ok_or_else(|| missing("Account"))?
+            .to_string();
+
+        let mut state = self.state.write();
+        match state.partner_event_sources.get(&name) {
+            Some(ps) if ps.account == account => {
+                state.partner_event_sources.remove(&name);
+            }
+            Some(_) => {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::NOT_FOUND,
+                    "ResourceNotFoundException",
+                    format!("Partner event source {name} does not exist for account {account}."),
+                ));
+            }
+            None => {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::NOT_FOUND,
+                    "ResourceNotFoundException",
+                    format!("Partner event source {name} does not exist."),
+                ));
+            }
+        }
 
         Ok(json_resp(json!({})))
     }
@@ -1064,26 +1147,553 @@ impl EventBridgeService {
         validate_string_length("name", &name, 1, 256)?;
 
         let state = self.state.read();
-        if !state.partner_event_sources.contains_key(&name) {
-            return Err(AwsServiceError::aws_error(
+        let ps = state.partner_event_sources.get(&name).ok_or_else(|| {
+            AwsServiceError::aws_error(
                 StatusCode::NOT_FOUND,
                 "ResourceNotFoundException",
                 format!("Partner event source {name} does not exist."),
-            ));
-        }
-
-        let arn = format!(
-            "arn:aws:events:{}::event-source/aws.partner/{}",
-            state.region, name
-        );
+            )
+        })?;
 
         Ok(json_resp(json!({
-            "Arn": arn,
-            "Name": name,
+            "Arn": ps.arn,
+            "Name": ps.name,
         })))
     }
 
-    // ─── PutEvents ───────────────���──────────────────────────────────────
+    fn list_partner_event_sources(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let name_prefix = body["NamePrefix"].as_str();
+        let limit = body["Limit"].as_i64().unwrap_or(100) as usize;
+        let offset: usize = body["NextToken"]
+            .as_str()
+            .map(|t| t.parse().unwrap_or(0))
+            .unwrap_or(0);
+
+        let state = self.state.read();
+        let filtered: Vec<Value> = state
+            .partner_event_sources
+            .values()
+            .filter(|ps| match name_prefix {
+                Some(prefix) => ps.name.starts_with(prefix),
+                None => true,
+            })
+            .skip(offset)
+            .take(limit + 1)
+            .map(|ps| {
+                json!({
+                    "Arn": ps.arn,
+                    "Name": ps.name,
+                    "CreationTime": ps.creation_time.timestamp() as f64,
+                })
+            })
+            .collect();
+
+        let has_more = filtered.len() > limit;
+        let sources: Vec<Value> = filtered.into_iter().take(limit).collect();
+        let mut resp = json!({ "PartnerEventSources": sources });
+        if has_more {
+            resp["NextToken"] = json!((offset + limit).to_string());
+        }
+
+        Ok(json_resp(resp))
+    }
+
+    fn list_partner_event_source_accounts(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        validate_required("EventSourceName", &body["EventSourceName"])?;
+        let event_source_name = body["EventSourceName"]
+            .as_str()
+            .ok_or_else(|| missing("EventSourceName"))?;
+
+        let state = self.state.read();
+        let accounts: Vec<Value> = state
+            .partner_event_sources
+            .values()
+            .filter(|ps| ps.name == event_source_name)
+            .map(|ps| json!({ "Account": ps.account }))
+            .collect();
+
+        Ok(json_resp(json!({
+            "PartnerEventSourceAccounts": accounts
+        })))
+    }
+
+    fn activate_event_source(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        validate_required("Name", &body["Name"])?;
+        let name = body["Name"]
+            .as_str()
+            .ok_or_else(|| missing("Name"))?
+            .to_string();
+
+        let mut state = self.state.write();
+        let ps = state.partner_event_sources.get_mut(&name).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "ResourceNotFoundException",
+                format!("Event source {name} does not exist."),
+            )
+        })?;
+        ps.state = "ACTIVE".to_string();
+
+        Ok(json_resp(json!({})))
+    }
+
+    fn deactivate_event_source(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        validate_required("Name", &body["Name"])?;
+        let name = body["Name"]
+            .as_str()
+            .ok_or_else(|| missing("Name"))?
+            .to_string();
+
+        let mut state = self.state.write();
+        let ps = state.partner_event_sources.get_mut(&name).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "ResourceNotFoundException",
+                format!("Event source {name} does not exist."),
+            )
+        })?;
+        ps.state = "INACTIVE".to_string();
+
+        Ok(json_resp(json!({})))
+    }
+
+    fn describe_event_source(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        validate_required("Name", &body["Name"])?;
+        let name = body["Name"]
+            .as_str()
+            .ok_or_else(|| missing("Name"))?
+            .to_string();
+
+        let state = self.state.read();
+        let ps = state.partner_event_sources.get(&name).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "ResourceNotFoundException",
+                format!("Event source {name} does not exist."),
+            )
+        })?;
+
+        Ok(json_resp(json!({
+            "Arn": ps.arn,
+            "Name": ps.name,
+            "CreatedBy": ps.account,
+            "CreationTime": ps.creation_time.timestamp() as f64,
+            "State": ps.state,
+        })))
+    }
+
+    fn list_event_sources(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let name_prefix = body["NamePrefix"].as_str();
+        let limit = body["Limit"].as_i64().unwrap_or(100) as usize;
+        let offset: usize = body["NextToken"]
+            .as_str()
+            .map(|t| t.parse().unwrap_or(0))
+            .unwrap_or(0);
+
+        let state = self.state.read();
+        let filtered: Vec<Value> = state
+            .partner_event_sources
+            .values()
+            .filter(|ps| match name_prefix {
+                Some(prefix) => ps.name.starts_with(prefix),
+                None => true,
+            })
+            .skip(offset)
+            .take(limit + 1)
+            .map(|ps| {
+                json!({
+                    "Arn": ps.arn,
+                    "Name": ps.name,
+                    "CreatedBy": ps.account,
+                    "CreationTime": ps.creation_time.timestamp() as f64,
+                    "State": ps.state,
+                })
+            })
+            .collect();
+
+        let has_more = filtered.len() > limit;
+        let sources: Vec<Value> = filtered.into_iter().take(limit).collect();
+        let mut resp = json!({ "EventSources": sources });
+        if has_more {
+            resp["NextToken"] = json!((offset + limit).to_string());
+        }
+
+        Ok(json_resp(resp))
+    }
+
+    fn put_partner_events(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        validate_required("Entries", &body["Entries"])?;
+        let entries = body["Entries"]
+            .as_array()
+            .ok_or_else(|| missing("Entries"))?;
+
+        let mut result_entries = Vec::new();
+        for _entry in entries {
+            let event_id = uuid::Uuid::new_v4().to_string();
+            result_entries.push(json!({ "EventId": event_id }));
+        }
+
+        Ok(json_resp(json!({
+            "FailedEntryCount": 0,
+            "Entries": result_entries,
+        })))
+    }
+
+    // ─── TestEventPattern ────────────────────────────────────────────────
+
+    fn test_event_pattern(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        validate_required("EventPattern", &body["EventPattern"])?;
+        validate_required("Event", &body["Event"])?;
+        let event_pattern = body["EventPattern"]
+            .as_str()
+            .ok_or_else(|| missing("EventPattern"))?;
+        let event_str = body["Event"].as_str().ok_or_else(|| missing("Event"))?;
+
+        // Parse the event JSON
+        let event: Value = serde_json::from_str(event_str).map_err(|_| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidEventPatternException",
+                "Event is not valid JSON.",
+            )
+        })?;
+
+        // Parse the pattern JSON
+        let _pattern: Value = serde_json::from_str(event_pattern).map_err(|_| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidEventPatternException",
+                "Event pattern is not valid JSON.",
+            )
+        })?;
+
+        let source = event["source"].as_str().unwrap_or("");
+        let detail_type = event["detail-type"].as_str().unwrap_or("");
+        let detail = event
+            .get("detail")
+            .map(|v| serde_json::to_string(v).unwrap_or_default())
+            .unwrap_or_else(|| "{}".to_string());
+        let account = event["account"].as_str().unwrap_or("");
+        let region = event["region"].as_str().unwrap_or("");
+        let resources: Vec<String> = event["resources"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let result = matches_pattern(
+            Some(event_pattern),
+            source,
+            detail_type,
+            &detail,
+            account,
+            region,
+            &resources,
+        );
+
+        Ok(json_resp(json!({ "Result": result })))
+    }
+
+    // ─── UpdateEventBus ─────────────────────────────────────────────────
+
+    fn update_event_bus(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let name = body["Name"].as_str().unwrap_or("default");
+
+        let mut state = self.state.write();
+        let bus = state.buses.get_mut(name).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("Event bus {name} does not exist."),
+            )
+        })?;
+
+        if let Some(desc) = body["Description"].as_str() {
+            bus.description = Some(desc.to_string());
+        }
+        if let Some(kms) = body["KmsKeyIdentifier"].as_str() {
+            bus.kms_key_identifier = Some(kms.to_string());
+        }
+        if let Some(dlc) = body.get("DeadLetterConfig") {
+            bus.dead_letter_config = Some(dlc.clone());
+        }
+        bus.last_modified_time = Utc::now();
+
+        let arn = bus.arn.clone();
+        let bus_name = bus.name.clone();
+
+        Ok(json_resp(json!({
+            "Arn": arn,
+            "Name": bus_name,
+        })))
+    }
+
+    // ─── Endpoint Operations ────────────────────────────────────────────
+
+    fn create_endpoint(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        validate_required("Name", &body["Name"])?;
+        let name = body["Name"]
+            .as_str()
+            .ok_or_else(|| missing("Name"))?
+            .to_string();
+        validate_string_length("name", &name, 1, 64)?;
+        validate_required("RoutingConfig", &body["RoutingConfig"])?;
+        validate_required("EventBuses", &body["EventBuses"])?;
+
+        let description = body["Description"].as_str().map(|s| s.to_string());
+        let routing_config = body["RoutingConfig"].clone();
+        let replication_config = body.get("ReplicationConfig").cloned();
+        let event_buses = body["EventBuses"].as_array().cloned().unwrap_or_default();
+        let role_arn = body["RoleArn"].as_str().map(|s| s.to_string());
+
+        let mut state = self.state.write();
+        if state.endpoints.contains_key(&name) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::CONFLICT,
+                "ResourceAlreadyExistsException",
+                format!("Endpoint {name} already exists."),
+            ));
+        }
+
+        let endpoint_id = format!("{}.abc123", name);
+        let arn = format!(
+            "arn:aws:events:{}:{}:endpoint/{}",
+            req.region, state.account_id, name
+        );
+        let endpoint_url = format!(
+            "https://{}.endpoint.events.{}.amazonaws.com",
+            endpoint_id, req.region
+        );
+        let now = Utc::now();
+
+        let endpoint = Endpoint {
+            name: name.clone(),
+            arn: arn.clone(),
+            endpoint_id: endpoint_id.clone(),
+            endpoint_url: Some(endpoint_url),
+            description,
+            routing_config: routing_config.clone(),
+            replication_config: replication_config.clone(),
+            event_buses: event_buses.clone(),
+            role_arn: role_arn.clone(),
+            state: "ACTIVE".to_string(),
+            creation_time: now,
+            last_modified_time: now,
+        };
+        state.endpoints.insert(name.clone(), endpoint);
+
+        let mut resp = json!({
+            "Name": name,
+            "Arn": arn,
+            "State": "ACTIVE",
+            "RoutingConfig": routing_config,
+            "EventBuses": event_buses,
+        });
+        if let Some(ref rc) = replication_config {
+            resp["ReplicationConfig"] = rc.clone();
+        }
+        if let Some(ref ra) = role_arn {
+            resp["RoleArn"] = json!(ra);
+        }
+
+        Ok(json_resp(resp))
+    }
+
+    fn delete_endpoint(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        validate_required("Name", &body["Name"])?;
+        let name = body["Name"].as_str().ok_or_else(|| missing("Name"))?;
+
+        let mut state = self.state.write();
+        state.endpoints.remove(name).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("Endpoint '{name}' does not exist."),
+            )
+        })?;
+
+        Ok(json_resp(json!({})))
+    }
+
+    fn describe_endpoint(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        validate_required("Name", &body["Name"])?;
+        let name = body["Name"].as_str().ok_or_else(|| missing("Name"))?;
+
+        let state = self.state.read();
+        let ep = state.endpoints.get(name).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("Endpoint '{name}' does not exist."),
+            )
+        })?;
+
+        let mut resp = json!({
+            "Name": ep.name,
+            "Arn": ep.arn,
+            "EndpointId": ep.endpoint_id,
+            "State": ep.state,
+            "RoutingConfig": ep.routing_config,
+            "EventBuses": ep.event_buses,
+            "CreationTime": ep.creation_time.timestamp() as f64,
+            "LastModifiedTime": ep.last_modified_time.timestamp() as f64,
+        });
+        if let Some(ref url) = ep.endpoint_url {
+            resp["EndpointUrl"] = json!(url);
+        }
+        if let Some(ref desc) = ep.description {
+            resp["Description"] = json!(desc);
+        }
+        if let Some(ref rc) = ep.replication_config {
+            resp["ReplicationConfig"] = rc.clone();
+        }
+        if let Some(ref ra) = ep.role_arn {
+            resp["RoleArn"] = json!(ra);
+        }
+
+        Ok(json_resp(resp))
+    }
+
+    fn list_endpoints(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let name_prefix = body["NamePrefix"].as_str();
+        let limit = body["MaxResults"].as_i64().unwrap_or(100) as usize;
+        let offset: usize = body["NextToken"]
+            .as_str()
+            .map(|t| t.parse().unwrap_or(0))
+            .unwrap_or(0);
+
+        let state = self.state.read();
+        let filtered: Vec<Value> = state
+            .endpoints
+            .values()
+            .filter(|ep| match name_prefix {
+                Some(prefix) => ep.name.starts_with(prefix),
+                None => true,
+            })
+            .skip(offset)
+            .take(limit + 1)
+            .map(|ep| {
+                let mut obj = json!({
+                    "Name": ep.name,
+                    "Arn": ep.arn,
+                    "EndpointId": ep.endpoint_id,
+                    "State": ep.state,
+                    "RoutingConfig": ep.routing_config,
+                    "EventBuses": ep.event_buses,
+                    "CreationTime": ep.creation_time.timestamp() as f64,
+                    "LastModifiedTime": ep.last_modified_time.timestamp() as f64,
+                });
+                if let Some(ref url) = ep.endpoint_url {
+                    obj["EndpointUrl"] = json!(url);
+                }
+                obj
+            })
+            .collect();
+
+        let has_more = filtered.len() > limit;
+        let endpoints: Vec<Value> = filtered.into_iter().take(limit).collect();
+        let mut resp = json!({ "Endpoints": endpoints });
+        if has_more {
+            resp["NextToken"] = json!((offset + limit).to_string());
+        }
+
+        Ok(json_resp(resp))
+    }
+
+    fn update_endpoint(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        validate_required("Name", &body["Name"])?;
+        let name = body["Name"].as_str().ok_or_else(|| missing("Name"))?;
+
+        let mut state = self.state.write();
+        let ep = state.endpoints.get_mut(name).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("Endpoint '{name}' does not exist."),
+            )
+        })?;
+
+        if let Some(desc) = body["Description"].as_str() {
+            ep.description = Some(desc.to_string());
+        }
+        if !body["RoutingConfig"].is_null() {
+            ep.routing_config = body["RoutingConfig"].clone();
+        }
+        if let Some(rc) = body.get("ReplicationConfig") {
+            ep.replication_config = Some(rc.clone());
+        }
+        if let Some(buses) = body["EventBuses"].as_array() {
+            ep.event_buses = buses.clone();
+        }
+        if let Some(ra) = body["RoleArn"].as_str() {
+            ep.role_arn = Some(ra.to_string());
+        }
+        ep.last_modified_time = Utc::now();
+
+        let resp = json!({
+            "Name": ep.name,
+            "Arn": ep.arn,
+            "EndpointId": ep.endpoint_id,
+            "State": ep.state,
+            "RoutingConfig": ep.routing_config,
+            "EventBuses": ep.event_buses,
+        });
+
+        Ok(json_resp(resp))
+    }
+
+    // ─── DeauthorizeConnection ──────────────────────────────────────────
+
+    fn deauthorize_connection(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        validate_required("Name", &body["Name"])?;
+        let name = body["Name"].as_str().ok_or_else(|| missing("Name"))?;
+        validate_string_length("name", name, 1, 64)?;
+
+        let mut state = self.state.write();
+        let conn = state.connections.get_mut(name).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("Connection '{name}' does not exist."),
+            )
+        })?;
+
+        conn.connection_state = "DEAUTHORIZING".to_string();
+        conn.last_modified_time = Utc::now();
+
+        let resp = json!({
+            "ConnectionArn": conn.arn,
+            "ConnectionState": conn.connection_state,
+            "CreationTime": conn.creation_time.timestamp() as f64,
+            "LastModifiedTime": conn.last_modified_time.timestamp() as f64,
+            "LastAuthorizedTime": conn.last_authorized_time.timestamp() as f64,
+        });
+
+        Ok(json_resp(resp))
+    }
+
+    // ─── PutEvents ──────────────────────────────────────────────────────
 
     fn put_events(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = parse_body(req);
@@ -3809,5 +4419,374 @@ mod tests {
             result.is_err(),
             "non-numeric NextToken should return an error"
         );
+    }
+
+    // ---- TestEventPattern tests ----
+
+    #[test]
+    fn test_event_pattern_match() {
+        let svc = make_service();
+        let req = make_request(
+            "TestEventPattern",
+            json!({
+                "EventPattern": r#"{"source": ["my.app"]}"#,
+                "Event": r#"{"source": "my.app", "detail-type": "Test", "detail": {}}"#
+            }),
+        );
+        let resp = svc.test_event_pattern(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["Result"], true);
+    }
+
+    #[test]
+    fn test_event_pattern_no_match() {
+        let svc = make_service();
+        let req = make_request(
+            "TestEventPattern",
+            json!({
+                "EventPattern": r#"{"source": ["other.app"]}"#,
+                "Event": r#"{"source": "my.app", "detail-type": "Test", "detail": {}}"#
+            }),
+        );
+        let resp = svc.test_event_pattern(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["Result"], false);
+    }
+
+    #[test]
+    fn test_event_pattern_detail_match() {
+        let svc = make_service();
+        let req = make_request(
+            "TestEventPattern",
+            json!({
+                "EventPattern": r#"{"detail": {"status": ["PLACED"]}}"#,
+                "Event": r#"{"source": "my.app", "detail-type": "Order", "detail": {"status": "PLACED", "id": "123"}}"#
+            }),
+        );
+        let resp = svc.test_event_pattern(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["Result"], true);
+    }
+
+    // ---- UpdateEventBus tests ----
+
+    #[test]
+    fn update_event_bus_description() {
+        let svc = make_service();
+        create_event_bus(&svc, "my-bus");
+
+        let req = make_request(
+            "UpdateEventBus",
+            json!({ "Name": "my-bus", "Description": "Updated desc" }),
+        );
+        let resp = svc.update_event_bus(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["Name"], "my-bus");
+
+        // Verify via describe
+        let req = make_request("DescribeEventBus", json!({ "Name": "my-bus" }));
+        let resp = svc.describe_event_bus(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["Description"], "Updated desc");
+    }
+
+    #[test]
+    fn update_event_bus_not_found() {
+        let svc = make_service();
+        let req = make_request(
+            "UpdateEventBus",
+            json!({ "Name": "ghost-bus", "Description": "nope" }),
+        );
+        assert!(svc.update_event_bus(&req).is_err());
+    }
+
+    // ---- Endpoint CRUD tests ----
+
+    fn create_endpoint_helper(svc: &EventBridgeService, name: &str) {
+        let req = make_request(
+            "CreateEndpoint",
+            json!({
+                "Name": name,
+                "RoutingConfig": {
+                    "FailoverConfig": {
+                        "Primary": { "HealthCheck": "" },
+                        "Secondary": { "Route": "us-west-2" }
+                    }
+                },
+                "EventBuses": [
+                    { "EventBusArn": "arn:aws:events:us-east-1:123456789012:event-bus/default" }
+                ]
+            }),
+        );
+        svc.create_endpoint(&req).unwrap();
+    }
+
+    #[test]
+    fn endpoint_create_describe_delete() {
+        let svc = make_service();
+        create_endpoint_helper(&svc, "my-endpoint");
+
+        // Describe
+        let req = make_request("DescribeEndpoint", json!({ "Name": "my-endpoint" }));
+        let resp = svc.describe_endpoint(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["Name"], "my-endpoint");
+        assert_eq!(body["State"], "ACTIVE");
+        assert!(body["EndpointId"].as_str().unwrap().contains("my-endpoint"));
+
+        // Delete
+        let req = make_request("DeleteEndpoint", json!({ "Name": "my-endpoint" }));
+        svc.delete_endpoint(&req).unwrap();
+
+        // Verify gone
+        let req = make_request("DescribeEndpoint", json!({ "Name": "my-endpoint" }));
+        assert!(svc.describe_endpoint(&req).is_err());
+    }
+
+    #[test]
+    fn endpoint_list_and_update() {
+        let svc = make_service();
+        create_endpoint_helper(&svc, "ep-alpha");
+        create_endpoint_helper(&svc, "ep-beta");
+
+        // List all
+        let req = make_request("ListEndpoints", json!({}));
+        let resp = svc.list_endpoints(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["Endpoints"].as_array().unwrap().len(), 2);
+
+        // Update
+        let req = make_request(
+            "UpdateEndpoint",
+            json!({ "Name": "ep-alpha", "Description": "updated" }),
+        );
+        let resp = svc.update_endpoint(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["Name"], "ep-alpha");
+
+        // Verify description
+        let req = make_request("DescribeEndpoint", json!({ "Name": "ep-alpha" }));
+        let resp = svc.describe_endpoint(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["Description"], "updated");
+    }
+
+    #[test]
+    fn endpoint_duplicate_fails() {
+        let svc = make_service();
+        create_endpoint_helper(&svc, "dup-ep");
+        let req = make_request(
+            "CreateEndpoint",
+            json!({
+                "Name": "dup-ep",
+                "RoutingConfig": {},
+                "EventBuses": []
+            }),
+        );
+        assert!(svc.create_endpoint(&req).is_err());
+    }
+
+    // ---- DeauthorizeConnection tests ----
+
+    #[test]
+    fn deauthorize_connection_sets_state() {
+        let svc = make_service();
+        create_connection(&svc, "deauth-conn");
+
+        let req = make_request("DeauthorizeConnection", json!({ "Name": "deauth-conn" }));
+        let resp = svc.deauthorize_connection(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["ConnectionState"], "DEAUTHORIZING");
+        assert!(body["ConnectionArn"]
+            .as_str()
+            .unwrap()
+            .contains("deauth-conn"));
+
+        // Verify via describe
+        let req = make_request("DescribeConnection", json!({ "Name": "deauth-conn" }));
+        let resp = svc.describe_connection(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["ConnectionState"], "DEAUTHORIZING");
+    }
+
+    #[test]
+    fn deauthorize_connection_not_found() {
+        let svc = make_service();
+        let req = make_request("DeauthorizeConnection", json!({ "Name": "ghost-conn" }));
+        assert!(svc.deauthorize_connection(&req).is_err());
+    }
+
+    // ---- Partner event source tests ----
+
+    #[test]
+    fn partner_event_source_crud() {
+        let svc = make_service();
+
+        // Create
+        let req = make_request(
+            "CreatePartnerEventSource",
+            json!({ "Name": "partner/test", "Account": "123456789012" }),
+        );
+        svc.create_partner_event_source(&req).unwrap();
+
+        // Describe
+        let req = make_request(
+            "DescribePartnerEventSource",
+            json!({ "Name": "partner/test" }),
+        );
+        let resp = svc.describe_partner_event_source(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["Name"], "partner/test");
+
+        // List
+        let req = make_request("ListPartnerEventSources", json!({}));
+        let resp = svc.list_partner_event_sources(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["PartnerEventSources"].as_array().unwrap().len(), 1);
+
+        // ListPartnerEventSourceAccounts
+        let req = make_request(
+            "ListPartnerEventSourceAccounts",
+            json!({ "EventSourceName": "partner/test" }),
+        );
+        let resp = svc.list_partner_event_source_accounts(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(
+            body["PartnerEventSourceAccounts"].as_array().unwrap().len(),
+            1
+        );
+
+        // DescribeEventSource
+        let req = make_request("DescribeEventSource", json!({ "Name": "partner/test" }));
+        let resp = svc.describe_event_source(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["Name"], "partner/test");
+        assert_eq!(body["State"], "ACTIVE");
+
+        // ListEventSources
+        let req = make_request("ListEventSources", json!({}));
+        let resp = svc.list_event_sources(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["EventSources"].as_array().unwrap().len(), 1);
+
+        // Delete
+        let req = make_request(
+            "DeletePartnerEventSource",
+            json!({ "Name": "partner/test", "Account": "123456789012" }),
+        );
+        svc.delete_partner_event_source(&req).unwrap();
+
+        // Verify gone
+        let req = make_request(
+            "DescribePartnerEventSource",
+            json!({ "Name": "partner/test" }),
+        );
+        assert!(svc.describe_partner_event_source(&req).is_err());
+    }
+
+    #[test]
+    fn activate_deactivate_event_source() {
+        let svc = make_service();
+
+        // Create a partner event source first
+        let req = make_request(
+            "CreatePartnerEventSource",
+            json!({ "Name": "aws.partner/test", "Account": "123456789012" }),
+        );
+        svc.create_partner_event_source(&req).unwrap();
+
+        // Deactivate it
+        let req = make_request(
+            "DeactivateEventSource",
+            json!({ "Name": "aws.partner/test" }),
+        );
+        svc.deactivate_event_source(&req).unwrap();
+        {
+            let state = svc.state.read();
+            assert_eq!(
+                state.partner_event_sources["aws.partner/test"].state,
+                "INACTIVE"
+            );
+        }
+
+        // Activate it
+        let req = make_request("ActivateEventSource", json!({ "Name": "aws.partner/test" }));
+        svc.activate_event_source(&req).unwrap();
+        {
+            let state = svc.state.read();
+            assert_eq!(
+                state.partner_event_sources["aws.partner/test"].state,
+                "ACTIVE"
+            );
+        }
+
+        // Not-found returns error
+        let req = make_request("ActivateEventSource", json!({ "Name": "nonexistent" }));
+        assert!(svc.activate_event_source(&req).is_err());
+
+        let req = make_request("DeactivateEventSource", json!({ "Name": "nonexistent" }));
+        assert!(svc.deactivate_event_source(&req).is_err());
+    }
+
+    #[test]
+    fn delete_partner_event_source_verifies_account() {
+        let svc = make_service();
+
+        // Create a partner event source
+        let req = make_request(
+            "CreatePartnerEventSource",
+            json!({ "Name": "aws.partner/test", "Account": "123456789012" }),
+        );
+        svc.create_partner_event_source(&req).unwrap();
+
+        // Deleting with wrong account fails
+        let req = make_request(
+            "DeletePartnerEventSource",
+            json!({ "Name": "aws.partner/test", "Account": "999999999999" }),
+        );
+        assert!(svc.delete_partner_event_source(&req).is_err());
+        // Source still exists
+        assert!(svc
+            .state
+            .read()
+            .partner_event_sources
+            .contains_key("aws.partner/test"));
+
+        // Deleting with correct account succeeds
+        let req = make_request(
+            "DeletePartnerEventSource",
+            json!({ "Name": "aws.partner/test", "Account": "123456789012" }),
+        );
+        svc.delete_partner_event_source(&req).unwrap();
+        assert!(!svc
+            .state
+            .read()
+            .partner_event_sources
+            .contains_key("aws.partner/test"));
+
+        // Deleting non-existent source returns error
+        let req = make_request(
+            "DeletePartnerEventSource",
+            json!({ "Name": "aws.partner/test", "Account": "123456789012" }),
+        );
+        assert!(svc.delete_partner_event_source(&req).is_err());
+    }
+
+    #[test]
+    fn put_partner_events() {
+        let svc = make_service();
+        let req = make_request(
+            "PutPartnerEvents",
+            json!({
+                "Entries": [
+                    { "Source": "partner.app", "DetailType": "Test", "Detail": "{}" }
+                ]
+            }),
+        );
+        let resp = svc.put_partner_events(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["FailedEntryCount"], 0);
+        assert_eq!(body["Entries"].as_array().unwrap().len(), 1);
+        assert!(body["Entries"][0]["EventId"].as_str().is_some());
     }
 }

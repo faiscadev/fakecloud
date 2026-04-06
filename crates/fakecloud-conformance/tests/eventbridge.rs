@@ -2,7 +2,9 @@ mod helpers;
 
 use aws_sdk_eventbridge::types::{
     ConnectionAuthorizationType, CreateConnectionApiKeyAuthRequestParameters,
-    CreateConnectionAuthRequestParameters, PutEventsRequestEntry, RuleState, Tag, Target,
+    CreateConnectionAuthRequestParameters, EndpointEventBus, FailoverConfig, Primary,
+    PutEventsRequestEntry, PutPartnerEventsRequestEntry, ReplicationConfig, ReplicationState,
+    RoutingConfig, RuleState, Secondary, Tag, Target,
 };
 use fakecloud_conformance_macros::test_action;
 use helpers::TestServer;
@@ -1154,4 +1156,436 @@ async fn eb_describe_partner_event_source() {
         .await
         .unwrap();
     assert!(resp.name().is_some());
+}
+
+#[test_action("events", "DeletePartnerEventSource", checksum = "bb7fb873")]
+#[tokio::test]
+async fn eb_delete_partner_event_source() {
+    let server = TestServer::start().await;
+    let client = server.eventbridge_client().await;
+
+    client
+        .create_partner_event_source()
+        .name("aws.partner/example.com/del")
+        .account("123456789012")
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .delete_partner_event_source()
+        .name("aws.partner/example.com/del")
+        .account("123456789012")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("events", "ListPartnerEventSources", checksum = "fe4e183a")]
+#[tokio::test]
+async fn eb_list_partner_event_sources() {
+    let server = TestServer::start().await;
+    let client = server.eventbridge_client().await;
+
+    client
+        .create_partner_event_source()
+        .name("aws.partner/example.com/list")
+        .account("123456789012")
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .list_partner_event_sources()
+        .name_prefix("aws.partner/example.com")
+        .send()
+        .await
+        .unwrap();
+    assert!(!resp.partner_event_sources().is_empty());
+}
+
+#[test_action("events", "ListPartnerEventSourceAccounts", checksum = "7a96ed63")]
+#[tokio::test]
+async fn eb_list_partner_event_source_accounts() {
+    let server = TestServer::start().await;
+    let client = server.eventbridge_client().await;
+
+    client
+        .create_partner_event_source()
+        .name("aws.partner/example.com/accts")
+        .account("123456789012")
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .list_partner_event_source_accounts()
+        .event_source_name("aws.partner/example.com/accts")
+        .send()
+        .await
+        .unwrap();
+    let _ = resp.partner_event_source_accounts();
+}
+
+#[test_action("events", "ActivateEventSource", checksum = "c72d22a8")]
+#[tokio::test]
+async fn eb_activate_event_source() {
+    let server = TestServer::start().await;
+    let client = server.eventbridge_client().await;
+
+    client
+        .create_partner_event_source()
+        .name("aws.partner/example.com/activate")
+        .account("123456789012")
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .activate_event_source()
+        .name("aws.partner/example.com/activate")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("events", "DeactivateEventSource", checksum = "f4551f56")]
+#[tokio::test]
+async fn eb_deactivate_event_source() {
+    let server = TestServer::start().await;
+    let client = server.eventbridge_client().await;
+
+    client
+        .create_partner_event_source()
+        .name("aws.partner/example.com/deactivate")
+        .account("123456789012")
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .deactivate_event_source()
+        .name("aws.partner/example.com/deactivate")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("events", "DescribeEventSource", checksum = "33dfc479")]
+#[tokio::test]
+async fn eb_describe_event_source() {
+    let server = TestServer::start().await;
+    let client = server.eventbridge_client().await;
+
+    client
+        .create_partner_event_source()
+        .name("aws.partner/example.com/descevt")
+        .account("123456789012")
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .describe_event_source()
+        .name("aws.partner/example.com/descevt")
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.name().is_some());
+}
+
+#[test_action("events", "ListEventSources", checksum = "b929f62f")]
+#[tokio::test]
+async fn eb_list_event_sources() {
+    let server = TestServer::start().await;
+    let client = server.eventbridge_client().await;
+
+    let resp = client.list_event_sources().send().await.unwrap();
+    let _ = resp.event_sources();
+}
+
+#[test_action("events", "PutPartnerEvents", checksum = "94e2fc0d")]
+#[tokio::test]
+async fn eb_put_partner_events() {
+    let server = TestServer::start().await;
+    let client = server.eventbridge_client().await;
+
+    let resp = client
+        .put_partner_events()
+        .entries(
+            PutPartnerEventsRequestEntry::builder()
+                .source("aws.partner/example.com/test")
+                .detail_type("TestEvent")
+                .detail(r#"{"key": "val"}"#)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.failed_entry_count(), 0);
+}
+
+#[test_action("events", "TestEventPattern", checksum = "d5fd69c1")]
+#[tokio::test]
+async fn eb_test_event_pattern() {
+    let server = TestServer::start().await;
+    let client = server.eventbridge_client().await;
+
+    let resp = client
+        .test_event_pattern()
+        .event_pattern(r#"{"source": ["test.app"]}"#)
+        .event(r#"{"source": "test.app", "detail-type": "TestEvent", "detail": {}}"#)
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.result());
+}
+
+// ---------------------------------------------------------------------------
+// UpdateEventBus
+// ---------------------------------------------------------------------------
+
+#[test_action("events", "UpdateEventBus", checksum = "b12ac967")]
+#[tokio::test]
+async fn eb_update_event_bus() {
+    let server = TestServer::start().await;
+    let client = server.eventbridge_client().await;
+
+    client
+        .create_event_bus()
+        .name("upd-bus")
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .update_event_bus()
+        .name("upd-bus")
+        .description("Updated bus")
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.arn().is_some());
+}
+
+// ---------------------------------------------------------------------------
+// DeauthorizeConnection
+// ---------------------------------------------------------------------------
+
+#[test_action("events", "DeauthorizeConnection", checksum = "c7d0f90d")]
+#[tokio::test]
+async fn eb_deauthorize_connection() {
+    let server = TestServer::start().await;
+    let client = server.eventbridge_client().await;
+
+    let auth = CreateConnectionAuthRequestParameters::builder()
+        .api_key_auth_parameters(
+            CreateConnectionApiKeyAuthRequestParameters::builder()
+                .api_key_name("x-api-key")
+                .api_key_value("secret")
+                .build()
+                .unwrap(),
+        )
+        .build();
+
+    client
+        .create_connection()
+        .name("deauth-conn")
+        .authorization_type(ConnectionAuthorizationType::ApiKey)
+        .auth_parameters(auth)
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .deauthorize_connection()
+        .name("deauth-conn")
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.connection_arn().is_some());
+}
+
+// ---------------------------------------------------------------------------
+// Endpoints
+// ---------------------------------------------------------------------------
+
+#[test_action("events", "CreateEndpoint", checksum = "2929c01c")]
+#[tokio::test]
+async fn eb_create_endpoint() {
+    let server = TestServer::start().await;
+    let client = server.eventbridge_client().await;
+
+    let resp = client
+        .create_endpoint()
+        .name("conf-endpoint")
+        .routing_config(
+            RoutingConfig::builder()
+                .failover_config(
+                    FailoverConfig::builder()
+                        .primary(
+                            Primary::builder()
+                                .health_check("arn:aws:route53:::healthcheck/abc123")
+                                .build()
+                                .unwrap(),
+                        )
+                        .secondary(Secondary::builder().route("us-west-2").build().unwrap())
+                        .build(),
+                )
+                .build(),
+        )
+        .event_buses(
+            EndpointEventBus::builder()
+                .event_bus_arn("arn:aws:events:us-east-1:123456789012:event-bus/default")
+                .build()
+                .unwrap(),
+        )
+        .replication_config(
+            ReplicationConfig::builder()
+                .state(ReplicationState::Disabled)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.arn().is_some());
+}
+
+#[test_action("events", "DescribeEndpoint", checksum = "e34860b5")]
+#[tokio::test]
+async fn eb_describe_endpoint() {
+    let server = TestServer::start().await;
+    let client = server.eventbridge_client().await;
+
+    client
+        .create_endpoint()
+        .name("desc-endpoint")
+        .routing_config(
+            RoutingConfig::builder()
+                .failover_config(
+                    FailoverConfig::builder()
+                        .primary(
+                            Primary::builder()
+                                .health_check("arn:aws:route53:::healthcheck/abc123")
+                                .build()
+                                .unwrap(),
+                        )
+                        .secondary(Secondary::builder().route("us-west-2").build().unwrap())
+                        .build(),
+                )
+                .build(),
+        )
+        .event_buses(
+            EndpointEventBus::builder()
+                .event_bus_arn("arn:aws:events:us-east-1:123456789012:event-bus/default")
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .describe_endpoint()
+        .name("desc-endpoint")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.name().unwrap(), "desc-endpoint");
+}
+
+#[test_action("events", "ListEndpoints", checksum = "9fbc15e9")]
+#[tokio::test]
+async fn eb_list_endpoints() {
+    let server = TestServer::start().await;
+    let client = server.eventbridge_client().await;
+
+    let resp = client.list_endpoints().send().await.unwrap();
+    let _ = resp.endpoints();
+}
+
+#[test_action("events", "UpdateEndpoint", checksum = "e7b112c5")]
+#[tokio::test]
+async fn eb_update_endpoint() {
+    let server = TestServer::start().await;
+    let client = server.eventbridge_client().await;
+
+    client
+        .create_endpoint()
+        .name("upd-endpoint")
+        .routing_config(
+            RoutingConfig::builder()
+                .failover_config(
+                    FailoverConfig::builder()
+                        .primary(
+                            Primary::builder()
+                                .health_check("arn:aws:route53:::healthcheck/abc123")
+                                .build()
+                                .unwrap(),
+                        )
+                        .secondary(Secondary::builder().route("us-west-2").build().unwrap())
+                        .build(),
+                )
+                .build(),
+        )
+        .event_buses(
+            EndpointEventBus::builder()
+                .event_bus_arn("arn:aws:events:us-east-1:123456789012:event-bus/default")
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .update_endpoint()
+        .name("upd-endpoint")
+        .description("Updated endpoint")
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.arn().is_some());
+}
+
+#[test_action("events", "DeleteEndpoint", checksum = "8287d5f0")]
+#[tokio::test]
+async fn eb_delete_endpoint() {
+    let server = TestServer::start().await;
+    let client = server.eventbridge_client().await;
+
+    client
+        .create_endpoint()
+        .name("del-endpoint")
+        .routing_config(
+            RoutingConfig::builder()
+                .failover_config(
+                    FailoverConfig::builder()
+                        .primary(
+                            Primary::builder()
+                                .health_check("arn:aws:route53:::healthcheck/abc123")
+                                .build()
+                                .unwrap(),
+                        )
+                        .secondary(Secondary::builder().route("us-west-2").build().unwrap())
+                        .build(),
+                )
+                .build(),
+        )
+        .event_buses(
+            EndpointEventBus::builder()
+                .event_bus_arn("arn:aws:events:us-east-1:123456789012:event-bus/default")
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .delete_endpoint()
+        .name("del-endpoint")
+        .send()
+        .await
+        .unwrap();
 }

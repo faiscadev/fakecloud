@@ -115,6 +115,32 @@ pub struct Replay {
     pub replay_end_time: Option<DateTime<Utc>>,
 }
 
+#[derive(Debug, Clone)]
+pub struct Endpoint {
+    pub name: String,
+    pub arn: String,
+    pub endpoint_id: String,
+    pub endpoint_url: Option<String>,
+    pub description: Option<String>,
+    pub routing_config: Value,
+    pub replication_config: Option<Value>,
+    pub event_buses: Vec<Value>,
+    pub role_arn: Option<String>,
+    pub state: String,
+    pub creation_time: DateTime<Utc>,
+    pub last_modified_time: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PartnerEventSource {
+    pub name: String,
+    pub arn: String,
+    pub account: String,
+    pub creation_time: DateTime<Utc>,
+    pub expiration_time: Option<DateTime<Utc>>,
+    pub state: String,
+}
+
 /// A recorded Lambda invocation from EventBridge delivery.
 #[derive(Debug, Clone)]
 pub struct LambdaInvocation {
@@ -149,8 +175,10 @@ pub struct EventBridgeState {
     pub connections: HashMap<String, Connection>,
     pub api_destinations: HashMap<String, ApiDestination>,
     pub replays: HashMap<String, Replay>,
-    /// Partner event sources: name -> account
-    pub partner_event_sources: HashMap<String, String>,
+    /// Partner event sources: name -> PartnerEventSource
+    pub partner_event_sources: HashMap<String, PartnerEventSource>,
+    /// Endpoints: name -> Endpoint
+    pub endpoints: HashMap<String, Endpoint>,
     /// Recorded Lambda invocations (stub deliveries).
     pub lambda_invocations: Vec<LambdaInvocation>,
     /// Recorded CloudWatch Logs deliveries (stub deliveries).
@@ -190,6 +218,7 @@ impl EventBridgeState {
             api_destinations: HashMap::new(),
             replays: HashMap::new(),
             partner_event_sources: HashMap::new(),
+            endpoints: HashMap::new(),
             lambda_invocations: Vec::new(),
             log_deliveries: Vec::new(),
             step_function_executions: Vec::new(),
@@ -214,6 +243,7 @@ impl EventBridgeState {
         self.rules.clear();
         self.events.clear();
         self.partner_event_sources.clear();
+        self.endpoints.clear();
         self.lambda_invocations.clear();
         self.log_deliveries.clear();
         self.step_function_executions.clear();
