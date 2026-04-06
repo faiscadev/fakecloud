@@ -988,7 +988,7 @@ async fn eventbridge_archive_replay_delivers_events() {
         )
         .event_start_time(aws_sdk_eventbridge::primitives::DateTime::from_secs(0))
         .event_end_time(aws_sdk_eventbridge::primitives::DateTime::from_secs(
-            (chrono::Utc::now().timestamp() + 3600) as i64,
+            chrono::Utc::now().timestamp() + 3600,
         ))
         .send()
         .await
