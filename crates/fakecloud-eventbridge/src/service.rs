@@ -3027,6 +3027,43 @@ impl EventBridgeService {
             req.region, state.account_id, name
         );
 
+        // Collect archived events within the replay time range
+        let archive = state.archives.get(&archive_name).unwrap();
+        let replay_events: Vec<PutEvent> = archive
+            .events
+            .iter()
+            .filter(|e| e.time >= event_start_time && e.time < event_end_time)
+            .cloned()
+            .collect();
+
+        // Find matching rules and their targets for each replayed event
+        let mut events_to_deliver: Vec<(PutEvent, Vec<EventTarget>)> = Vec::new();
+
+        for event in &replay_events {
+            let matching_targets: Vec<EventTarget> = state
+                .rules
+                .values()
+                .filter(|r| {
+                    r.event_bus_name == bus_name
+                        && r.state == "ENABLED"
+                        && matches_pattern(
+                            r.event_pattern.as_deref(),
+                            &event.source,
+                            &event.detail_type,
+                            &event.detail,
+                            &req.account_id,
+                            &req.region,
+                            &event.resources,
+                        )
+                })
+                .flat_map(|r| r.targets.clone())
+                .collect();
+
+            if !matching_targets.is_empty() {
+                events_to_deliver.push((event.clone(), matching_targets));
+            }
+        }
+
         let replay = Replay {
             name: name.clone(),
             arn: arn.clone(),
@@ -3035,11 +3072,120 @@ impl EventBridgeService {
             destination,
             event_start_time,
             event_end_time,
-            state: "COMPLETED".to_string(), // Mock completes immediately
+            state: "COMPLETED".to_string(),
             replay_start_time: now,
             replay_end_time: Some(now),
         };
         state.replays.insert(name, replay);
+
+        // Drop the lock before delivering
+        drop(state);
+
+        // Deliver replayed events to targets (same logic as PutEvents)
+        for (event, targets) in events_to_deliver {
+            let detail_value: Value = serde_json::from_str(&event.detail).unwrap_or(json!({}));
+            let event_json = json!({
+                "version": "0",
+                "id": event.event_id,
+                "source": event.source,
+                "account": req.account_id,
+                "detail-type": event.detail_type,
+                "detail": detail_value,
+                "time": event.time.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+                "region": req.region,
+                "resources": event.resources,
+                "replay-name": arn,
+            });
+            let event_str = event_json.to_string();
+
+            for target in targets {
+                let target_arn = &target.arn;
+                let body_str = if let Some(ref transformer) = target.input_transformer {
+                    apply_input_transformer(transformer, &event_json)
+                } else if let Some(ref input) = target.input {
+                    input.clone()
+                } else if let Some(ref input_path) = target.input_path {
+                    resolve_json_path(&event_json, input_path)
+                        .map(|v| v.to_string())
+                        .unwrap_or_else(|| event_str.clone())
+                } else {
+                    event_str.clone()
+                };
+
+                if target_arn.contains(":sqs:") {
+                    let group_id = target
+                        .sqs_parameters
+                        .as_ref()
+                        .and_then(|p| p["MessageGroupId"].as_str())
+                        .map(|s| s.to_string());
+                    if group_id.is_some() {
+                        self.delivery.send_to_sqs_with_attrs(
+                            target_arn,
+                            &body_str,
+                            &HashMap::new(),
+                            group_id.as_deref(),
+                            None,
+                        );
+                    } else {
+                        self.delivery
+                            .send_to_sqs(target_arn, &body_str, &HashMap::new());
+                    }
+                } else if target_arn.contains(":sns:") {
+                    self.delivery
+                        .publish_to_sns(target_arn, &body_str, Some(&event.detail_type));
+                } else if target_arn.contains(":lambda:") {
+                    let mut state = self.state.write();
+                    state
+                        .lambda_invocations
+                        .push(crate::state::LambdaInvocation {
+                            function_arn: target_arn.clone(),
+                            payload: body_str.clone(),
+                            timestamp: Utc::now(),
+                        });
+                    drop(state);
+                    if let Some(ref ls) = self.lambda_state {
+                        ls.write().invocations.push(LambdaInvocation {
+                            function_arn: target_arn.clone(),
+                            payload: body_str.clone(),
+                            timestamp: Utc::now(),
+                            source: "aws:events".to_string(),
+                        });
+                    }
+                } else if target_arn.contains(":logs:") {
+                    let mut state = self.state.write();
+                    state.log_deliveries.push(crate::state::LogDelivery {
+                        log_group_arn: target_arn.clone(),
+                        payload: body_str.clone(),
+                        timestamp: Utc::now(),
+                    });
+                    drop(state);
+                    if let Some(ref log_state) = self.logs_state {
+                        deliver_to_logs(log_state, target_arn, &body_str, Utc::now());
+                    }
+                } else if target_arn.contains(":states:") {
+                    let mut state = self.state.write();
+                    state
+                        .step_function_executions
+                        .push(crate::state::StepFunctionExecution {
+                            state_machine_arn: target_arn.clone(),
+                            payload: body_str.clone(),
+                            timestamp: Utc::now(),
+                        });
+                } else if target_arn.starts_with("https://") || target_arn.starts_with("http://") {
+                    let url = target_arn.clone();
+                    let payload = body_str.clone();
+                    tokio::spawn(async move {
+                        let client = reqwest::Client::new();
+                        let _ = client
+                            .post(&url)
+                            .header("Content-Type", "application/json")
+                            .body(payload)
+                            .send()
+                            .await;
+                    });
+                }
+            }
+        }
 
         Ok(json_resp(json!({
             "ReplayArn": arn,
@@ -4811,5 +4957,164 @@ mod tests {
         assert_eq!(body["FailedEntryCount"], 0);
         assert_eq!(body["Entries"].as_array().unwrap().len(), 1);
         assert!(body["Entries"][0]["EventId"].as_str().is_some());
+    }
+
+    // ---- Archive + Replay delivery tests ----
+
+    /// Helper: create a service with a mock SQS delivery that records messages.
+    fn make_service_with_sqs_recorder() -> (
+        EventBridgeService,
+        Arc<parking_lot::Mutex<Vec<(String, String)>>>,
+    ) {
+        use fakecloud_core::delivery::SqsDelivery;
+
+        struct RecordingSqsDelivery {
+            messages: Arc<parking_lot::Mutex<Vec<(String, String)>>>,
+        }
+
+        impl SqsDelivery for RecordingSqsDelivery {
+            fn deliver_to_queue(
+                &self,
+                queue_arn: &str,
+                message_body: &str,
+                _attributes: &HashMap<String, String>,
+            ) {
+                self.messages
+                    .lock()
+                    .push((queue_arn.to_string(), message_body.to_string()));
+            }
+        }
+
+        let messages: Arc<parking_lot::Mutex<Vec<(String, String)>>> =
+            Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let state = Arc::new(RwLock::new(EventBridgeState::new(
+            "123456789012",
+            "us-east-1",
+        )));
+        let delivery = Arc::new(DeliveryBus::new().with_sqs(Arc::new(RecordingSqsDelivery {
+            messages: messages.clone(),
+        })));
+        let svc = EventBridgeService::new(state, delivery);
+        (svc, messages)
+    }
+
+    #[test]
+    fn start_replay_delivers_archived_events_to_sqs_target() {
+        let (svc, messages) = make_service_with_sqs_recorder();
+        let queue_arn = "arn:aws:sqs:us-east-1:123456789012:replay-queue";
+
+        // Create a rule with an SQS target
+        let req = make_request(
+            "PutRule",
+            json!({
+                "Name": "replay-test-rule",
+                "EventPattern": r#"{"source": ["my.app"]}"#,
+                "State": "ENABLED"
+            }),
+        );
+        svc.put_rule(&req).unwrap();
+
+        let req = make_request(
+            "PutTargets",
+            json!({
+                "Rule": "replay-test-rule",
+                "Targets": [{
+                    "Id": "sqs-target",
+                    "Arn": queue_arn
+                }]
+            }),
+        );
+        svc.put_targets(&req).unwrap();
+
+        // Create an archive on the default bus
+        let req = make_request(
+            "CreateArchive",
+            json!({
+                "ArchiveName": "test-archive",
+                "EventSourceArn": "arn:aws:events:us-east-1:123456789012:event-bus/default"
+            }),
+        );
+        svc.create_archive(&req).unwrap();
+
+        // PutEvents: these should get archived and delivered
+        let req = make_request(
+            "PutEvents",
+            json!({
+                "Entries": [
+                    {
+                        "Source": "my.app",
+                        "DetailType": "OrderCreated",
+                        "Detail": "{\"orderId\": \"1\"}",
+                        "EventBusName": "default"
+                    },
+                    {
+                        "Source": "my.app",
+                        "DetailType": "OrderShipped",
+                        "Detail": "{\"orderId\": \"2\"}",
+                        "EventBusName": "default"
+                    }
+                ]
+            }),
+        );
+        let resp = svc.put_events(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["FailedEntryCount"], 0);
+
+        // Verify archive has 2 events
+        {
+            let state = svc.state.read();
+            let archive = state.archives.get("test-archive").unwrap();
+            assert_eq!(archive.events.len(), 2);
+            assert_eq!(archive.event_count, 2);
+        }
+
+        // Clear recorded messages from PutEvents delivery
+        messages.lock().clear();
+
+        // StartReplay: should re-deliver the archived events
+        let archive_arn = {
+            let state = svc.state.read();
+            state.archives.get("test-archive").unwrap().arn.clone()
+        };
+
+        // Use a wide time range to capture all events
+        let start_ts = 0.0_f64;
+        let end_ts = (chrono::Utc::now().timestamp() + 3600) as f64;
+
+        let req = make_request(
+            "StartReplay",
+            json!({
+                "ReplayName": "my-replay",
+                "EventSourceArn": archive_arn,
+                "Destination": {
+                    "Arn": "arn:aws:events:us-east-1:123456789012:event-bus/default"
+                },
+                "EventStartTime": start_ts,
+                "EventEndTime": end_ts
+            }),
+        );
+        let resp = svc.start_replay(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["State"], "STARTING");
+
+        // Verify the replay delivered events to SQS
+        let delivered = messages.lock();
+        assert_eq!(
+            delivered.len(),
+            2,
+            "expected 2 replayed events delivered to SQS"
+        );
+        for (arn, msg) in delivered.iter() {
+            assert_eq!(arn, queue_arn);
+            let event: Value = serde_json::from_str(msg).unwrap();
+            assert_eq!(event["source"], "my.app");
+            // Replayed events should include replay-name
+            assert!(event["replay-name"].as_str().is_some());
+        }
+
+        // Verify replay is marked as COMPLETED
+        let state = svc.state.read();
+        let replay = state.replays.get("my-replay").unwrap();
+        assert_eq!(replay.state, "COMPLETED");
     }
 }
