@@ -2,9 +2,8 @@ mod helpers;
 
 use aws_sdk_dynamodb::types::{
     AttributeDefinition, AttributeValue, BatchStatementRequest, BillingMode, Get, KeySchemaElement,
-    KeyType, ParameterizedStatement, ProvisionedThroughput, Put, PutRequest,
-    ScalarAttributeType, Tag, TimeToLiveSpecification, TransactGetItem, TransactWriteItem,
-    WriteRequest,
+    KeyType, ParameterizedStatement, ProvisionedThroughput, Put, PutRequest, ScalarAttributeType,
+    Tag, TimeToLiveSpecification, TransactGetItem, TransactWriteItem, WriteRequest,
 };
 use fakecloud_conformance_macros::test_action;
 use helpers::TestServer;
