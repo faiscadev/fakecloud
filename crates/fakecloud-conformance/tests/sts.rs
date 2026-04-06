@@ -96,3 +96,17 @@ async fn sts_get_access_key_info() {
         .unwrap();
     assert!(resp.account().is_some());
 }
+
+#[test_action("sts", "DecodeAuthorizationMessage", checksum = "4573ceaa")]
+#[tokio::test]
+async fn sts_decode_authorization_message() {
+    let server = TestServer::start().await;
+    let client = server.sts_client().await;
+    let result = client
+        .decode_authorization_message()
+        .encoded_message("encoded-test-message")
+        .send()
+        .await
+        .unwrap();
+    assert!(result.decoded_message().is_some());
+}
