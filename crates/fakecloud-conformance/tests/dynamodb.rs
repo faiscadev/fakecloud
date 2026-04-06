@@ -1,8 +1,10 @@
 mod helpers;
 
 use aws_sdk_dynamodb::types::{
-    AttributeDefinition, AttributeValue, BillingMode, KeySchemaElement, KeyType,
-    ProvisionedThroughput, PutRequest, ScalarAttributeType, Tag, WriteRequest,
+    AttributeDefinition, AttributeValue, BatchStatementRequest, BillingMode, Get, KeySchemaElement,
+    KeyType, ParameterizedStatement, ProvisionedThroughput, Put, PutRequest,
+    ScalarAttributeType, Tag, TimeToLiveSpecification, TransactGetItem, TransactWriteItem,
+    WriteRequest,
 };
 use fakecloud_conformance_macros::test_action;
 use helpers::TestServer;
@@ -556,4 +558,374 @@ async fn dynamodb_tag_untag_list_tags() {
         .unwrap();
     assert_eq!(resp.tags().len(), 1);
     assert_eq!(resp.tags()[0].key(), "project");
+}
+
+// ---------------------------------------------------------------------------
+// Transactions
+// ---------------------------------------------------------------------------
+
+#[test_action("dynamodb", "TransactWriteItems", checksum = "f48b6112")]
+#[test_action("dynamodb", "TransactGetItems", checksum = "b858229e")]
+#[tokio::test]
+async fn dynamodb_transact_write_and_get() {
+    let server = TestServer::start().await;
+    let client = server.dynamodb_client().await;
+
+    client
+        .create_table()
+        .table_name("TxTable")
+        .key_schema(
+            KeySchemaElement::builder()
+                .attribute_name("pk")
+                .key_type(KeyType::Hash)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            AttributeDefinition::builder()
+                .attribute_name("pk")
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .billing_mode(BillingMode::PayPerRequest)
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .transact_write_items()
+        .transact_items(
+            TransactWriteItem::builder()
+                .put(
+                    Put::builder()
+                        .table_name("TxTable")
+                        .item("pk", AttributeValue::S("tx1".to_string()))
+                        .item("data", AttributeValue::S("hello".to_string()))
+                        .build()
+                        .unwrap(),
+                )
+                .build(),
+        )
+        .transact_items(
+            TransactWriteItem::builder()
+                .put(
+                    Put::builder()
+                        .table_name("TxTable")
+                        .item("pk", AttributeValue::S("tx2".to_string()))
+                        .item("data", AttributeValue::S("world".to_string()))
+                        .build()
+                        .unwrap(),
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .transact_get_items()
+        .transact_items(
+            TransactGetItem::builder()
+                .get(
+                    Get::builder()
+                        .table_name("TxTable")
+                        .key("pk", AttributeValue::S("tx1".to_string()))
+                        .build()
+                        .unwrap(),
+                )
+                .build(),
+        )
+        .transact_items(
+            TransactGetItem::builder()
+                .get(
+                    Get::builder()
+                        .table_name("TxTable")
+                        .key("pk", AttributeValue::S("tx2".to_string()))
+                        .build()
+                        .unwrap(),
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.responses().len(), 2);
+}
+
+// ---------------------------------------------------------------------------
+// TTL
+// ---------------------------------------------------------------------------
+
+#[test_action("dynamodb", "UpdateTimeToLive", checksum = "aa8932c4")]
+#[test_action("dynamodb", "DescribeTimeToLive", checksum = "62d98ba8")]
+#[tokio::test]
+async fn dynamodb_update_and_describe_ttl() {
+    let server = TestServer::start().await;
+    let client = server.dynamodb_client().await;
+
+    client
+        .create_table()
+        .table_name("TtlTable")
+        .key_schema(
+            KeySchemaElement::builder()
+                .attribute_name("pk")
+                .key_type(KeyType::Hash)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            AttributeDefinition::builder()
+                .attribute_name("pk")
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .billing_mode(BillingMode::PayPerRequest)
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .update_time_to_live()
+        .table_name("TtlTable")
+        .time_to_live_specification(
+            TimeToLiveSpecification::builder()
+                .attribute_name("expiry")
+                .enabled(true)
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .describe_time_to_live()
+        .table_name("TtlTable")
+        .send()
+        .await
+        .unwrap();
+    let desc = resp.time_to_live_description().unwrap();
+    assert_eq!(desc.time_to_live_status().unwrap().as_str(), "ENABLED");
+}
+
+// ---------------------------------------------------------------------------
+// PartiQL
+// ---------------------------------------------------------------------------
+
+#[test_action("dynamodb", "ExecuteStatement", checksum = "76679282")]
+#[tokio::test]
+async fn dynamodb_execute_statement() {
+    let server = TestServer::start().await;
+    let client = server.dynamodb_client().await;
+
+    client
+        .create_table()
+        .table_name("PartiQL")
+        .key_schema(
+            KeySchemaElement::builder()
+                .attribute_name("pk")
+                .key_type(KeyType::Hash)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            AttributeDefinition::builder()
+                .attribute_name("pk")
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .billing_mode(BillingMode::PayPerRequest)
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .put_item()
+        .table_name("PartiQL")
+        .item("pk", AttributeValue::S("p1".to_string()))
+        .item("val", AttributeValue::S("data".to_string()))
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .execute_statement()
+        .statement("SELECT * FROM \"PartiQL\" WHERE pk = 'p1'")
+        .send()
+        .await
+        .unwrap();
+    assert!(!resp.items().is_empty());
+}
+
+#[test_action("dynamodb", "BatchExecuteStatement", checksum = "7f3aa0d5")]
+#[tokio::test]
+async fn dynamodb_batch_execute_statement() {
+    let server = TestServer::start().await;
+    let client = server.dynamodb_client().await;
+
+    client
+        .create_table()
+        .table_name("BatchPartiQL")
+        .key_schema(
+            KeySchemaElement::builder()
+                .attribute_name("pk")
+                .key_type(KeyType::Hash)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            AttributeDefinition::builder()
+                .attribute_name("pk")
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .billing_mode(BillingMode::PayPerRequest)
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .put_item()
+        .table_name("BatchPartiQL")
+        .item("pk", AttributeValue::S("bp1".to_string()))
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .batch_execute_statement()
+        .statements(
+            BatchStatementRequest::builder()
+                .statement("SELECT * FROM \"BatchPartiQL\" WHERE pk = 'bp1'")
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert!(!resp.responses().is_empty());
+}
+
+#[test_action("dynamodb", "ExecuteTransaction", checksum = "39e327cc")]
+#[tokio::test]
+async fn dynamodb_execute_transaction() {
+    let server = TestServer::start().await;
+    let client = server.dynamodb_client().await;
+
+    client
+        .create_table()
+        .table_name("TxPartiQL")
+        .key_schema(
+            KeySchemaElement::builder()
+                .attribute_name("pk")
+                .key_type(KeyType::Hash)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            AttributeDefinition::builder()
+                .attribute_name("pk")
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .billing_mode(BillingMode::PayPerRequest)
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .execute_transaction()
+        .transact_statements(
+            ParameterizedStatement::builder()
+                .statement("INSERT INTO \"TxPartiQL\" VALUE {'pk': 'txp1'}")
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let _ = resp.responses();
+}
+
+// ---------------------------------------------------------------------------
+// Resource Policies
+// ---------------------------------------------------------------------------
+
+#[test_action("dynamodb", "PutResourcePolicy", checksum = "af807319")]
+#[test_action("dynamodb", "GetResourcePolicy", checksum = "dec0fc2e")]
+#[test_action("dynamodb", "DeleteResourcePolicy", checksum = "565f9e81")]
+#[tokio::test]
+async fn dynamodb_resource_policy_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.dynamodb_client().await;
+
+    let create_resp = client
+        .create_table()
+        .table_name("PolicyTable")
+        .key_schema(
+            KeySchemaElement::builder()
+                .attribute_name("pk")
+                .key_type(KeyType::Hash)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            AttributeDefinition::builder()
+                .attribute_name("pk")
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .billing_mode(BillingMode::PayPerRequest)
+        .send()
+        .await
+        .unwrap();
+
+    let arn = create_resp
+        .table_description()
+        .unwrap()
+        .table_arn()
+        .unwrap()
+        .to_string();
+
+    let policy = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":"*","Action":"dynamodb:GetItem","Resource":"*"}]}"#;
+
+    client
+        .put_resource_policy()
+        .resource_arn(&arn)
+        .policy(policy)
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .get_resource_policy()
+        .resource_arn(&arn)
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.policy().is_some());
+
+    client
+        .delete_resource_policy()
+        .resource_arn(&arn)
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .get_resource_policy()
+        .resource_arn(&arn)
+        .send()
+        .await
+        .unwrap();
+    // After deletion, policy should be absent
+    let policy_val = resp.policy().unwrap_or_default();
+    assert!(policy_val.is_empty() || policy_val == "null");
 }
