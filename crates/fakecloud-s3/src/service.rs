@@ -6305,6 +6305,7 @@ fn normalize_notification_ids(xml: &str) -> String {
         "TopicConfiguration",
         "QueueConfiguration",
         "CloudFunctionConfiguration",
+        "LambdaFunctionConfiguration",
     ];
     let mut result = xml.to_string();
     for tag in &config_tags {
@@ -6587,11 +6588,62 @@ struct NotificationTarget {
     target_type: NotificationTargetType,
     arn: String,
     events: Vec<String>,
+    prefix_filter: Option<String>,
+    suffix_filter: Option<String>,
 }
 
 enum NotificationTargetType {
     Sqs,
     Sns,
+    Lambda,
+}
+
+/// Parse S3Key filter rules (prefix/suffix) from a notification configuration block.
+fn parse_s3_key_filters(block: &str) -> (Option<String>, Option<String>) {
+    let mut prefix = None;
+    let mut suffix = None;
+    if let Some(filter_start) = block.find("<Filter>") {
+        let after_filter = &block[filter_start..];
+        if let Some(filter_end) = after_filter.find("</Filter>") {
+            let filter_block = &after_filter[..filter_end];
+            // Parse each FilterRule
+            let mut remaining = filter_block;
+            while let Some(rule_start) = remaining.find("<FilterRule>") {
+                let after_rule = &remaining[rule_start + 12..];
+                if let Some(rule_end) = after_rule.find("</FilterRule>") {
+                    let rule_block = &after_rule[..rule_end];
+                    let name = extract_xml_value(rule_block, "Name");
+                    let value = extract_xml_value(rule_block, "Value");
+                    if let (Some(name), Some(value)) = (name, value) {
+                        match name.to_lowercase().as_str() {
+                            "prefix" => prefix = Some(value),
+                            "suffix" => suffix = Some(value),
+                            _ => {}
+                        }
+                    }
+                    remaining = &after_rule[rule_end + 13..];
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+    (prefix, suffix)
+}
+
+/// Check if an object key matches the prefix/suffix filters.
+fn key_matches_filters(key: &str, prefix: &Option<String>, suffix: &Option<String>) -> bool {
+    if let Some(p) = prefix {
+        if !key.starts_with(p.as_str()) {
+            return false;
+        }
+    }
+    if let Some(s) = suffix {
+        if !key.ends_with(s.as_str()) {
+            return false;
+        }
+    }
+    true
 }
 
 /// Parse the bucket notification configuration XML into targets.
@@ -6606,10 +6658,13 @@ fn parse_notification_config(xml: &str) -> Vec<NotificationTarget> {
             let block = &after[..end];
             if let Some(arn) = extract_xml_value(block, "Queue") {
                 let events = extract_all_xml_values(block, "Event");
+                let (prefix_filter, suffix_filter) = parse_s3_key_filters(block);
                 targets.push(NotificationTarget {
                     target_type: NotificationTargetType::Sqs,
                     arn,
                     events,
+                    prefix_filter,
+                    suffix_filter,
                 });
             }
             remaining = &after[end + 21..];
@@ -6626,13 +6681,65 @@ fn parse_notification_config(xml: &str) -> Vec<NotificationTarget> {
             let block = &after[..end];
             if let Some(arn) = extract_xml_value(block, "Topic") {
                 let events = extract_all_xml_values(block, "Event");
+                let (prefix_filter, suffix_filter) = parse_s3_key_filters(block);
                 targets.push(NotificationTarget {
                     target_type: NotificationTargetType::Sns,
                     arn,
                     events,
+                    prefix_filter,
+                    suffix_filter,
                 });
             }
             remaining = &after[end + 21..];
+        } else {
+            break;
+        }
+    }
+
+    // Parse CloudFunctionConfiguration entries (older S3 XML format)
+    remaining = xml;
+    while let Some(start) = remaining.find("<CloudFunctionConfiguration>") {
+        let after = &remaining[start + 28..];
+        if let Some(end) = after.find("</CloudFunctionConfiguration>") {
+            let block = &after[..end];
+            if let Some(arn) = extract_xml_value(block, "CloudFunction") {
+                let events = extract_all_xml_values(block, "Event");
+                let (prefix_filter, suffix_filter) = parse_s3_key_filters(block);
+                targets.push(NotificationTarget {
+                    target_type: NotificationTargetType::Lambda,
+                    arn,
+                    events,
+                    prefix_filter,
+                    suffix_filter,
+                });
+            }
+            remaining = &after[end + 29..];
+        } else {
+            break;
+        }
+    }
+
+    // Parse LambdaFunctionConfiguration entries (newer S3 XML format)
+    remaining = xml;
+    while let Some(start) = remaining.find("<LambdaFunctionConfiguration>") {
+        let after = &remaining[start + 29..];
+        if let Some(end) = after.find("</LambdaFunctionConfiguration>") {
+            let block = &after[..end];
+            // The newer format uses <Function> for the ARN
+            let arn = extract_xml_value(block, "Function")
+                .or_else(|| extract_xml_value(block, "CloudFunction"));
+            if let Some(arn) = arn {
+                let events = extract_all_xml_values(block, "Event");
+                let (prefix_filter, suffix_filter) = parse_s3_key_filters(block);
+                targets.push(NotificationTarget {
+                    target_type: NotificationTargetType::Lambda,
+                    arn,
+                    events,
+                    prefix_filter,
+                    suffix_filter,
+                });
+            }
+            remaining = &after[end + 30..];
         } else {
             break;
         }
@@ -6682,7 +6789,7 @@ fn event_matches(event_name: &str, filter: &str) -> bool {
 /// Deliver S3 event notifications for a bucket operation.
 #[allow(clippy::too_many_arguments)]
 fn deliver_notifications(
-    delivery: &DeliveryBus,
+    delivery: &Arc<DeliveryBus>,
     notification_config: &str,
     event_name: &str,
     bucket_name: &str,
@@ -6704,12 +6811,47 @@ fn deliver_notifications(
         if !matches {
             continue;
         }
+        if !key_matches_filters(key, &target.prefix_filter, &target.suffix_filter) {
+            continue;
+        }
         match target.target_type {
             NotificationTargetType::Sqs => {
                 delivery.send_to_sqs(&target.arn, &message, &std::collections::HashMap::new());
             }
             NotificationTargetType::Sns => {
                 delivery.publish_to_sns(&target.arn, &message, Some("Amazon S3 Notification"));
+            }
+            NotificationTargetType::Lambda => {
+                let delivery = delivery.clone();
+                let function_arn = target.arn.clone();
+                let payload = message.clone();
+                tokio::spawn(async move {
+                    tracing::info!(
+                        function_arn = %function_arn,
+                        "S3 invoking Lambda function for notification"
+                    );
+                    match delivery.invoke_lambda(&function_arn, &payload).await {
+                        Some(Ok(_)) => {
+                            tracing::info!(
+                                function_arn = %function_arn,
+                                "S3->Lambda invocation succeeded"
+                            );
+                        }
+                        Some(Err(e)) => {
+                            tracing::error!(
+                                function_arn = %function_arn,
+                                error = %e,
+                                "S3->Lambda invocation failed"
+                            );
+                        }
+                        None => {
+                            tracing::warn!(
+                                function_arn = %function_arn,
+                                "No Lambda delivery configured"
+                            );
+                        }
+                    }
+                });
             }
         }
     }
@@ -6913,6 +7055,173 @@ mod tests {
             "arn:aws:sns:us-east-1:123456789012:my-topic"
         );
         assert_eq!(targets[1].events, vec!["s3:ObjectRemoved:*"]);
+    }
+
+    #[test]
+    fn test_parse_notification_config_lambda() {
+        // Test CloudFunctionConfiguration (older format)
+        let xml = r#"<NotificationConfiguration>
+            <CloudFunctionConfiguration>
+                <CloudFunction>arn:aws:lambda:us-east-1:123456789012:function:my-func</CloudFunction>
+                <Event>s3:ObjectCreated:*</Event>
+            </CloudFunctionConfiguration>
+        </NotificationConfiguration>"#;
+        let targets = parse_notification_config(xml);
+        assert_eq!(targets.len(), 1);
+        assert!(matches!(
+            targets[0].target_type,
+            NotificationTargetType::Lambda
+        ));
+        assert_eq!(
+            targets[0].arn,
+            "arn:aws:lambda:us-east-1:123456789012:function:my-func"
+        );
+        assert_eq!(targets[0].events, vec!["s3:ObjectCreated:*"]);
+    }
+
+    #[test]
+    fn test_parse_notification_config_lambda_new_format() {
+        // Test LambdaFunctionConfiguration (newer format used by AWS SDK)
+        let xml = r#"<NotificationConfiguration>
+            <LambdaFunctionConfiguration>
+                <Function>arn:aws:lambda:us-east-1:123456789012:function:my-func</Function>
+                <Event>s3:ObjectCreated:Put</Event>
+                <Event>s3:ObjectRemoved:*</Event>
+            </LambdaFunctionConfiguration>
+        </NotificationConfiguration>"#;
+        let targets = parse_notification_config(xml);
+        assert_eq!(targets.len(), 1);
+        assert!(matches!(
+            targets[0].target_type,
+            NotificationTargetType::Lambda
+        ));
+        assert_eq!(
+            targets[0].arn,
+            "arn:aws:lambda:us-east-1:123456789012:function:my-func"
+        );
+        assert_eq!(
+            targets[0].events,
+            vec!["s3:ObjectCreated:Put", "s3:ObjectRemoved:*"]
+        );
+    }
+
+    #[test]
+    fn test_parse_notification_config_all_types() {
+        let xml = r#"<NotificationConfiguration>
+            <QueueConfiguration>
+                <Queue>arn:aws:sqs:us-east-1:123456789012:q</Queue>
+                <Event>s3:ObjectCreated:*</Event>
+            </QueueConfiguration>
+            <TopicConfiguration>
+                <Topic>arn:aws:sns:us-east-1:123456789012:t</Topic>
+                <Event>s3:ObjectRemoved:*</Event>
+            </TopicConfiguration>
+            <LambdaFunctionConfiguration>
+                <Function>arn:aws:lambda:us-east-1:123456789012:function:f</Function>
+                <Event>s3:ObjectCreated:Put</Event>
+            </LambdaFunctionConfiguration>
+        </NotificationConfiguration>"#;
+        let targets = parse_notification_config(xml);
+        assert_eq!(targets.len(), 3);
+        assert!(matches!(
+            targets[0].target_type,
+            NotificationTargetType::Sqs
+        ));
+        assert!(matches!(
+            targets[1].target_type,
+            NotificationTargetType::Sns
+        ));
+        assert!(matches!(
+            targets[2].target_type,
+            NotificationTargetType::Lambda
+        ));
+    }
+
+    #[test]
+    fn test_parse_notification_config_with_filters() {
+        let xml = r#"<NotificationConfiguration>
+            <LambdaFunctionConfiguration>
+                <Function>arn:aws:lambda:us-east-1:123456789012:function:my-func</Function>
+                <Event>s3:ObjectCreated:*</Event>
+                <Filter>
+                    <S3Key>
+                        <FilterRule>
+                            <Name>prefix</Name>
+                            <Value>images/</Value>
+                        </FilterRule>
+                        <FilterRule>
+                            <Name>suffix</Name>
+                            <Value>.jpg</Value>
+                        </FilterRule>
+                    </S3Key>
+                </Filter>
+            </LambdaFunctionConfiguration>
+        </NotificationConfiguration>"#;
+        let targets = parse_notification_config(xml);
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].prefix_filter, Some("images/".to_string()));
+        assert_eq!(targets[0].suffix_filter, Some(".jpg".to_string()));
+    }
+
+    #[test]
+    fn test_parse_notification_config_no_filters() {
+        let xml = r#"<NotificationConfiguration>
+            <LambdaFunctionConfiguration>
+                <Function>arn:aws:lambda:us-east-1:123456789012:function:my-func</Function>
+                <Event>s3:ObjectCreated:*</Event>
+            </LambdaFunctionConfiguration>
+        </NotificationConfiguration>"#;
+        let targets = parse_notification_config(xml);
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].prefix_filter, None);
+        assert_eq!(targets[0].suffix_filter, None);
+    }
+
+    #[test]
+    fn test_key_matches_filters() {
+        // No filters — everything matches
+        assert!(key_matches_filters("anything", &None, &None));
+
+        // Prefix only
+        assert!(key_matches_filters(
+            "images/photo.jpg",
+            &Some("images/".to_string()),
+            &None
+        ));
+        assert!(!key_matches_filters(
+            "docs/file.txt",
+            &Some("images/".to_string()),
+            &None
+        ));
+
+        // Suffix only
+        assert!(key_matches_filters(
+            "images/photo.jpg",
+            &None,
+            &Some(".jpg".to_string())
+        ));
+        assert!(!key_matches_filters(
+            "images/photo.png",
+            &None,
+            &Some(".jpg".to_string())
+        ));
+
+        // Both prefix and suffix
+        assert!(key_matches_filters(
+            "images/photo.jpg",
+            &Some("images/".to_string()),
+            &Some(".jpg".to_string())
+        ));
+        assert!(!key_matches_filters(
+            "images/photo.png",
+            &Some("images/".to_string()),
+            &Some(".jpg".to_string())
+        ));
+        assert!(!key_matches_filters(
+            "docs/photo.jpg",
+            &Some("images/".to_string()),
+            &Some(".jpg".to_string())
+        ));
     }
 
     #[test]

@@ -148,12 +148,16 @@ async fn main() {
             .with_sns(sns_delivery.clone()),
     );
 
-    // Step 3: S3 delivery (S3 notifications can push to SQS and SNS)
-    let delivery_for_s3 = Arc::new(
-        DeliveryBus::new()
+    // Step 3: S3 delivery (S3 notifications can push to SQS, SNS, and Lambda)
+    let delivery_for_s3 = {
+        let mut bus = DeliveryBus::new()
             .with_sqs(sqs_delivery.clone())
-            .with_sns(sns_delivery),
-    );
+            .with_sns(sns_delivery);
+        if let Some(ref ld) = lambda_delivery {
+            bus = bus.with_lambda(ld.clone());
+        }
+        Arc::new(bus)
+    };
 
     // Step 4: Logs delivery (subscription filters can push to SQS)
     let delivery_for_logs = Arc::new(DeliveryBus::new().with_sqs(sqs_delivery));

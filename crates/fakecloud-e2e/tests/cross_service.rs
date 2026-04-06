@@ -1347,38 +1347,28 @@ def handler(event, context):
     assert_eq!(record["Sns"]["Subject"], "Test Subject");
 }
 
-/// SQS -> Lambda ESM real execution: send a message to SQS, the event source mapping
-/// triggers a Lambda that processes the message and writes "processed:<body>" to a result queue.
+/// S3 PUT notification -> Lambda: verify that uploading an object triggers Lambda execution.
 #[tokio::test]
 #[ignore] // Requires Docker with host.docker.internal networking — run locally, not in CI
-async fn sqs_to_lambda_esm_actually_executes() {
+async fn s3_to_lambda_notification_executes() {
     let server = TestServer::start().await;
+    let s3 = server.s3_client().await;
     let sqs = server.sqs_client().await;
     let lambda = server.lambda_client().await;
 
-    // 1. Create source queue and result queue
-    let source_queue = sqs
+    // 1. Create SQS result queue where Lambda will write proof that it ran
+    let queue = sqs
         .create_queue()
-        .queue_name("esm-source-queue")
+        .queue_name("s3-lambda-proof-queue")
         .send()
         .await
         .unwrap();
-    let source_url = source_queue.queue_url().unwrap().to_string();
-    let source_arn = get_queue_arn(&sqs, &source_url).await;
+    let queue_url = queue.queue_url().unwrap().to_string();
 
-    let result_queue = sqs
-        .create_queue()
-        .queue_name("esm-result-queue")
-        .send()
-        .await
-        .unwrap();
-    let result_url = result_queue.queue_url().unwrap().to_string();
-
-    // 2. Create Lambda (Python) that reads SQS event, extracts message body,
-    //    and sends "processed:<body>" to the result queue
+    // 2. Create a Lambda function with Python code that sends the S3 event to SQS
     let docker_endpoint = format!("http://host.docker.internal:{}", server.port());
-    let docker_result_url = format!(
-        "http://host.docker.internal:{}/123456789012/esm-result-queue",
+    let docker_queue_url = format!(
+        "http://host.docker.internal:{}/123456789012/s3-lambda-proof-queue",
         server.port()
     );
     let python_code = format!(
@@ -1388,75 +1378,90 @@ import urllib.request
 import urllib.parse
 
 def handler(event, context):
-    for record in event.get("Records", []):
-        body = record.get("body", "")
-        result = "processed:" + body
-        params = urllib.parse.urlencode({{
-            "Action": "SendMessage",
-            "QueueUrl": "{docker_result_url}",
-            "MessageBody": result,
-            "Version": "2012-11-05",
-        }})
-        req = urllib.request.Request(
-            "{docker_endpoint}/",
-            data=params.encode("utf-8"),
-            headers={{
-                "Content-Type": "application/x-www-form-urlencoded",
-                "Authorization": "AWS4-HMAC-SHA256 Credential=test/20260101/us-east-1/sqs/aws4_request, SignedHeaders=host, Signature=fake",
-            }},
-        )
-        urllib.request.urlopen(req, timeout=5)
+    endpoint = "{docker_endpoint}"
+    queue_url = "{docker_queue_url}"
+    params = urllib.parse.urlencode({{
+        "Action": "SendMessage",
+        "QueueUrl": queue_url,
+        "MessageBody": json.dumps(event),
+        "Version": "2012-11-05",
+    }})
+    req = urllib.request.Request(
+        endpoint + "/",
+        data=params.encode("utf-8"),
+        headers={{
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Authorization": "AWS4-HMAC-SHA256 Credential=test/20260101/us-east-1/sqs/aws4_request, SignedHeaders=host, Signature=fake",
+        }},
+    )
+    urllib.request.urlopen(req, timeout=5)
     return {{"statusCode": 200, "body": "ok"}}
 "#
     );
 
     let zip = make_zip(&[("index.py", python_code.as_bytes())]);
 
-    lambda
+    let create_result = lambda
         .create_function()
-        .function_name("esm-processor")
+        .function_name("s3-notif-func")
         .runtime(Runtime::Python312)
         .role("arn:aws:iam::123456789012:role/lambda-role")
         .handler("index.handler")
-        .timeout(10)
         .environment(
             Environment::builder()
-                .variables("AWS_ACCESS_KEY_ID", "test")
-                .variables("AWS_SECRET_ACCESS_KEY", "test")
+                .variables("FAKECLOUD_ENDPOINT", server.endpoint())
                 .build(),
         )
         .code(FunctionCode::builder().zip_file(Blob::new(zip)).build())
         .send()
         .await
         .unwrap();
+    let function_arn = create_result.function_arn().unwrap().to_string();
 
-    // 3. Create event source mapping from source queue to Lambda
-    lambda
-        .create_event_source_mapping()
-        .event_source_arn(&source_arn)
-        .function_name("esm-processor")
-        .batch_size(10)
-        .enabled(true)
+    // 3. Create S3 bucket
+    s3.create_bucket()
+        .bucket("lambda-notif-bucket")
         .send()
         .await
         .unwrap();
 
-    // 4. Send a message to the source queue
-    let original_body = "hello-esm-test";
-    sqs.send_message()
-        .queue_url(&source_url)
-        .message_body(original_body)
+    // 4. Put notification configuration with LambdaFunctionConfigurations targeting the Lambda
+    let notif_config = format!(
+        r#"{{"LambdaFunctionConfigurations":[{{"LambdaFunctionArn":"{}","Events":["s3:ObjectCreated:*"]}}]}}"#,
+        function_arn
+    );
+    let output = server
+        .aws_cli(&[
+            "s3api",
+            "put-bucket-notification-configuration",
+            "--bucket",
+            "lambda-notif-bucket",
+            "--notification-configuration",
+            &notif_config,
+        ])
+        .await;
+    assert!(
+        output.success(),
+        "put-bucket-notification-configuration failed: {}",
+        output.stderr_text()
+    );
+
+    // 5. Upload an object to the bucket
+    s3.put_object()
+        .bucket("lambda-notif-bucket")
+        .key("test-file.txt")
+        .body(ByteStream::from_static(b"hello from S3"))
         .send()
         .await
         .unwrap();
 
-    // 5. Wait and receive from result queue
+    // 6. Wait for Lambda to execute and write proof to SQS
     let mut proof_message = None;
     for _ in 0..30 {
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         let msgs = sqs
             .receive_message()
-            .queue_url(&result_url)
+            .queue_url(&queue_url)
             .max_number_of_messages(1)
             .send()
             .await
@@ -1467,12 +1472,18 @@ def handler(event, context):
         }
     }
 
-    // 6. Assert the result contains "processed:" + original message
-    let msg = proof_message
-        .expect("Lambda was not actually invoked by SQS ESM -- no message in result queue");
-    assert_eq!(
-        msg,
-        format!("processed:{original_body}"),
-        "Lambda should have processed the SQS message and sent 'processed:<body>' to result queue"
+    // 7. Assert Lambda ran with the S3 event
+    let proof = proof_message
+        .expect("Lambda did not write proof to SQS — S3->Lambda notification did not execute");
+    let event: serde_json::Value = serde_json::from_str(&proof).unwrap();
+
+    // The Lambda receives an S3 event with Records array
+    assert!(
+        event["Records"].is_array(),
+        "Expected S3 event with Records array, got: {event}"
     );
+    let record = &event["Records"][0];
+    assert_eq!(record["eventSource"], "aws:s3");
+    assert_eq!(record["s3"]["bucket"]["name"], "lambda-notif-bucket");
+    assert_eq!(record["s3"]["object"]["key"], "test-file.txt");
 }
