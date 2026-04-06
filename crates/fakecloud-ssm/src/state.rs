@@ -153,6 +153,94 @@ pub struct PatchGroup {
     pub patch_group: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct SsmAssociation {
+    pub association_id: String,
+    pub name: String, // document name
+    pub targets: Vec<serde_json::Value>,
+    pub schedule_expression: Option<String>,
+    pub parameters: HashMap<String, Vec<String>>,
+    pub association_name: Option<String>,
+    pub document_version: Option<String>,
+    pub output_location: Option<serde_json::Value>,
+    pub automation_target_parameter_name: Option<String>,
+    pub max_errors: Option<String>,
+    pub max_concurrency: Option<String>,
+    pub compliance_severity: Option<String>,
+    pub sync_compliance: Option<String>,
+    pub apply_only_at_cron_interval: bool,
+    pub calendar_names: Vec<String>,
+    pub target_locations: Vec<serde_json::Value>,
+    pub schedule_offset: Option<i64>,
+    pub target_maps: Vec<serde_json::Value>,
+    pub tags: HashMap<String, String>,
+    pub status: String,
+    pub status_date: DateTime<Utc>,
+    pub overview: serde_json::Value,
+    pub created_date: DateTime<Utc>,
+    pub last_update_association_date: DateTime<Utc>,
+    pub last_execution_date: Option<DateTime<Utc>>,
+    pub instance_id: Option<String>,
+    pub versions: Vec<SsmAssociationVersion>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SsmAssociationVersion {
+    pub version: i64,
+    pub name: String,
+    pub targets: Vec<serde_json::Value>,
+    pub schedule_expression: Option<String>,
+    pub parameters: HashMap<String, Vec<String>>,
+    pub document_version: Option<String>,
+    pub created_date: DateTime<Utc>,
+    pub association_name: Option<String>,
+    pub max_errors: Option<String>,
+    pub max_concurrency: Option<String>,
+    pub compliance_severity: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SsmOpsItem {
+    pub ops_item_id: String,
+    pub title: String,
+    pub description: Option<String>,
+    pub source: String,
+    pub status: String,
+    pub priority: Option<i64>,
+    pub severity: Option<String>,
+    pub category: Option<String>,
+    pub operational_data: HashMap<String, serde_json::Value>,
+    pub notifications: Vec<serde_json::Value>,
+    pub related_ops_items: Vec<serde_json::Value>,
+    pub tags: HashMap<String, String>,
+    pub created_time: DateTime<Utc>,
+    pub last_modified_time: DateTime<Utc>,
+    pub created_by: String,
+    pub last_modified_by: String,
+    pub ops_item_type: Option<String>,
+    pub planned_start_time: Option<DateTime<Utc>>,
+    pub planned_end_time: Option<DateTime<Utc>>,
+    pub actual_start_time: Option<DateTime<Utc>>,
+    pub actual_end_time: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SsmResourcePolicy {
+    pub policy_id: String,
+    pub policy_hash: String,
+    pub policy: String,
+    pub resource_arn: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct SsmServiceSetting {
+    pub setting_id: String,
+    pub setting_value: String,
+    pub last_modified_date: DateTime<Utc>,
+    pub last_modified_user: String,
+    pub status: String,
+}
+
 pub struct SsmState {
     pub account_id: String,
     pub region: String,
@@ -162,6 +250,12 @@ pub struct SsmState {
     pub maintenance_windows: HashMap<String, MaintenanceWindow>,
     pub patch_baselines: HashMap<String, PatchBaseline>,
     pub patch_groups: Vec<PatchGroup>,
+    pub associations: HashMap<String, SsmAssociation>,
+    pub ops_items: HashMap<String, SsmOpsItem>,
+    pub resource_policies: Vec<SsmResourcePolicy>,
+    pub service_settings: HashMap<String, SsmServiceSetting>,
+    pub default_patch_baseline_id: Option<String>,
+    pub ops_item_counter: u64,
 }
 
 impl SsmState {
@@ -175,6 +269,12 @@ impl SsmState {
             maintenance_windows: HashMap::new(),
             patch_baselines: HashMap::new(),
             patch_groups: Vec::new(),
+            associations: HashMap::new(),
+            ops_items: HashMap::new(),
+            resource_policies: Vec::new(),
+            service_settings: HashMap::new(),
+            default_patch_baseline_id: None,
+            ops_item_counter: 0,
         };
         state.seed_defaults();
         state
@@ -187,6 +287,12 @@ impl SsmState {
         self.maintenance_windows.clear();
         self.patch_baselines.clear();
         self.patch_groups.clear();
+        self.associations.clear();
+        self.ops_items.clear();
+        self.resource_policies.clear();
+        self.service_settings.clear();
+        self.default_patch_baseline_id = None;
+        self.ops_item_counter = 0;
         self.seed_defaults();
     }
 

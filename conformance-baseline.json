@@ -1,46 +1,14 @@
 {
-  "variants_passed": 27758,
+  "variants_passed": 29113,
   "total_variants": 34856,
   "per_service": {
-    "kms": {
-      "passed": 1905,
-      "total": 2196
-    },
-    "ssm": {
-      "passed": 1775,
-      "total": 5303
-    },
     "s3": {
       "passed": 3620,
       "total": 3620
     },
-    "sns": {
-      "passed": 1027,
-      "total": 1027
-    },
-    "logs": {
-      "passed": 2037,
-      "total": 3911
-    },
-    "events": {
-      "passed": 2070,
-      "total": 2108
-    },
-    "cloudformation": {
-      "passed": 3420,
-      "total": 3420
-    },
-    "dynamodb": {
-      "passed": 758,
-      "total": 2123
-    },
-    "iam": {
-      "passed": 5962,
-      "total": 5962
-    },
-    "lambda": {
-      "passed": 3347,
-      "total": 3347
+    "kms": {
+      "passed": 1905,
+      "total": 2196
     },
     "secretsmanager": {
       "passed": 852,
@@ -50,9 +18,41 @@
       "passed": 549,
       "total": 549
     },
+    "lambda": {
+      "passed": 3347,
+      "total": 3347
+    },
+    "cloudformation": {
+      "passed": 3420,
+      "total": 3420
+    },
+    "dynamodb": {
+      "passed": 1079,
+      "total": 2123
+    },
+    "iam": {
+      "passed": 5962,
+      "total": 5962
+    },
+    "logs": {
+      "passed": 2037,
+      "total": 3911
+    },
+    "sns": {
+      "passed": 1027,
+      "total": 1027
+    },
+    "ssm": {
+      "passed": 2801,
+      "total": 5303
+    },
     "sts": {
       "passed": 436,
       "total": 438
+    },
+    "events": {
+      "passed": 2078,
+      "total": 2108
     }
   }
 }

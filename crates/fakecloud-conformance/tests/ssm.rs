@@ -669,3 +669,550 @@ async fn ssm_patch_groups() {
         .await
         .unwrap();
 }
+
+// -- Association lifecycle --
+
+#[test_action("ssm", "CreateAssociation", checksum = "507ad141")]
+#[test_action("ssm", "DescribeAssociation", checksum = "2ffc2f3f")]
+#[test_action("ssm", "UpdateAssociation", checksum = "2febcaea")]
+#[test_action("ssm", "ListAssociations", checksum = "373868d2")]
+#[test_action("ssm", "ListAssociationVersions", checksum = "6d4e7407")]
+#[test_action("ssm", "DeleteAssociation", checksum = "89e9a7ab")]
+#[tokio::test]
+async fn ssm_association_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+
+    let create = client
+        .create_association()
+        .name("AWS-RunShellScript")
+        .targets(
+            aws_sdk_ssm::types::Target::builder()
+                .key("InstanceIds")
+                .values("i-00000000000000001")
+                .build(),
+        )
+        .schedule_expression("rate(1 hour)")
+        .association_name("conf-assoc")
+        .send()
+        .await
+        .unwrap();
+    let assoc_id = create
+        .association_description()
+        .unwrap()
+        .association_id()
+        .unwrap()
+        .to_string();
+
+    let _ = client
+        .describe_association()
+        .association_id(&assoc_id)
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .update_association()
+        .association_id(&assoc_id)
+        .association_name("conf-assoc-updated")
+        .send()
+        .await
+        .unwrap();
+
+    let _ = client.list_associations().send().await.unwrap();
+
+    let _ = client
+        .list_association_versions()
+        .association_id(&assoc_id)
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .delete_association()
+        .association_id(&assoc_id)
+        .send()
+        .await
+        .unwrap();
+}
+
+// -- UpdateAssociationStatus --
+
+#[test_action("ssm", "UpdateAssociationStatus", checksum = "1668b3f6")]
+#[tokio::test]
+async fn ssm_update_association_status() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+
+    let create = client
+        .create_association()
+        .name("AWS-RunShellScript")
+        .instance_id("i-00000000000000001")
+        .send()
+        .await
+        .unwrap();
+    let _assoc_id = create
+        .association_description()
+        .unwrap()
+        .association_id()
+        .unwrap()
+        .to_string();
+
+    client
+        .update_association_status()
+        .name("AWS-RunShellScript")
+        .instance_id("i-00000000000000001")
+        .association_status(
+            aws_sdk_ssm::types::AssociationStatus::builder()
+                .name(aws_sdk_ssm::types::AssociationStatusName::Success)
+                .date(aws_sdk_ssm::primitives::DateTime::from_secs(0))
+                .message("ok")
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+}
+
+// -- StartAssociationsOnce --
+
+#[test_action("ssm", "StartAssociationsOnce", checksum = "7f3c858a")]
+#[tokio::test]
+async fn ssm_start_associations_once() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+
+    let create = client
+        .create_association()
+        .name("AWS-RunShellScript")
+        .targets(
+            aws_sdk_ssm::types::Target::builder()
+                .key("InstanceIds")
+                .values("i-00000000000000001")
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let assoc_id = create
+        .association_description()
+        .unwrap()
+        .association_id()
+        .unwrap()
+        .to_string();
+
+    client
+        .start_associations_once()
+        .association_ids(&assoc_id)
+        .send()
+        .await
+        .unwrap();
+}
+
+// -- CreateAssociationBatch --
+
+#[test_action("ssm", "CreateAssociationBatch", checksum = "d64a58de")]
+#[tokio::test]
+async fn ssm_create_association_batch() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+
+    let entry = aws_sdk_ssm::types::CreateAssociationBatchRequestEntry::builder()
+        .name("AWS-RunShellScript")
+        .targets(
+            aws_sdk_ssm::types::Target::builder()
+                .key("InstanceIds")
+                .values("i-00000000000000001")
+                .build(),
+        )
+        .build()
+        .unwrap();
+
+    let resp = client
+        .create_association_batch()
+        .entries(entry)
+        .send()
+        .await
+        .unwrap();
+    assert!(!resp.successful().is_empty());
+}
+
+// -- DescribeAssociationExecutions + Targets --
+
+#[test_action("ssm", "DescribeAssociationExecutions", checksum = "6b36f591")]
+#[tokio::test]
+async fn ssm_describe_association_executions() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+
+    let create = client
+        .create_association()
+        .name("AWS-RunShellScript")
+        .targets(
+            aws_sdk_ssm::types::Target::builder()
+                .key("InstanceIds")
+                .values("i-00000000000000001")
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let assoc_id = create
+        .association_description()
+        .unwrap()
+        .association_id()
+        .unwrap()
+        .to_string();
+
+    let resp = client
+        .describe_association_executions()
+        .association_id(&assoc_id)
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.association_executions().is_empty());
+}
+
+#[test_action("ssm", "DescribeAssociationExecutionTargets", checksum = "10258e0d")]
+#[tokio::test]
+async fn ssm_describe_association_execution_targets() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+
+    let create = client
+        .create_association()
+        .name("AWS-RunShellScript")
+        .targets(
+            aws_sdk_ssm::types::Target::builder()
+                .key("InstanceIds")
+                .values("i-00000000000000001")
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let assoc_id = create
+        .association_description()
+        .unwrap()
+        .association_id()
+        .unwrap()
+        .to_string();
+
+    let resp = client
+        .describe_association_execution_targets()
+        .association_id(&assoc_id)
+        .execution_id("fake-execution-id")
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.association_execution_targets().is_empty());
+}
+
+// -- OpsItems --
+
+#[test_action("ssm", "CreateOpsItem", checksum = "48b1d2b8")]
+#[test_action("ssm", "GetOpsItem", checksum = "649a65f9")]
+#[test_action("ssm", "UpdateOpsItem", checksum = "43879dd9")]
+#[test_action("ssm", "DescribeOpsItems", checksum = "3a284cc4")]
+#[test_action("ssm", "DeleteOpsItem", checksum = "f705d8f4")]
+#[tokio::test]
+async fn ssm_ops_item_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+
+    let create = client
+        .create_ops_item()
+        .title("Conf OpsItem")
+        .source("conf-test")
+        .send()
+        .await
+        .unwrap();
+    let ops_item_id = create.ops_item_id().unwrap().to_string();
+
+    let get = client
+        .get_ops_item()
+        .ops_item_id(&ops_item_id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get.ops_item().unwrap().title().unwrap(), "Conf OpsItem");
+
+    client
+        .update_ops_item()
+        .ops_item_id(&ops_item_id)
+        .title("Updated Conf OpsItem")
+        .send()
+        .await
+        .unwrap();
+
+    let _ = client.describe_ops_items().send().await.unwrap();
+
+    client
+        .delete_ops_item()
+        .ops_item_id(&ops_item_id)
+        .send()
+        .await
+        .unwrap();
+}
+
+// -- Document extras --
+
+#[test_action("ssm", "ListDocumentVersions", checksum = "aadc01d4")]
+#[tokio::test]
+async fn ssm_list_document_versions() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+    let doc_content = r#"{"schemaVersion":"2.2","description":"ver","mainSteps":[{"action":"aws:runShellScript","name":"test","inputs":{"runCommand":["echo hi"]}}]}"#;
+
+    client
+        .create_document()
+        .name("conf-doc-ver")
+        .content(doc_content)
+        .document_type(aws_sdk_ssm::types::DocumentType::Command)
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .list_document_versions()
+        .name("conf-doc-ver")
+        .send()
+        .await
+        .unwrap();
+    assert!(!resp.document_versions().is_empty());
+}
+
+#[test_action("ssm", "ListDocumentMetadataHistory", checksum = "c6bdd053")]
+#[tokio::test]
+async fn ssm_list_document_metadata_history() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+    let doc_content = r#"{"schemaVersion":"2.2","description":"meta","mainSteps":[{"action":"aws:runShellScript","name":"test","inputs":{"runCommand":["echo hi"]}}]}"#;
+
+    client
+        .create_document()
+        .name("conf-doc-meta")
+        .content(doc_content)
+        .document_type(aws_sdk_ssm::types::DocumentType::Command)
+        .send()
+        .await
+        .unwrap();
+
+    let _ = client
+        .list_document_metadata_history()
+        .name("conf-doc-meta")
+        .metadata(aws_sdk_ssm::types::DocumentMetadataEnum::DocumentReviews)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ssm", "UpdateDocumentMetadata", checksum = "9e4be7a5")]
+#[tokio::test]
+async fn ssm_update_document_metadata() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+    let doc_content = r#"{"schemaVersion":"2.2","description":"updmeta","mainSteps":[{"action":"aws:runShellScript","name":"test","inputs":{"runCommand":["echo hi"]}}]}"#;
+
+    client
+        .create_document()
+        .name("conf-doc-updmeta")
+        .content(doc_content)
+        .document_type(aws_sdk_ssm::types::DocumentType::Command)
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .update_document_metadata()
+        .name("conf-doc-updmeta")
+        .document_reviews(
+            aws_sdk_ssm::types::DocumentReviews::builder()
+                .action(aws_sdk_ssm::types::DocumentReviewAction::Approve)
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+}
+
+// -- Resource policies --
+
+#[test_action("ssm", "PutResourcePolicy", checksum = "7ee6b0bd")]
+#[test_action("ssm", "GetResourcePolicies", checksum = "303e2bb5")]
+#[test_action("ssm", "DeleteResourcePolicy", checksum = "df09409d")]
+#[tokio::test]
+async fn ssm_resource_policies() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+
+    // First create a parameter to use as resource
+    client
+        .put_parameter()
+        .name("/conf/policy-test")
+        .value("x")
+        .r#type(aws_sdk_ssm::types::ParameterType::String)
+        .send()
+        .await
+        .unwrap();
+
+    let put = client
+        .put_resource_policy()
+        .resource_arn("arn:aws:ssm:us-east-1:123456789012:parameter/conf/policy-test")
+        .policy(r#"{"Version":"2012-10-17","Statement":[]}"#)
+        .send()
+        .await
+        .unwrap();
+    let policy_id = put.policy_id().unwrap().to_string();
+    let policy_hash = put.policy_hash().unwrap().to_string();
+
+    let get = client
+        .get_resource_policies()
+        .resource_arn("arn:aws:ssm:us-east-1:123456789012:parameter/conf/policy-test")
+        .send()
+        .await
+        .unwrap();
+    assert!(!get.policies().is_empty());
+
+    client
+        .delete_resource_policy()
+        .resource_arn("arn:aws:ssm:us-east-1:123456789012:parameter/conf/policy-test")
+        .policy_id(&policy_id)
+        .policy_hash(&policy_hash)
+        .send()
+        .await
+        .unwrap();
+}
+
+// -- Stubs --
+
+#[test_action("ssm", "GetConnectionStatus", checksum = "5ceb276b")]
+#[tokio::test]
+async fn ssm_get_connection_status() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+    let resp = client
+        .get_connection_status()
+        .target("i-00000000000000001")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        Some(&aws_sdk_ssm::types::ConnectionStatus::Connected)
+    );
+}
+
+#[test_action("ssm", "GetCalendarState", checksum = "ead1c10e")]
+#[tokio::test]
+async fn ssm_get_calendar_state() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+    let _ = client
+        .get_calendar_state()
+        .calendar_names("arn:aws:ssm:us-east-1:123456789012:document/cal")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ssm", "DescribePatchGroupState", checksum = "6ff4c75a")]
+#[tokio::test]
+async fn ssm_describe_patch_group_state() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+    let _ = client
+        .describe_patch_group_state()
+        .patch_group("conf-group")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ssm", "DescribePatchProperties", checksum = "79e19b9c")]
+#[tokio::test]
+async fn ssm_describe_patch_properties() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+    let _ = client
+        .describe_patch_properties()
+        .operating_system(aws_sdk_ssm::types::OperatingSystem::Windows)
+        .property(aws_sdk_ssm::types::PatchProperty::Product)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ssm", "GetDefaultPatchBaseline", checksum = "e52823f7")]
+#[tokio::test]
+async fn ssm_get_default_patch_baseline() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+    let resp = client.get_default_patch_baseline().send().await.unwrap();
+    assert!(resp.baseline_id().is_some());
+}
+
+#[test_action("ssm", "RegisterDefaultPatchBaseline", checksum = "5b5ac699")]
+#[tokio::test]
+async fn ssm_register_default_patch_baseline() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+
+    // Create a baseline to register
+    let create = client
+        .create_patch_baseline()
+        .name("conf-default-bl")
+        .send()
+        .await
+        .unwrap();
+    let baseline_id = create.baseline_id().unwrap().to_string();
+
+    client
+        .register_default_patch_baseline()
+        .baseline_id(&baseline_id)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ssm", "DescribeAvailablePatches", checksum = "2d7c2b66")]
+#[tokio::test]
+async fn ssm_describe_available_patches() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+    let resp = client.describe_available_patches().send().await.unwrap();
+    assert!(resp.patches().is_empty());
+}
+
+#[test_action("ssm", "GetServiceSetting", checksum = "3419aa2b")]
+#[test_action("ssm", "UpdateServiceSetting", checksum = "ea87e0e0")]
+#[test_action("ssm", "ResetServiceSetting", checksum = "cfad6810")]
+#[tokio::test]
+async fn ssm_service_settings() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+
+    let _ = client
+        .get_service_setting()
+        .setting_id("/ssm/parameter-store/high-throughput-enabled")
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .update_service_setting()
+        .setting_id("/ssm/parameter-store/high-throughput-enabled")
+        .setting_value("true")
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .reset_service_setting()
+        .setting_id("/ssm/parameter-store/high-throughput-enabled")
+        .send()
+        .await
+        .unwrap();
+}

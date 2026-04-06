@@ -721,3 +721,352 @@ async fn ssm_remove_tags_invalid_resource_type() {
         "expected error for invalid resource type, but got success"
     );
 }
+
+// =====================================================================
+// Associations
+// =====================================================================
+
+#[tokio::test]
+async fn ssm_association_crud() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+
+    // Create
+    let create_resp = client
+        .create_association()
+        .name("AWS-RunShellScript")
+        .targets(
+            aws_sdk_ssm::types::Target::builder()
+                .key("InstanceIds")
+                .values("i-00000000000000001")
+                .build(),
+        )
+        .schedule_expression("rate(1 hour)")
+        .association_name("e2e-assoc")
+        .send()
+        .await
+        .unwrap();
+    let assoc_desc = create_resp.association_description().unwrap();
+    let assoc_id = assoc_desc.association_id().unwrap().to_string();
+    assert_eq!(assoc_desc.name().unwrap(), "AWS-RunShellScript");
+
+    // Describe
+    let desc = client
+        .describe_association()
+        .association_id(&assoc_id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        desc.association_description()
+            .unwrap()
+            .association_name()
+            .unwrap(),
+        "e2e-assoc"
+    );
+
+    // List
+    let list = client.list_associations().send().await.unwrap();
+    assert!(!list.associations().is_empty());
+
+    // Update
+    client
+        .update_association()
+        .association_id(&assoc_id)
+        .association_name("updated-assoc")
+        .send()
+        .await
+        .unwrap();
+
+    // List versions
+    let versions = client
+        .list_association_versions()
+        .association_id(&assoc_id)
+        .send()
+        .await
+        .unwrap();
+    assert!(versions.association_versions().len() >= 2);
+
+    // Delete
+    client
+        .delete_association()
+        .association_id(&assoc_id)
+        .send()
+        .await
+        .unwrap();
+
+    // Verify deleted
+    let result = client
+        .describe_association()
+        .association_id(&assoc_id)
+        .send()
+        .await;
+    assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn ssm_association_batch_and_start() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+
+    // Batch create
+    let entry1 = aws_sdk_ssm::types::CreateAssociationBatchRequestEntry::builder()
+        .name("AWS-RunShellScript")
+        .targets(
+            aws_sdk_ssm::types::Target::builder()
+                .key("InstanceIds")
+                .values("i-001")
+                .build(),
+        )
+        .build()
+        .unwrap();
+    let entry2 = aws_sdk_ssm::types::CreateAssociationBatchRequestEntry::builder()
+        .name("AWS-RunShellScript")
+        .targets(
+            aws_sdk_ssm::types::Target::builder()
+                .key("InstanceIds")
+                .values("i-002")
+                .build(),
+        )
+        .build()
+        .unwrap();
+
+    let batch_resp = client
+        .create_association_batch()
+        .entries(entry1)
+        .entries(entry2)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(batch_resp.successful().len(), 2);
+
+    // StartAssociationsOnce
+    let assoc_id = batch_resp.successful()[0]
+        .association_id()
+        .unwrap()
+        .to_string();
+    let _ = client
+        .start_associations_once()
+        .association_ids(&assoc_id)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn ssm_association_executions_empty() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+
+    let create_resp = client
+        .create_association()
+        .name("AWS-RunShellScript")
+        .targets(
+            aws_sdk_ssm::types::Target::builder()
+                .key("InstanceIds")
+                .values("i-00000000000000001")
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let assoc_id = create_resp
+        .association_description()
+        .unwrap()
+        .association_id()
+        .unwrap()
+        .to_string();
+
+    let execs = client
+        .describe_association_executions()
+        .association_id(&assoc_id)
+        .send()
+        .await
+        .unwrap();
+    assert!(execs.association_executions().is_empty());
+}
+
+// =====================================================================
+// OpsItems
+// =====================================================================
+
+#[tokio::test]
+async fn ssm_ops_item_crud() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+
+    // Create
+    let create_resp = client
+        .create_ops_item()
+        .title("E2E Test OpsItem")
+        .source("e2e-test")
+        .description("A test ops item for E2E tests")
+        .send()
+        .await
+        .unwrap();
+    let ops_item_id = create_resp.ops_item_id().unwrap().to_string();
+
+    // Get
+    let get_resp = client
+        .get_ops_item()
+        .ops_item_id(&ops_item_id)
+        .send()
+        .await
+        .unwrap();
+    let item = get_resp.ops_item().unwrap();
+    assert_eq!(item.title().unwrap(), "E2E Test OpsItem");
+    assert_eq!(
+        item.status(),
+        Some(&aws_sdk_ssm::types::OpsItemStatus::Open)
+    );
+
+    // Update
+    client
+        .update_ops_item()
+        .ops_item_id(&ops_item_id)
+        .title("Updated OpsItem")
+        .status(aws_sdk_ssm::types::OpsItemStatus::Resolved)
+        .send()
+        .await
+        .unwrap();
+
+    // Verify update
+    let get_resp = client
+        .get_ops_item()
+        .ops_item_id(&ops_item_id)
+        .send()
+        .await
+        .unwrap();
+    let item = get_resp.ops_item().unwrap();
+    assert_eq!(item.title().unwrap(), "Updated OpsItem");
+
+    // Describe
+    let desc = client.describe_ops_items().send().await.unwrap();
+    assert!(!desc.ops_item_summaries().is_empty());
+
+    // Delete
+    client
+        .delete_ops_item()
+        .ops_item_id(&ops_item_id)
+        .send()
+        .await
+        .unwrap();
+
+    // Verify deleted
+    let result = client.get_ops_item().ops_item_id(&ops_item_id).send().await;
+    assert!(result.is_err());
+}
+
+// =====================================================================
+// Document extras
+// =====================================================================
+
+#[tokio::test]
+async fn ssm_list_document_versions() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+
+    let doc_content = r#"{"schemaVersion":"2.2","description":"test","mainSteps":[{"action":"aws:runShellScript","name":"test","inputs":{"runCommand":["echo hi"]}}]}"#;
+
+    client
+        .create_document()
+        .name("e2e-doc-ver")
+        .content(doc_content)
+        .document_type(aws_sdk_ssm::types::DocumentType::Command)
+        .send()
+        .await
+        .unwrap();
+
+    let versions = client
+        .list_document_versions()
+        .name("e2e-doc-ver")
+        .send()
+        .await
+        .unwrap();
+    assert!(!versions.document_versions().is_empty());
+}
+
+// =====================================================================
+// Stubs
+// =====================================================================
+
+#[tokio::test]
+async fn ssm_get_connection_status() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+
+    let resp = client
+        .get_connection_status()
+        .target("i-00000000000000001")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        Some(&aws_sdk_ssm::types::ConnectionStatus::Connected)
+    );
+}
+
+#[tokio::test]
+async fn ssm_get_calendar_state() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+
+    let resp = client
+        .get_calendar_state()
+        .calendar_names("arn:aws:ssm:us-east-1:123456789012:document/cal")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.state(), Some(&aws_sdk_ssm::types::CalendarState::Open));
+}
+
+#[tokio::test]
+async fn ssm_service_settings() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+
+    // Get default
+    let resp = client
+        .get_service_setting()
+        .setting_id("/ssm/parameter-store/high-throughput-enabled")
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.service_setting().is_some());
+
+    // Update
+    client
+        .update_service_setting()
+        .setting_id("/ssm/parameter-store/high-throughput-enabled")
+        .setting_value("true")
+        .send()
+        .await
+        .unwrap();
+
+    // Reset
+    client
+        .reset_service_setting()
+        .setting_id("/ssm/parameter-store/high-throughput-enabled")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn ssm_get_default_patch_baseline() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+
+    let resp = client.get_default_patch_baseline().send().await.unwrap();
+    assert!(resp.baseline_id().is_some());
+}
+
+#[tokio::test]
+async fn ssm_describe_available_patches() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+
+    let resp = client.describe_available_patches().send().await.unwrap();
+    assert!(resp.patches().is_empty());
+}
