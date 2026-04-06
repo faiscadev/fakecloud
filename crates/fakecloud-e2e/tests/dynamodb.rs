@@ -3,8 +3,8 @@ mod helpers;
 use aws_sdk_dynamodb::types::{
     AttributeDefinition, AttributeValue, BillingMode, ContributorInsightsAction, Delete,
     DeleteRequest, Get, KeySchemaElement, KeyType, PointInTimeRecoverySpecification,
-    ProvisionedThroughput, Put, PutRequest, ScalarAttributeType, Tag, TimeToLiveSpecification,
-    TransactGetItem, TransactWriteItem, WriteRequest,
+    ProvisionedThroughput, Put, PutRequest, Replica, ScalarAttributeType, Tag,
+    TimeToLiveSpecification, TransactGetItem, TransactWriteItem, WriteRequest,
 };
 use helpers::TestServer;
 use std::collections::HashMap;
@@ -1634,4 +1634,157 @@ async fn dynamodb_restore_to_point_in_time_preserves_data() {
         .unwrap();
     assert_eq!(scan.count(), 3);
     assert_eq!(scan.items().len(), 3);
+}
+
+#[tokio::test]
+async fn dynamodb_global_table_replicates_writes() {
+    let server = TestServer::start().await;
+    let client = server.dynamodb_client().await;
+
+    // Create the table first
+    client
+        .create_table()
+        .table_name("GlobalTestTable")
+        .key_schema(
+            KeySchemaElement::builder()
+                .attribute_name("pk")
+                .key_type(KeyType::Hash)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            AttributeDefinition::builder()
+                .attribute_name("pk")
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .billing_mode(BillingMode::PayPerRequest)
+        .send()
+        .await
+        .unwrap();
+
+    // Create global table with replicas
+    client
+        .create_global_table()
+        .global_table_name("GlobalTestTable")
+        .replication_group(Replica::builder().region_name("us-east-1").build())
+        .replication_group(Replica::builder().region_name("eu-west-1").build())
+        .send()
+        .await
+        .unwrap();
+
+    // Write an item
+    client
+        .put_item()
+        .table_name("GlobalTestTable")
+        .item("pk", AttributeValue::S("global-key".to_string()))
+        .item("data", AttributeValue::S("global-value".to_string()))
+        .send()
+        .await
+        .unwrap();
+
+    // Read it back (all replicas share the same table in fakecloud)
+    let resp = client
+        .get_item()
+        .table_name("GlobalTestTable")
+        .key("pk", AttributeValue::S("global-key".to_string()))
+        .send()
+        .await
+        .unwrap();
+
+    let item = resp.item().unwrap();
+    assert_eq!(item.get("pk").unwrap().as_s().unwrap(), "global-key");
+    assert_eq!(item.get("data").unwrap().as_s().unwrap(), "global-value");
+
+    // Verify the global table is described correctly
+    let gt = client
+        .describe_global_table()
+        .global_table_name("GlobalTestTable")
+        .send()
+        .await
+        .unwrap();
+    let desc = gt.global_table_description().unwrap();
+    assert_eq!(desc.replication_group().len(), 2);
+}
+
+#[tokio::test]
+async fn dynamodb_contributor_insights_tracks_access() {
+    let server = TestServer::start().await;
+    let client = server.dynamodb_client().await;
+
+    // Create table
+    client
+        .create_table()
+        .table_name("InsightsTable")
+        .key_schema(
+            KeySchemaElement::builder()
+                .attribute_name("pk")
+                .key_type(KeyType::Hash)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            AttributeDefinition::builder()
+                .attribute_name("pk")
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .billing_mode(BillingMode::PayPerRequest)
+        .send()
+        .await
+        .unwrap();
+
+    // Enable contributor insights
+    client
+        .update_contributor_insights()
+        .table_name("InsightsTable")
+        .contributor_insights_action(ContributorInsightsAction::Enable)
+        .send()
+        .await
+        .unwrap();
+
+    // Put items with different partition keys
+    for key in &["alpha", "beta", "alpha", "gamma", "alpha"] {
+        client
+            .put_item()
+            .table_name("InsightsTable")
+            .item("pk", AttributeValue::S(key.to_string()))
+            .item("data", AttributeValue::S("value".to_string()))
+            .send()
+            .await
+            .unwrap();
+    }
+
+    // Get items to also track read access
+    for _ in 0..2 {
+        client
+            .get_item()
+            .table_name("InsightsTable")
+            .key("pk", AttributeValue::S("beta".to_string()))
+            .send()
+            .await
+            .unwrap();
+    }
+
+    // Describe contributor insights
+    let resp = client
+        .describe_contributor_insights()
+        .table_name("InsightsTable")
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.contributor_insights_status().unwrap().as_str(),
+        "ENABLED"
+    );
+
+    // Verify that rules list is non-empty
+    let rules = resp.contributor_insights_rule_list();
+    assert!(
+        !rules.is_empty(),
+        "ContributorInsightsRuleList should not be empty"
+    );
 }

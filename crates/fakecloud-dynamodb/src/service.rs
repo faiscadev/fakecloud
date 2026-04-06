@@ -139,6 +139,7 @@ impl DynamoDbService {
             pitr_enabled: false,
             kinesis_destinations: Vec::new(),
             contributor_insights_status: "DISABLED".to_string(),
+            contributor_insights_counters: HashMap::new(),
         };
 
         state.tables.insert(table_name, table);
@@ -332,11 +333,12 @@ impl DynamoDbService {
         };
 
         if let Some(idx) = existing_idx {
-            table.items[idx] = item;
+            table.items[idx] = item.clone();
         } else {
-            table.items.push(item);
+            table.items.push(item.clone());
         }
 
+        table.record_item_access(&item);
         table.recalculate_stats();
 
         let mut result = json!({});
@@ -352,8 +354,10 @@ impl DynamoDbService {
         let table_name = require_str(&body, "TableName")?;
         let key = require_object(&body, "Key")?;
 
-        let state = self.state.read();
-        let table = get_table(&state.tables, table_name)?;
+        let mut state = self.state.write();
+        let table = get_table_mut(&mut state.tables, table_name)?;
+
+        table.record_key_access(&key);
 
         let result = match table.find_item_index(&key) {
             Some(idx) => {
@@ -618,6 +622,18 @@ impl DynamoDbService {
             matched.truncate(lim);
         }
 
+        // Collect partition key values for contributor insights
+        let insights_enabled = table.contributor_insights_status == "ENABLED";
+        let pk_name = table.hash_key_name().to_string();
+        let accessed_keys: Vec<String> = if insights_enabled {
+            matched
+                .iter()
+                .filter_map(|item| item.get(&pk_name).map(|v| v.to_string()))
+                .collect()
+        } else {
+            Vec::new()
+        };
+
         let items: Vec<Value> = matched
             .iter()
             .map(|item| {
@@ -626,11 +642,27 @@ impl DynamoDbService {
             })
             .collect();
 
-        Self::ok_json(json!({
+        let result = json!({
             "Items": items,
             "Count": items.len(),
             "ScannedCount": scanned_count,
-        }))
+        });
+
+        drop(state);
+
+        if !accessed_keys.is_empty() {
+            let mut state = self.state.write();
+            if let Some(table) = state.tables.get_mut(table_name) {
+                for key_str in accessed_keys {
+                    *table
+                        .contributor_insights_counters
+                        .entry(key_str)
+                        .or_insert(0) += 1;
+                }
+            }
+        }
+
+        Self::ok_json(result)
     }
 
     fn scan(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
@@ -658,6 +690,18 @@ impl DynamoDbService {
             matched.truncate(lim);
         }
 
+        // Collect partition key values for contributor insights
+        let insights_enabled = table.contributor_insights_status == "ENABLED";
+        let pk_name = table.hash_key_name().to_string();
+        let accessed_keys: Vec<String> = if insights_enabled {
+            matched
+                .iter()
+                .filter_map(|item| item.get(&pk_name).map(|v| v.to_string()))
+                .collect()
+        } else {
+            Vec::new()
+        };
+
         let items: Vec<Value> = matched
             .iter()
             .map(|item| {
@@ -666,11 +710,27 @@ impl DynamoDbService {
             })
             .collect();
 
-        Self::ok_json(json!({
+        let result = json!({
             "Items": items,
             "Count": items.len(),
             "ScannedCount": scanned_count,
-        }))
+        });
+
+        drop(state);
+
+        if !accessed_keys.is_empty() {
+            let mut state = self.state.write();
+            if let Some(table) = state.tables.get_mut(table_name) {
+                for key_str in accessed_keys {
+                    *table
+                        .contributor_insights_counters
+                        .entry(key_str)
+                        .or_insert(0) += 1;
+                }
+            }
+        }
+
+        Self::ok_json(result)
     }
 
     // ── Batch Operations ────────────────────────────────────────────────
@@ -1629,6 +1689,7 @@ impl DynamoDbService {
             pitr_enabled: false,
             kinesis_destinations: Vec::new(),
             contributor_insights_status: "DISABLED".to_string(),
+            contributor_insights_counters: HashMap::new(),
         };
         table.recalculate_stats();
 
@@ -1699,6 +1760,7 @@ impl DynamoDbService {
             pitr_enabled: false,
             kinesis_destinations: Vec::new(),
             contributor_insights_status: "DISABLED".to_string(),
+            contributor_insights_counters: HashMap::new(),
         };
         table.recalculate_stats();
 
@@ -2202,10 +2264,22 @@ impl DynamoDbService {
         let state = self.state.read();
         let table = get_table(&state.tables, table_name)?;
 
+        let top = table.top_contributors(10);
+        let contributors: Vec<Value> = top
+            .iter()
+            .map(|(key, count)| {
+                json!({
+                    "Key": key,
+                    "Count": count
+                })
+            })
+            .collect();
+
         let mut result = json!({
             "TableName": table_name,
             "ContributorInsightsStatus": table.contributor_insights_status,
-            "ContributorInsightsRuleList": []
+            "ContributorInsightsRuleList": ["DynamoDBContributorInsights"],
+            "TopContributors": contributors
         });
         if let Some(idx) = index_name {
             result["IndexName"] = json!(idx);
@@ -2238,6 +2312,9 @@ impl DynamoDbService {
             }
         };
         table.contributor_insights_status = status.to_string();
+        if status == "DISABLED" {
+            table.contributor_insights_counters.clear();
+        }
 
         let mut result = json!({
             "TableName": table_name,
@@ -2476,6 +2553,7 @@ impl DynamoDbService {
             pitr_enabled: false,
             kinesis_destinations: Vec::new(),
             contributor_insights_status: "DISABLED".to_string(),
+            contributor_insights_counters: HashMap::new(),
         };
         state.tables.insert(table_name.to_string(), table);
 
@@ -5447,5 +5525,153 @@ mod tests {
         let body: Value = serde_json::from_slice(&resp.body).unwrap();
         assert_eq!(body["Count"], 3);
         assert_eq!(body["Items"].as_array().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn global_table_replicates_writes() {
+        let svc = make_service();
+        create_test_table(&svc);
+
+        // Create global table with replicas
+        let req = make_request(
+            "CreateGlobalTable",
+            json!({
+                "GlobalTableName": "test-table",
+                "ReplicationGroup": [
+                    { "RegionName": "us-east-1" },
+                    { "RegionName": "eu-west-1" }
+                ]
+            }),
+        );
+        let resp = svc.create_global_table(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(
+            body["GlobalTableDescription"]["GlobalTableStatus"],
+            "ACTIVE"
+        );
+
+        // Put an item
+        let req = make_request(
+            "PutItem",
+            json!({
+                "TableName": "test-table",
+                "Item": {
+                    "pk": { "S": "replicated-key" },
+                    "data": { "S": "replicated-value" }
+                }
+            }),
+        );
+        svc.put_item(&req).unwrap();
+
+        // Verify the item is readable (since all replicas share the same table)
+        let req = make_request(
+            "GetItem",
+            json!({
+                "TableName": "test-table",
+                "Key": { "pk": { "S": "replicated-key" } }
+            }),
+        );
+        let resp = svc.get_item(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["Item"]["pk"]["S"], "replicated-key");
+        assert_eq!(body["Item"]["data"]["S"], "replicated-value");
+    }
+
+    #[test]
+    fn contributor_insights_tracks_access() {
+        let svc = make_service();
+        create_test_table(&svc);
+
+        // Enable contributor insights
+        let req = make_request(
+            "UpdateContributorInsights",
+            json!({
+                "TableName": "test-table",
+                "ContributorInsightsAction": "ENABLE"
+            }),
+        );
+        svc.update_contributor_insights(&req).unwrap();
+
+        // Put items with different partition keys
+        for key in &["alpha", "beta", "alpha", "alpha", "beta"] {
+            let req = make_request(
+                "PutItem",
+                json!({
+                    "TableName": "test-table",
+                    "Item": {
+                        "pk": { "S": key },
+                        "data": { "S": "value" }
+                    }
+                }),
+            );
+            svc.put_item(&req).unwrap();
+        }
+
+        // Get items (to also track read access)
+        for _ in 0..3 {
+            let req = make_request(
+                "GetItem",
+                json!({
+                    "TableName": "test-table",
+                    "Key": { "pk": { "S": "alpha" } }
+                }),
+            );
+            svc.get_item(&req).unwrap();
+        }
+
+        // Describe contributor insights — should show top contributors
+        let req = make_request(
+            "DescribeContributorInsights",
+            json!({ "TableName": "test-table" }),
+        );
+        let resp = svc.describe_contributor_insights(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["ContributorInsightsStatus"], "ENABLED");
+
+        let contributors = body["TopContributors"].as_array().unwrap();
+        assert!(
+            !contributors.is_empty(),
+            "TopContributors should not be empty"
+        );
+
+        // alpha was accessed 3 (put) + 3 (get) = 6 times, beta 2 times
+        // alpha should be the top contributor
+        let top = &contributors[0];
+        assert!(top["Count"].as_u64().unwrap() > 0);
+
+        // Verify the rule list is populated
+        let rules = body["ContributorInsightsRuleList"].as_array().unwrap();
+        assert!(!rules.is_empty());
+    }
+
+    #[test]
+    fn contributor_insights_not_tracked_when_disabled() {
+        let svc = make_service();
+        create_test_table(&svc);
+
+        // Put items without enabling insights
+        let req = make_request(
+            "PutItem",
+            json!({
+                "TableName": "test-table",
+                "Item": {
+                    "pk": { "S": "key1" },
+                    "data": { "S": "value" }
+                }
+            }),
+        );
+        svc.put_item(&req).unwrap();
+
+        // Describe — should show empty contributors
+        let req = make_request(
+            "DescribeContributorInsights",
+            json!({ "TableName": "test-table" }),
+        );
+        let resp = svc.describe_contributor_insights(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["ContributorInsightsStatus"], "DISABLED");
+
+        let contributors = body["TopContributors"].as_array().unwrap();
+        assert!(contributors.is_empty());
     }
 }

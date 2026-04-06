@@ -83,6 +83,8 @@ pub struct DynamoTable {
     pub kinesis_destinations: Vec<KinesisDestination>,
     /// Contributor insights status
     pub contributor_insights_status: String,
+    /// Contributor insights: partition key access counters (key_value_string -> count)
+    pub contributor_insights_counters: HashMap<String, u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -242,6 +244,49 @@ impl DynamoTable {
             }
             _ => v.to_string().len() as i64,
         }
+    }
+
+    /// Record a partition key access for contributor insights.
+    /// Only records if contributor insights is enabled.
+    pub fn record_key_access(&mut self, key: &HashMap<String, AttributeValue>) {
+        if self.contributor_insights_status != "ENABLED" {
+            return;
+        }
+        let hash_key = self.hash_key_name().to_string();
+        if let Some(pk_value) = key.get(&hash_key) {
+            let key_str = pk_value.to_string();
+            *self
+                .contributor_insights_counters
+                .entry(key_str)
+                .or_insert(0) += 1;
+        }
+    }
+
+    /// Record a partition key access from a full item (extracts the key first).
+    pub fn record_item_access(&mut self, item: &HashMap<String, AttributeValue>) {
+        if self.contributor_insights_status != "ENABLED" {
+            return;
+        }
+        let hash_key = self.hash_key_name().to_string();
+        if let Some(pk_value) = item.get(&hash_key) {
+            let key_str = pk_value.to_string();
+            *self
+                .contributor_insights_counters
+                .entry(key_str)
+                .or_insert(0) += 1;
+        }
+    }
+
+    /// Get top N contributors sorted by access count (descending).
+    pub fn top_contributors(&self, n: usize) -> Vec<(&str, u64)> {
+        let mut entries: Vec<(&str, u64)> = self
+            .contributor_insights_counters
+            .iter()
+            .map(|(k, &v)| (k.as_str(), v))
+            .collect();
+        entries.sort_by(|a, b| b.1.cmp(&a.1));
+        entries.truncate(n);
+        entries
     }
 
     /// Recalculate item_count and size_bytes from the items vec.

@@ -632,6 +632,7 @@ impl ResourceProvisioner {
             pitr_enabled: false,
             kinesis_destinations: Vec::new(),
             contributor_insights_status: "DISABLED".to_string(),
+            contributor_insights_counters: HashMap::new(),
         };
 
         state.tables.insert(table_name.to_string(), table);
