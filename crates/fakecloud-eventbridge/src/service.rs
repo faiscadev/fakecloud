@@ -10,6 +10,7 @@ use fakecloud_core::delivery::DeliveryBus;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 use fakecloud_core::validation::*;
 
+use fakecloud_lambda::runtime::ContainerRuntime;
 use fakecloud_lambda::state::{LambdaInvocation, SharedLambdaState};
 use fakecloud_logs::state::SharedLogsState;
 
@@ -23,6 +24,7 @@ pub struct EventBridgeService {
     delivery: Arc<DeliveryBus>,
     lambda_state: Option<SharedLambdaState>,
     logs_state: Option<SharedLogsState>,
+    container_runtime: Option<Arc<ContainerRuntime>>,
 }
 
 impl EventBridgeService {
@@ -32,6 +34,7 @@ impl EventBridgeService {
             delivery,
             lambda_state: None,
             logs_state: None,
+            container_runtime: None,
         }
     }
 
@@ -42,6 +45,11 @@ impl EventBridgeService {
 
     pub fn with_logs(mut self, logs_state: SharedLogsState) -> Self {
         self.logs_state = Some(logs_state);
+        self
+    }
+
+    pub fn with_runtime(mut self, runtime: Arc<ContainerRuntime>) -> Self {
+        self.container_runtime = Some(runtime);
         self
     }
 }
@@ -1973,6 +1981,13 @@ impl EventBridgeService {
                             source: "aws:events".to_string(),
                         });
                     }
+                    // Actually invoke the Lambda function if a container runtime is available
+                    invoke_lambda_async(
+                        &self.container_runtime,
+                        &self.lambda_state,
+                        arn,
+                        &body_str,
+                    );
                 } else if arn.contains(":logs:") {
                     tracing::info!(
                         log_group_arn = %arn,
@@ -3193,6 +3208,12 @@ impl EventBridgeService {
                             source: "aws:events".to_string(),
                         });
                     }
+                    invoke_lambda_async(
+                        &self.container_runtime,
+                        &self.lambda_state,
+                        target_arn,
+                        &body_str,
+                    );
                 } else if target_arn.contains(":logs:") {
                     let mut state = self.state.write();
                     state.log_deliveries.push(crate::state::LogDelivery {
@@ -3765,6 +3786,68 @@ fn missing(name: &str) -> AwsServiceError {
         "ValidationException",
         format!("The request must contain the parameter {name}"),
     )
+}
+
+/// Extract a Lambda function name from its ARN.
+///
+/// Handles both unqualified (`arn:aws:lambda:region:account:function:NAME`)
+/// and qualified (`arn:aws:lambda:region:account:function:NAME:alias`) ARNs.
+fn function_name_from_arn(arn: &str) -> &str {
+    let parts: Vec<&str> = arn.split(':').collect();
+    if parts.len() >= 7 && parts[5] == "function" {
+        parts[6]
+    } else {
+        arn
+    }
+}
+
+/// Spawn a background task to invoke a Lambda function via ContainerRuntime.
+/// This is fire-and-forget: EventBridge delivery is asynchronous.
+pub fn invoke_lambda_async(
+    container_runtime: &Option<Arc<ContainerRuntime>>,
+    lambda_state: &Option<SharedLambdaState>,
+    function_arn: &str,
+    payload: &str,
+) {
+    let runtime = match container_runtime {
+        Some(rt) => rt.clone(),
+        None => return,
+    };
+    let lambda_state = match lambda_state {
+        Some(ls) => ls.clone(),
+        None => return,
+    };
+    let func_name = function_name_from_arn(function_arn).to_string();
+    let payload = payload.as_bytes().to_vec();
+
+    tokio::spawn(async move {
+        let func = {
+            let state = lambda_state.read();
+            state.functions.get(&func_name).cloned()
+        };
+        let func = match func {
+            Some(f) => f,
+            None => {
+                tracing::warn!(
+                    function = %func_name,
+                    "EventBridge Lambda target not found, skipping invocation"
+                );
+                return;
+            }
+        };
+        match runtime.invoke(&func, &payload).await {
+            Ok(_) => {
+                tracing::info!(function = %func_name, "EventBridge Lambda invocation succeeded");
+            }
+            Err(e) => {
+                tracing::warn!(
+                    function = %func_name,
+                    error = %e,
+                    "EventBridge Lambda invocation failed"
+                );
+            }
+        }
+    });
 }
 
 /// Deliver an EventBridge event to CloudWatch Logs by writing a log event
@@ -5349,5 +5432,30 @@ mod tests {
         assert_eq!(body["FailedEntryCount"], 0);
         assert_eq!(body["Entries"].as_array().unwrap().len(), 1);
         assert!(body["Entries"][0]["EventId"].as_str().is_some());
+    }
+
+    #[test]
+    fn test_function_name_from_arn() {
+        // Unqualified ARN
+        assert_eq!(
+            super::function_name_from_arn("arn:aws:lambda:us-east-1:123456789012:function:my-func"),
+            "my-func"
+        );
+        // Qualified ARN with alias
+        assert_eq!(
+            super::function_name_from_arn(
+                "arn:aws:lambda:us-east-1:123456789012:function:my-func:prod"
+            ),
+            "my-func"
+        );
+        // Qualified ARN with version
+        assert_eq!(
+            super::function_name_from_arn(
+                "arn:aws:lambda:us-east-1:123456789012:function:my-func:42"
+            ),
+            "my-func"
+        );
+        // Plain function name (not an ARN)
+        assert_eq!(super::function_name_from_arn("my-func"), "my-func");
     }
 }

@@ -193,16 +193,21 @@ async fn main() {
     )));
     registry.register(Arc::new(SqsService::new(sqs_state.clone())));
     registry.register(Arc::new(SnsService::new(sns_state, delivery_for_sns)));
-    registry.register(Arc::new(
-        EventBridgeService::new(eb_state.clone(), delivery_for_eb.clone())
-            .with_lambda(lambda_state.clone())
-            .with_logs(logs_state.clone()),
-    ));
-
-    // Spawn the EventBridge scheduler as a background task
-    let scheduler = fakecloud_eventbridge::scheduler::Scheduler::new(eb_state, delivery_for_eb)
+    let mut eb_service = EventBridgeService::new(eb_state.clone(), delivery_for_eb.clone())
         .with_lambda(lambda_state.clone())
         .with_logs(logs_state.clone());
+    if let Some(ref rt) = container_runtime {
+        eb_service = eb_service.with_runtime(rt.clone());
+    }
+    registry.register(Arc::new(eb_service));
+
+    // Spawn the EventBridge scheduler as a background task
+    let mut scheduler = fakecloud_eventbridge::scheduler::Scheduler::new(eb_state, delivery_for_eb)
+        .with_lambda(lambda_state.clone())
+        .with_logs(logs_state.clone());
+    if let Some(ref rt) = container_runtime {
+        scheduler = scheduler.with_runtime(rt.clone());
+    }
     tokio::spawn(scheduler.run());
     registry.register(Arc::new(IamService::new(iam_state.clone())));
     registry.register(Arc::new(StsService::new(iam_state)));
