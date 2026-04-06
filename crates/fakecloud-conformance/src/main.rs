@@ -69,8 +69,13 @@ fn main() {
             endpoint,
         } => cmd_run(&cli.models_dir, services, &format, endpoint),
         CliCommand::Audit => {
-            eprintln!("Level 2 audit not yet implemented");
-            std::process::exit(1);
+            let project_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("..")
+                .join("..");
+            let pass = fakecloud_conformance::audit::run_audit(&project_root);
+            if !pass {
+                std::process::exit(1);
+            }
         }
     }
 }

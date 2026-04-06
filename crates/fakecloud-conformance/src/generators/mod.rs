@@ -3,6 +3,7 @@ pub mod enum_exhaust;
 pub mod examples;
 pub mod negative;
 pub mod optionals;
+pub mod proptest_gen;
 
 use serde_json::Value;
 use std::collections::HashMap;
@@ -30,6 +31,8 @@ pub enum Strategy {
     EnumExhaust,
     /// Strategy 3: Optionals permutation
     Optionals,
+    /// Strategy 4: Property-based random value generation
+    Proptest,
     /// Strategy 5: Real-world examples from model
     Examples,
     /// Strategy 6: Negative testing
@@ -42,6 +45,7 @@ impl std::fmt::Display for Strategy {
             Strategy::Boundary => write!(f, "boundary"),
             Strategy::EnumExhaust => write!(f, "enum_exhaust"),
             Strategy::Optionals => write!(f, "optionals"),
+            Strategy::Proptest => write!(f, "proptest"),
             Strategy::Examples => write!(f, "examples"),
             Strategy::Negative => write!(f, "negative"),
         }
@@ -267,6 +271,9 @@ pub fn generate_all_variants(
 
     // Strategy 3: Optionals permutation
     variants.extend(optionals::generate(model, input_shape_id, overrides));
+
+    // Strategy 4: Property-based random value generation (20 variants)
+    variants.extend(proptest_gen::generate(model, input_shape_id, overrides, 20));
 
     // Strategy 5: Examples from model
     let op_shape_id = format!("{}#{}", model.service_name, operation_name);

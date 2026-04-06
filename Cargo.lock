@@ -1315,7 +1315,25 @@ dependencies = [
 name = "fakecloud-conformance"
 version = "0.1.1"
 dependencies = [
+ "aws-config",
+ "aws-credential-types",
+ "aws-sdk-cloudformation",
+ "aws-sdk-cloudwatchlogs",
+ "aws-sdk-dynamodb",
+ "aws-sdk-eventbridge",
+ "aws-sdk-iam",
+ "aws-sdk-kms",
+ "aws-sdk-lambda",
+ "aws-sdk-s3",
+ "aws-sdk-secretsmanager",
+ "aws-sdk-sns",
+ "aws-sdk-sqs",
+ "aws-sdk-ssm",
+ "aws-sdk-sts",
+ "aws-types",
  "clap",
+ "fakecloud-conformance-macros",
+ "regex",
  "reqwest",
  "serde",
  "serde_json",
@@ -2593,6 +2611,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed2bf2547551a7053d6fdfafda3f938979645c44812fbfcda098faae3f1a362d"
 dependencies = [
  "bitflags",
+]
+
+[[package]]
+name = "regex"
+version = "1.12.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e10754a14b9137dd7b1e3e5b0493cc9171fdd105e0ab477f51b72e7f3ac0e276"
+dependencies = [
+ "aho-corasick",
+ "memchr",
+ "regex-automata",
+ "regex-syntax",
 ]
 
 [[package]]

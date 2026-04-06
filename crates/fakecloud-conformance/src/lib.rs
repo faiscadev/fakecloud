@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+pub mod audit;
 pub mod checksum;
 pub mod generators;
 pub mod probe;
