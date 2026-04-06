@@ -100,6 +100,15 @@ impl AwsService for KmsService {
             "GenerateMac" => self.generate_mac(&req),
             "VerifyMac" => self.verify_mac(&req),
             "ReplicateKey" => self.replicate_key(&req),
+            "GenerateDataKeyPair" => self.generate_data_key_pair(&req),
+            "GenerateDataKeyPairWithoutPlaintext" => {
+                self.generate_data_key_pair_without_plaintext(&req)
+            }
+            "DeriveSharedSecret" => self.derive_shared_secret(&req),
+            "GetParametersForImport" => self.get_parameters_for_import(&req),
+            "ImportKeyMaterial" => self.import_key_material(&req),
+            "DeleteImportedKeyMaterial" => self.delete_imported_key_material(&req),
+            "UpdatePrimaryRegion" => self.update_primary_region(&req),
             _ => Err(AwsServiceError::action_not_implemented("kms", &req.action)),
         }
     }
@@ -146,6 +155,13 @@ impl AwsService for KmsService {
             "GenerateMac",
             "VerifyMac",
             "ReplicateKey",
+            "GenerateDataKeyPair",
+            "GenerateDataKeyPairWithoutPlaintext",
+            "DeriveSharedSecret",
+            "GetParametersForImport",
+            "ImportKeyMaterial",
+            "DeleteImportedKeyMaterial",
+            "UpdatePrimaryRegion",
         ]
     }
 }
@@ -411,6 +427,8 @@ impl KmsService {
             encryption_algorithms: encryption_algs,
             mac_algorithms: mac_algs,
             custom_key_store_id,
+            imported_key_material: false,
+            primary_region: None,
         };
 
         let metadata = key_metadata_json(&key, &state.account_id);
@@ -2121,6 +2139,8 @@ impl KmsService {
             encryption_algorithms: source_encryption_algorithms,
             mac_algorithms: source_mac_algorithms,
             custom_key_store_id: None,
+            imported_key_material: false,
+            primary_region: None,
         };
 
         let replica_storage_key = format!("{}:{}", replica_region, source_key_id);
@@ -2134,6 +2154,359 @@ impl KmsService {
             }))
             .unwrap(),
         ))
+    }
+
+    fn generate_data_key_pair(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = body_json(req);
+        let key_id = Self::require_key_id(&body)?;
+        let key_pair_spec = body["KeyPairSpec"]
+            .as_str()
+            .unwrap_or("RSA_2048")
+            .to_string();
+
+        let resolved = self.resolve_key_id(&key_id).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "NotFoundException",
+                format!("Key '{key_id}' does not exist"),
+            )
+        })?;
+
+        let state = self.state.read();
+        let key = state.keys.get(&resolved).unwrap();
+        if !key.enabled {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "DisabledException",
+                format!("Key '{}' is disabled", key.arn),
+            ));
+        }
+
+        let public_key_bytes = generate_fake_public_key(&key_pair_spec);
+        let private_key_bytes = rand_bytes(256);
+        let public_key_b64 = base64::engine::general_purpose::STANDARD.encode(&public_key_bytes);
+        let private_plaintext_b64 =
+            base64::engine::general_purpose::STANDARD.encode(&private_key_bytes);
+
+        // Encrypt private key
+        let envelope = format!(
+            "{FAKE_ENVELOPE_PREFIX}{}:{private_plaintext_b64}",
+            key.key_id
+        );
+        let private_ciphertext_b64 =
+            base64::engine::general_purpose::STANDARD.encode(envelope.as_bytes());
+
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            serde_json::to_string(&json!({
+                "KeyId": key.arn,
+                "KeyPairSpec": key_pair_spec,
+                "PublicKey": public_key_b64,
+                "PrivateKeyPlaintext": private_plaintext_b64,
+                "PrivateKeyCiphertextBlob": private_ciphertext_b64,
+            }))
+            .unwrap(),
+        ))
+    }
+
+    fn generate_data_key_pair_without_plaintext(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = body_json(req);
+        let key_id = Self::require_key_id(&body)?;
+        let key_pair_spec = body["KeyPairSpec"]
+            .as_str()
+            .unwrap_or("RSA_2048")
+            .to_string();
+
+        let resolved = self.resolve_key_id(&key_id).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "NotFoundException",
+                format!("Key '{key_id}' does not exist"),
+            )
+        })?;
+
+        let state = self.state.read();
+        let key = state.keys.get(&resolved).unwrap();
+        if !key.enabled {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "DisabledException",
+                format!("Key '{}' is disabled", key.arn),
+            ));
+        }
+
+        let public_key_bytes = generate_fake_public_key(&key_pair_spec);
+        let private_key_bytes = rand_bytes(256);
+        let public_key_b64 = base64::engine::general_purpose::STANDARD.encode(&public_key_bytes);
+        let private_plaintext_b64 =
+            base64::engine::general_purpose::STANDARD.encode(&private_key_bytes);
+
+        let envelope = format!(
+            "{FAKE_ENVELOPE_PREFIX}{}:{private_plaintext_b64}",
+            key.key_id
+        );
+        let private_ciphertext_b64 =
+            base64::engine::general_purpose::STANDARD.encode(envelope.as_bytes());
+
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            serde_json::to_string(&json!({
+                "KeyId": key.arn,
+                "KeyPairSpec": key_pair_spec,
+                "PublicKey": public_key_b64,
+                "PrivateKeyCiphertextBlob": private_ciphertext_b64,
+            }))
+            .unwrap(),
+        ))
+    }
+
+    fn derive_shared_secret(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = body_json(req);
+        let key_id = Self::require_key_id(&body)?;
+        let _key_agreement_algorithm = body["KeyAgreementAlgorithm"]
+            .as_str()
+            .unwrap_or("ECDH")
+            .to_string();
+        let _public_key = body["PublicKey"].as_str().ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ValidationException",
+                "PublicKey is required",
+            )
+        })?;
+
+        let resolved = self.resolve_key_id(&key_id).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "NotFoundException",
+                format!("Key '{key_id}' does not exist"),
+            )
+        })?;
+
+        let state = self.state.read();
+        let key = state.keys.get(&resolved).unwrap();
+
+        if !key.enabled {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "DisabledException",
+                format!("Key '{}' is disabled", key.arn),
+            ));
+        }
+
+        // Key must be asymmetric (KEY_AGREEMENT usage)
+        if key.key_usage != "KEY_AGREEMENT" {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidKeyUsageException",
+                format!(
+                    "Key '{}' usage is '{}', not KEY_AGREEMENT",
+                    key.arn, key.key_usage
+                ),
+            ));
+        }
+
+        let shared_secret_bytes = rand_bytes(32);
+        let shared_secret_b64 =
+            base64::engine::general_purpose::STANDARD.encode(&shared_secret_bytes);
+
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            serde_json::to_string(&json!({
+                "KeyId": key.arn,
+                "SharedSecret": shared_secret_b64,
+                "KeyAgreementAlgorithm": "ECDH",
+                "KeyOrigin": key.origin,
+            }))
+            .unwrap(),
+        ))
+    }
+
+    fn get_parameters_for_import(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = body_json(req);
+        let key_id = Self::require_key_id(&body)?;
+
+        let resolved = self.resolve_key_id(&key_id).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "NotFoundException",
+                format!("Key '{key_id}' does not exist"),
+            )
+        })?;
+
+        let state = self.state.read();
+        let key = state.keys.get(&resolved).unwrap();
+
+        if key.origin != "EXTERNAL" {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "UnsupportedOperationException",
+                format!("Key '{}' origin is '{}', not EXTERNAL", key.arn, key.origin),
+            ));
+        }
+
+        let import_token_bytes = rand_bytes(64);
+        let import_token_b64 =
+            base64::engine::general_purpose::STANDARD.encode(&import_token_bytes);
+        let public_key_bytes = generate_fake_public_key("RSA_2048");
+        let public_key_b64 = base64::engine::general_purpose::STANDARD.encode(&public_key_bytes);
+
+        // Valid for 24 hours
+        let parameters_valid_to = Utc::now().timestamp() as f64 + 86400.0;
+
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            serde_json::to_string(&json!({
+                "KeyId": key.arn,
+                "ImportToken": import_token_b64,
+                "PublicKey": public_key_b64,
+                "ParametersValidTo": parameters_valid_to,
+            }))
+            .unwrap(),
+        ))
+    }
+
+    fn import_key_material(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = body_json(req);
+        let key_id = Self::require_key_id(&body)?;
+
+        let _import_token = body["ImportToken"].as_str().ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ValidationException",
+                "ImportToken is required",
+            )
+        })?;
+
+        let _encrypted_key_material = body["EncryptedKeyMaterial"].as_str().ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ValidationException",
+                "EncryptedKeyMaterial is required",
+            )
+        })?;
+
+        let resolved = self.resolve_key_id(&key_id).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "NotFoundException",
+                format!("Key '{key_id}' does not exist"),
+            )
+        })?;
+
+        let mut state = self.state.write();
+        let key = state.keys.get_mut(&resolved).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "NotFoundException",
+                format!("Key '{key_id}' does not exist"),
+            )
+        })?;
+
+        if key.origin != "EXTERNAL" {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "UnsupportedOperationException",
+                format!("Key '{}' origin is '{}', not EXTERNAL", key.arn, key.origin),
+            ));
+        }
+
+        key.imported_key_material = true;
+        key.enabled = true;
+        key.key_state = "Enabled".to_string();
+
+        Ok(AwsResponse::json(StatusCode::OK, "{}"))
+    }
+
+    fn delete_imported_key_material(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = body_json(req);
+        let key_id = Self::require_key_id(&body)?;
+
+        let resolved = self.resolve_key_id(&key_id).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "NotFoundException",
+                format!("Key '{key_id}' does not exist"),
+            )
+        })?;
+
+        let mut state = self.state.write();
+        let key = state.keys.get_mut(&resolved).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "NotFoundException",
+                format!("Key '{key_id}' does not exist"),
+            )
+        })?;
+
+        if key.origin != "EXTERNAL" {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "UnsupportedOperationException",
+                format!("Key '{}' origin is '{}', not EXTERNAL", key.arn, key.origin),
+            ));
+        }
+
+        key.imported_key_material = false;
+        key.enabled = false;
+        key.key_state = "PendingImport".to_string();
+
+        Ok(AwsResponse::json(StatusCode::OK, "{}"))
+    }
+
+    fn update_primary_region(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = body_json(req);
+        let key_id = Self::require_key_id(&body)?;
+        let primary_region = body["PrimaryRegion"]
+            .as_str()
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationException",
+                    "PrimaryRegion is required",
+                )
+            })?
+            .to_string();
+
+        let resolved = self.resolve_key_id(&key_id).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "NotFoundException",
+                format!("Key '{key_id}' does not exist"),
+            )
+        })?;
+
+        let mut state = self.state.write();
+        let account_id = state.account_id.clone();
+        let key = state.keys.get_mut(&resolved).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "NotFoundException",
+                format!("Key '{key_id}' does not exist"),
+            )
+        })?;
+
+        if !key.multi_region {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "UnsupportedOperationException",
+                format!("Key '{}' is not a multi-Region key", key.arn),
+            ));
+        }
+        key.primary_region = Some(primary_region.clone());
+        // Update the ARN to reflect the new region
+        key.arn = format!(
+            "arn:aws:kms:{}:{}:key/{}",
+            primary_region, account_id, key.key_id
+        );
+
+        Ok(AwsResponse::json(StatusCode::OK, "{}"))
     }
 }
 
@@ -2542,5 +2915,235 @@ mod tests {
 
         // All 5 grants returned
         assert_eq!(collected_ids.len(), 5, "expected 5 grants total");
+    }
+
+    fn create_key_with_opts(svc: &KmsService, body: Value) -> String {
+        let req = make_request("CreateKey", body);
+        let resp = svc.create_key(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        body["KeyMetadata"]["KeyId"].as_str().unwrap().to_string()
+    }
+
+    #[test]
+    fn generate_data_key_pair_returns_all_fields() {
+        let svc = make_service();
+        let key_id = create_key(&svc);
+
+        let req = make_request(
+            "GenerateDataKeyPair",
+            json!({ "KeyId": key_id, "KeyPairSpec": "RSA_2048" }),
+        );
+        let resp = svc.generate_data_key_pair(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+
+        assert!(body["PublicKey"].as_str().is_some());
+        assert!(body["PrivateKeyPlaintext"].as_str().is_some());
+        assert!(body["PrivateKeyCiphertextBlob"].as_str().is_some());
+        assert_eq!(body["KeyPairSpec"].as_str().unwrap(), "RSA_2048");
+        assert!(body["KeyId"].as_str().unwrap().contains(":key/"));
+    }
+
+    #[test]
+    fn generate_data_key_pair_disabled_key_fails() {
+        let svc = make_service();
+        let key_id = create_key(&svc);
+
+        let disable_req = make_request("DisableKey", json!({ "KeyId": key_id }));
+        svc.disable_key(&disable_req).unwrap();
+
+        let req = make_request(
+            "GenerateDataKeyPair",
+            json!({ "KeyId": key_id, "KeyPairSpec": "RSA_2048" }),
+        );
+        assert!(svc.generate_data_key_pair(&req).is_err());
+    }
+
+    #[test]
+    fn generate_data_key_pair_without_plaintext_omits_private_plaintext() {
+        let svc = make_service();
+        let key_id = create_key(&svc);
+
+        let req = make_request(
+            "GenerateDataKeyPairWithoutPlaintext",
+            json!({ "KeyId": key_id, "KeyPairSpec": "ECC_NIST_P256" }),
+        );
+        let resp = svc.generate_data_key_pair_without_plaintext(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+
+        assert!(body["PublicKey"].as_str().is_some());
+        assert!(body["PrivateKeyCiphertextBlob"].as_str().is_some());
+        assert!(body.get("PrivateKeyPlaintext").is_none());
+        assert_eq!(body["KeyPairSpec"].as_str().unwrap(), "ECC_NIST_P256");
+    }
+
+    #[test]
+    fn derive_shared_secret_success() {
+        let svc = make_service();
+        let key_id = create_key_with_opts(
+            &svc,
+            json!({
+                "KeyUsage": "KEY_AGREEMENT",
+                "KeySpec": "ECC_NIST_P256"
+            }),
+        );
+
+        let fake_pub = base64::engine::general_purpose::STANDARD.encode(b"fake-public-key");
+        let req = make_request(
+            "DeriveSharedSecret",
+            json!({
+                "KeyId": key_id,
+                "KeyAgreementAlgorithm": "ECDH",
+                "PublicKey": fake_pub
+            }),
+        );
+        let resp = svc.derive_shared_secret(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+
+        assert!(body["SharedSecret"].as_str().is_some());
+        assert!(body["KeyId"].as_str().unwrap().contains(":key/"));
+        assert_eq!(body["KeyAgreementAlgorithm"].as_str().unwrap(), "ECDH");
+    }
+
+    #[test]
+    fn derive_shared_secret_wrong_usage_fails() {
+        let svc = make_service();
+        let key_id = create_key(&svc); // Default is ENCRYPT_DECRYPT
+
+        let fake_pub = base64::engine::general_purpose::STANDARD.encode(b"fake-public-key");
+        let req = make_request(
+            "DeriveSharedSecret",
+            json!({
+                "KeyId": key_id,
+                "KeyAgreementAlgorithm": "ECDH",
+                "PublicKey": fake_pub
+            }),
+        );
+        assert!(svc.derive_shared_secret(&req).is_err());
+    }
+
+    #[test]
+    fn get_parameters_for_import_success() {
+        let svc = make_service();
+        let key_id = create_key_with_opts(&svc, json!({ "Origin": "EXTERNAL" }));
+
+        let req = make_request(
+            "GetParametersForImport",
+            json!({ "KeyId": key_id, "WrappingAlgorithm": "RSAES_OAEP_SHA_256", "WrappingKeySpec": "RSA_2048" }),
+        );
+        let resp = svc.get_parameters_for_import(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+
+        assert!(body["ImportToken"].as_str().is_some());
+        assert!(body["PublicKey"].as_str().is_some());
+        assert!(body["ParametersValidTo"].as_f64().is_some());
+        assert!(body["KeyId"].as_str().unwrap().contains(":key/"));
+    }
+
+    #[test]
+    fn get_parameters_for_import_non_external_fails() {
+        let svc = make_service();
+        let key_id = create_key(&svc); // Default origin is AWS_KMS
+
+        let req = make_request("GetParametersForImport", json!({ "KeyId": key_id }));
+        assert!(svc.get_parameters_for_import(&req).is_err());
+    }
+
+    #[test]
+    fn import_key_material_lifecycle() {
+        let svc = make_service();
+        let key_id = create_key_with_opts(&svc, json!({ "Origin": "EXTERNAL" }));
+
+        let fake_token = base64::engine::general_purpose::STANDARD.encode(b"token");
+        let fake_material = base64::engine::general_purpose::STANDARD.encode(b"material");
+
+        // Import
+        let req = make_request(
+            "ImportKeyMaterial",
+            json!({
+                "KeyId": key_id,
+                "ImportToken": fake_token,
+                "EncryptedKeyMaterial": fake_material,
+                "ExpirationModel": "KEY_MATERIAL_DOES_NOT_EXPIRE"
+            }),
+        );
+        svc.import_key_material(&req).unwrap();
+
+        // Key should be enabled
+        {
+            let state = svc.state.read();
+            let key = state.keys.get(&key_id).unwrap();
+            assert!(key.imported_key_material);
+            assert!(key.enabled);
+        }
+
+        // Delete imported material
+        let req = make_request("DeleteImportedKeyMaterial", json!({ "KeyId": key_id }));
+        svc.delete_imported_key_material(&req).unwrap();
+
+        // Key should be disabled and pending import
+        {
+            let state = svc.state.read();
+            let key = state.keys.get(&key_id).unwrap();
+            assert!(!key.imported_key_material);
+            assert!(!key.enabled);
+            assert_eq!(key.key_state, "PendingImport");
+        }
+    }
+
+    #[test]
+    fn import_key_material_non_external_fails() {
+        let svc = make_service();
+        let key_id = create_key(&svc);
+
+        let fake_token = base64::engine::general_purpose::STANDARD.encode(b"token");
+        let fake_material = base64::engine::general_purpose::STANDARD.encode(b"material");
+
+        let req = make_request(
+            "ImportKeyMaterial",
+            json!({
+                "KeyId": key_id,
+                "ImportToken": fake_token,
+                "EncryptedKeyMaterial": fake_material
+            }),
+        );
+        assert!(svc.import_key_material(&req).is_err());
+    }
+
+    #[test]
+    fn delete_imported_key_material_non_external_fails() {
+        let svc = make_service();
+        let key_id = create_key(&svc);
+
+        let req = make_request("DeleteImportedKeyMaterial", json!({ "KeyId": key_id }));
+        assert!(svc.delete_imported_key_material(&req).is_err());
+    }
+
+    #[test]
+    fn update_primary_region_success() {
+        let svc = make_service();
+        let key_id = create_key_with_opts(&svc, json!({ "MultiRegion": true }));
+
+        let req = make_request(
+            "UpdatePrimaryRegion",
+            json!({ "KeyId": key_id, "PrimaryRegion": "eu-west-1" }),
+        );
+        svc.update_primary_region(&req).unwrap();
+
+        let state = svc.state.read();
+        let key = state.keys.get(&key_id).unwrap();
+        assert_eq!(key.primary_region.as_deref(), Some("eu-west-1"));
+        assert!(key.arn.contains("eu-west-1"));
+    }
+
+    #[test]
+    fn update_primary_region_non_multi_region_fails() {
+        let svc = make_service();
+        let key_id = create_key(&svc); // Not multi-region
+
+        let req = make_request(
+            "UpdatePrimaryRegion",
+            json!({ "KeyId": key_id, "PrimaryRegion": "eu-west-1" }),
+        );
+        assert!(svc.update_primary_region(&req).is_err());
     }
 }

@@ -52,6 +52,8 @@ pub struct KmsKey {
     pub encryption_algorithms: Option<Vec<String>>,
     pub mac_algorithms: Option<Vec<String>>,
     pub custom_key_store_id: Option<String>,
+    pub imported_key_material: bool,
+    pub primary_region: Option<String>,
 }
 
 pub struct KmsAlias {

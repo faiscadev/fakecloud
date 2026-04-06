@@ -340,3 +340,123 @@ async fn kms_create_duplicate_alias_fails() {
         .await;
     assert!(result.is_err());
 }
+
+#[tokio::test]
+async fn kms_generate_data_key_pair() {
+    let server = TestServer::start().await;
+    let client = server.kms_client().await;
+
+    let resp = client.create_key().send().await.unwrap();
+    let key_id = resp.key_metadata().unwrap().key_id().to_string();
+
+    let pair = client
+        .generate_data_key_pair()
+        .key_id(&key_id)
+        .key_pair_spec(aws_sdk_kms::types::DataKeyPairSpec::Rsa2048)
+        .send()
+        .await
+        .unwrap();
+
+    assert!(pair.public_key().is_some());
+    assert!(pair.private_key_plaintext().is_some());
+    assert!(pair.private_key_ciphertext_blob().is_some());
+    assert!(pair.key_id().is_some());
+
+    // Without plaintext variant
+    let pair_no_pt = client
+        .generate_data_key_pair_without_plaintext()
+        .key_id(&key_id)
+        .key_pair_spec(aws_sdk_kms::types::DataKeyPairSpec::EccNistP256)
+        .send()
+        .await
+        .unwrap();
+
+    assert!(pair_no_pt.public_key().is_some());
+    assert!(pair_no_pt.private_key_ciphertext_blob().is_some());
+    assert!(pair_no_pt.key_id().is_some());
+}
+
+#[tokio::test]
+async fn kms_derive_shared_secret() {
+    let server = TestServer::start().await;
+    let client = server.kms_client().await;
+
+    let resp = client
+        .create_key()
+        .key_usage(aws_sdk_kms::types::KeyUsageType::KeyAgreement)
+        .key_spec(aws_sdk_kms::types::KeySpec::EccNistP256)
+        .send()
+        .await
+        .unwrap();
+    let key_id = resp.key_metadata().unwrap().key_id().to_string();
+
+    let fake_pub = Blob::new(vec![0x04; 65]); // Fake uncompressed EC point
+    let result = client
+        .derive_shared_secret()
+        .key_id(&key_id)
+        .key_agreement_algorithm(aws_sdk_kms::types::KeyAgreementAlgorithmSpec::Ecdh)
+        .public_key(fake_pub)
+        .send()
+        .await
+        .unwrap();
+
+    assert!(result.shared_secret().is_some());
+    assert!(result.key_id().is_some());
+}
+
+#[tokio::test]
+async fn kms_import_key_material_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.kms_client().await;
+
+    // Create key with EXTERNAL origin
+    let resp = client
+        .create_key()
+        .origin(aws_sdk_kms::types::OriginType::External)
+        .send()
+        .await
+        .unwrap();
+    let key_id = resp.key_metadata().unwrap().key_id().to_string();
+
+    // Get parameters for import
+    let params = client
+        .get_parameters_for_import()
+        .key_id(&key_id)
+        .wrapping_algorithm(aws_sdk_kms::types::AlgorithmSpec::RsaesOaepSha256)
+        .wrapping_key_spec(aws_sdk_kms::types::WrappingKeySpec::Rsa2048)
+        .send()
+        .await
+        .unwrap();
+
+    assert!(params.import_token().is_some());
+    assert!(params.public_key().is_some());
+    assert!(params.parameters_valid_to().is_some());
+
+    // Import key material
+    let import_token = params.import_token().unwrap().clone();
+    client
+        .import_key_material()
+        .key_id(&key_id)
+        .import_token(import_token)
+        .encrypted_key_material(Blob::new(vec![0u8; 32]))
+        .expiration_model(aws_sdk_kms::types::ExpirationModelType::KeyMaterialDoesNotExpire)
+        .send()
+        .await
+        .unwrap();
+
+    // Key should now be enabled
+    let desc = client.describe_key().key_id(&key_id).send().await.unwrap();
+    assert!(desc.key_metadata().unwrap().enabled());
+
+    // Delete imported key material
+    client
+        .delete_imported_key_material()
+        .key_id(&key_id)
+        .send()
+        .await
+        .unwrap();
+
+    // Key should now be pending import
+    let desc = client.describe_key().key_id(&key_id).send().await.unwrap();
+    assert!(!desc.key_metadata().unwrap().enabled());
+}
