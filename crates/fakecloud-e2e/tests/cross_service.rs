@@ -1346,3 +1346,133 @@ def handler(event, context):
     assert_eq!(record["Sns"]["Message"], "hello from SNS");
     assert_eq!(record["Sns"]["Subject"], "Test Subject");
 }
+
+/// SQS -> Lambda ESM real execution: send a message to SQS, the event source mapping
+/// triggers a Lambda that processes the message and writes "processed:<body>" to a result queue.
+#[tokio::test]
+#[ignore] // Requires Docker with host.docker.internal networking — run locally, not in CI
+async fn sqs_to_lambda_esm_actually_executes() {
+    let server = TestServer::start().await;
+    let sqs = server.sqs_client().await;
+    let lambda = server.lambda_client().await;
+
+    // 1. Create source queue and result queue
+    let source_queue = sqs
+        .create_queue()
+        .queue_name("esm-source-queue")
+        .send()
+        .await
+        .unwrap();
+    let source_url = source_queue.queue_url().unwrap().to_string();
+    let source_arn = get_queue_arn(&sqs, &source_url).await;
+
+    let result_queue = sqs
+        .create_queue()
+        .queue_name("esm-result-queue")
+        .send()
+        .await
+        .unwrap();
+    let result_url = result_queue.queue_url().unwrap().to_string();
+
+    // 2. Create Lambda (Python) that reads SQS event, extracts message body,
+    //    and sends "processed:<body>" to the result queue
+    let docker_endpoint = format!("http://host.docker.internal:{}", server.port());
+    let docker_result_url = format!(
+        "http://host.docker.internal:{}/123456789012/esm-result-queue",
+        server.port()
+    );
+    let python_code = format!(
+        r#"
+import json
+import urllib.request
+import urllib.parse
+
+def handler(event, context):
+    for record in event.get("Records", []):
+        body = record.get("body", "")
+        result = "processed:" + body
+        params = urllib.parse.urlencode({{
+            "Action": "SendMessage",
+            "QueueUrl": "{docker_result_url}",
+            "MessageBody": result,
+            "Version": "2012-11-05",
+        }})
+        req = urllib.request.Request(
+            "{docker_endpoint}/",
+            data=params.encode("utf-8"),
+            headers={{
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Authorization": "AWS4-HMAC-SHA256 Credential=test/20260101/us-east-1/sqs/aws4_request, SignedHeaders=host, Signature=fake",
+            }},
+        )
+        urllib.request.urlopen(req, timeout=5)
+    return {{"statusCode": 200, "body": "ok"}}
+"#
+    );
+
+    let zip = make_zip(&[("index.py", python_code.as_bytes())]);
+
+    lambda
+        .create_function()
+        .function_name("esm-processor")
+        .runtime(Runtime::Python312)
+        .role("arn:aws:iam::123456789012:role/lambda-role")
+        .handler("index.handler")
+        .timeout(10)
+        .environment(
+            Environment::builder()
+                .variables("AWS_ACCESS_KEY_ID", "test")
+                .variables("AWS_SECRET_ACCESS_KEY", "test")
+                .build(),
+        )
+        .code(FunctionCode::builder().zip_file(Blob::new(zip)).build())
+        .send()
+        .await
+        .unwrap();
+
+    // 3. Create event source mapping from source queue to Lambda
+    lambda
+        .create_event_source_mapping()
+        .event_source_arn(&source_arn)
+        .function_name("esm-processor")
+        .batch_size(10)
+        .enabled(true)
+        .send()
+        .await
+        .unwrap();
+
+    // 4. Send a message to the source queue
+    let original_body = "hello-esm-test";
+    sqs.send_message()
+        .queue_url(&source_url)
+        .message_body(original_body)
+        .send()
+        .await
+        .unwrap();
+
+    // 5. Wait and receive from result queue
+    let mut proof_message = None;
+    for _ in 0..30 {
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        let msgs = sqs
+            .receive_message()
+            .queue_url(&result_url)
+            .max_number_of_messages(1)
+            .send()
+            .await
+            .unwrap();
+        if !msgs.messages().is_empty() {
+            proof_message = Some(msgs.messages()[0].body().unwrap().to_string());
+            break;
+        }
+    }
+
+    // 6. Assert the result contains "processed:" + original message
+    let msg = proof_message
+        .expect("Lambda was not actually invoked by SQS ESM -- no message in result queue");
+    assert_eq!(
+        msg,
+        format!("processed:{original_body}"),
+        "Lambda should have processed the SQS message and sent 'processed:<body>' to result queue"
+    );
+}

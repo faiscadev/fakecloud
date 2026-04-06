@@ -1,14 +1,17 @@
 //! Background poller that bridges SQS -> Lambda event source mappings.
 //!
 //! Periodically checks Lambda state for enabled event source mappings
-//! pointing to SQS queues, polls those queues for messages, and records
-//! Lambda invocations in Lambda state.
+//! pointing to SQS queues, polls those queues for messages, and either
+//! invokes the Lambda function via the container runtime (when available)
+//! or records the invocation in Lambda state.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
 use serde_json::json;
 
+use fakecloud_core::delivery::LambdaDelivery;
 use fakecloud_lambda::state::{LambdaInvocation, SharedLambdaState};
 use fakecloud_sqs::state::SharedSqsState;
 
@@ -16,6 +19,7 @@ use fakecloud_sqs::state::SharedSqsState;
 pub struct SqsLambdaPoller {
     sqs_state: SharedSqsState,
     lambda_state: SharedLambdaState,
+    lambda_delivery: Option<Arc<dyn LambdaDelivery>>,
 }
 
 impl SqsLambdaPoller {
@@ -23,18 +27,24 @@ impl SqsLambdaPoller {
         Self {
             sqs_state,
             lambda_state,
+            lambda_delivery: None,
         }
+    }
+
+    pub fn with_lambda_delivery(mut self, delivery: Arc<dyn LambdaDelivery>) -> Self {
+        self.lambda_delivery = Some(delivery);
+        self
     }
 
     pub async fn run(self) {
         let mut interval = tokio::time::interval(Duration::from_millis(500));
         loop {
             interval.tick().await;
-            self.poll();
+            self.poll().await;
         }
     }
 
-    fn poll(&self) {
+    async fn poll(&self) {
         // Collect enabled mappings that point to SQS sources
         let mappings: Vec<(String, String, i64)> = {
             let lambda = self.lambda_state.read();
@@ -125,7 +135,26 @@ impl SqsLambdaPoller {
                 "SQS->Lambda: delivering messages to function"
             );
 
-            // Record the invocation in Lambda state
+            // If we have a real Lambda delivery mechanism, invoke the function
+            if let Some(ref delivery) = self.lambda_delivery {
+                match delivery.invoke_lambda(&function_arn, &payload).await {
+                    Ok(_) => {
+                        tracing::debug!(
+                            function_arn = %function_arn,
+                            "SQS->Lambda: function invoked successfully"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            function_arn = %function_arn,
+                            error = %e,
+                            "SQS->Lambda: function invocation failed"
+                        );
+                    }
+                }
+            }
+
+            // Record the invocation in Lambda state (for observability / testing)
             let mut lambda = self.lambda_state.write();
             lambda.invocations.push(LambdaInvocation {
                 function_arn,
