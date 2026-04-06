@@ -4962,6 +4962,7 @@ mod tests {
     // ---- Archive + Replay delivery tests ----
 
     /// Helper: create a service with a mock SQS delivery that records messages.
+    #[allow(clippy::type_complexity)]
     fn make_service_with_sqs_recorder() -> (
         EventBridgeService,
         Arc<parking_lot::Mutex<Vec<(String, String)>>>,
