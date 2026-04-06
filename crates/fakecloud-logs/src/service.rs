@@ -955,8 +955,7 @@ impl LogsService {
                 let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
                 encoder.write_all(payload_str.as_bytes()).unwrap();
                 let compressed = encoder.finish().unwrap();
-                let encoded =
-                    base64::engine::general_purpose::STANDARD.encode(&compressed);
+                let encoded = base64::engine::general_purpose::STANDARD.encode(&compressed);
 
                 self.delivery_bus
                     .send_to_sqs(destination_arn, &encoded, &HashMap::new());
