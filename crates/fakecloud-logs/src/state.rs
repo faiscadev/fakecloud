@@ -34,6 +34,9 @@ pub struct LogsState {
     pub s3_table_sources: HashMap<String, Vec<String>>,
     /// Bearer token authentication flag per log group
     pub bearer_token_auth: HashMap<String, bool>,
+    /// Internal export storage: keyed by "bucket/prefix/..." path, value is exported data.
+    /// Used by CreateExportTask and delivery pipeline when direct S3 access is unavailable.
+    pub export_storage: HashMap<String, Vec<u8>>,
 }
 
 impl LogsState {
@@ -59,6 +62,7 @@ impl LogsState {
             scheduled_queries: HashMap::new(),
             s3_table_sources: HashMap::new(),
             bearer_token_auth: HashMap::new(),
+            export_storage: HashMap::new(),
         }
     }
 
@@ -81,6 +85,7 @@ impl LogsState {
         self.scheduled_queries.clear();
         self.s3_table_sources.clear();
         self.bearer_token_auth.clear();
+        self.export_storage.clear();
     }
 }
 

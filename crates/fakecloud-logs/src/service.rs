@@ -14,6 +14,7 @@ use fakecloud_core::delivery::DeliveryBus;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 use fakecloud_core::validation::*;
 
+use crate::query;
 use crate::state::{
     AccountPolicy, AnomalyDetector, DataProtectionPolicy, Delivery, DeliveryDestination,
     DeliverySource, Destination, ExportTask, ImportTask, IndexPolicy, Integration, LogEvent,
@@ -160,6 +161,8 @@ impl AwsService for LogsService {
             }
             "UpdateDeliveryConfiguration" => self.update_delivery_configuration(&req),
             "DescribeConfigurationTemplates" => self.describe_configuration_templates(&req),
+            // Internal action for testing export storage
+            "GetExportedData" => self.get_exported_data(&req),
             _ => Err(AwsServiceError::action_not_implemented("logs", &req.action)),
         }
     }
@@ -916,6 +919,59 @@ impl LogsService {
             .collect();
         let group_name_owned = group_name.to_string();
         let stream_name_owned = stream_name.to_string();
+
+        // Collect delivery pipeline info: find active deliveries whose source
+        // resource ARN matches this log group's ARN.
+        let group_arn = group.arn.clone();
+        let delivery_targets: Vec<String> = state
+            .deliveries
+            .values()
+            .filter_map(|d| {
+                // Check if the delivery source references this log group
+                if let Some(source) = state.delivery_sources.get(&d.delivery_source_name) {
+                    if source.resource_arns.contains(&group_arn) {
+                        // Find the destination's S3 bucket configuration
+                        if let Some(dest) = state
+                            .delivery_destinations
+                            .values()
+                            .find(|dd| dd.arn == d.delivery_destination_arn)
+                        {
+                            if let Some(dest_arn) = dest
+                                .delivery_destination_configuration
+                                .get("destinationResourceArn")
+                            {
+                                if dest_arn.contains(":s3:") || dest_arn.starts_with("arn:aws:s3") {
+                                    return Some(dest_arn.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+                None
+            })
+            .collect();
+
+        // Write delivery pipeline events to internal export storage
+        if !delivery_targets.is_empty() && !accepted_events.is_empty() {
+            let lines: Vec<String> = accepted_events.iter().map(|e| e.message.clone()).collect();
+            let data = lines.join("\n");
+            let now_str = Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
+            for dest_arn in &delivery_targets {
+                // Extract bucket name from S3 ARN: arn:aws:s3:::bucket-name
+                let bucket = dest_arn.strip_prefix("arn:aws:s3:::").unwrap_or(dest_arn);
+                let key = format!(
+                    "{}/delivery/{}/{}/{}",
+                    bucket, group_name_owned, stream_name_owned, now_str
+                );
+                // Append to existing data if present
+                let entry = state.export_storage.entry(key).or_default();
+                if !entry.is_empty() {
+                    entry.push(b'\n');
+                }
+                entry.extend_from_slice(data.as_bytes());
+            }
+        }
+
         drop(state);
 
         // Deliver to subscription filter destinations
@@ -2422,7 +2478,7 @@ impl LogsService {
         validate_string_length("queryId", query_id, 1, 256)?;
 
         let state = self.state.read();
-        let query = state.queries.get(query_id).ok_or_else(|| {
+        let query_info = state.queries.get(query_id).ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "ResourceNotFoundException",
@@ -2430,38 +2486,35 @@ impl LogsService {
             )
         })?;
 
-        // Find matching log events
-        let mut results: Vec<Value> = Vec::new();
-        if let Some(group) = state.log_groups.get(&query.log_group_name) {
+        // Parse the query string
+        let parsed = query::parse_query(&query_info.query_string);
+
+        // Collect events by stream
+        let mut stream_events: Vec<(String, Vec<LogEvent>)> = Vec::new();
+        if let Some(group) = state.log_groups.get(&query_info.log_group_name) {
             for stream in group.log_streams.values() {
-                for event in &stream.events {
-                    // Convert timestamps: query uses seconds, events use milliseconds
-                    let event_time_secs = event.timestamp / 1000;
-                    if event_time_secs >= query.start_time && event_time_secs < query.end_time {
-                        results.push(json!([
-                            {"field": "@message", "value": event.message},
-                            {"field": "@ptr", "value": format!("{}/{}", stream.name, event.timestamp)},
-                        ]));
-                    }
-                }
+                stream_events.push((stream.name.clone(), stream.events.clone()));
             }
         }
 
-        // Sort by @message value
-        results.sort_by(|a, b| {
-            let a_msg = a[0]["value"].as_str().unwrap_or("");
-            let b_msg = b[0]["value"].as_str().unwrap_or("");
-            a_msg.cmp(b_msg)
-        });
+        let results = query::execute_query(
+            &parsed,
+            &stream_events,
+            query_info.start_time,
+            query_info.end_time,
+        );
+
+        let records_matched = results.len() as f64;
+        let total_scanned: usize = stream_events.iter().map(|(_, e)| e.len()).sum();
 
         Ok(AwsResponse::json(
             StatusCode::OK,
             serde_json::to_string(&json!({
-                "status": query.status,
+                "status": query_info.status,
                 "results": results,
                 "statistics": {
-                    "recordsMatched": results.len() as f64,
-                    "recordsScanned": results.len() as f64,
+                    "recordsMatched": records_matched,
+                    "recordsScanned": total_scanned as f64,
                     "bytesScanned": 0.0,
                 },
             }))
@@ -2594,7 +2647,35 @@ impl LogsService {
             ("active".to_string(), "Task is active".to_string())
         };
 
+        // Collect matching events and write to export storage
         let mut state = self.state.write();
+        if from_time < to_time {
+            if let Some(group) = state.log_groups.get(&log_group_name) {
+                let mut exported_lines: Vec<String> = Vec::new();
+                for (stream_name, stream) in &group.log_streams {
+                    // Apply stream name prefix filter if provided
+                    if let Some(ref prefix) = log_stream_name_prefix {
+                        if !stream_name.starts_with(prefix.as_str()) {
+                            continue;
+                        }
+                    }
+                    for event in &stream.events {
+                        if event.timestamp >= from_time && event.timestamp < to_time {
+                            exported_lines.push(event.message.clone());
+                        }
+                    }
+                }
+                if !exported_lines.is_empty() {
+                    let export_key = format!(
+                        "{}/{}/{}/{}",
+                        destination, destination_prefix, log_group_name, task_id
+                    );
+                    let data = exported_lines.join("\n");
+                    state.export_storage.insert(export_key, data.into_bytes());
+                }
+            }
+        }
+
         state.export_tasks.push(ExportTask {
             task_id: task_id.clone(),
             task_name,
@@ -2715,6 +2796,31 @@ impl LogsService {
         task.status_message = "Task was cancelled".to_string();
 
         Ok(AwsResponse::json(StatusCode::OK, "{}"))
+    }
+
+    /// Internal action: returns data from the export storage for testing.
+    /// Request body: `{"keyPrefix": "bucket/prefix"}` — returns all matching entries.
+    fn get_exported_data(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = body_json(req);
+        let key_prefix = body["keyPrefix"].as_str().unwrap_or("");
+
+        let state = self.state.read();
+        let entries: Vec<Value> = state
+            .export_storage
+            .iter()
+            .filter(|(k, _)| k.starts_with(key_prefix))
+            .map(|(k, v)| {
+                json!({
+                    "key": k,
+                    "data": String::from_utf8_lossy(v).to_string(),
+                })
+            })
+            .collect();
+
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            serde_json::to_string(&json!({ "entries": entries })).unwrap(),
+        ))
     }
 
     // ---- Delivery Destinations ----
@@ -7178,5 +7284,398 @@ mod tests {
         assert_eq!(events.len(), 2);
         assert!(events[0]["message"].as_str().unwrap().contains("ERROR"));
         assert!(events[1]["message"].as_str().unwrap().contains("ERROR"));
+    }
+
+    // ---- Query language (StartQuery / GetQueryResults) tests ----
+
+    #[test]
+    fn logs_query_filters_events() {
+        let svc = make_service();
+        create_group(&svc, "/query/test");
+        create_stream(&svc, "/query/test", "stream-1");
+
+        let now = chrono::Utc::now().timestamp_millis();
+        let events: Vec<Value> = vec![
+            json!({ "timestamp": now, "message": "ERROR: something broke" }),
+            json!({ "timestamp": now + 1, "message": "INFO: all good" }),
+            json!({ "timestamp": now + 2, "message": "ERROR: another failure" }),
+        ];
+        let req = make_request(
+            "PutLogEvents",
+            json!({
+                "logGroupName": "/query/test",
+                "logStreamName": "stream-1",
+                "logEvents": events,
+            }),
+        );
+        svc.put_log_events(&req).unwrap();
+
+        // Start a query with filter
+        let start_secs = (now / 1000) - 1;
+        let end_secs = (now / 1000) + 10;
+        let req = make_request(
+            "StartQuery",
+            json!({
+                "logGroupName": "/query/test",
+                "startTime": start_secs,
+                "endTime": end_secs,
+                "queryString": "filter @message like /ERROR/ | limit 10",
+            }),
+        );
+        let resp = svc.start_query(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let query_id = body["queryId"].as_str().unwrap();
+
+        // Get results
+        let req = make_request("GetQueryResults", json!({ "queryId": query_id }));
+        let resp = svc.get_query_results(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let results = body["results"].as_array().unwrap();
+        assert_eq!(results.len(), 2, "Should only return ERROR events");
+        assert_eq!(body["status"].as_str().unwrap(), "Complete");
+    }
+
+    #[test]
+    fn logs_query_fields_selection() {
+        let svc = make_service();
+        create_group(&svc, "/qfields/test");
+        create_stream(&svc, "/qfields/test", "s1");
+
+        let now = chrono::Utc::now().timestamp_millis();
+        let req = make_request(
+            "PutLogEvents",
+            json!({
+                "logGroupName": "/qfields/test",
+                "logStreamName": "s1",
+                "logEvents": [{ "timestamp": now, "message": "hello" }],
+            }),
+        );
+        svc.put_log_events(&req).unwrap();
+
+        let start_secs = (now / 1000) - 1;
+        let end_secs = (now / 1000) + 10;
+        let req = make_request(
+            "StartQuery",
+            json!({
+                "logGroupName": "/qfields/test",
+                "startTime": start_secs,
+                "endTime": end_secs,
+                "queryString": "fields @message",
+            }),
+        );
+        let resp = svc.start_query(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let query_id = body["queryId"].as_str().unwrap();
+
+        let req = make_request("GetQueryResults", json!({ "queryId": query_id }));
+        let resp = svc.get_query_results(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let results = body["results"].as_array().unwrap();
+        assert_eq!(results.len(), 1);
+
+        let row = results[0].as_array().unwrap();
+        let field_names: Vec<&str> = row.iter().map(|f| f["field"].as_str().unwrap()).collect();
+        assert!(field_names.contains(&"@message"));
+        assert!(field_names.contains(&"@ptr"));
+        assert!(!field_names.contains(&"@timestamp"));
+    }
+
+    #[test]
+    fn logs_query_sort_and_limit() {
+        let svc = make_service();
+        create_group(&svc, "/qsort/test");
+        create_stream(&svc, "/qsort/test", "s1");
+
+        let now = chrono::Utc::now().timestamp_millis();
+        let req = make_request(
+            "PutLogEvents",
+            json!({
+                "logGroupName": "/qsort/test",
+                "logStreamName": "s1",
+                "logEvents": [
+                    { "timestamp": now, "message": "first" },
+                    { "timestamp": now + 1000, "message": "second" },
+                    { "timestamp": now + 2000, "message": "third" },
+                ],
+            }),
+        );
+        svc.put_log_events(&req).unwrap();
+
+        let start_secs = (now / 1000) - 1;
+        let end_secs = (now / 1000) + 10;
+        let req = make_request(
+            "StartQuery",
+            json!({
+                "logGroupName": "/qsort/test",
+                "startTime": start_secs,
+                "endTime": end_secs,
+                "queryString": "sort @timestamp desc | limit 2",
+            }),
+        );
+        let resp = svc.start_query(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let query_id = body["queryId"].as_str().unwrap();
+
+        let req = make_request("GetQueryResults", json!({ "queryId": query_id }));
+        let resp = svc.get_query_results(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let results = body["results"].as_array().unwrap();
+        assert_eq!(results.len(), 2, "Should be limited to 2");
+
+        // First result should be the latest (desc sort)
+        let first_msg = results[0]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["field"].as_str() == Some("@message"))
+            .unwrap();
+        assert_eq!(first_msg["value"].as_str().unwrap(), "third");
+    }
+
+    #[test]
+    fn logs_query_json_field_filter() {
+        let svc = make_service();
+        create_group(&svc, "/qjson/test");
+        create_stream(&svc, "/qjson/test", "s1");
+
+        let now = chrono::Utc::now().timestamp_millis();
+        let req = make_request(
+            "PutLogEvents",
+            json!({
+                "logGroupName": "/qjson/test",
+                "logStreamName": "s1",
+                "logEvents": [
+                    { "timestamp": now, "message": r#"{"level":"ERROR","msg":"fail"}"# },
+                    { "timestamp": now + 1, "message": r#"{"level":"INFO","msg":"ok"}"# },
+                    { "timestamp": now + 2, "message": r#"{"level":"ERROR","msg":"crash"}"# },
+                ],
+            }),
+        );
+        svc.put_log_events(&req).unwrap();
+
+        let start_secs = (now / 1000) - 1;
+        let end_secs = (now / 1000) + 10;
+        let req = make_request(
+            "StartQuery",
+            json!({
+                "logGroupName": "/qjson/test",
+                "startTime": start_secs,
+                "endTime": end_secs,
+                "queryString": r#"filter level = "ERROR""#,
+            }),
+        );
+        let resp = svc.start_query(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let query_id = body["queryId"].as_str().unwrap();
+
+        let req = make_request("GetQueryResults", json!({ "queryId": query_id }));
+        let resp = svc.get_query_results(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let results = body["results"].as_array().unwrap();
+        assert_eq!(results.len(), 2, "Should only match ERROR JSON events");
+    }
+
+    // ---- Export task writes to storage ----
+
+    #[test]
+    fn logs_export_task_writes_to_s3() {
+        let svc = make_service();
+        create_group(&svc, "/export/test");
+        create_stream(&svc, "/export/test", "stream-1");
+
+        let now = chrono::Utc::now().timestamp_millis();
+        let req = make_request(
+            "PutLogEvents",
+            json!({
+                "logGroupName": "/export/test",
+                "logStreamName": "stream-1",
+                "logEvents": [
+                    { "timestamp": now, "message": "export event 1" },
+                    { "timestamp": now + 1, "message": "export event 2" },
+                    { "timestamp": now + 2, "message": "export event 3" },
+                ],
+            }),
+        );
+        svc.put_log_events(&req).unwrap();
+
+        // Create export task
+        let req = make_request(
+            "CreateExportTask",
+            json!({
+                "logGroupName": "/export/test",
+                "from": now - 1000,
+                "to": now + 10000,
+                "destination": "my-export-bucket",
+                "destinationPrefix": "logs",
+            }),
+        );
+        let resp = svc.create_export_task(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let task_id = body["taskId"].as_str().unwrap();
+
+        // Verify task is COMPLETED
+        let req = make_request("DescribeExportTasks", json!({ "taskId": task_id }));
+        let resp = svc.describe_export_tasks(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(
+            body["exportTasks"][0]["status"]["code"].as_str().unwrap(),
+            "COMPLETED"
+        );
+
+        // Verify data was written to export storage
+        let req = make_request(
+            "GetExportedData",
+            json!({ "keyPrefix": "my-export-bucket/logs" }),
+        );
+        let resp = svc.get_exported_data(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let entries = body["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 1, "Should have one export entry");
+        let data = entries[0]["data"].as_str().unwrap();
+        assert!(data.contains("export event 1"));
+        assert!(data.contains("export event 2"));
+        assert!(data.contains("export event 3"));
+    }
+
+    #[test]
+    fn logs_export_task_applies_stream_prefix_filter() {
+        let svc = make_service();
+        create_group(&svc, "/export-filter/test");
+        create_stream(&svc, "/export-filter/test", "web-server");
+        create_stream(&svc, "/export-filter/test", "api-server");
+
+        let now = chrono::Utc::now().timestamp_millis();
+        let req = make_request(
+            "PutLogEvents",
+            json!({
+                "logGroupName": "/export-filter/test",
+                "logStreamName": "web-server",
+                "logEvents": [{ "timestamp": now, "message": "web event" }],
+            }),
+        );
+        svc.put_log_events(&req).unwrap();
+
+        let req = make_request(
+            "PutLogEvents",
+            json!({
+                "logGroupName": "/export-filter/test",
+                "logStreamName": "api-server",
+                "logEvents": [{ "timestamp": now + 1, "message": "api event" }],
+            }),
+        );
+        svc.put_log_events(&req).unwrap();
+
+        let req = make_request(
+            "CreateExportTask",
+            json!({
+                "logGroupName": "/export-filter/test",
+                "from": now - 1000,
+                "to": now + 10000,
+                "destination": "filtered-bucket",
+                "destinationPrefix": "prefix",
+                "logStreamNamePrefix": "web-",
+            }),
+        );
+        svc.create_export_task(&req).unwrap();
+
+        let req = make_request(
+            "GetExportedData",
+            json!({ "keyPrefix": "filtered-bucket/prefix" }),
+        );
+        let resp = svc.get_exported_data(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let entries = body["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 1);
+        let data = entries[0]["data"].as_str().unwrap();
+        assert!(data.contains("web event"));
+        assert!(!data.contains("api event"));
+    }
+
+    // ---- Delivery pipeline tests ----
+
+    #[test]
+    fn logs_delivery_pipeline_writes_to_storage() {
+        let svc = make_service();
+        create_group(&svc, "/delivery/test");
+        create_stream(&svc, "/delivery/test", "stream-1");
+
+        // Get the log group ARN
+        let req = make_request(
+            "DescribeLogGroups",
+            json!({ "logGroupNamePrefix": "/delivery/test" }),
+        );
+        let resp = svc.describe_log_groups(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let group_arn = body["logGroups"][0]["arn"].as_str().unwrap().to_string();
+
+        // Create delivery source referencing this log group
+        let req = make_request(
+            "PutDeliverySource",
+            json!({
+                "name": "test-source",
+                "resourceArn": group_arn,
+                "logType": "APPLICATION_LOGS",
+            }),
+        );
+        svc.put_delivery_source(&req).unwrap();
+
+        // Create delivery destination targeting an S3 bucket
+        let req = make_request(
+            "PutDeliveryDestination",
+            json!({
+                "name": "test-dest",
+                "deliveryDestinationConfiguration": {
+                    "destinationResourceArn": "arn:aws:s3:::delivery-test-bucket"
+                }
+            }),
+        );
+        svc.put_delivery_destination(&req).unwrap();
+
+        // Get the destination ARN
+        let req = make_request("GetDeliveryDestination", json!({ "name": "test-dest" }));
+        let resp = svc.get_delivery_destination(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let dest_arn = body["deliveryDestination"]["arn"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // Create delivery linking source to destination
+        let req = make_request(
+            "CreateDelivery",
+            json!({
+                "deliverySourceName": "test-source",
+                "deliveryDestinationArn": dest_arn,
+            }),
+        );
+        svc.create_delivery(&req).unwrap();
+
+        // Now put log events — they should be forwarded to export storage
+        let now = chrono::Utc::now().timestamp_millis();
+        let req = make_request(
+            "PutLogEvents",
+            json!({
+                "logGroupName": "/delivery/test",
+                "logStreamName": "stream-1",
+                "logEvents": [
+                    { "timestamp": now, "message": "delivered event 1" },
+                    { "timestamp": now + 1, "message": "delivered event 2" },
+                ],
+            }),
+        );
+        svc.put_log_events(&req).unwrap();
+
+        // Verify data was written to export storage under the S3 bucket path
+        let req = make_request(
+            "GetExportedData",
+            json!({ "keyPrefix": "delivery-test-bucket/delivery" }),
+        );
+        let resp = svc.get_exported_data(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let entries = body["entries"].as_array().unwrap();
+        assert!(!entries.is_empty(), "Should have delivery data");
+        let data = entries[0]["data"].as_str().unwrap();
+        assert!(data.contains("delivered event 1"));
+        assert!(data.contains("delivered event 2"));
     }
 }
