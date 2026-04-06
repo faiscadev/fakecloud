@@ -925,6 +925,145 @@ async fn logs_subscription_filter_delivers_to_sqs() {
     assert_eq!(log_events[1]["message"], "second event");
 }
 
+/// EventBridge -> Lambda real execution: put_events triggers a Lambda function
+/// that sends a message to an SQS proof queue, verifying end-to-end execution.
+#[tokio::test]
+#[ignore] // Requires Docker for Lambda execution
+async fn eventbridge_to_lambda_actually_executes() {
+    use aws_sdk_lambda::primitives::Blob;
+    use aws_sdk_lambda::types::{Environment, FunctionCode, Runtime};
+
+    let server = TestServer::start().await;
+    let sqs = server.sqs_client().await;
+    let lambda = server.lambda_client().await;
+    let eb = server.eventbridge_client().await;
+
+    // 1. Create SQS proof queue
+    let queue = sqs
+        .create_queue()
+        .queue_name("eb-lambda-proof")
+        .send()
+        .await
+        .unwrap();
+    let queue_url = queue.queue_url().unwrap().to_string();
+    let _queue_arn = get_queue_arn(&sqs, &queue_url).await;
+
+    // 2. Create Lambda function (Python) that sends a message to the proof queue
+    let handler_code = format!(
+        r#"
+import json
+import urllib.request
+
+def handler(event, context):
+    # Send proof message to SQS via fakecloud endpoint
+    endpoint = "http://host.docker.internal:{port}"
+    queue_url = "{queue_url}"
+    body = (
+        "Action=SendMessage"
+        "&QueueUrl=" + queue_url
+        + "&MessageBody=" + json.dumps(event)
+    )
+    req = urllib.request.Request(
+        endpoint,
+        data=body.encode("utf-8"),
+        headers={{"Content-Type": "application/x-www-form-urlencoded"}},
+    )
+    urllib.request.urlopen(req, timeout=5)
+    return {{"statusCode": 200}}
+"#,
+        port = server.port(),
+        queue_url = queue_url.replace("127.0.0.1", "host.docker.internal"),
+    );
+
+    let zip_bytes = make_zip(&[("index.py", handler_code.as_bytes())]);
+    lambda
+        .create_function()
+        .function_name("eb-proof-fn")
+        .runtime(Runtime::Python312)
+        .role("arn:aws:iam::123456789012:role/test-role")
+        .handler("index.handler")
+        .timeout(10)
+        .environment(
+            Environment::builder()
+                .variables("AWS_ACCESS_KEY_ID", "test")
+                .variables("AWS_SECRET_ACCESS_KEY", "test")
+                .build(),
+        )
+        .code(
+            FunctionCode::builder()
+                .zip_file(Blob::new(zip_bytes))
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    // 3. Create EventBridge rule matching source "test.app"
+    eb.put_rule()
+        .name("eb-lambda-test-rule")
+        .event_pattern(r#"{"source": ["test.app"]}"#)
+        .send()
+        .await
+        .unwrap();
+
+    // 4. Add Lambda as target
+    let lambda_arn = "arn:aws:lambda:us-east-1:123456789012:function:eb-proof-fn";
+    eb.put_targets()
+        .rule("eb-lambda-test-rule")
+        .targets(
+            Target::builder()
+                .id("lambda-target")
+                .arn(lambda_arn)
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    // 5. PutEvents with source "test.app"
+    eb.put_events()
+        .entries(
+            PutEventsRequestEntry::builder()
+                .source("test.app")
+                .detail_type("TestEvent")
+                .detail(r#"{"key": "value"}"#)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    // 6. Wait and receive from proof queue
+    let mut found = false;
+    for _ in 0..15 {
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        let msgs = sqs
+            .receive_message()
+            .queue_url(&queue_url)
+            .max_number_of_messages(10)
+            .wait_time_seconds(1)
+            .send()
+            .await
+            .unwrap();
+        if !msgs.messages().is_empty() {
+            // 7. Assert Lambda ran -- the message body should contain the event
+            let body = msgs.messages()[0].body().unwrap();
+            let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+            assert_eq!(parsed["source"], "test.app");
+            assert_eq!(parsed["detail-type"], "TestEvent");
+            found = true;
+            break;
+        }
+    }
+    assert!(
+        found,
+        "Lambda was not actually invoked by EventBridge -- no message in proof queue"
+    );
+}
+
+// make_zip is defined at the top of this file
+
 /// DynamoDB export to S3 and import from S3 roundtrip test.
 #[tokio::test]
 async fn dynamodb_export_import_roundtrip() {

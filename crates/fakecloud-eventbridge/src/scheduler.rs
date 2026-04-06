@@ -6,6 +6,7 @@ use chrono::{Datelike, Timelike, Utc};
 use serde_json::json;
 
 use fakecloud_core::delivery::DeliveryBus;
+use fakecloud_lambda::runtime::ContainerRuntime;
 use fakecloud_lambda::state::{LambdaInvocation, SharedLambdaState};
 use fakecloud_logs::state::SharedLogsState;
 
@@ -109,6 +110,7 @@ pub struct Scheduler {
     delivery: Arc<DeliveryBus>,
     lambda_state: Option<SharedLambdaState>,
     logs_state: Option<SharedLogsState>,
+    container_runtime: Option<Arc<ContainerRuntime>>,
 }
 
 impl Scheduler {
@@ -118,6 +120,7 @@ impl Scheduler {
             delivery,
             lambda_state: None,
             logs_state: None,
+            container_runtime: None,
         }
     }
 
@@ -128,6 +131,11 @@ impl Scheduler {
 
     pub fn with_logs(mut self, logs_state: SharedLogsState) -> Self {
         self.logs_state = Some(logs_state);
+        self
+    }
+
+    pub fn with_runtime(mut self, runtime: Arc<ContainerRuntime>) -> Self {
+        self.container_runtime = Some(runtime);
         self
     }
 
@@ -261,6 +269,12 @@ impl Scheduler {
                             source: "aws:events".to_string(),
                         });
                     }
+                    crate::service::invoke_lambda_async(
+                        &self.container_runtime,
+                        &self.lambda_state,
+                        arn,
+                        &event_str,
+                    );
                 } else if arn.contains(":logs:") {
                     tracing::info!(
                         log_group_arn = %arn,
