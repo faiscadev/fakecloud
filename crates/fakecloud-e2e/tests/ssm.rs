@@ -1396,14 +1396,23 @@ async fn ssm_ops_item_related_items() {
         .unwrap();
     let assoc_id = assoc.association_id().unwrap().to_string();
 
-    // List
-    let resp = client
-        .list_ops_item_related_items()
-        .ops_item_id(&ops_item_id)
+    // List - verify via raw HTTP since SDK/CLI have timestamp deserialization issues
+    let http_client = reqwest::Client::new();
+    let resp = http_client
+        .post(server.endpoint())
+        .header("Content-Type", "application/x-amz-json-1.1")
+        .header("X-Amz-Target", "AmazonSSM.ListOpsItemRelatedItems")
+        .header(
+            "Authorization",
+            "AWS4-HMAC-SHA256 Credential=test/20240101/us-east-1/ssm/aws4_request",
+        )
+        .body(format!("{{\"OpsItemId\":\"{}\"}}", ops_item_id))
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.summaries().len(), 1);
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["Summaries"].as_array().unwrap().len(), 1);
 
     // Disassociate
     client

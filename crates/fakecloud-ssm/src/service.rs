@@ -6594,9 +6594,9 @@ impl SsmService {
                     "AssociationType": ri.association_type,
                     "ResourceType": ri.resource_type,
                     "ResourceUri": ri.resource_uri,
-                    "CreatedTime": ri.created_time.timestamp_millis() as f64 / 1000.0,
+                    "CreatedTime": ri.created_time.timestamp(),
                     "CreatedBy": ri.created_by,
-                    "LastModifiedTime": ri.last_modified_time.timestamp_millis() as f64 / 1000.0,
+                    "LastModifiedTime": ri.last_modified_time.timestamp(),
                     "LastModifiedBy": ri.last_modified_by,
                 })
             })
