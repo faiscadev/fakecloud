@@ -1,17 +1,17 @@
-# FakeCloud — Full Documentation
+# fakecloud — Full Documentation
 
-> FakeCloud is a free, open-source local AWS cloud emulator written in Rust. It runs on a single port (4566), requires no account or auth token, and aims for 100% behavioral parity with real AWS on every service it implements. It is an open-source alternative to LocalStack, which went proprietary in March 2026.
+> fakecloud is a free, open-source local AWS cloud emulator written in Rust. It runs on a single port (4566), requires no account or auth token, and aims for 100% behavioral parity with real AWS on every service it implements. It is an open-source alternative to LocalStack, which went proprietary in March 2026.
 
 ## Overview
 
-FakeCloud emulates 12 AWS services locally for integration testing and development. It is a single Rust binary — no Docker required, no signup, starts in under 100ms. Point any AWS SDK or the AWS CLI at `http://localhost:4566` with dummy credentials.
+fakecloud emulates 12 AWS services locally for integration testing and development. It is a single Rust binary — no Docker required, no signup, starts in under 100ms. Point any AWS SDK or the AWS CLI at `http://localhost:4566` with dummy credentials.
 
 Key design principles:
 - **Correctness over coverage**: Every implemented service targets 100% behavioral parity with real AWS, verified by automated conformance tests against AWS Smithy models
 - **Zero friction**: No auth tokens, no accounts, no config files needed
 - **Cross-service integration**: Services talk to each other (S3 notifications deliver to SNS/SQS, SNS fans out to SQS, EventBridge rules fire on schedule and deliver to targets)
 
-FakeCloud is NOT a production-ready cloud replacement. It is for integration testing and local development.
+fakecloud is NOT a production-ready cloud replacement. It is for integration testing and local development.
 
 ## Installation
 
@@ -56,7 +56,7 @@ services:
 fakecloud
 ```
 
-FakeCloud listens at `http://localhost:4566`.
+fakecloud listens at `http://localhost:4566`.
 
 ### Configuration
 
@@ -75,7 +75,7 @@ curl http://localhost:4566/_fakecloud/health
 
 ## Using with AWS SDKs
 
-All AWS SDKs work with FakeCloud by setting the endpoint URL to `http://localhost:4566` and using dummy credentials.
+All AWS SDKs work with fakecloud by setting the endpoint URL to `http://localhost:4566` and using dummy credentials.
 
 ### AWS CLI
 ```sh
@@ -269,7 +269,7 @@ Protocol: Query (form-encoded body, `Action` parameter, XML responses)
 
 ## Cross-Service Integration
 
-FakeCloud implements real cross-service message delivery:
+fakecloud implements real cross-service message delivery:
 
 - **S3 -> SNS/SQS**: Bucket notification configurations deliver to SNS topics and SQS queues on object create/delete
 - **SNS -> SQS**: Publishing to an SNS topic delivers to all SQS subscriptions
@@ -280,7 +280,7 @@ FakeCloud implements real cross-service message delivery:
 
 ## Protocol Notes
 
-FakeCloud handles three AWS protocol families:
+fakecloud handles three AWS protocol families:
 
 - **Query protocol** (SQS, SNS, IAM, STS, CloudFormation): form-encoded body with `Action` parameter, XML responses
 - **JSON protocol** (SSM, EventBridge, DynamoDB, Secrets Manager, CloudWatch Logs, KMS): JSON body, `X-Amz-Target` header, JSON responses
@@ -290,12 +290,12 @@ SigV4 signatures are parsed for service routing but never validated. Use any dum
 
 ## Using with AI Coding Tools
 
-Add these snippets to your project to make AI coding assistants automatically use FakeCloud for AWS integration tests.
+Add these snippets to your project to make AI coding assistants automatically use fakecloud for AWS integration tests.
 
 ### Claude Code (CLAUDE.md)
 ```markdown
 ## AWS Testing
-For integration tests, use FakeCloud as a local AWS emulator.
+For integration tests, use fakecloud as a local AWS emulator.
 - Install: `curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash`
 - Run: `fakecloud` (listens on http://localhost:4566)
 - Configure AWS SDK endpoint to http://localhost:4566 with dummy credentials (access_key=test, secret_key=test)
@@ -304,7 +304,7 @@ For integration tests, use FakeCloud as a local AWS emulator.
 
 ### Cursor (.cursor/rules)
 ```
-For AWS integration tests, use FakeCloud (local AWS emulator) at http://localhost:4566.
+For AWS integration tests, use fakecloud (local AWS emulator) at http://localhost:4566.
 Install: curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash
 Run: fakecloud
 Use dummy credentials (access_key=test, secret_key=test).
@@ -314,7 +314,7 @@ Docs: https://fakecloud.dev/llms.txt
 ### GitHub Copilot (.github/copilot-instructions.md)
 ```markdown
 ## AWS Testing
-Use FakeCloud as a local AWS emulator for integration tests.
+Use fakecloud as a local AWS emulator for integration tests.
 - Run: `fakecloud` (listens on http://localhost:4566)
 - Configure endpoint_url to http://localhost:4566 with dummy credentials
 - Docs: https://fakecloud.dev/llms.txt

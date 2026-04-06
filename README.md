@@ -1,5 +1,5 @@
 <p align="center">
-  <strong>FakeCloud</strong><br>
+  <strong>fakecloud</strong><br>
   <em>Local AWS cloud emulator. Free forever.</em>
 </p>
 
@@ -13,13 +13,13 @@
 
 ---
 
-FakeCloud is a free, open-source local AWS cloud emulator. It runs on a single port
+fakecloud is a free, open-source local AWS cloud emulator. It runs on a single port
 (`4566`), requires no account or auth token, and aims to faithfully replicate
 AWS service behavior for local development and testing.
 
 Part of the [faisca project family](https://faisca.dev).
 
-## Why FakeCloud?
+## Why fakecloud?
 
 In March 2026, LocalStack replaced its open-source Community Edition with a
 proprietary image that requires an account and auth token. Several open-source
@@ -27,7 +27,7 @@ alternatives have emerged since then. Here's how they compare:
 
 ### Comparison
 
-| Feature | FakeCloud | LocalStack | [Floci](https://github.com/hectorvent/floci) | [MiniStack](https://github.com/Nahuel990/ministack) |
+| Feature | fakecloud | LocalStack | [Floci](https://github.com/hectorvent/floci) | [MiniStack](https://github.com/Nahuel990/ministack) |
 |---|---|---|---|---|
 | License | AGPL-3.0 | Proprietary | MIT | MIT |
 | Language | Rust | Python | Java (Quarkus Native) | Python |
@@ -84,7 +84,7 @@ services:
 docker compose up
 ```
 
-FakeCloud is now listening at `http://localhost:4566`.
+fakecloud is now listening at `http://localhost:4566`.
 
 ## Supported Services
 
@@ -368,7 +368,7 @@ AWS::DynamoDB::Table, AWS::Logs::LogGroup.
 
 ### Cross-Service Integration
 
-FakeCloud implements real cross-service message delivery and background
+fakecloud implements real cross-service message delivery and background
 processing:
 
 - **S3 -> SNS/SQS**: Bucket event notification configurations deliver to SNS
@@ -384,7 +384,7 @@ processing:
 
 ## Configuration
 
-FakeCloud is configured via CLI flags or environment variables.
+fakecloud is configured via CLI flags or environment variables.
 
 | Flag | Env Var | Default | Description |
 |---|---|---|---|
@@ -415,7 +415,7 @@ curl http://localhost:4566/_fakecloud/health
 
 ## Architecture
 
-FakeCloud is organized as a Cargo workspace:
+fakecloud is organized as a Cargo workspace:
 
 | Crate | Purpose |
 |---|---|
@@ -451,12 +451,12 @@ cargo clippy --workspace -- -D warnings     # lint
 cargo fmt --check                           # format check
 ```
 
-E2E tests use the official `aws-sdk-rust` crates and spawn a real FakeCloud
+E2E tests use the official `aws-sdk-rust` crates and spawn a real fakecloud
 server per test.
 
 ## Contributing
 
-Contributions are welcome. FakeCloud is still in early development (Phase 1).
+Contributions are welcome. fakecloud is still in early development (Phase 1).
 
 1. Fork the repository
 2. Create a feature branch: `git checkout -b feat/my-feature`
@@ -471,29 +471,29 @@ Contributions are welcome. FakeCloud is still in early development (Phase 1).
 
 EC2, RDS, ECS, Elastic Load Balancing, CloudWatch Metrics, Route 53, API Gateway, Step Functions.
 
-## What FakeCloud Is (and Isn't)
+## What fakecloud Is (and Isn't)
 
-**FakeCloud is** a free, open-source local AWS emulator for integration testing and
+**fakecloud is** a free, open-source local AWS emulator for integration testing and
 local development. For every service it implements, the goal is 100% behavioral
 parity with real AWS — verified by 34,000+ automated conformance test variants
 against official AWS Smithy models across all 983 API operations. 13 services,
 98% conformance, and growing.
 
-**FakeCloud is not** a production-ready cloud replacement. It's not designed to
+**fakecloud is not** a production-ready cloud replacement. It's not designed to
 be scalable or to handle production workloads. It's for testing — making sure
 your code works correctly before it hits the real cloud.
 
 ## Use with AI Coding Tools
 
 Add one of these snippets to your project so AI coding assistants (Claude Code,
-Cursor, GitHub Copilot) automatically use FakeCloud for AWS integration tests.
+Cursor, GitHub Copilot) automatically use fakecloud for AWS integration tests.
 
 <details>
 <summary><strong>Claude Code</strong> — add to <code>CLAUDE.md</code></summary>
 
 ```markdown
 ## AWS Testing
-For integration tests, use FakeCloud as a local AWS emulator.
+For integration tests, use fakecloud as a local AWS emulator.
 - Install: `curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash`
 - Run: `fakecloud` (listens on http://localhost:4566)
 - Configure AWS SDK endpoint to http://localhost:4566 with dummy credentials (access_key=test, secret_key=test)
@@ -506,7 +506,7 @@ For integration tests, use FakeCloud as a local AWS emulator.
 <summary><strong>Cursor</strong> — add to <code>.cursor/rules</code></summary>
 
 ```
-For AWS integration tests, use FakeCloud (local AWS emulator) at http://localhost:4566.
+For AWS integration tests, use fakecloud (local AWS emulator) at http://localhost:4566.
 Install: curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash
 Run: fakecloud
 Use dummy credentials (access_key=test, secret_key=test).
@@ -520,7 +520,7 @@ Docs: https://fakecloud.dev/llms.txt
 
 ```markdown
 ## AWS Testing
-Use FakeCloud as a local AWS emulator for integration tests.
+Use fakecloud as a local AWS emulator for integration tests.
 - Run: `fakecloud` (listens on http://localhost:4566)
 - Configure endpoint_url to http://localhost:4566 with dummy credentials
 - Docs: https://fakecloud.dev/llms.txt
@@ -530,7 +530,7 @@ Use FakeCloud as a local AWS emulator for integration tests.
 
 ## License
 
-FakeCloud is free and open-source software, licensed under the [GNU Affero General Public License v3.0](https://www.gnu.org/licenses/agpl-3.0.html) (AGPL-3.0-or-later). Free for commercial use.
+fakecloud is free and open-source software, licensed under the [GNU Affero General Public License v3.0](https://www.gnu.org/licenses/agpl-3.0.html) (AGPL-3.0-or-later). Free for commercial use.
 
 ---
 

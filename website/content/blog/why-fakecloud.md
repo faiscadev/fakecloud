@@ -25,19 +25,19 @@ That's what LocalStack used to give us. And that's what I wanted to keep — but
 
 ## So I built it
 
-I started FakeCloud on April 4th, 2026. Three days later: 12 AWS services, 301 commits, 844 tests.
+I started fakecloud on April 4th, 2026. Three days later: 12 AWS services, 301 commits, 844 tests.
 
 That pace was possible because of two things. First, I used LLMs heavily throughout — not to generate code I don't understand, but as a force multiplier with strong guardrails. Every feature ships with E2E tests. The tests are the guardrails. If the LLM generates something that doesn't match real AWS behavior, the tests catch it.
 
-Second, Rust. I chose Rust because I love static-typed compiled languages, and Rust's type system is genuinely amazing. You get the performance of no garbage collector without having to manually manage memory. It means FakeCloud starts in under 100ms and runs as a single binary — no Docker required, no runtime dependencies.
+Second, Rust. I chose Rust because I love static-typed compiled languages, and Rust's type system is genuinely amazing. You get the performance of no garbage collector without having to manually manage memory. It means fakecloud starts in under 100ms and runs as a single binary — no Docker required, no runtime dependencies.
 
 ## Correctness is the whole point
 
-FakeCloud doesn't try to be a scalable production cloud. It's not that. It's a testing tool. And the one thing a testing tool needs to get right is correctness.
+fakecloud doesn't try to be a scalable production cloud. It's not that. It's a testing tool. And the one thing a testing tool needs to get right is correctness.
 
-What does that mean in practice? If you call `CreateQueue`, then `SendMessage`, then `ReceiveMessage` on real AWS and get back your message with specific attributes — FakeCloud should do exactly the same thing. If it doesn't, that's a FakeCloud bug.
+What does that mean in practice? If you call `CreateQueue`, then `SendMessage`, then `ReceiveMessage` on real AWS and get back your message with specific attributes — fakecloud should do exactly the same thing. If it doesn't, that's a fakecloud bug.
 
-We currently verify this with 280+ E2E tests that use the official `aws-sdk-rust` crate and 34,000+ auto-generated conformance test variants validated against official AWS Smithy models — covering all 983 API operations across 13 services at 98% conformance. The plan for the near future: set up a real AWS account and run our test suite against both FakeCloud and real AWS side by side, so we can verify behavioral parity automatically.
+We currently verify this with 280+ E2E tests that use the official `aws-sdk-rust` crate and 34,000+ auto-generated conformance test variants validated against official AWS Smithy models — covering all 983 API operations across 13 services at 98% conformance. The plan for the near future: set up a real AWS account and run our test suite against both fakecloud and real AWS side by side, so we can verify behavioral parity automatically.
 
 ## What's here today
 
