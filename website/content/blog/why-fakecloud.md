@@ -25,7 +25,7 @@ That's what LocalStack used to give us. And that's what I wanted to keep — but
 
 ## So I built it
 
-I started fakecloud on April 4th, 2026. Three days later: 12 AWS services, 301 commits, 844 tests.
+I started fakecloud on April 4th, 2026. Three days later: 13 AWS services, 300+ commits, 1,000+ tests.
 
 That pace was possible because of two things. First, I used LLMs heavily throughout — not to generate code I don't understand, but as a force multiplier with strong guardrails. Every feature ships with E2E tests. The tests are the guardrails. If the LLM generates something that doesn't match real AWS behavior, the tests catch it.
 
