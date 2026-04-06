@@ -377,6 +377,45 @@ async fn logs_describe_groups_with_prefix() {
 }
 
 #[tokio::test]
+async fn logs_describe_log_groups_validates_limit() {
+    let server = TestServer::start().await;
+    let client = server.logs_client().await;
+
+    let result = client.describe_log_groups().limit(0).send().await;
+    assert!(result.is_err(), "limit=0 should be rejected");
+}
+
+#[tokio::test]
+async fn logs_put_metric_filter_requires_filter_pattern() {
+    let server = TestServer::start().await;
+    let client = server.logs_client().await;
+
+    // Create the log group first
+    client
+        .create_log_group()
+        .log_group_name("/test/metric-filter")
+        .send()
+        .await
+        .unwrap();
+
+    // Omit filterPattern via CLI (the SDK may enforce required fields locally)
+    let result = server
+        .aws_cli(&[
+            "logs",
+            "put-metric-filter",
+            "--log-group-name",
+            "/test/metric-filter",
+            "--filter-name",
+            "test-filter",
+            "--metric-transformations",
+            "metricName=TestMetric,metricNamespace=TestNS,metricValue=1",
+        ])
+        .await;
+    // The CLI should fail because filterPattern is required
+    assert!(!result.success(), "omitting filterPattern should fail");
+}
+
+#[tokio::test]
 async fn logs_put_events_to_nonexistent_stream_fails() {
     let server = TestServer::start().await;
     let client = server.logs_client().await;

@@ -282,15 +282,13 @@ impl LogsService {
             0,
             512,
         )?;
-
-        // Validate limit
-        if limit > 50 {
-            return Err(validation_error(
-                "limit",
-                &limit.to_string(),
-                "Member must have value less than or equal to 50",
-            ));
-        }
+        validate_optional_range_i64("limit", body["limit"].as_i64(), 1, 50)?;
+        validate_optional_string_length("nextToken", body["nextToken"].as_str(), 1, 2048)?;
+        validate_optional_enum_value(
+            "logGroupClass",
+            &body["logGroupClass"],
+            &["STANDARD", "INFREQUENT_ACCESS", "DELIVERY"],
+        )?;
 
         let state = self.state.read();
         let mut groups: Vec<&LogGroup> = state
@@ -1642,6 +1640,7 @@ impl LogsService {
                 )
             })?
             .to_string();
+        validate_required("filterPattern", &body["filterPattern"])?;
         let filter_pattern = body["filterPattern"].as_str().unwrap_or("").to_string();
         let log_group_name = body["logGroupName"]
             .as_str()
@@ -1657,6 +1656,12 @@ impl LogsService {
         validate_string_length("filterName", &filter_name, 1, 512)?;
         validate_string_length("logGroupName", &log_group_name, 1, 512)?;
         validate_optional_string_length("filterPattern", Some(&filter_pattern), 0, 1024)?;
+        validate_optional_string_length(
+            "fieldSelectionCriteria",
+            body["fieldSelectionCriteria"].as_str(),
+            0,
+            2000,
+        )?;
 
         let transformations_json = body["metricTransformations"].as_array().ok_or_else(|| {
             AwsServiceError::aws_error(
@@ -1721,6 +1726,8 @@ impl LogsService {
         validate_optional_string_length("logGroupName", log_group_name, 1, 512)?;
         validate_optional_string_length("metricName", metric_name, 0, 255)?;
         validate_optional_string_length("metricNamespace", metric_namespace, 0, 255)?;
+        validate_optional_range_i64("limit", body["limit"].as_i64(), 1, 50)?;
+        validate_optional_string_length("nextToken", body["nextToken"].as_str(), 1, 2048)?;
 
         let state = self.state.read();
         let filters: Vec<Value> = state
@@ -1881,7 +1888,14 @@ impl LogsService {
     }
 
     fn describe_resource_policies(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        let _body = body_json(req);
+        let body = body_json(req);
+        validate_optional_range_i64("limit", body["limit"].as_i64(), 1, 50)?;
+        validate_optional_string_length("nextToken", body["nextToken"].as_str(), 1, 2048)?;
+        validate_optional_enum_value(
+            "policyScope",
+            &body["policyScope"],
+            &["ACCOUNT", "RESOURCE"],
+        )?;
         let state = self.state.read();
 
         let mut policies: Vec<Value> = state
@@ -1966,6 +1980,8 @@ impl LogsService {
             .to_string();
 
         validate_string_length("destinationName", &destination_name, 1, 512)?;
+        validate_string_length("targetArn", &target_arn, 1, 2048)?;
+        validate_string_length("roleArn", &role_arn, 1, 2048)?;
 
         let tags: std::collections::HashMap<String, String> = body["tags"]
             .as_object()
@@ -2025,6 +2041,8 @@ impl LogsService {
             1,
             512,
         )?;
+        validate_optional_range_i64("limit", body["limit"].as_i64(), 1, 50)?;
+        validate_optional_string_length("nextToken", body["nextToken"].as_str(), 1, 2048)?;
 
         let state = self.state.read();
         let destinations: Vec<Value> = state
@@ -2095,6 +2113,8 @@ impl LogsService {
                 "accessPolicy is required",
             )
         })?;
+
+        validate_string_length("accessPolicy", policy, 1, 5120)?;
 
         let mut state = self.state.write();
         let dest = state.destinations.get_mut(name).ok_or_else(|| {
@@ -2227,6 +2247,26 @@ impl LogsService {
         let status_filter = body["status"].as_str();
 
         validate_optional_string_length("logGroupName", log_group_name, 1, 512)?;
+        validate_optional_range_i64("maxResults", body["maxResults"].as_i64(), 1, 1000)?;
+        validate_optional_string_length("nextToken", body["nextToken"].as_str(), 1, 2048)?;
+        validate_optional_enum_value(
+            "status",
+            &body["status"],
+            &[
+                "Scheduled",
+                "Running",
+                "Complete",
+                "Failed",
+                "Cancelled",
+                "Timeout",
+                "Unknown",
+            ],
+        )?;
+        validate_optional_enum_value(
+            "queryLanguage",
+            &body["queryLanguage"],
+            &["CWLI", "SQL", "PPL"],
+        )?;
 
         let state = self.state.read();
         let queries: Vec<Value> = state
@@ -2351,6 +2391,20 @@ impl LogsService {
         let task_id_filter = body["taskId"].as_str();
 
         validate_optional_string_length("taskId", task_id_filter, 1, 512)?;
+        validate_optional_range_i64("limit", body["limit"].as_i64(), 1, 50)?;
+        validate_optional_string_length("nextToken", body["nextToken"].as_str(), 1, 2048)?;
+        validate_optional_enum_value(
+            "statusCode",
+            &body["statusCode"],
+            &[
+                "CANCELLED",
+                "COMPLETED",
+                "FAILED",
+                "PENDING",
+                "PENDING_CANCEL",
+                "RUNNING",
+            ],
+        )?;
 
         let state = self.state.read();
 
@@ -2451,6 +2505,12 @@ impl LogsService {
             .to_string();
 
         validate_string_length("name", &name, 1, 60)?;
+
+        validate_optional_enum_value(
+            "deliveryDestinationType",
+            &body["deliveryDestinationType"],
+            &["S3", "CWL", "FH", "XRAY"],
+        )?;
 
         let output_format = body["outputFormat"].as_str().map(|s| s.to_string());
 
@@ -2589,8 +2649,12 @@ impl LogsService {
 
     fn describe_delivery_destinations(
         &self,
-        _req: &AwsRequest,
+        req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
+        let body = body_json(req);
+        validate_optional_range_i64("limit", body["limit"].as_i64(), 1, 50)?;
+        validate_optional_string_length("nextToken", body["nextToken"].as_str(), 1, 2048)?;
+
         let state = self.state.read();
         let dds: Vec<Value> = state
             .delivery_destinations
@@ -2928,7 +2992,11 @@ impl LogsService {
         ))
     }
 
-    fn describe_delivery_sources(&self, _req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+    fn describe_delivery_sources(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = body_json(req);
+        validate_optional_range_i64("limit", body["limit"].as_i64(), 1, 50)?;
+        validate_optional_string_length("nextToken", body["nextToken"].as_str(), 1, 2048)?;
+
         let state = self.state.read();
         let sources: Vec<Value> = state
             .delivery_sources
@@ -3153,7 +3221,11 @@ impl LogsService {
         ))
     }
 
-    fn describe_deliveries(&self, _req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+    fn describe_deliveries(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = body_json(req);
+        validate_optional_range_i64("limit", body["limit"].as_i64(), 1, 50)?;
+        validate_optional_string_length("nextToken", body["nextToken"].as_str(), 1, 2048)?;
+
         let state = self.state.read();
         let deliveries: Vec<Value> = state
             .deliveries
@@ -3317,6 +3389,12 @@ impl LogsService {
             1,
             256,
         )?;
+        validate_optional_string_length("clientToken", body["clientToken"].as_str(), 1, 128)?;
+        validate_optional_enum_value(
+            "queryLanguage",
+            &body["queryLanguage"],
+            &["CWLI", "SQL", "PPL"],
+        )?;
 
         let now = Utc::now().timestamp_millis();
 
@@ -3349,6 +3427,13 @@ impl LogsService {
             body["queryDefinitionNamePrefix"].as_str(),
             1,
             255,
+        )?;
+        validate_optional_range_i64("maxResults", body["maxResults"].as_i64(), 1, 1000)?;
+        validate_optional_string_length("nextToken", body["nextToken"].as_str(), 1, 2048)?;
+        validate_optional_enum_value(
+            "queryLanguage",
+            &body["queryLanguage"],
+            &["CWLI", "SQL", "PPL"],
         )?;
 
         let state = self.state.read();
