@@ -10,6 +10,12 @@
 <link rel="alternate" type="application/rss+xml" title="FakeCloud Blog" href="{{ get_url(path='rss.xml') }}">
 {% endif %}
 <link rel="stylesheet" href="/style.css">
+<script>
+  (function() {
+    var t = localStorage.getItem('theme');
+    if (t) document.documentElement.setAttribute('data-theme', t);
+  })();
+</script>
 </head>
 <body>
 
@@ -22,6 +28,7 @@
       <a href="/#compare">Compare</a>
       <a href="/blog/">Blog</a>
       <a href="{{ config.extra.github }}">GitHub</a>
+      <button class="theme-toggle" id="theme-toggle" aria-label="Toggle theme"></button>
     </div>
   </div>
 </nav>
@@ -39,5 +46,26 @@
   </div>
 </footer>
 
+<script>
+  (function() {
+    var btn = document.getElementById('theme-toggle');
+    function getEffective() {
+      var t = document.documentElement.getAttribute('data-theme');
+      if (t) return t;
+      return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    }
+    function update() {
+      btn.textContent = getEffective() === 'dark' ? '\u2600\uFE0F' : '\uD83C\uDF19';
+    }
+    btn.addEventListener('click', function() {
+      var next = getEffective() === 'dark' ? 'light' : 'dark';
+      document.documentElement.setAttribute('data-theme', next);
+      localStorage.setItem('theme', next);
+      update();
+    });
+    update();
+    window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', update);
+  })();
+</script>
 </body>
 </html>

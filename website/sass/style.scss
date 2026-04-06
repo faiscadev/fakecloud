@@ -1,4 +1,20 @@
-:root {
+// Light theme (default)
+:root, [data-theme="light"] {
+  --bg: #ffffff;
+  --surface: #f6f8fa;
+  --border: #d1d9e0;
+  --text: #1f2328;
+  --text-muted: #656d76;
+  --accent: #d97706;
+  --accent-dim: rgba(217, 119, 6, 0.08);
+  --code-bg: #f6f8fa;
+  --nav-bg: rgba(255, 255, 255, 0.85);
+  --mono: "SF Mono", "Cascadia Code", "Fira Code", Menlo, monospace;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+}
+
+// Dark theme
+[data-theme="dark"] {
   --bg: #0e1117;
   --surface: #161b22;
   --border: #30363d;
@@ -7,8 +23,36 @@
   --accent: #f59e0b;
   --accent-dim: rgba(245, 158, 11, 0.12);
   --code-bg: #1c2128;
-  --mono: "SF Mono", "Cascadia Code", "Fira Code", Menlo, monospace;
-  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  --nav-bg: rgba(14, 17, 23, 0.85);
+}
+
+// System preference fallback (when no data-theme is set)
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    --bg: #0e1117;
+    --surface: #161b22;
+    --border: #30363d;
+    --text: #e6edf3;
+    --text-muted: #8b949e;
+    --accent: #f59e0b;
+    --accent-dim: rgba(245, 158, 11, 0.12);
+    --code-bg: #1c2128;
+    --nav-bg: rgba(14, 17, 23, 0.85);
+  }
+}
+
+// Theme toggle
+.theme-toggle {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 16px;
+  padding: 4px 8px;
+  line-height: 1;
+  transition: border-color 0.2s, color 0.2s;
+  &:hover { color: var(--text); border-color: var(--text-muted); }
 }
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -31,7 +75,7 @@ section + section { border-top: 1px solid var(--border); }
 // Nav
 nav {
   position: sticky; top: 0; z-index: 10;
-  background: rgba(14, 17, 23, 0.85);
+  background: var(--nav-bg);
   backdrop-filter: blur(12px);
   border-bottom: 1px solid var(--border);
   padding: 14px 0;
