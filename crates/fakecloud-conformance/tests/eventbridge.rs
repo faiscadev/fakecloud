@@ -2,9 +2,9 @@ mod helpers;
 
 use aws_sdk_eventbridge::types::{
     ConnectionAuthorizationType, CreateConnectionApiKeyAuthRequestParameters,
-    CreateConnectionAuthRequestParameters, EndpointEventBus, FailoverConfig,
-    Primary, PutEventsRequestEntry, PutPartnerEventsRequestEntry, ReplicationConfig,
-    ReplicationState, RoutingConfig, RuleState, Secondary, Tag, Target,
+    CreateConnectionAuthRequestParameters, EndpointEventBus, FailoverConfig, Primary,
+    PutEventsRequestEntry, PutPartnerEventsRequestEntry, ReplicationConfig, ReplicationState,
+    RoutingConfig, RuleState, Secondary, Tag, Target,
 };
 use fakecloud_conformance_macros::test_action;
 use helpers::TestServer;
@@ -1429,12 +1429,7 @@ async fn eb_create_endpoint() {
                                 .build()
                                 .unwrap(),
                         )
-                        .secondary(
-                            Secondary::builder()
-                                .route("us-west-2")
-                                .build()
-                                .unwrap(),
-                        )
+                        .secondary(Secondary::builder().route("us-west-2").build().unwrap())
                         .build(),
                 )
                 .build(),
@@ -1475,12 +1470,7 @@ async fn eb_describe_endpoint() {
                                 .build()
                                 .unwrap(),
                         )
-                        .secondary(
-                            Secondary::builder()
-                                .route("us-west-2")
-                                .build()
-                                .unwrap(),
-                        )
+                        .secondary(Secondary::builder().route("us-west-2").build().unwrap())
                         .build(),
                 )
                 .build(),
@@ -1533,12 +1523,7 @@ async fn eb_update_endpoint() {
                                 .build()
                                 .unwrap(),
                         )
-                        .secondary(
-                            Secondary::builder()
-                                .route("us-west-2")
-                                .build()
-                                .unwrap(),
-                        )
+                        .secondary(Secondary::builder().route("us-west-2").build().unwrap())
                         .build(),
                 )
                 .build(),
@@ -1582,12 +1567,7 @@ async fn eb_delete_endpoint() {
                                 .build()
                                 .unwrap(),
                         )
-                        .secondary(
-                            Secondary::builder()
-                                .route("us-west-2")
-                                .build()
-                                .unwrap(),
-                        )
+                        .secondary(Secondary::builder().route("us-west-2").build().unwrap())
                         .build(),
                 )
                 .build(),
