@@ -1099,3 +1099,184 @@ async fn kms_derive_shared_secret() {
     // May fail with key type mismatch but should not be unimplemented
     assert!(result.is_ok() || format!("{:?}", result.unwrap_err()).contains("Exception"));
 }
+
+// ---------------------------------------------------------------------------
+// Custom Key Stores
+// ---------------------------------------------------------------------------
+
+#[test_action("kms", "CreateCustomKeyStore", checksum = "4cddd7f6")]
+#[tokio::test]
+async fn kms_create_custom_key_store() {
+    let server = TestServer::start().await;
+    let client = server.kms_client().await;
+
+    let resp = client
+        .create_custom_key_store()
+        .custom_key_store_name("conf-store")
+        .cloud_hsm_cluster_id("cluster-1234")
+        .trust_anchor_certificate("cert-data")
+        .key_store_password("pass1234")
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.custom_key_store_id().unwrap().starts_with("cks-"));
+}
+
+#[test_action("kms", "DescribeCustomKeyStores", checksum = "cdfa151f")]
+#[tokio::test]
+async fn kms_describe_custom_key_stores() {
+    let server = TestServer::start().await;
+    let client = server.kms_client().await;
+
+    let resp = client
+        .create_custom_key_store()
+        .custom_key_store_name("desc-store")
+        .send()
+        .await
+        .unwrap();
+    let store_id = resp.custom_key_store_id().unwrap().to_string();
+
+    let desc = client
+        .describe_custom_key_stores()
+        .custom_key_store_id(&store_id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(desc.custom_key_stores().len(), 1);
+    assert_eq!(
+        desc.custom_key_stores()[0].custom_key_store_name().unwrap(),
+        "desc-store"
+    );
+}
+
+#[test_action("kms", "ConnectCustomKeyStore", checksum = "06b97197")]
+#[tokio::test]
+async fn kms_connect_custom_key_store() {
+    let server = TestServer::start().await;
+    let client = server.kms_client().await;
+
+    let resp = client
+        .create_custom_key_store()
+        .custom_key_store_name("conn-store")
+        .send()
+        .await
+        .unwrap();
+    let store_id = resp.custom_key_store_id().unwrap().to_string();
+
+    client
+        .connect_custom_key_store()
+        .custom_key_store_id(&store_id)
+        .send()
+        .await
+        .unwrap();
+
+    let desc = client
+        .describe_custom_key_stores()
+        .custom_key_store_id(&store_id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        desc.custom_key_stores()[0].connection_state().unwrap(),
+        &aws_sdk_kms::types::ConnectionStateType::Connected
+    );
+}
+
+#[test_action("kms", "DisconnectCustomKeyStore", checksum = "dbf9df6b")]
+#[tokio::test]
+async fn kms_disconnect_custom_key_store() {
+    let server = TestServer::start().await;
+    let client = server.kms_client().await;
+
+    let resp = client
+        .create_custom_key_store()
+        .custom_key_store_name("disc-store")
+        .send()
+        .await
+        .unwrap();
+    let store_id = resp.custom_key_store_id().unwrap().to_string();
+
+    client
+        .connect_custom_key_store()
+        .custom_key_store_id(&store_id)
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .disconnect_custom_key_store()
+        .custom_key_store_id(&store_id)
+        .send()
+        .await
+        .unwrap();
+
+    let desc = client
+        .describe_custom_key_stores()
+        .custom_key_store_id(&store_id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        desc.custom_key_stores()[0].connection_state().unwrap(),
+        &aws_sdk_kms::types::ConnectionStateType::Disconnected
+    );
+}
+
+#[test_action("kms", "UpdateCustomKeyStore", checksum = "3d9ee466")]
+#[tokio::test]
+async fn kms_update_custom_key_store() {
+    let server = TestServer::start().await;
+    let client = server.kms_client().await;
+
+    let resp = client
+        .create_custom_key_store()
+        .custom_key_store_name("upd-store")
+        .send()
+        .await
+        .unwrap();
+    let store_id = resp.custom_key_store_id().unwrap().to_string();
+
+    client
+        .update_custom_key_store()
+        .custom_key_store_id(&store_id)
+        .new_custom_key_store_name("updated-store")
+        .send()
+        .await
+        .unwrap();
+
+    let desc = client
+        .describe_custom_key_stores()
+        .custom_key_store_id(&store_id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        desc.custom_key_stores()[0].custom_key_store_name().unwrap(),
+        "updated-store"
+    );
+}
+
+#[test_action("kms", "DeleteCustomKeyStore", checksum = "38877e92")]
+#[tokio::test]
+async fn kms_delete_custom_key_store() {
+    let server = TestServer::start().await;
+    let client = server.kms_client().await;
+
+    let resp = client
+        .create_custom_key_store()
+        .custom_key_store_name("del-store")
+        .send()
+        .await
+        .unwrap();
+    let store_id = resp.custom_key_store_id().unwrap().to_string();
+
+    client
+        .delete_custom_key_store()
+        .custom_key_store_id(&store_id)
+        .send()
+        .await
+        .unwrap();
+
+    let desc = client.describe_custom_key_stores().send().await.unwrap();
+    assert!(desc.custom_key_stores().is_empty());
+}

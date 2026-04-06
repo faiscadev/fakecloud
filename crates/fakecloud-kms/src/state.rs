@@ -11,6 +11,7 @@ pub struct KmsState {
     pub keys: HashMap<String, KmsKey>,
     pub aliases: HashMap<String, KmsAlias>,
     pub grants: Vec<KmsGrant>,
+    pub custom_key_stores: HashMap<String, CustomKeyStore>,
 }
 
 impl KmsState {
@@ -21,6 +22,7 @@ impl KmsState {
             keys: HashMap::new(),
             aliases: HashMap::new(),
             grants: Vec::new(),
+            custom_key_stores: HashMap::new(),
         }
     }
 
@@ -28,6 +30,7 @@ impl KmsState {
         self.keys.clear();
         self.aliases.clear();
         self.grants.clear();
+        self.custom_key_stores.clear();
     }
 }
 
@@ -79,4 +82,18 @@ pub struct KeyRotation {
     pub key_id: String,
     pub rotation_date: f64,
     pub rotation_type: String,
+}
+
+pub struct CustomKeyStore {
+    pub custom_key_store_id: String,
+    pub custom_key_store_name: String,
+    pub custom_key_store_type: String,
+    pub cloud_hsm_cluster_id: Option<String>,
+    pub trust_anchor_certificate: Option<String>,
+    pub connection_state: String,
+    pub creation_date: f64,
+    pub xks_proxy_uri_endpoint: Option<String>,
+    pub xks_proxy_uri_path: Option<String>,
+    pub xks_proxy_vpc_endpoint_service_name: Option<String>,
+    pub xks_proxy_connectivity: Option<String>,
 }
