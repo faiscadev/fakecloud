@@ -1077,7 +1077,7 @@ async fn logs_stop_query() {
         .unwrap();
     let query_id = start.query_id().unwrap().to_string();
 
-    client.stop_query().query_id(&query_id).send().await;
+    client.stop_query().query_id(&query_id).send().await.unwrap();
 }
 
 #[test_action("logs", "PutLogGroupDeletionProtection", checksum = "9e6e0d1a")]
