@@ -1574,7 +1574,7 @@ fn tags_to_json(tags: &[(String, String)]) -> Vec<Value> {
         .collect()
 }
 
-/// Split text into words, matching moto's split_words behavior.
+/// Split text into words for secret name filtering.
 /// Splits on special characters (/ - _ + = . @) and camelCase.
 /// If multiple different special characters are present, doesn't split.
 /// Spaces are always split on first.
@@ -1622,7 +1622,7 @@ fn split_words_no_space(text: &str) -> Vec<String> {
 }
 
 /// Split a string by the pattern: a non-lowercase char followed by one or more lowercase chars.
-/// This matches moto's regex: re.split(r"([^a-z][a-z]+)", s)
+/// Equivalent to Python regex: re.split(r"([^a-z][a-z]+)", s)
 fn split_by_uppercase(text: &str) -> Vec<String> {
     // Implement the equivalent of Python's re.split(r"([^a-z][a-z]+)", text)
     // re.split with capturing group returns: [before, match, between, match, ..., after]
@@ -1705,7 +1705,7 @@ fn match_pattern(pattern: &str, value: &str, match_prefix: bool, case_sensitive:
 }
 
 /// The main matcher: check patterns against a list of strings.
-/// Follows moto's _matcher logic exactly.
+/// Supports negation (!pattern), prefix matching, and case sensitivity.
 fn matcher(patterns: &[&str], strings: &[&str], match_prefix: bool, case_sensitive: bool) -> bool {
     // First check negated patterns
     for pattern in patterns.iter().filter(|p| p.starts_with('!')) {
