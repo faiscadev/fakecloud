@@ -1,0 +1,13 @@
+base_url = "https://fakecloud.dev"
+title = "FakeCloud"
+description = "Free, open-source local AWS cloud emulator"
+compile_sass = true
+minify_html = true
+generate_feeds = true
+feed_filenames = ["rss.xml"]
+
+[markdown]
+highlighting = { theme = "github-dark-dimmed" }
+
+[extra]
+github = "https://github.com/faiscadev/fakecloud"

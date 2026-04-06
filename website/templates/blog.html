@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+
+{% block title %}Blog - {{ config.title }}{% endblock %}
+{% block description %}Updates, guides, and thoughts on building an open-source AWS emulator.{% endblock %}
+
+{% block content %}
+<section>
+  <div class="container">
+    <h1 class="section-title">Blog</h1>
+    <p class="section-sub">Updates, guides, and thoughts on building an open-source AWS emulator.</p>
+    <div class="blog-list">
+      {% for page in section.pages %}
+      <a href="{{ page.permalink }}" class="post">
+        <div class="date">{{ page.date | date(format="%B %d, %Y") }}</div>
+        <h3>{{ page.title }}</h3>
+        <p>{{ page.description }}</p>
+      </a>
+      {% endfor %}
+    </div>
+  </div>
+</section>
+{% endblock %}

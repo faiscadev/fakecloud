@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}{{ config.title }}{% endblock %}</title>
+<meta name="description" content="{% block description %}{{ config.description }}{% endblock %}">
+<link rel="help" href="/llms.txt" type="text/markdown" title="LLM documentation">
+{% if config.generate_feeds %}
+<link rel="alternate" type="application/rss+xml" title="FakeCloud Blog" href="{{ get_url(path='rss.xml') }}">
+{% endif %}
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<nav>
+  <div class="container">
+    <a href="/" class="logo">fake<span>cloud</span></a>
+    <div class="links">
+      <a href="/#features">Features</a>
+      <a href="/#quickstart">Quick Start</a>
+      <a href="/#compare">Compare</a>
+      <a href="/blog/">Blog</a>
+      <a href="{{ config.extra.github }}">GitHub</a>
+    </div>
+  </div>
+</nav>
+
+{% block content %}{% endblock %}
+
+<footer>
+  <div class="container">
+    <p>Built by <a href="https://faisca.dev">faisca</a></p>
+    <div class="links">
+      <a href="{{ config.extra.github }}">Source</a>
+      <a href="{{ config.extra.github }}/issues">Issues</a>
+      <a href="{{ config.extra.github }}/blob/main/LICENSE">License</a>
+    </div>
+  </div>
+</footer>
+
+</body>
+</html>
