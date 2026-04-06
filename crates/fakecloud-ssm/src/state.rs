@@ -256,6 +256,13 @@ pub struct SsmState {
     pub service_settings: HashMap<String, SsmServiceSetting>,
     pub default_patch_baseline_id: Option<String>,
     pub ops_item_counter: u64,
+    pub maintenance_window_executions: Vec<MaintenanceWindowExecution>,
+    pub inventory_entries: HashMap<String, InventoryEntry>, // instance_id -> entry
+    pub inventory_deletions: Vec<InventoryDeletion>,
+    pub compliance_items: Vec<ComplianceItem>,
+    pub resource_data_syncs: HashMap<String, ResourceDataSync>,
+    pub mw_execution_counter: u64,
+    pub inventory_deletion_counter: u64,
 }
 
 impl SsmState {
@@ -275,6 +282,13 @@ impl SsmState {
             service_settings: HashMap::new(),
             default_patch_baseline_id: None,
             ops_item_counter: 0,
+            maintenance_window_executions: Vec::new(),
+            inventory_entries: HashMap::new(),
+            inventory_deletions: Vec::new(),
+            compliance_items: Vec::new(),
+            resource_data_syncs: HashMap::new(),
+            mw_execution_counter: 0,
+            inventory_deletion_counter: 0,
         };
         state.seed_defaults();
         state
@@ -293,6 +307,13 @@ impl SsmState {
         self.service_settings.clear();
         self.default_patch_baseline_id = None;
         self.ops_item_counter = 0;
+        self.maintenance_window_executions.clear();
+        self.inventory_entries.clear();
+        self.inventory_deletions.clear();
+        self.compliance_items.clear();
+        self.resource_data_syncs.clear();
+        self.mw_execution_counter = 0;
+        self.inventory_deletion_counter = 0;
         self.seed_defaults();
     }
 
@@ -462,6 +483,96 @@ impl SsmState {
             },
         );
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct MaintenanceWindowExecution {
+    pub window_execution_id: String,
+    pub window_id: String,
+    pub status: String,
+    pub start_time: DateTime<Utc>,
+    pub end_time: Option<DateTime<Utc>>,
+    pub tasks: Vec<MaintenanceWindowExecutionTask>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MaintenanceWindowExecutionTask {
+    pub task_execution_id: String,
+    pub window_execution_id: String,
+    pub task_arn: String,
+    pub task_type: String,
+    pub status: String,
+    pub start_time: DateTime<Utc>,
+    pub end_time: Option<DateTime<Utc>>,
+    pub invocations: Vec<MaintenanceWindowExecutionTaskInvocation>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MaintenanceWindowExecutionTaskInvocation {
+    pub invocation_id: String,
+    pub task_execution_id: String,
+    pub window_execution_id: String,
+    pub execution_id: Option<String>,
+    pub status: String,
+    pub start_time: DateTime<Utc>,
+    pub end_time: Option<DateTime<Utc>>,
+    pub parameters: Option<String>,
+    pub owner_information: Option<String>,
+    pub window_target_id: Option<String>,
+    pub status_details: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct InventoryItem {
+    pub type_name: String,
+    pub schema_version: String,
+    pub capture_time: String,
+    pub content: Vec<HashMap<String, String>>,
+    pub content_hash: Option<String>,
+    pub context: Option<HashMap<String, String>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct InventoryEntry {
+    pub instance_id: String,
+    pub items: Vec<InventoryItem>,
+}
+
+#[derive(Debug, Clone)]
+pub struct InventoryDeletion {
+    pub deletion_id: String,
+    pub type_name: String,
+    pub deletion_start_time: DateTime<Utc>,
+    pub last_status: String,
+    pub last_status_message: String,
+    pub deletion_summary: serde_json::Value,
+    pub last_status_update_time: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ComplianceItem {
+    pub resource_id: String,
+    pub resource_type: String,
+    pub compliance_type: String,
+    pub severity: String,
+    pub status: String,
+    pub title: Option<String>,
+    pub id: Option<String>,
+    pub details: HashMap<String, String>,
+    pub execution_summary: serde_json::Value,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResourceDataSync {
+    pub sync_name: String,
+    pub sync_type: Option<String>,
+    pub sync_source: Option<serde_json::Value>,
+    pub s3_destination: Option<serde_json::Value>,
+    pub created_date: DateTime<Utc>,
+    pub last_sync_time: Option<DateTime<Utc>>,
+    pub last_successful_sync_time: Option<DateTime<Utc>>,
+    pub last_status: String,
+    pub sync_last_modified_time: DateTime<Utc>,
 }
 
 pub type SharedSsmState = Arc<RwLock<SsmState>>;

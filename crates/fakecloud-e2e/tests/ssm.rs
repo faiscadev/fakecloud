@@ -1070,3 +1070,299 @@ async fn ssm_describe_available_patches() {
     let resp = client.describe_available_patches().send().await.unwrap();
     assert!(resp.patches().is_empty());
 }
+
+#[tokio::test]
+async fn ssm_inventory_lifecycle() {
+    use aws_sdk_ssm::types::InventoryItem;
+
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+
+    // PutInventory
+    let item = InventoryItem::builder()
+        .type_name("Custom:TestApp")
+        .schema_version("1.0")
+        .capture_time("2024-01-01T00:00:00Z")
+        .content({
+            let mut map = std::collections::HashMap::new();
+            map.insert("Name".to_string(), "TestApp".to_string());
+            map.insert("Version".to_string(), "1.0".to_string());
+            map
+        })
+        .build()
+        .unwrap();
+
+    client
+        .put_inventory()
+        .instance_id("i-1234567890abcdef0")
+        .items(item)
+        .send()
+        .await
+        .unwrap();
+
+    // GetInventory
+    let resp = client.get_inventory().send().await.unwrap();
+    assert!(!resp.entities().is_empty());
+
+    // GetInventorySchema
+    let resp = client.get_inventory_schema().send().await.unwrap();
+    assert!(!resp.schemas().is_empty());
+
+    // ListInventoryEntries
+    let resp = client
+        .list_inventory_entries()
+        .instance_id("i-1234567890abcdef0")
+        .type_name("Custom:TestApp")
+        .send()
+        .await
+        .unwrap();
+    assert!(!resp.entries().is_empty());
+
+    // DeleteInventory
+    let resp = client
+        .delete_inventory()
+        .type_name("Custom:TestApp")
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.deletion_id().is_some());
+
+    // DescribeInventoryDeletions
+    let resp = client.describe_inventory_deletions().send().await.unwrap();
+    assert!(!resp.inventory_deletions().is_empty());
+}
+
+#[tokio::test]
+async fn ssm_compliance_lifecycle() {
+    use aws_sdk_ssm::types::{
+        ComplianceExecutionSummary, ComplianceItemEntry, ComplianceSeverity, ComplianceStatus,
+    };
+
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+
+    let exec_summary = ComplianceExecutionSummary::builder()
+        .execution_time(aws_sdk_ssm::primitives::DateTime::from_secs(1704067200))
+        .build()
+        .unwrap();
+
+    let item = ComplianceItemEntry::builder()
+        .severity(ComplianceSeverity::Critical)
+        .status(ComplianceStatus::Compliant)
+        .title("Test patch")
+        .id("patch-001")
+        .build()
+        .unwrap();
+
+    client
+        .put_compliance_items()
+        .resource_id("i-1234567890abcdef0")
+        .resource_type("ManagedInstance")
+        .compliance_type("Custom:PatchTest")
+        .execution_summary(exec_summary)
+        .items(item)
+        .send()
+        .await
+        .unwrap();
+
+    // ListComplianceItems
+    let resp = client.list_compliance_items().send().await.unwrap();
+    assert!(!resp.compliance_items().is_empty());
+
+    // ListComplianceSummaries
+    let resp = client.list_compliance_summaries().send().await.unwrap();
+    assert!(!resp.compliance_summary_items().is_empty());
+
+    // ListResourceComplianceSummaries
+    let resp = client
+        .list_resource_compliance_summaries()
+        .send()
+        .await
+        .unwrap();
+    assert!(!resp.resource_compliance_summary_items().is_empty());
+}
+
+#[tokio::test]
+async fn ssm_maintenance_window_execution() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+
+    // Create window with target and task
+    let mw = client
+        .create_maintenance_window()
+        .name("e2e-mw")
+        .schedule("cron(0 2 ? * SUN *)")
+        .duration(3)
+        .cutoff(1)
+        .allow_unassociated_targets(true)
+        .send()
+        .await
+        .unwrap();
+    let window_id = mw.window_id().unwrap().to_string();
+
+    // Register target
+    use aws_sdk_ssm::types::{MaintenanceWindowResourceType, Target};
+    let target = Target::builder().key("InstanceIds").values("i-001").build();
+    let reg = client
+        .register_target_with_maintenance_window()
+        .window_id(&window_id)
+        .resource_type(MaintenanceWindowResourceType::Instance)
+        .targets(target)
+        .name("e2e-target")
+        .send()
+        .await
+        .unwrap();
+    let target_id = reg.window_target_id().unwrap().to_string();
+
+    // UpdateMaintenanceWindowTarget
+    let resp = client
+        .update_maintenance_window_target()
+        .window_id(&window_id)
+        .window_target_id(&target_id)
+        .name("updated-target")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.name().unwrap(), "updated-target");
+
+    // Register task
+    use aws_sdk_ssm::types::MaintenanceWindowTaskType;
+    let reg = client
+        .register_task_with_maintenance_window()
+        .window_id(&window_id)
+        .task_arn("AWS-RunShellScript")
+        .task_type(MaintenanceWindowTaskType::RunCommand)
+        .name("e2e-task")
+        .send()
+        .await
+        .unwrap();
+    let task_id = reg.window_task_id().unwrap().to_string();
+
+    // GetMaintenanceWindowTask
+    let resp = client
+        .get_maintenance_window_task()
+        .window_id(&window_id)
+        .window_task_id(&task_id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.task_arn().unwrap(), "AWS-RunShellScript");
+
+    // UpdateMaintenanceWindowTask
+    let resp = client
+        .update_maintenance_window_task()
+        .window_id(&window_id)
+        .window_task_id(&task_id)
+        .name("updated-task")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.name().unwrap(), "updated-task");
+
+    // DescribeMaintenanceWindowExecutions (empty initially)
+    let resp = client
+        .describe_maintenance_window_executions()
+        .window_id(&window_id)
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.window_executions().is_empty());
+
+    // DescribeMaintenanceWindowSchedule
+    let resp = client
+        .describe_maintenance_window_schedule()
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.scheduled_window_executions().is_empty());
+
+    // DescribeMaintenanceWindowsForTarget
+    let target = Target::builder().key("InstanceIds").values("i-001").build();
+    let resp = client
+        .describe_maintenance_windows_for_target()
+        .resource_type(MaintenanceWindowResourceType::Instance)
+        .targets(target)
+        .send()
+        .await
+        .unwrap();
+    assert!(!resp.window_identities().is_empty());
+}
+
+#[tokio::test]
+async fn ssm_patch_baseline_update() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+
+    // Create
+    let resp = client
+        .create_patch_baseline()
+        .name("e2e-baseline")
+        .operating_system(aws_sdk_ssm::types::OperatingSystem::AmazonLinux2)
+        .description("original")
+        .send()
+        .await
+        .unwrap();
+    let baseline_id = resp.baseline_id().unwrap().to_string();
+
+    // Update
+    let resp = client
+        .update_patch_baseline()
+        .baseline_id(&baseline_id)
+        .name("updated-baseline")
+        .description("updated desc")
+        .approved_patches("KB001")
+        .approved_patches("KB002")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.name().unwrap(), "updated-baseline");
+    assert_eq!(resp.description().unwrap(), "updated desc");
+    assert_eq!(resp.approved_patches().len(), 2);
+
+    // DescribeInstancePatchStates
+    let resp = client
+        .describe_instance_patch_states()
+        .instance_ids("i-001")
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.instance_patch_states().is_empty());
+
+    // DescribeInstancePatches
+    let resp = client
+        .describe_instance_patches()
+        .instance_id("i-001")
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.patches().is_empty());
+
+    // DescribeEffectivePatchesForPatchBaseline
+    let resp = client
+        .describe_effective_patches_for_patch_baseline()
+        .baseline_id(&baseline_id)
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.effective_patches().is_empty());
+
+    // GetDeployablePatchSnapshotForInstance
+    let resp = client
+        .get_deployable_patch_snapshot_for_instance()
+        .instance_id("i-001")
+        .snapshot_id("snap-001")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.instance_id().unwrap(), "i-001");
+    assert_eq!(resp.snapshot_id().unwrap(), "snap-001");
+
+    // DescribeInstancePatchStatesForPatchGroup
+    let resp = client
+        .describe_instance_patch_states_for_patch_group()
+        .patch_group("test-group")
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.instance_patch_states().is_empty());
+}
