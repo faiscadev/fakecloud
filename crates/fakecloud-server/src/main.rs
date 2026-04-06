@@ -122,9 +122,12 @@ async fn main() {
     // Step 3: S3 delivery (S3 notifications can push to SQS and SNS)
     let delivery_for_s3 = Arc::new(
         DeliveryBus::new()
-            .with_sqs(sqs_delivery)
+            .with_sqs(sqs_delivery.clone())
             .with_sns(sns_delivery),
     );
+
+    // Step 4: Logs delivery (subscription filters can push to SQS)
+    let delivery_for_logs = Arc::new(DeliveryBus::new().with_sqs(sqs_delivery));
 
     // Clone state refs for internal endpoints
     let lambda_invocations_state = lambda_state.clone();
@@ -179,7 +182,7 @@ async fn main() {
     registry.register(Arc::new(DynamoDbService::new(dynamodb_state)));
     registry.register(Arc::new(LambdaService::new(lambda_state.clone())));
     registry.register(Arc::new(SecretsManagerService::new(secretsmanager_state)));
-    registry.register(Arc::new(LogsService::new(logs_state)));
+    registry.register(Arc::new(LogsService::new(logs_state, delivery_for_logs)));
     registry.register(Arc::new(KmsService::new(kms_state.clone())));
     registry.register(Arc::new(
         S3Service::new(s3_state.clone(), delivery_for_s3).with_kms(kms_state),

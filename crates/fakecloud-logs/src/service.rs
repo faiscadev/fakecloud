@@ -1,8 +1,15 @@
+use std::io::Write;
+use std::sync::Arc;
+
 use async_trait::async_trait;
+use base64::Engine;
 use chrono::Utc;
+use flate2::write::GzEncoder;
+use flate2::Compression;
 use http::StatusCode;
 use serde_json::{json, Value};
 
+use fakecloud_core::delivery::DeliveryBus;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 use fakecloud_core::validation::*;
 
@@ -15,11 +22,12 @@ use crate::state::{
 
 pub struct LogsService {
     state: SharedLogsState,
+    delivery: Arc<DeliveryBus>,
 }
 
 impl LogsService {
-    pub fn new(state: SharedLogsState) -> Self {
-        Self { state }
+    pub fn new(state: SharedLogsState, delivery: Arc<DeliveryBus>) -> Self {
+        Self { state, delivery }
     }
 }
 
@@ -884,11 +892,53 @@ impl LogsService {
         // Generate new sequence token
         stream.upload_sequence_token = generate_sequence_token();
 
+        let accepted_events: Vec<LogEvent> = new_events.clone();
         stream.events.append(&mut new_events);
         stream.events.sort_by_key(|e| e.timestamp);
 
+        // Collect subscription filter info and sequence token while we still hold the lock
+        let subscription_filters: Vec<(String, String, String)> = group
+            .subscription_filters
+            .iter()
+            .map(|f| {
+                (
+                    f.filter_name.clone(),
+                    f.filter_pattern.clone(),
+                    f.destination_arn.clone(),
+                )
+            })
+            .collect();
+        let log_group_name = group.name.clone();
+        let next_sequence_token = stream.upload_sequence_token.clone();
+
+        // Drop the write lock before doing cross-service delivery
+        drop(state);
+
+        // Deliver matching events to subscription filter destinations
+        for (filter_name, filter_pattern, destination_arn) in &subscription_filters {
+            let matching: Vec<&LogEvent> = accepted_events
+                .iter()
+                .filter(|e| matches_filter_pattern(filter_pattern, &e.message))
+                .collect();
+
+            if matching.is_empty() {
+                continue;
+            }
+
+            let payload =
+                build_subscription_payload(&log_group_name, stream_name, filter_name, &matching);
+
+            if destination_arn.contains(":sqs:") {
+                self.delivery.send_to_sqs(
+                    destination_arn,
+                    &payload,
+                    &std::collections::HashMap::new(),
+                );
+            }
+        }
+
         let mut response = json!({
-            "nextSequenceToken": stream.upload_sequence_token,
+            "nextSequenceToken": next_sequence_token,
         });
         if has_rejected {
             response["rejectedLogEventsInfo"] = rejected_info;
@@ -5613,6 +5663,35 @@ fn matches_filter_pattern(pattern: &str, message: &str) -> bool {
     words.iter().all(|word| message.contains(word))
 }
 
+/// Build the CloudWatch Logs subscription payload: a base64-encoded gzip JSON blob.
+///
+/// This matches the format that real AWS sends to subscription filter destinations.
+fn build_subscription_payload(
+    log_group: &str,
+    log_stream: &str,
+    filter_name: &str,
+    events: &[&LogEvent],
+) -> String {
+    let payload = json!({
+        "messageType": "DATA_MESSAGE",
+        "owner": "123456789012",
+        "logGroup": log_group,
+        "logStream": log_stream,
+        "subscriptionFilters": [filter_name],
+        "logEvents": events.iter().map(|e| json!({
+            "id": format!("{}", e.ingestion_time),
+            "timestamp": e.timestamp,
+            "message": e.message,
+        })).collect::<Vec<_>>(),
+    });
+
+    let json_bytes = serde_json::to_vec(&payload).unwrap();
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(&json_bytes).unwrap();
+    let compressed = encoder.finish().unwrap();
+    base64::engine::general_purpose::STANDARD.encode(&compressed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5627,7 +5706,8 @@ mod tests {
             "123456789012",
             "us-east-1",
         )));
-        LogsService::new(state)
+        let delivery = Arc::new(fakecloud_core::delivery::DeliveryBus::new());
+        LogsService::new(state, delivery)
     }
 
     fn make_request(action: &str, body: Value) -> AwsRequest {
@@ -6671,5 +6751,170 @@ mod tests {
             .as_array()
             .unwrap()
             .is_empty());
+    }
+
+    /// Mock SQS delivery that captures messages for testing.
+    struct MockSqsDelivery {
+        messages: parking_lot::Mutex<Vec<(String, String)>>,
+    }
+
+    impl MockSqsDelivery {
+        fn new() -> Self {
+            Self {
+                messages: parking_lot::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn take_messages(&self) -> Vec<(String, String)> {
+            std::mem::take(&mut *self.messages.lock())
+        }
+    }
+
+    impl fakecloud_core::delivery::SqsDelivery for MockSqsDelivery {
+        fn deliver_to_queue(
+            &self,
+            queue_arn: &str,
+            message_body: &str,
+            _attributes: &HashMap<String, String>,
+        ) {
+            self.messages
+                .lock()
+                .push((queue_arn.to_string(), message_body.to_string()));
+        }
+    }
+
+    fn make_service_with_mock_sqs() -> (LogsService, Arc<MockSqsDelivery>) {
+        let state = Arc::new(parking_lot::RwLock::new(LogsState::new(
+            "123456789012",
+            "us-east-1",
+        )));
+        let mock = Arc::new(MockSqsDelivery::new());
+        let delivery =
+            Arc::new(fakecloud_core::delivery::DeliveryBus::new().with_sqs(mock.clone()));
+        (LogsService::new(state, delivery), mock)
+    }
+
+    #[test]
+    fn subscription_filter_delivers_matching_events_to_sqs() {
+        let (svc, mock) = make_service_with_mock_sqs();
+        let group = "/test/sub";
+        let stream = "stream-1";
+        let queue_arn = "arn:aws:sqs:us-east-1:123456789012:my-queue";
+
+        // Create log group and stream
+        create_group(&svc, group);
+        create_stream(&svc, group, stream);
+
+        // Put subscription filter targeting SQS
+        let req = make_request(
+            "PutSubscriptionFilter",
+            json!({
+                "logGroupName": group,
+                "filterName": "my-filter",
+                "filterPattern": "",
+                "destinationArn": queue_arn,
+            }),
+        );
+        svc.put_subscription_filter(&req).unwrap();
+
+        // Put log events
+        put_events(&svc, group, stream, &["hello world", "test message"]);
+
+        // Verify delivery
+        let messages = mock.take_messages();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].0, queue_arn);
+
+        // Decode the payload: base64 -> gzip -> JSON
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(&messages[0].1)
+            .unwrap();
+        let mut decoder = flate2::read::GzDecoder::new(&decoded[..]);
+        let mut json_str = String::new();
+        std::io::Read::read_to_string(&mut decoder, &mut json_str).unwrap();
+        let payload: Value = serde_json::from_str(&json_str).unwrap();
+
+        assert_eq!(payload["messageType"], "DATA_MESSAGE");
+        assert_eq!(payload["logGroup"], group);
+        assert_eq!(payload["logStream"], stream);
+        assert_eq!(payload["subscriptionFilters"][0], "my-filter");
+        let events = payload["logEvents"].as_array().unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0]["message"], "hello world");
+        assert_eq!(events[1]["message"], "test message");
+    }
+
+    #[test]
+    fn subscription_filter_respects_pattern() {
+        let (svc, mock) = make_service_with_mock_sqs();
+        let group = "/test/pattern";
+        let stream = "stream-1";
+        let queue_arn = "arn:aws:sqs:us-east-1:123456789012:pattern-queue";
+
+        create_group(&svc, group);
+        create_stream(&svc, group, stream);
+
+        // Filter only matches "ERROR"
+        let req = make_request(
+            "PutSubscriptionFilter",
+            json!({
+                "logGroupName": group,
+                "filterName": "error-filter",
+                "filterPattern": "ERROR",
+                "destinationArn": queue_arn,
+            }),
+        );
+        svc.put_subscription_filter(&req).unwrap();
+
+        // Put events, only one matches
+        put_events(
+            &svc,
+            group,
+            stream,
+            &["INFO all good", "ERROR something broke"],
+        );
+
+        let messages = mock.take_messages();
+        assert_eq!(messages.len(), 1);
+
+        // Decode and verify only the matching event was sent
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(&messages[0].1)
+            .unwrap();
+        let mut decoder = flate2::read::GzDecoder::new(&decoded[..]);
+        let mut json_str = String::new();
+        std::io::Read::read_to_string(&mut decoder, &mut json_str).unwrap();
+        let payload: Value = serde_json::from_str(&json_str).unwrap();
+
+        let events = payload["logEvents"].as_array().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["message"], "ERROR something broke");
+    }
+
+    #[test]
+    fn subscription_filter_no_delivery_when_no_match() {
+        let (svc, mock) = make_service_with_mock_sqs();
+        let group = "/test/nomatch";
+        let stream = "stream-1";
+        let queue_arn = "arn:aws:sqs:us-east-1:123456789012:nomatch-queue";
+
+        create_group(&svc, group);
+        create_stream(&svc, group, stream);
+
+        let req = make_request(
+            "PutSubscriptionFilter",
+            json!({
+                "logGroupName": group,
+                "filterName": "strict-filter",
+                "filterPattern": "CRITICAL",
+                "destinationArn": queue_arn,
+            }),
+        );
+        svc.put_subscription_filter(&req).unwrap();
+
+        put_events(&svc, group, stream, &["INFO all good", "WARN something"]);
+
+        let messages = mock.take_messages();
+        assert!(messages.is_empty());
     }
 }
