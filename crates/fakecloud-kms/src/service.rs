@@ -10,7 +10,7 @@ use uuid::Uuid;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 use fakecloud_core::validation::*;
 
-use crate::state::{KeyRotation, KmsAlias, KmsGrant, KmsKey, SharedKmsState};
+use crate::state::{CustomKeyStore, KeyRotation, KmsAlias, KmsGrant, KmsKey, SharedKmsState};
 
 const FAKE_ENVELOPE_PREFIX: &str = "fakecloud-kms:";
 
@@ -109,6 +109,12 @@ impl AwsService for KmsService {
             "ImportKeyMaterial" => self.import_key_material(&req),
             "DeleteImportedKeyMaterial" => self.delete_imported_key_material(&req),
             "UpdatePrimaryRegion" => self.update_primary_region(&req),
+            "CreateCustomKeyStore" => self.create_custom_key_store(&req),
+            "DeleteCustomKeyStore" => self.delete_custom_key_store(&req),
+            "DescribeCustomKeyStores" => self.describe_custom_key_stores(&req),
+            "ConnectCustomKeyStore" => self.connect_custom_key_store(&req),
+            "DisconnectCustomKeyStore" => self.disconnect_custom_key_store(&req),
+            "UpdateCustomKeyStore" => self.update_custom_key_store(&req),
             _ => Err(AwsServiceError::action_not_implemented("kms", &req.action)),
         }
     }
@@ -162,6 +168,12 @@ impl AwsService for KmsService {
             "ImportKeyMaterial",
             "DeleteImportedKeyMaterial",
             "UpdatePrimaryRegion",
+            "CreateCustomKeyStore",
+            "DeleteCustomKeyStore",
+            "DescribeCustomKeyStores",
+            "ConnectCustomKeyStore",
+            "DisconnectCustomKeyStore",
+            "UpdateCustomKeyStore",
         ]
     }
 }
@@ -2508,6 +2520,335 @@ impl KmsService {
 
         Ok(AwsResponse::json(StatusCode::OK, "{}"))
     }
+
+    fn create_custom_key_store(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = body_json(req);
+
+        let name = body["CustomKeyStoreName"]
+            .as_str()
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationException",
+                    "CustomKeyStoreName is required",
+                )
+            })?
+            .to_string();
+
+        validate_string_length("customKeyStoreName", &name, 1, 256)?;
+
+        let store_type = body["CustomKeyStoreType"]
+            .as_str()
+            .unwrap_or("AWS_CLOUDHSM")
+            .to_string();
+
+        validate_optional_enum(
+            "customKeyStoreType",
+            Some(store_type.as_str()),
+            &["AWS_CLOUDHSM", "EXTERNAL_KEY_STORE"],
+        )?;
+
+        let mut state = self.state.write();
+
+        // Name must be unique
+        if state
+            .custom_key_stores
+            .values()
+            .any(|s| s.custom_key_store_name == name)
+        {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "CustomKeyStoreNameInUseException",
+                format!("Custom key store name '{name}' is already in use"),
+            ));
+        }
+
+        let store_id = format!("cks-{}", Uuid::new_v4().as_simple());
+        let now = Utc::now().timestamp() as f64;
+
+        let store = CustomKeyStore {
+            custom_key_store_id: store_id.clone(),
+            custom_key_store_name: name,
+            custom_key_store_type: store_type,
+            cloud_hsm_cluster_id: body["CloudHsmClusterId"].as_str().map(|s| s.to_string()),
+            trust_anchor_certificate: body["TrustAnchorCertificate"]
+                .as_str()
+                .map(|s| s.to_string()),
+            connection_state: "DISCONNECTED".to_string(),
+            creation_date: now,
+            xks_proxy_uri_endpoint: body["XksProxyUriEndpoint"].as_str().map(|s| s.to_string()),
+            xks_proxy_uri_path: body["XksProxyUriPath"].as_str().map(|s| s.to_string()),
+            xks_proxy_vpc_endpoint_service_name: body["XksProxyVpcEndpointServiceName"]
+                .as_str()
+                .map(|s| s.to_string()),
+            xks_proxy_connectivity: body["XksProxyConnectivity"].as_str().map(|s| s.to_string()),
+        };
+
+        state.custom_key_stores.insert(store_id.clone(), store);
+
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            serde_json::to_string(&json!({ "CustomKeyStoreId": store_id })).unwrap(),
+        ))
+    }
+
+    fn delete_custom_key_store(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = body_json(req);
+
+        let store_id = body["CustomKeyStoreId"]
+            .as_str()
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationException",
+                    "CustomKeyStoreId is required",
+                )
+            })?
+            .to_string();
+
+        let mut state = self.state.write();
+
+        let store = state.custom_key_stores.get(&store_id).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "CustomKeyStoreNotFoundException",
+                format!("Custom key store '{store_id}' does not exist"),
+            )
+        })?;
+
+        if store.connection_state == "CONNECTED" {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "CustomKeyStoreHasCMKsException",
+                "Cannot delete a connected custom key store. Disconnect it first.",
+            ));
+        }
+
+        state.custom_key_stores.remove(&store_id);
+
+        Ok(AwsResponse::json(StatusCode::OK, "{}"))
+    }
+
+    fn describe_custom_key_stores(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = body_json(req);
+
+        let filter_id = body["CustomKeyStoreId"].as_str();
+        let filter_name = body["CustomKeyStoreName"].as_str();
+        let limit = body["Limit"].as_u64().unwrap_or(1000) as usize;
+        let marker = body["Marker"].as_str();
+
+        let state = self.state.read();
+
+        let mut stores: Vec<&CustomKeyStore> = state
+            .custom_key_stores
+            .values()
+            .filter(|s| {
+                if let Some(id) = filter_id {
+                    return s.custom_key_store_id == id;
+                }
+                if let Some(name) = filter_name {
+                    return s.custom_key_store_name == name;
+                }
+                true
+            })
+            .collect();
+
+        stores.sort_by(|a, b| a.custom_key_store_id.cmp(&b.custom_key_store_id));
+
+        // If filtering by ID and not found, return error
+        if let Some(id) = filter_id {
+            if stores.is_empty() {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "CustomKeyStoreNotFoundException",
+                    format!("Custom key store '{id}' does not exist"),
+                ));
+            }
+        }
+
+        let start = marker
+            .and_then(|m| {
+                stores
+                    .iter()
+                    .position(|s| s.custom_key_store_id == m)
+                    .map(|p| p + 1)
+            })
+            .unwrap_or(0);
+
+        let page: Vec<_> = stores.iter().skip(start).take(limit).collect();
+        let truncated = start + page.len() < stores.len();
+
+        let entries: Vec<Value> = page.iter().map(|s| custom_key_store_json(s)).collect();
+
+        let mut resp = json!({ "CustomKeyStores": entries, "Truncated": truncated });
+        if truncated {
+            if let Some(last) = page.last() {
+                resp["NextMarker"] = json!(last.custom_key_store_id);
+            }
+        }
+
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            serde_json::to_string(&resp).unwrap(),
+        ))
+    }
+
+    fn connect_custom_key_store(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = body_json(req);
+
+        let store_id = body["CustomKeyStoreId"]
+            .as_str()
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationException",
+                    "CustomKeyStoreId is required",
+                )
+            })?
+            .to_string();
+
+        let mut state = self.state.write();
+
+        let store = state.custom_key_stores.get_mut(&store_id).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "CustomKeyStoreNotFoundException",
+                format!("Custom key store '{store_id}' does not exist"),
+            )
+        })?;
+
+        store.connection_state = "CONNECTED".to_string();
+
+        Ok(AwsResponse::json(StatusCode::OK, "{}"))
+    }
+
+    fn disconnect_custom_key_store(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = body_json(req);
+
+        let store_id = body["CustomKeyStoreId"]
+            .as_str()
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationException",
+                    "CustomKeyStoreId is required",
+                )
+            })?
+            .to_string();
+
+        let mut state = self.state.write();
+
+        let store = state.custom_key_stores.get_mut(&store_id).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "CustomKeyStoreNotFoundException",
+                format!("Custom key store '{store_id}' does not exist"),
+            )
+        })?;
+
+        store.connection_state = "DISCONNECTED".to_string();
+
+        Ok(AwsResponse::json(StatusCode::OK, "{}"))
+    }
+
+    fn update_custom_key_store(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = body_json(req);
+
+        let store_id = body["CustomKeyStoreId"]
+            .as_str()
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationException",
+                    "CustomKeyStoreId is required",
+                )
+            })?
+            .to_string();
+
+        let mut state = self.state.write();
+
+        // Check uniqueness of new name before borrowing store mutably
+        if let Some(new_name) = body["NewCustomKeyStoreName"].as_str() {
+            if state
+                .custom_key_stores
+                .values()
+                .any(|s| s.custom_key_store_name == new_name && s.custom_key_store_id != store_id)
+            {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "CustomKeyStoreNameInUseException",
+                    format!("Custom key store name '{new_name}' is already in use"),
+                ));
+            }
+        }
+
+        let store = state.custom_key_stores.get_mut(&store_id).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "CustomKeyStoreNotFoundException",
+                format!("Custom key store '{store_id}' does not exist"),
+            )
+        })?;
+
+        if let Some(new_name) = body["NewCustomKeyStoreName"].as_str() {
+            store.custom_key_store_name = new_name.to_string();
+        }
+        if let Some(v) = body["CloudHsmClusterId"].as_str() {
+            store.cloud_hsm_cluster_id = Some(v.to_string());
+        }
+        if let Some(v) = body["KeyStorePassword"].as_str() {
+            // In a real implementation this would update the password;
+            // we just accept it silently.
+            let _ = v;
+        }
+        if let Some(v) = body["XksProxyUriEndpoint"].as_str() {
+            store.xks_proxy_uri_endpoint = Some(v.to_string());
+        }
+        if let Some(v) = body["XksProxyUriPath"].as_str() {
+            store.xks_proxy_uri_path = Some(v.to_string());
+        }
+        if let Some(v) = body["XksProxyVpcEndpointServiceName"].as_str() {
+            store.xks_proxy_vpc_endpoint_service_name = Some(v.to_string());
+        }
+        if let Some(v) = body["XksProxyConnectivity"].as_str() {
+            store.xks_proxy_connectivity = Some(v.to_string());
+        }
+
+        Ok(AwsResponse::json(StatusCode::OK, "{}"))
+    }
+}
+
+fn custom_key_store_json(store: &CustomKeyStore) -> Value {
+    let mut obj = json!({
+        "CustomKeyStoreId": store.custom_key_store_id,
+        "CustomKeyStoreName": store.custom_key_store_name,
+        "CustomKeyStoreType": store.custom_key_store_type,
+        "ConnectionState": store.connection_state,
+        "CreationDate": store.creation_date,
+    });
+    if let Some(ref v) = store.cloud_hsm_cluster_id {
+        obj["CloudHsmClusterId"] = json!(v);
+    }
+    if let Some(ref v) = store.trust_anchor_certificate {
+        obj["TrustAnchorCertificate"] = json!(v);
+    }
+    if let Some(ref v) = store.xks_proxy_uri_endpoint {
+        obj["XksProxyConfiguration"] = json!({});
+        obj["XksProxyConfiguration"]["UriEndpoint"] = json!(v);
+        if let Some(ref p) = store.xks_proxy_uri_path {
+            obj["XksProxyConfiguration"]["UriPath"] = json!(p);
+        }
+        if let Some(ref c) = store.xks_proxy_connectivity {
+            obj["XksProxyConfiguration"]["Connectivity"] = json!(c);
+        }
+        if let Some(ref s) = store.xks_proxy_vpc_endpoint_service_name {
+            obj["XksProxyConfiguration"]["VpcEndpointServiceName"] = json!(s);
+        }
+    }
+    obj
 }
 
 fn key_metadata_json(key: &KmsKey, account_id: &str) -> Value {
@@ -3145,5 +3486,226 @@ mod tests {
             json!({ "KeyId": key_id, "PrimaryRegion": "eu-west-1" }),
         );
         assert!(svc.update_primary_region(&req).is_err());
+    }
+
+    #[test]
+    fn custom_key_store_lifecycle() {
+        let svc = make_service();
+
+        // Create
+        let req = make_request(
+            "CreateCustomKeyStore",
+            json!({
+                "CustomKeyStoreName": "my-store",
+                "CloudHsmClusterId": "cluster-1234",
+                "TrustAnchorCertificate": "cert-data",
+                "KeyStorePassword": "password123"
+            }),
+        );
+        let resp = svc.create_custom_key_store(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let store_id = body["CustomKeyStoreId"].as_str().unwrap().to_string();
+        assert!(store_id.starts_with("cks-"));
+
+        // Describe
+        let req = make_request(
+            "DescribeCustomKeyStores",
+            json!({ "CustomKeyStoreId": store_id }),
+        );
+        let resp = svc.describe_custom_key_stores(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let stores = body["CustomKeyStores"].as_array().unwrap();
+        assert_eq!(stores.len(), 1);
+        assert_eq!(
+            stores[0]["CustomKeyStoreName"].as_str().unwrap(),
+            "my-store"
+        );
+        assert_eq!(
+            stores[0]["ConnectionState"].as_str().unwrap(),
+            "DISCONNECTED"
+        );
+        assert_eq!(
+            stores[0]["CloudHsmClusterId"].as_str().unwrap(),
+            "cluster-1234"
+        );
+
+        // Connect
+        let req = make_request(
+            "ConnectCustomKeyStore",
+            json!({ "CustomKeyStoreId": store_id }),
+        );
+        svc.connect_custom_key_store(&req).unwrap();
+
+        // Verify connected
+        let req = make_request(
+            "DescribeCustomKeyStores",
+            json!({ "CustomKeyStoreId": store_id }),
+        );
+        let resp = svc.describe_custom_key_stores(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(
+            body["CustomKeyStores"][0]["ConnectionState"]
+                .as_str()
+                .unwrap(),
+            "CONNECTED"
+        );
+
+        // Cannot delete when connected
+        let req = make_request(
+            "DeleteCustomKeyStore",
+            json!({ "CustomKeyStoreId": store_id }),
+        );
+        assert!(svc.delete_custom_key_store(&req).is_err());
+
+        // Disconnect
+        let req = make_request(
+            "DisconnectCustomKeyStore",
+            json!({ "CustomKeyStoreId": store_id }),
+        );
+        svc.disconnect_custom_key_store(&req).unwrap();
+
+        // Update name
+        let req = make_request(
+            "UpdateCustomKeyStore",
+            json!({
+                "CustomKeyStoreId": store_id,
+                "NewCustomKeyStoreName": "renamed-store"
+            }),
+        );
+        svc.update_custom_key_store(&req).unwrap();
+
+        // Verify update
+        let req = make_request(
+            "DescribeCustomKeyStores",
+            json!({ "CustomKeyStoreId": store_id }),
+        );
+        let resp = svc.describe_custom_key_stores(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(
+            body["CustomKeyStores"][0]["CustomKeyStoreName"]
+                .as_str()
+                .unwrap(),
+            "renamed-store"
+        );
+
+        // Delete
+        let req = make_request(
+            "DeleteCustomKeyStore",
+            json!({ "CustomKeyStoreId": store_id }),
+        );
+        svc.delete_custom_key_store(&req).unwrap();
+
+        // Describe all should return empty
+        let req = make_request("DescribeCustomKeyStores", json!({}));
+        let resp = svc.describe_custom_key_stores(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert!(body["CustomKeyStores"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn custom_key_store_duplicate_name_fails() {
+        let svc = make_service();
+
+        let req = make_request(
+            "CreateCustomKeyStore",
+            json!({ "CustomKeyStoreName": "dup-store" }),
+        );
+        svc.create_custom_key_store(&req).unwrap();
+
+        let req = make_request(
+            "CreateCustomKeyStore",
+            json!({ "CustomKeyStoreName": "dup-store" }),
+        );
+        assert!(svc.create_custom_key_store(&req).is_err());
+    }
+
+    #[test]
+    fn describe_custom_key_store_not_found() {
+        let svc = make_service();
+
+        let req = make_request(
+            "DescribeCustomKeyStores",
+            json!({ "CustomKeyStoreId": "cks-nonexistent" }),
+        );
+        assert!(svc.describe_custom_key_stores(&req).is_err());
+    }
+
+    #[test]
+    fn delete_nonexistent_custom_key_store_fails() {
+        let svc = make_service();
+
+        let req = make_request(
+            "DeleteCustomKeyStore",
+            json!({ "CustomKeyStoreId": "cks-nonexistent" }),
+        );
+        assert!(svc.delete_custom_key_store(&req).is_err());
+    }
+
+    #[test]
+    fn connect_nonexistent_custom_key_store_fails() {
+        let svc = make_service();
+
+        let req = make_request(
+            "ConnectCustomKeyStore",
+            json!({ "CustomKeyStoreId": "cks-nonexistent" }),
+        );
+        assert!(svc.connect_custom_key_store(&req).is_err());
+    }
+
+    #[test]
+    fn describe_custom_key_stores_by_name() {
+        let svc = make_service();
+
+        let req = make_request(
+            "CreateCustomKeyStore",
+            json!({ "CustomKeyStoreName": "store-a" }),
+        );
+        svc.create_custom_key_store(&req).unwrap();
+
+        let req = make_request(
+            "CreateCustomKeyStore",
+            json!({ "CustomKeyStoreName": "store-b" }),
+        );
+        svc.create_custom_key_store(&req).unwrap();
+
+        // Filter by name
+        let req = make_request(
+            "DescribeCustomKeyStores",
+            json!({ "CustomKeyStoreName": "store-a" }),
+        );
+        let resp = svc.describe_custom_key_stores(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let stores = body["CustomKeyStores"].as_array().unwrap();
+        assert_eq!(stores.len(), 1);
+        assert_eq!(stores[0]["CustomKeyStoreName"].as_str().unwrap(), "store-a");
+    }
+
+    #[test]
+    fn update_custom_key_store_name_conflict() {
+        let svc = make_service();
+
+        let req = make_request(
+            "CreateCustomKeyStore",
+            json!({ "CustomKeyStoreName": "store-x" }),
+        );
+        svc.create_custom_key_store(&req).unwrap();
+
+        let req = make_request(
+            "CreateCustomKeyStore",
+            json!({ "CustomKeyStoreName": "store-y" }),
+        );
+        let resp = svc.create_custom_key_store(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let store_y_id = body["CustomKeyStoreId"].as_str().unwrap().to_string();
+
+        // Try to rename store-y to store-x
+        let req = make_request(
+            "UpdateCustomKeyStore",
+            json!({
+                "CustomKeyStoreId": store_y_id,
+                "NewCustomKeyStoreName": "store-x"
+            }),
+        );
+        assert!(svc.update_custom_key_store(&req).is_err());
     }
 }

@@ -460,3 +460,98 @@ async fn kms_import_key_material_lifecycle() {
     let desc = client.describe_key().key_id(&key_id).send().await.unwrap();
     assert!(!desc.key_metadata().unwrap().enabled());
 }
+
+#[tokio::test]
+async fn kms_custom_key_store_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.kms_client().await;
+
+    // Create a custom key store
+    let create_resp = client
+        .create_custom_key_store()
+        .custom_key_store_name("e2e-test-store")
+        .cloud_hsm_cluster_id("cluster-abcdef")
+        .trust_anchor_certificate("cert-data")
+        .key_store_password("password123")
+        .send()
+        .await
+        .unwrap();
+    let store_id = create_resp.custom_key_store_id().unwrap().to_string();
+    assert!(store_id.starts_with("cks-"));
+
+    // Describe by ID
+    let desc = client
+        .describe_custom_key_stores()
+        .custom_key_store_id(&store_id)
+        .send()
+        .await
+        .unwrap();
+    let stores = desc.custom_key_stores();
+    assert_eq!(stores.len(), 1);
+    assert_eq!(stores[0].custom_key_store_name().unwrap(), "e2e-test-store");
+    assert_eq!(
+        stores[0].connection_state().unwrap(),
+        &aws_sdk_kms::types::ConnectionStateType::Disconnected
+    );
+
+    // Connect
+    client
+        .connect_custom_key_store()
+        .custom_key_store_id(&store_id)
+        .send()
+        .await
+        .unwrap();
+
+    // Verify connected
+    let desc = client
+        .describe_custom_key_stores()
+        .custom_key_store_id(&store_id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        desc.custom_key_stores()[0].connection_state().unwrap(),
+        &aws_sdk_kms::types::ConnectionStateType::Connected
+    );
+
+    // Disconnect
+    client
+        .disconnect_custom_key_store()
+        .custom_key_store_id(&store_id)
+        .send()
+        .await
+        .unwrap();
+
+    // Update name
+    client
+        .update_custom_key_store()
+        .custom_key_store_id(&store_id)
+        .new_custom_key_store_name("renamed-store")
+        .send()
+        .await
+        .unwrap();
+
+    // Verify update
+    let desc = client
+        .describe_custom_key_stores()
+        .custom_key_store_id(&store_id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        desc.custom_key_stores()[0].custom_key_store_name().unwrap(),
+        "renamed-store"
+    );
+
+    // Delete
+    client
+        .delete_custom_key_store()
+        .custom_key_store_id(&store_id)
+        .send()
+        .await
+        .unwrap();
+
+    // Describe all should be empty
+    let desc = client.describe_custom_key_stores().send().await.unwrap();
+    assert!(desc.custom_key_stores().is_empty());
+}
