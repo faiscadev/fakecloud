@@ -133,7 +133,7 @@ impl AwsService for LogsService {
             "DeleteScheduledQuery" => self.delete_scheduled_query(&req),
             "UpdateScheduledQuery" => self.update_scheduled_query(&req),
             "StartLiveTail" => self.start_live_tail(&req),
-            "ListLogGroups" => self.describe_log_groups(&req),
+            "ListLogGroups" => self.list_log_groups(&req),
             "ListLogGroupsForQuery" => self.list_log_groups_for_query(&req),
             "ListAggregateLogGroupSummaries" => self.list_aggregate_log_group_summaries(&req),
             "PutBearerTokenAuthentication" => self.put_bearer_token_authentication(&req),
@@ -3638,6 +3638,18 @@ impl LogsService {
 
     fn put_account_policy(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = body_json(req);
+        validate_optional_enum_value(
+            "policyType",
+            &body["policyType"],
+            &[
+                "DATA_PROTECTION_POLICY",
+                "SUBSCRIPTION_FILTER_POLICY",
+                "FIELD_INDEX_POLICY",
+                "TRANSFORMER_POLICY",
+                "METRIC_EXTRACTION_POLICY",
+            ],
+        )?;
+        validate_optional_enum_value("scope", &body["scope"], &["ALL"])?;
         let policy_name = body["policyName"].as_str().ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
@@ -3703,6 +3715,19 @@ impl LogsService {
 
     fn describe_account_policies(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = body_json(req);
+        validate_required("policyType", &body["policyType"])?;
+        validate_enum(
+            "policyType",
+            body["policyType"].as_str().unwrap_or(""),
+            &[
+                "DATA_PROTECTION_POLICY",
+                "SUBSCRIPTION_FILTER_POLICY",
+                "FIELD_INDEX_POLICY",
+                "TRANSFORMER_POLICY",
+                "METRIC_EXTRACTION_POLICY",
+            ],
+        )?;
+        validate_optional_string_length("nextToken", body["nextToken"].as_str(), 1, 2048)?;
         let policy_type = body["policyType"].as_str().ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
@@ -4016,6 +4041,7 @@ impl LogsService {
 
     fn describe_index_policies(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = body_json(req);
+        validate_optional_string_length("nextToken", body["nextToken"].as_str(), 1, 2048)?;
         let log_group_ids = body["logGroupIdentifiers"].as_array().ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
@@ -4100,6 +4126,7 @@ impl LogsService {
 
     fn describe_field_indexes(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = body_json(req);
+        validate_optional_string_length("nextToken", body["nextToken"].as_str(), 1, 2048)?;
         // Validate that logGroupIdentifiers is provided
         let _log_group_ids = body["logGroupIdentifiers"].as_array().ok_or_else(|| {
             AwsServiceError::aws_error(
@@ -4300,6 +4327,28 @@ impl LogsService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = body_json(req);
+        validate_optional_string_length("detectorName", body["detectorName"].as_str(), 1, 2048)?;
+        validate_optional_enum_value(
+            "evaluationFrequency",
+            &body["evaluationFrequency"],
+            &[
+                "ONE_MIN",
+                "FIVE_MIN",
+                "TEN_MIN",
+                "FIFTEEN_MIN",
+                "THIRTY_MIN",
+                "ONE_HOUR",
+            ],
+        )?;
+        validate_optional_string_length("filterPattern", body["filterPattern"].as_str(), 0, 1024)?;
+        validate_optional_string_length("kmsKeyId", body["kmsKeyId"].as_str(), 0, 256)?;
+        validate_optional_range_i64(
+            "anomalyVisibilityTime",
+            body["anomalyVisibilityTime"].as_i64(),
+            7,
+            90,
+        )?;
+
         let log_group_arn_list = body["logGroupArnList"]
             .as_array()
             .ok_or_else(|| {
@@ -4416,6 +4465,14 @@ impl LogsService {
 
     fn list_log_anomaly_detectors(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = body_json(req);
+        validate_optional_string_length(
+            "filterLogGroupArn",
+            body["filterLogGroupArn"].as_str(),
+            1,
+            2048,
+        )?;
+        validate_optional_range_i64("limit", body["limit"].as_i64(), 1, 50)?;
+        validate_optional_string_length("nextToken", body["nextToken"].as_str(), 1, 2048)?;
         let filter_log_group_arn = body["filterLogGroupArn"].as_str();
         let _limit = body["limit"].as_i64().unwrap_or(50);
 
@@ -4542,6 +4599,7 @@ impl LogsService {
 
     fn test_metric_filter(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = body_json(req);
+        validate_required("filterPattern", &body["filterPattern"])?;
         let filter_pattern = body["filterPattern"].as_str().ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
@@ -4549,6 +4607,8 @@ impl LogsService {
                 "filterPattern is required",
             )
         })?;
+        validate_string_length("filterPattern", filter_pattern, 0, 1024)?;
+        validate_required("logEventMessages", &body["logEventMessages"])?;
         let log_event_messages = body["logEventMessages"].as_array().ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
@@ -4575,10 +4635,7 @@ impl LogsService {
 
         Ok(AwsResponse::json(
             StatusCode::OK,
-            serde_json::to_string(
-                &json!({ "matches": matches, "testResults": !matches.is_empty() }),
-            )
-            .unwrap(),
+            serde_json::to_string(&json!({ "matches": matches })).unwrap(),
         ))
     }
 
@@ -4671,7 +4728,21 @@ impl LogsService {
         ))
     }
 
-    fn list_anomalies(&self, _req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+    fn list_anomalies(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = body_json(req);
+        validate_optional_string_length(
+            "anomalyDetectorArn",
+            body["anomalyDetectorArn"].as_str(),
+            1,
+            2048,
+        )?;
+        validate_optional_enum_value(
+            "suppressionState",
+            &body["suppressionState"],
+            &["SUPPRESSED", "UNSUPPRESSED"],
+        )?;
+        validate_optional_range_i64("limit", body["limit"].as_i64(), 1, 50)?;
+        validate_optional_string_length("nextToken", body["nextToken"].as_str(), 1, 2048)?;
         // Stub: return empty anomalies list
         Ok(AwsResponse::json(
             StatusCode::OK,
@@ -4679,7 +4750,22 @@ impl LogsService {
         ))
     }
 
-    fn update_anomaly(&self, _req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+    fn update_anomaly(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = body_json(req);
+        validate_required("anomalyDetectorArn", &body["anomalyDetectorArn"])?;
+        validate_string_length(
+            "anomalyDetectorArn",
+            body["anomalyDetectorArn"].as_str().unwrap_or(""),
+            1,
+            2048,
+        )?;
+        validate_optional_string_length("anomalyId", body["anomalyId"].as_str(), 36, 36)?;
+        validate_optional_string_length("patternId", body["patternId"].as_str(), 32, 32)?;
+        validate_optional_enum_value(
+            "suppressionType",
+            &body["suppressionType"],
+            &["LIMITED", "INFINITE"],
+        )?;
         // No-op stub
         Ok(AwsResponse::json(StatusCode::OK, "{}"))
     }
@@ -4690,6 +4776,7 @@ impl LogsService {
         let body = body_json(req);
         let import_source_arn = require_str(&body, "importSourceArn")?;
         let import_role_arn = require_str(&body, "importRoleArn")?;
+        validate_string_length("importRoleArn", import_role_arn, 1, 2048)?;
         let log_group_name = body["logGroupName"].as_str().map(|s| s.to_string());
 
         let import_id = uuid::Uuid::new_v4().to_string();
@@ -4713,7 +4800,16 @@ impl LogsService {
         ))
     }
 
-    fn describe_import_tasks(&self, _req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+    fn describe_import_tasks(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = body_json(req);
+        validate_optional_string_length("importId", body["importId"].as_str(), 1, 256)?;
+        validate_optional_enum_value(
+            "importStatus",
+            &body["importStatus"],
+            &["IN_PROGRESS", "CANCELLED", "COMPLETED", "FAILED"],
+        )?;
+        validate_optional_range_i64("limit", body["limit"].as_i64(), 1, 50)?;
+        validate_optional_string_length("nextToken", body["nextToken"].as_str(), 1, 2048)?;
         let state = self.state.read();
         let tasks: Vec<Value> = state
             .import_tasks
@@ -4739,6 +4835,9 @@ impl LogsService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = body_json(req);
         let _import_id = require_str(&body, "importId")?;
+        validate_string_length("importId", _import_id, 1, 256)?;
+        validate_optional_range_i64("limit", body["limit"].as_i64(), 1, 50)?;
+        validate_optional_string_length("nextToken", body["nextToken"].as_str(), 1, 2048)?;
         // Stub: return empty batches
         Ok(AwsResponse::json(
             StatusCode::OK,
@@ -4768,8 +4867,11 @@ impl LogsService {
 
     fn put_integration(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = body_json(req);
+        validate_required("resourceConfig", &body["resourceConfig"])?;
         let integration_name = require_str(&body, "integrationName")?;
+        validate_string_length("integrationName", integration_name, 1, 50)?;
         let integration_type = require_str(&body, "integrationType")?;
+        validate_enum("integrationType", integration_type, &["OPENSEARCH"])?;
         let resource_config = body["resourceConfig"].clone();
 
         let now = Utc::now().timestamp_millis();
@@ -4822,13 +4924,27 @@ impl LogsService {
     fn delete_integration(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = body_json(req);
         let integration_name = require_str(&body, "integrationName")?;
+        validate_string_length("integrationName", integration_name, 1, 50)?;
 
         let mut state = self.state.write();
         state.integrations.remove(integration_name);
         Ok(AwsResponse::json(StatusCode::OK, "{}"))
     }
 
-    fn list_integrations(&self, _req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+    fn list_integrations(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = body_json(req);
+        validate_optional_string_length(
+            "integrationNamePrefix",
+            body["integrationNamePrefix"].as_str(),
+            1,
+            50,
+        )?;
+        validate_optional_enum_value("integrationType", &body["integrationType"], &["OPENSEARCH"])?;
+        validate_optional_enum_value(
+            "integrationStatus",
+            &body["integrationStatus"],
+            &["PROVISIONING", "ACTIVE", "FAILED"],
+        )?;
         let state = self.state.read();
         let integrations: Vec<Value> = state
             .integrations
@@ -4852,7 +4968,11 @@ impl LogsService {
     fn create_lookup_table(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = body_json(req);
         let lookup_table_name = require_str(&body, "lookupTableName")?;
+        validate_string_length("lookupTableName", lookup_table_name, 1, 256)?;
+        validate_optional_string_length("description", body["description"].as_str(), 0, 1024)?;
         let table_body = require_str(&body, "tableBody")?;
+        validate_string_length("tableBody", table_body, 1, 10485760)?;
+        validate_optional_string_length("kmsKeyId", body["kmsKeyId"].as_str(), 0, 256)?;
 
         let state_r = self.state.read();
         let account_id = state_r.account_id.clone();
@@ -4904,7 +5024,17 @@ impl LogsService {
         }
     }
 
-    fn describe_lookup_tables(&self, _req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+    fn describe_lookup_tables(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = body_json(req);
+        validate_optional_string_length(
+            "lookupTableNamePrefix",
+            body["lookupTableNamePrefix"].as_str(),
+            1,
+            256,
+        )?;
+        validate_optional_range_i64("maxResults", body["maxResults"].as_i64(), 1, 100)?;
+        validate_optional_string_length("nextToken", body["nextToken"].as_str(), 1, 2048)?;
+
         let state = self.state.read();
         let tables: Vec<Value> = state
             .lookup_tables
@@ -4913,8 +5043,7 @@ impl LogsService {
                 json!({
                     "lookupTableName": t.lookup_table_name,
                     "lookupTableArn": t.arn,
-                    "creationTime": t.creation_time,
-                    "lastModifiedTime": t.last_modified_time,
+                    "lastUpdatedTime": t.last_modified_time,
                 })
             })
             .collect();
@@ -4958,10 +5087,30 @@ impl LogsService {
     fn create_scheduled_query(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = body_json(req);
         let name = require_str(&body, "name")?;
+        validate_string_length("name", name, 1, 255)?;
+        validate_optional_string_length("description", body["description"].as_str(), 0, 1024)?;
         let query_string = require_str(&body, "queryString")?;
+        validate_string_length("queryString", query_string, 0, 10000)?;
         let query_language = require_str(&body, "queryLanguage")?;
+        validate_enum("queryLanguage", query_language, &["CWLI", "SQL", "PPL"])?;
         let schedule_expression = require_str(&body, "scheduleExpression")?;
+        validate_string_length("scheduleExpression", schedule_expression, 0, 256)?;
         let execution_role_arn = require_str(&body, "executionRoleArn")?;
+        validate_string_length("executionRoleArn", execution_role_arn, 1, 2048)?;
+        validate_optional_string_length("timezone", body["timezone"].as_str(), 1, 2048)?;
+        validate_optional_range_i64(
+            "scheduleStartTime",
+            body["scheduleStartTime"].as_i64(),
+            0,
+            i64::MAX,
+        )?;
+        validate_optional_range_i64(
+            "scheduleEndTime",
+            body["scheduleEndTime"].as_i64(),
+            0,
+            i64::MAX,
+        )?;
+        validate_optional_enum_value("state", &body["state"], &["ENABLED", "DISABLED"])?;
 
         let state_r = self.state.read();
         let account_id = state_r.account_id.clone();
@@ -5024,6 +5173,12 @@ impl LogsService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = body_json(req);
         let _identifier = require_str(&body, "identifier")?;
+        validate_required("startTime", &body["startTime"])?;
+        validate_required("endTime", &body["endTime"])?;
+        validate_optional_range_i64("startTime", body["startTime"].as_i64(), 0, i64::MAX)?;
+        validate_optional_range_i64("endTime", body["endTime"].as_i64(), 0, i64::MAX)?;
+        validate_optional_range_i64("maxResults", body["maxResults"].as_i64(), 1, 1000)?;
+        validate_optional_string_length("nextToken", body["nextToken"].as_str(), 1, 2048)?;
         // Stub: return empty history
         Ok(AwsResponse::json(
             StatusCode::OK,
@@ -5031,7 +5186,11 @@ impl LogsService {
         ))
     }
 
-    fn list_scheduled_queries(&self, _req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+    fn list_scheduled_queries(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = body_json(req);
+        validate_optional_range_i64("maxResults", body["maxResults"].as_i64(), 1, 1000)?;
+        validate_optional_string_length("nextToken", body["nextToken"].as_str(), 1, 2048)?;
+        validate_optional_enum_value("state", &body["state"], &["ENABLED", "DISABLED"])?;
         let state = self.state.read();
         let queries: Vec<Value> = state
             .scheduled_queries
@@ -5086,7 +5245,15 @@ impl LogsService {
 
     // -- Misc stubs --
 
-    fn start_live_tail(&self, _req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+    fn start_live_tail(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = body_json(req);
+        validate_required("logGroupIdentifiers", &body["logGroupIdentifiers"])?;
+        validate_optional_string_length(
+            "logEventFilterPattern",
+            body["logEventFilterPattern"].as_str(),
+            0,
+            1024,
+        )?;
         let session_id = uuid::Uuid::new_v4().to_string();
         Ok(AwsResponse::json(
             StatusCode::OK,
@@ -5102,9 +5269,78 @@ impl LogsService {
         ))
     }
 
+    fn list_log_groups(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = body_json(req);
+        let pattern = body["logGroupNamePattern"].as_str().unwrap_or("");
+        let limit = body["limit"].as_i64().unwrap_or(50) as usize;
+        let next_token = body["nextToken"].as_str();
+
+        validate_optional_string_length(
+            "logGroupNamePattern",
+            body["logGroupNamePattern"].as_str(),
+            3,
+            129,
+        )?;
+        validate_optional_range_i64("limit", body["limit"].as_i64(), 1, 1000)?;
+        validate_optional_string_length("nextToken", body["nextToken"].as_str(), 1, 2048)?;
+        validate_optional_enum_value(
+            "logGroupClass",
+            &body["logGroupClass"],
+            &["STANDARD", "INFREQUENT_ACCESS", "DELIVERY"],
+        )?;
+
+        let state = self.state.read();
+        let mut groups: Vec<&LogGroup> = state
+            .log_groups
+            .values()
+            .filter(|g| pattern.is_empty() || g.name.contains(pattern))
+            .collect();
+        groups.sort_by(|a, b| a.name.cmp(&b.name));
+
+        let start_idx = if let Some(token) = next_token {
+            groups
+                .iter()
+                .position(|g| g.name.as_str() > token)
+                .unwrap_or(groups.len())
+        } else {
+            0
+        };
+
+        let page = &groups[start_idx..];
+        let has_more = page.len() > limit;
+        let page = if has_more { &page[..limit] } else { page };
+
+        let log_groups: Vec<Value> = page
+            .iter()
+            .map(|g| {
+                let log_group_arn = g.arn.trim_end_matches(":*").to_string();
+                json!({
+                    "logGroupName": g.name,
+                    "logGroupArn": log_group_arn,
+                    "logGroupClass": "STANDARD",
+                })
+            })
+            .collect();
+
+        let mut result = json!({ "logGroups": log_groups });
+        if has_more {
+            if let Some(last) = page.last() {
+                result["nextToken"] = json!(last.name);
+            }
+        }
+
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            serde_json::to_string(&result).unwrap(),
+        ))
+    }
+
     fn list_log_groups_for_query(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = body_json(req);
         let _query_id = require_str(&body, "queryId")?;
+        validate_string_length("queryId", _query_id, 1, 256)?;
+        validate_optional_range_i64("maxResults", body["maxResults"].as_i64(), 50, 500)?;
+        validate_optional_string_length("nextToken", body["nextToken"].as_str(), 1, 2048)?;
         // Stub: return empty log group names
         Ok(AwsResponse::json(
             StatusCode::OK,
@@ -5114,8 +5350,31 @@ impl LogsService {
 
     fn list_aggregate_log_group_summaries(
         &self,
-        _req: &AwsRequest,
+        req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
+        let body = body_json(req);
+        validate_required("groupBy", &body["groupBy"])?;
+        validate_enum(
+            "groupBy",
+            body["groupBy"].as_str().unwrap_or(""),
+            &[
+                "DATA_SOURCE_NAME_TYPE_AND_FORMAT",
+                "DATA_SOURCE_NAME_AND_TYPE",
+            ],
+        )?;
+        validate_optional_enum_value(
+            "logGroupClass",
+            &body["logGroupClass"],
+            &["STANDARD", "INFREQUENT_ACCESS", "DELIVERY"],
+        )?;
+        validate_optional_string_length(
+            "logGroupNamePattern",
+            body["logGroupNamePattern"].as_str(),
+            3,
+            129,
+        )?;
+        validate_optional_string_length("nextToken", body["nextToken"].as_str(), 1, 2048)?;
+        validate_optional_range_i64("limit", body["limit"].as_i64(), 1, 50)?;
         // Stub: return empty summaries
         Ok(AwsResponse::json(
             StatusCode::OK,
@@ -5128,7 +5387,12 @@ impl LogsService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = body_json(req);
+        validate_required(
+            "bearerTokenAuthenticationEnabled",
+            &body["bearerTokenAuthenticationEnabled"],
+        )?;
         let log_group_identifier = require_str(&body, "logGroupIdentifier")?;
+        validate_string_length("logGroupIdentifier", log_group_identifier, 1, 2048)?;
         let enabled = body["bearerTokenAuthenticationEnabled"]
             .as_bool()
             .unwrap_or(false);
@@ -5140,15 +5404,23 @@ impl LogsService {
         Ok(AwsResponse::json(StatusCode::OK, "{}"))
     }
 
-    fn get_log_object(&self, _req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        // Stub: return empty log object
-        Ok(AwsResponse::json(
-            StatusCode::OK,
-            serde_json::to_string(&json!({ "logObject": {} })).unwrap(),
-        ))
+    fn get_log_object(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = body_json(req);
+        validate_required("logObjectPointer", &body["logObjectPointer"])?;
+        validate_string_length(
+            "logObjectPointer",
+            body["logObjectPointer"].as_str().unwrap_or(""),
+            1,
+            512,
+        )?;
+        // Stub: return empty response (fieldStream is a streaming union, omit when empty)
+        Ok(AwsResponse::json(StatusCode::OK, "{}"))
     }
 
-    fn get_log_fields(&self, _req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+    fn get_log_fields(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = body_json(req);
+        validate_required("dataSourceName", &body["dataSourceName"])?;
+        validate_required("dataSourceType", &body["dataSourceType"])?;
         // Stub: return empty log fields
         Ok(AwsResponse::json(
             StatusCode::OK,
@@ -5161,6 +5433,7 @@ impl LogsService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = body_json(req);
+        validate_required("dataSource", &body["dataSource"])?;
         let integration_arn = require_str(&body, "integrationArn")?;
         let data_source = body["dataSource"].clone();
         let source_id = data_source
@@ -5185,21 +5458,18 @@ impl LogsService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = body_json(req);
         let integration_arn = require_str(&body, "integrationArn")?;
+        validate_optional_range_i64("maxResults", body["maxResults"].as_i64(), 1, 100)?;
+        validate_optional_string_length("nextToken", body["nextToken"].as_str(), 1, 2048)?;
 
         let state = self.state.read();
         let sources: Vec<Value> = state
             .s3_table_sources
             .get(integration_arn)
-            .map(|sources| {
-                sources
-                    .iter()
-                    .map(|s| json!({ "resourceArn": s }))
-                    .collect()
-            })
+            .map(|sources| sources.iter().map(|s| json!({ "identifier": s })).collect())
             .unwrap_or_default();
         Ok(AwsResponse::json(
             StatusCode::OK,
-            serde_json::to_string(&json!({ "dataSources": sources })).unwrap(),
+            serde_json::to_string(&json!({ "sources": sources })).unwrap(),
         ))
     }
 
@@ -5209,6 +5479,7 @@ impl LogsService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = body_json(req);
         let _identifier = require_str(&body, "identifier")?;
+        validate_string_length("identifier", _identifier, 1, 2048)?;
         // No-op stub (we don't track detailed enough to remove specific sources)
         Ok(AwsResponse::json(StatusCode::OK, "{}"))
     }
@@ -5236,8 +5507,12 @@ impl LogsService {
 
     fn describe_configuration_templates(
         &self,
-        _req: &AwsRequest,
+        req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
+        let body = body_json(req);
+        validate_optional_string_length("service", body["service"].as_str(), 1, 255)?;
+        validate_optional_string_length("nextToken", body["nextToken"].as_str(), 1, 2048)?;
+        validate_optional_range_i64("limit", body["limit"].as_i64(), 1, 50)?;
         // Stub: return empty configuration templates
         Ok(AwsResponse::json(
             StatusCode::OK,
@@ -6016,7 +6291,10 @@ mod tests {
     #[test]
     fn update_anomaly_noop() {
         let svc = make_service();
-        let req = make_request("UpdateAnomaly", json!({}));
+        let req = make_request(
+            "UpdateAnomaly",
+            json!({ "anomalyDetectorArn": "arn:aws:logs:us-east-1:123456789012:anomaly-detector:test" }),
+        );
         svc.update_anomaly(&req).unwrap();
     }
 
@@ -6244,7 +6522,7 @@ mod tests {
         let svc = make_service();
         let req = make_request(
             "ListAggregateLogGroupSummaries",
-            json!({ "groupBy": "ACCOUNT" }),
+            json!({ "groupBy": "DATA_SOURCE_NAME_AND_TYPE" }),
         );
         let resp = svc.list_aggregate_log_group_summaries(&req).unwrap();
         let body: Value = serde_json::from_slice(&resp.body).unwrap();
@@ -6277,7 +6555,7 @@ mod tests {
         );
         let resp = svc.get_log_object(&req).unwrap();
         let body: Value = serde_json::from_slice(&resp.body).unwrap();
-        assert!(body["logObject"].is_object());
+        assert!(body.is_object());
     }
 
     #[test]
@@ -6313,7 +6591,7 @@ mod tests {
         );
         let resp = svc.list_sources_for_s3_table_integration(&req).unwrap();
         let body: Value = serde_json::from_slice(&resp.body).unwrap();
-        assert_eq!(body["dataSources"].as_array().unwrap().len(), 1);
+        assert_eq!(body["sources"].as_array().unwrap().len(), 1);
 
         let req = make_request(
             "DisassociateSourceFromS3TableIntegration",
