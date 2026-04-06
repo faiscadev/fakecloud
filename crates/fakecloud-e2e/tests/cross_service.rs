@@ -1421,6 +1421,25 @@ def handler(event, context):
     // 3. Create S3 bucket
     s3.create_bucket()
         .bucket("lambda-notif-bucket")
+/// SecretsManager rotation invokes the configured Lambda function with the correct payload.
+#[tokio::test]
+async fn secretsmanager_rotation_invokes_lambda() {
+    let server = TestServer::start().await;
+    let sm = server.secretsmanager_client().await;
+    let lambda = server.lambda_client().await;
+
+    // Create a Lambda function (no real code needed -- invocation is recorded regardless)
+    lambda
+        .create_function()
+        .function_name("rotation-handler")
+        .runtime(aws_sdk_lambda::types::Runtime::Python312)
+        .role("arn:aws:iam::123456789012:role/lambda-role")
+        .handler("index.handler")
+        .code(
+            aws_sdk_lambda::types::FunctionCode::builder()
+                .zip_file(aws_sdk_lambda::primitives::Blob::new(b"fake-code"))
+                .build(),
+        )
         .send()
         .await
         .unwrap();
@@ -1451,6 +1470,10 @@ def handler(event, context):
         .bucket("lambda-notif-bucket")
         .key("test-file.txt")
         .body(ByteStream::from_static(b"hello from S3"))
+    // Create a secret
+    sm.create_secret()
+        .name("rotation-test-secret")
+        .secret_string("old-password")
         .send()
         .await
         .unwrap();
@@ -1468,6 +1491,39 @@ def handler(event, context):
             .unwrap();
         if !msgs.messages().is_empty() {
             proof_message = Some(msgs.messages()[0].body().unwrap().to_string());
+    let lambda_arn = "arn:aws:lambda:us-east-1:123456789012:function:rotation-handler";
+    let token = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+
+    // Rotate the secret with a Lambda ARN
+    let resp = sm
+        .rotate_secret()
+        .secret_id("rotation-test-secret")
+        .rotation_lambda_arn(lambda_arn)
+        .client_request_token(token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.version_id().unwrap(), token);
+
+    // Poll for all 4 rotation Lambda invocations (background task is async)
+    let expected_steps = ["createSecret", "setSecret", "testSecret", "finishSecret"];
+    let mut rotation_invocations = Vec::new();
+    for attempt in 0..10 {
+        if attempt > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+        let invocations = get_lambda_invocations(server.endpoint()).await;
+        let inv_list = invocations["invocations"].as_array().unwrap().clone();
+        rotation_invocations = inv_list
+            .into_iter()
+            .filter(|i| {
+                i["functionArn"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("rotation-handler")
+            })
+            .collect::<Vec<_>>();
+        if rotation_invocations.len() >= expected_steps.len() {
             break;
         }
     }
@@ -1486,4 +1542,47 @@ def handler(event, context):
     assert_eq!(record["eventSource"], "aws:s3");
     assert_eq!(record["s3"]["bucket"]["name"], "lambda-notif-bucket");
     assert_eq!(record["s3"]["object"]["key"], "test-file.txt");
+    assert_eq!(
+        rotation_invocations.len(),
+        expected_steps.len(),
+        "expected {} rotation Lambda invocations, got {}: {rotation_invocations:?}",
+        expected_steps.len(),
+        rotation_invocations.len(),
+    );
+
+    // Verify each rotation step was invoked in order
+    for (inv, expected_step) in rotation_invocations.iter().zip(expected_steps.iter()) {
+        let payload: serde_json::Value =
+            serde_json::from_str(inv["payload"].as_str().unwrap()).unwrap();
+        assert!(
+            payload["SecretId"]
+                .as_str()
+                .unwrap()
+                .contains("rotation-test-secret"),
+            "SecretId should contain the secret name/ARN, got: {}",
+            payload["SecretId"]
+        );
+        assert_eq!(payload["ClientRequestToken"], token);
+        assert_eq!(
+            payload["Step"], *expected_step,
+            "expected step {expected_step}, got {}",
+            payload["Step"]
+        );
+    }
+
+    // Verify the AWSPENDING version exists
+    let describe = sm
+        .describe_secret()
+        .secret_id("rotation-test-secret")
+        .send()
+        .await
+        .unwrap();
+    let stages = describe.version_ids_to_stages().unwrap();
+    let has_pending = stages
+        .values()
+        .any(|s| s.iter().any(|stage| stage.as_str() == "AWSPENDING"));
+    assert!(
+        has_pending,
+        "expected AWSPENDING version after rotation, stages: {stages:?}"
+    );
 }

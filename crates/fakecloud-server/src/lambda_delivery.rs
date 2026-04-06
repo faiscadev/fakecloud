@@ -45,9 +45,25 @@ impl LambdaDelivery for LambdaDeliveryImpl {
 
         let runtime = self.runtime.clone();
         let payload = payload.to_string();
+        let lambda_state = self.lambda_state.clone();
+        let function_arn = function_arn.to_string();
 
         Box::pin(async move {
             let func = func.ok_or_else(|| format!("Function not found: {function_name}"))?;
+
+            // Record invocation regardless of whether code exists
+            {
+                let mut state = lambda_state.write();
+                state
+                    .invocations
+                    .push(fakecloud_lambda::state::LambdaInvocation {
+                        function_arn: function_arn.clone(),
+                        payload: payload.clone(),
+                        timestamp: chrono::Utc::now(),
+                        source: "aws:lambda:delivery".to_string(),
+                    });
+            }
+
             if func.code_zip.is_none() {
                 return Err(format!(
                     "Function {function_name} has no deployment package"

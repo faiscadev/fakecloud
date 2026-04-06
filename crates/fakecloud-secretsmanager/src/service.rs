@@ -1,20 +1,39 @@
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use chrono::Utc;
 use http::StatusCode;
 use serde_json::{json, Value};
 
+use fakecloud_core::delivery::DeliveryBus;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 use fakecloud_core::validation::*;
 
 use crate::state::{RotationRules, Secret, SecretVersion, SharedSecretsManagerState};
 
+/// Information needed to invoke the rotation Lambda after releasing state lock.
+struct RotationInvocation {
+    lambda_arn: String,
+    secret_id: String,
+    client_request_token: String,
+}
+
 pub struct SecretsManagerService {
     state: SharedSecretsManagerState,
+    delivery_bus: Option<Arc<DeliveryBus>>,
 }
 
 impl SecretsManagerService {
     pub fn new(state: SharedSecretsManagerState) -> Self {
-        Self { state }
+        Self {
+            state,
+            delivery_bus: None,
+        }
+    }
+
+    pub fn with_delivery(mut self, delivery_bus: Arc<DeliveryBus>) -> Self {
+        self.delivery_bus = Some(delivery_bus);
+        self
     }
 
     fn create_secret(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
@@ -1045,7 +1064,10 @@ impl SecretsManagerService {
         Ok(AwsResponse::json(StatusCode::OK, response.to_string()))
     }
 
-    fn rotate_secret(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+    fn rotate_secret(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<(AwsResponse, Option<RotationInvocation>), AwsServiceError> {
         let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
         let secret_id = require_secret_id(&body)?;
 
@@ -1119,8 +1141,10 @@ impl SecretsManagerService {
 
         let has_lambda =
             body["RotationLambdaARN"].as_str().is_some() || secret.rotation_lambda_arn.is_some();
+        let lambda_arn = secret.rotation_lambda_arn.clone();
 
         // If the secret has a value, perform rotation
+        let mut invocation = None;
         if let Some(current_vid) = secret.current_version_id.clone() {
             let current_value = secret.versions.get(&current_vid).cloned();
 
@@ -1135,6 +1159,15 @@ impl SecretsManagerService {
                         created_at: now,
                     };
                     secret.versions.insert(version_id.clone(), version);
+
+                    // Schedule Lambda invocation
+                    if let Some(ref arn) = lambda_arn {
+                        invocation = Some(RotationInvocation {
+                            lambda_arn: arn.clone(),
+                            secret_id: secret.arn.clone(),
+                            client_request_token: version_id.clone(),
+                        });
+                    }
                 } else {
                     // Without Lambda: simple rotation - new version becomes AWSCURRENT
                     // Move old version to AWSPREVIOUS
@@ -1163,7 +1196,10 @@ impl SecretsManagerService {
             "VersionId": version_id,
         });
 
-        Ok(AwsResponse::json(StatusCode::OK, response.to_string()))
+        Ok((
+            AwsResponse::json(StatusCode::OK, response.to_string()),
+            invocation,
+        ))
     }
 
     fn cancel_rotate_secret(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
@@ -1932,7 +1968,47 @@ impl AwsService for SecretsManagerService {
             "UntagResource" => self.untag_resource(&req),
             "ListSecretVersionIds" => self.list_secret_version_ids(&req),
             "GetRandomPassword" => self.get_random_password(&req),
-            "RotateSecret" => self.rotate_secret(&req),
+            "RotateSecret" => {
+                let (response, invocation) = self.rotate_secret(&req)?;
+                if let Some(inv) = invocation {
+                    if let Some(ref bus) = self.delivery_bus {
+                        let bus = bus.clone();
+                        // AWS invokes the rotation Lambda asynchronously for each step.
+                        tokio::spawn(async move {
+                            for step in &["createSecret", "setSecret", "testSecret", "finishSecret"]
+                            {
+                                let payload = serde_json::json!({
+                                    "SecretId": inv.secret_id,
+                                    "ClientRequestToken": inv.client_request_token,
+                                    "Step": step,
+                                });
+                                let payload_str = payload.to_string();
+                                match bus.invoke_lambda(&inv.lambda_arn, &payload_str).await {
+                                    Some(Ok(_)) => {}
+                                    Some(Err(e)) => {
+                                        tracing::warn!(
+                                            step = step,
+                                            error = %e,
+                                            "rotation Lambda invocation failed"
+                                        );
+                                        break;
+                                    }
+                                    None => {
+                                        tracing::warn!(
+                                            lambda_arn = %inv.lambda_arn,
+                                            step = step,
+                                            "rotation Lambda delivery not configured; \
+                                             Lambda invocation skipped"
+                                        );
+                                        break;
+                                    }
+                                }
+                            }
+                        });
+                    }
+                }
+                Ok(response)
+            }
             "CancelRotateSecret" => self.cancel_rotate_secret(&req),
             "UpdateSecretVersionStage" => self.update_secret_version_stage(&req),
             "BatchGetSecretValue" => self.batch_get_secret_value(&req),
@@ -2324,5 +2400,74 @@ mod tests {
             Err(e) => assert!(e.to_string().contains("ValidationException")),
             Ok(_) => panic!("expected ValidationException"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_rotate_secret_with_lambda_creates_pending_version() {
+        let state = make_state();
+        let svc = SecretsManagerService::new(state.clone());
+
+        // Create a secret
+        let req = make_request(
+            "CreateSecret",
+            r#"{"Name": "rotate-me", "SecretString": "old-password"}"#,
+        );
+        svc.handle(req).await.unwrap();
+
+        // Rotate with a Lambda ARN
+        let token = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+        let body = serde_json::json!({
+            "SecretId": "rotate-me",
+            "RotationLambdaARN": "arn:aws:lambda:us-east-1:123456789012:function:rotator",
+            "ClientRequestToken": token,
+        });
+        let req = make_request("RotateSecret", &body.to_string());
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+        let resp_body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(resp_body["VersionId"], token);
+
+        // Verify AWSPENDING version exists
+        let s = state.read();
+        let secret = s.secrets.get("rotate-me").unwrap();
+        let pending = secret.versions.get(token).unwrap();
+        assert!(pending.stages.contains(&"AWSPENDING".to_string()));
+        assert_eq!(pending.secret_string.as_deref(), Some("old-password"));
+
+        // Verify rotation config was set
+        assert_eq!(
+            secret.rotation_lambda_arn.as_deref(),
+            Some("arn:aws:lambda:us-east-1:123456789012:function:rotator")
+        );
+        assert_eq!(secret.rotation_enabled, Some(true));
+    }
+
+    #[tokio::test]
+    async fn test_rotate_secret_without_lambda_promotes_directly() {
+        let state = make_state();
+        let svc = SecretsManagerService::new(state.clone());
+
+        // Create a secret
+        let req = make_request(
+            "CreateSecret",
+            r#"{"Name": "rotate-no-lambda", "SecretString": "value1"}"#,
+        );
+        svc.handle(req).await.unwrap();
+
+        // Rotate without Lambda ARN
+        let token = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+        let body = serde_json::json!({
+            "SecretId": "rotate-no-lambda",
+            "ClientRequestToken": token,
+        });
+        let req = make_request("RotateSecret", &body.to_string());
+        svc.handle(req).await.unwrap();
+
+        // Verify the new version is AWSCURRENT (no pending)
+        let s = state.read();
+        let secret = s.secrets.get("rotate-no-lambda").unwrap();
+        let new_ver = secret.versions.get(token).unwrap();
+        assert!(new_ver.stages.contains(&"AWSCURRENT".to_string()));
+        assert_eq!(secret.current_version_id.as_deref(), Some(token));
     }
 }

@@ -226,7 +226,17 @@ async fn main() {
         lambda_service = lambda_service.with_runtime(rt.clone());
     }
     registry.register(Arc::new(lambda_service));
-    registry.register(Arc::new(SecretsManagerService::new(secretsmanager_state)));
+    // SecretsManager delivery bus (rotation Lambda invocation)
+    let delivery_for_secretsmanager = {
+        let mut bus = DeliveryBus::new();
+        if let Some(ref ld) = lambda_delivery {
+            bus = bus.with_lambda(ld.clone());
+        }
+        Arc::new(bus)
+    };
+    registry.register(Arc::new(
+        SecretsManagerService::new(secretsmanager_state).with_delivery(delivery_for_secretsmanager),
+    ));
     registry.register(Arc::new(LogsService::new(logs_state, delivery_for_logs)));
     registry.register(Arc::new(KmsService::new(kms_state.clone())));
     registry.register(Arc::new(
