@@ -992,3 +992,93 @@ async fn kms_replicate_key() {
         .send()
         .await;
 }
+
+#[test_action("kms", "GenerateDataKeyPair", checksum = "abecf576")]
+#[tokio::test]
+async fn kms_generate_data_key_pair() {
+    let server = TestServer::start().await;
+    let client = server.kms_client().await;
+    let key = client.create_key().send().await.unwrap();
+    let key_id = key.key_metadata().unwrap().key_id();
+    let result = client
+        .generate_data_key_pair()
+        .key_id(key_id)
+        .key_pair_spec(aws_sdk_kms::types::DataKeyPairSpec::Rsa2048)
+        .send()
+        .await
+        .unwrap();
+    assert!(result.public_key().is_some());
+}
+
+#[test_action("kms", "GenerateDataKeyPairWithoutPlaintext", checksum = "77bf6cb6")]
+#[tokio::test]
+async fn kms_generate_data_key_pair_without_plaintext() {
+    let server = TestServer::start().await;
+    let client = server.kms_client().await;
+    let key = client.create_key().send().await.unwrap();
+    let key_id = key.key_metadata().unwrap().key_id();
+    let result = client
+        .generate_data_key_pair_without_plaintext()
+        .key_id(key_id)
+        .key_pair_spec(aws_sdk_kms::types::DataKeyPairSpec::Rsa2048)
+        .send()
+        .await
+        .unwrap();
+    assert!(result.public_key().is_some());
+}
+
+#[test_action("kms", "DeriveSharedSecret", checksum = "5bccf034")]
+#[test_action("kms", "GetParametersForImport", checksum = "bb7096f5")]
+#[test_action("kms", "ImportKeyMaterial", checksum = "02aaa90d")]
+#[test_action("kms", "DeleteImportedKeyMaterial", checksum = "5f65bfcd")]
+#[tokio::test]
+async fn kms_import_key_material_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.kms_client().await;
+    let key = client
+        .create_key()
+        .origin(aws_sdk_kms::types::OriginType::External)
+        .send()
+        .await
+        .unwrap();
+    let key_id = key.key_metadata().unwrap().key_id();
+    let params = client
+        .get_parameters_for_import()
+        .key_id(key_id)
+        .wrapping_algorithm(aws_sdk_kms::types::AlgorithmSpec::RsaesOaepSha256)
+        .wrapping_key_spec(aws_sdk_kms::types::WrappingKeySpec::Rsa2048)
+        .send()
+        .await
+        .unwrap();
+    assert!(params.import_token().is_some());
+    let _ = client
+        .import_key_material()
+        .key_id(key_id)
+        .import_token(aws_sdk_kms::primitives::Blob::new(b"token"))
+        .encrypted_key_material(aws_sdk_kms::primitives::Blob::new(b"material"))
+        .send()
+        .await
+        .unwrap();
+    client
+        .delete_imported_key_material()
+        .key_id(key_id)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("kms", "UpdatePrimaryRegion", checksum = "01b38fd1")]
+#[tokio::test]
+async fn kms_update_primary_region() {
+    let server = TestServer::start().await;
+    let client = server.kms_client().await;
+    let key = client.create_key().send().await.unwrap();
+    let key_id = key.key_metadata().unwrap().key_id();
+    client
+        .update_primary_region()
+        .key_id(key_id)
+        .primary_region("us-west-2")
+        .send()
+        .await
+        .unwrap();
+}
