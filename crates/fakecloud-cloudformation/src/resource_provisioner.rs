@@ -629,6 +629,9 @@ impl ResourceProvisioner {
             ttl_attribute: None,
             ttl_enabled: false,
             resource_policy: None,
+            pitr_enabled: false,
+            kinesis_destinations: Vec::new(),
+            contributor_insights_status: "DISABLED".to_string(),
         };
 
         state.tables.insert(table_name.to_string(), table);
