@@ -638,22 +638,7 @@ mod tests {
         let path = models_dir().join("dynamodb.json");
         let model = parse_model(&path).unwrap();
 
-        // DynamoDB should have operations with examples
-        let _ops_with_examples: Vec<_> = model
-            .operations
-            .iter()
-            .filter(|op| {
-                if let Some(shape) = model
-                    .shapes
-                    .get(&format!("com.amazonaws.dynamodb#{}", op.name))
-                {
-                    !shape.traits.examples.is_empty()
-                } else {
-                    false
-                }
-            })
-            .collect();
-        // Examples are on operation shapes
+        // DynamoDB should have operation shapes with examples
         let op_shapes_with_examples: Vec<_> = model
             .shapes
             .iter()
