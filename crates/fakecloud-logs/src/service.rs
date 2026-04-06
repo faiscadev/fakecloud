@@ -1,8 +1,16 @@
 use async_trait::async_trait;
+use base64::Engine;
 use chrono::Utc;
+use flate2::write::GzEncoder;
+use flate2::Compression;
 use http::StatusCode;
 use serde_json::{json, Value};
 
+use std::collections::HashMap;
+use std::io::Write;
+use std::sync::Arc;
+
+use fakecloud_core::delivery::DeliveryBus;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 use fakecloud_core::validation::*;
 
@@ -15,11 +23,15 @@ use crate::state::{
 
 pub struct LogsService {
     state: SharedLogsState,
+    delivery_bus: Arc<DeliveryBus>,
 }
 
 impl LogsService {
-    pub fn new(state: SharedLogsState) -> Self {
-        Self { state }
+    pub fn new(state: SharedLogsState, delivery_bus: Arc<DeliveryBus>) -> Self {
+        Self {
+            state,
+            delivery_bus,
+        }
     }
 }
 
@@ -884,11 +896,75 @@ impl LogsService {
         // Generate new sequence token
         stream.upload_sequence_token = generate_sequence_token();
 
+        let accepted_events: Vec<LogEvent> = new_events.clone();
         stream.events.append(&mut new_events);
         stream.events.sort_by_key(|e| e.timestamp);
 
+        let sequence_token = stream.upload_sequence_token.clone();
+
+        // Collect subscription filter info for delivery (while we hold the lock)
+        let filters_to_deliver: Vec<(String, String, String)> = group
+            .subscription_filters
+            .iter()
+            .map(|f| {
+                (
+                    f.filter_name.clone(),
+                    f.filter_pattern.clone(),
+                    f.destination_arn.clone(),
+                )
+            })
+            .collect();
+        let group_name_owned = group_name.to_string();
+        let stream_name_owned = stream_name.to_string();
+        drop(state);
+
+        // Deliver to subscription filter destinations
+        if !filters_to_deliver.is_empty() && !accepted_events.is_empty() {
+            for (filter_name, filter_pattern, destination_arn) in &filters_to_deliver {
+                let matching_events: Vec<&LogEvent> = accepted_events
+                    .iter()
+                    .filter(|e| matches_filter_pattern(filter_pattern, &e.message))
+                    .collect();
+
+                if matching_events.is_empty() {
+                    continue;
+                }
+
+                let log_events_json: Vec<Value> = matching_events
+                    .iter()
+                    .enumerate()
+                    .map(|(i, e)| {
+                        json!({
+                            "id": format!("{:032}", i),
+                            "timestamp": e.timestamp,
+                            "message": e.message,
+                        })
+                    })
+                    .collect();
+
+                let payload = json!({
+                    "messageType": "DATA_MESSAGE",
+                    "owner": "123456789012",
+                    "logGroup": group_name_owned,
+                    "logStream": stream_name_owned,
+                    "subscriptionFilters": [filter_name],
+                    "logEvents": log_events_json,
+                });
+
+                let payload_str = serde_json::to_string(&payload).unwrap();
+                let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+                encoder.write_all(payload_str.as_bytes()).unwrap();
+                let compressed = encoder.finish().unwrap();
+                let encoded =
+                    base64::engine::general_purpose::STANDARD.encode(&compressed);
+
+                self.delivery_bus
+                    .send_to_sqs(destination_arn, &encoded, &HashMap::new());
+            }
+        }
+
         let mut response = json!({
-            "nextSequenceToken": stream.upload_sequence_token,
+            "nextSequenceToken": sequence_token,
         });
         if has_rejected {
             response["rejectedLogEventsInfo"] = rejected_info;
@@ -5817,7 +5893,8 @@ mod tests {
             "123456789012",
             "us-east-1",
         )));
-        LogsService::new(state)
+        let delivery_bus = Arc::new(DeliveryBus::new());
+        LogsService::new(state, delivery_bus)
     }
 
     fn make_request(action: &str, body: Value) -> AwsRequest {
