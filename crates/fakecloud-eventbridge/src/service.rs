@@ -3705,7 +3705,10 @@ mod tests {
         );
         let resp = svc.put_events(&req).unwrap();
         let body: Value = serde_json::from_slice(&resp.body).unwrap();
-        assert!(body["EndpointId"].is_null());
+        assert!(
+            !body.as_object().unwrap().contains_key("EndpointId"),
+            "EndpointId should be omitted when not provided"
+        );
     }
 
     // -- ListArchives pagination tests --

@@ -2516,17 +2516,8 @@ impl SsmService {
         if let Some(ref p) = output_s3_prefix {
             cmd_obj["OutputS3KeyPrefix"] = json!(p);
         }
-        if let Some(ref s) = service_role {
-            cmd_obj["ServiceRoleArn"] = json!(s);
-        }
         if let Some(t) = timeout {
             cmd_obj["TimeoutSeconds"] = json!(t);
-        }
-        if let Some(ref dh) = document_hash {
-            cmd_obj["DocumentHash"] = json!(dh);
-        }
-        if let Some(ref dht) = document_hash_type {
-            cmd_obj["DocumentHashType"] = json!(dht);
         }
 
         Ok(json_resp(json!({ "Command": cmd_obj })))
@@ -2564,7 +2555,7 @@ impl SsmService {
             .map(|c| {
                 let expires = c.requested_date_time
                     + chrono::Duration::seconds(c.timeout_seconds.unwrap_or(3600));
-                let mut v = json!({
+                let v = json!({
                     "CommandId": c.command_id,
                     "DocumentName": c.document_name,
                     "InstanceIds": c.instance_ids,
@@ -2580,12 +2571,6 @@ impl SsmService {
                     "OutputS3KeyPrefix": c.output_s3_key_prefix,
                     "DeliveryTimedOutCount": 0,
                 });
-                if let Some(ref dh) = c.document_hash {
-                    v["DocumentHash"] = json!(dh);
-                }
-                if let Some(ref dht) = c.document_hash_type {
-                    v["DocumentHashType"] = json!(dht);
-                }
                 v
             })
             .collect();
@@ -4546,6 +4531,54 @@ mod tests {
         let body: Value = serde_json::from_slice(&resp.body).unwrap();
         assert_eq!(body["Commands"].as_array().unwrap().len(), 1);
         assert!(body.get("NextToken").is_none() || body["NextToken"].is_null());
+    }
+
+    #[test]
+    fn send_command_response_omits_non_shape_fields() {
+        let svc = make_service();
+
+        // Create a document first
+        let req = make_request(
+            "CreateDocument",
+            json!({
+                "Name": "TestDoc",
+                "Content": "{\"schemaVersion\":\"2.2\",\"mainSteps\":[]}",
+                "DocumentType": "Command"
+            }),
+        );
+        svc.create_document(&req).unwrap();
+
+        let req = make_request(
+            "SendCommand",
+            json!({
+                "DocumentName": "TestDoc",
+                "InstanceIds": ["i-1234567890abcdef0"],
+                "DocumentHash": "abc123hash",
+                "DocumentHashType": "Sha256",
+                "ServiceRoleArn": "arn:aws:iam::123456789012:role/MyRole"
+            }),
+        );
+        let resp = svc.send_command(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let cmd = &body["Command"];
+
+        // These fields are not part of the Smithy Command output shape
+        assert!(
+            !cmd.as_object().unwrap().contains_key("DocumentHash"),
+            "DocumentHash should not be in SendCommand response"
+        );
+        assert!(
+            !cmd.as_object().unwrap().contains_key("DocumentHashType"),
+            "DocumentHashType should not be in SendCommand response"
+        );
+        assert!(
+            !cmd.as_object().unwrap().contains_key("ServiceRoleArn"),
+            "ServiceRoleArn should not be in SendCommand response"
+        );
+
+        // Ensure expected fields are still present
+        assert!(cmd["CommandId"].is_string());
+        assert_eq!(cmd["DocumentName"].as_str().unwrap(), "TestDoc");
     }
 
     #[test]
