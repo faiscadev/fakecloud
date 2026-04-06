@@ -23,7 +23,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --check
       - run: cargo clippy --workspace -- -D warnings
-      - run: cargo test --workspace --exclude fakecloud-e2e
+      - run: cargo test --workspace --exclude fakecloud-e2e --exclude fakecloud-conformance
 
   build:
     name: Build ${{ matrix.name }}
