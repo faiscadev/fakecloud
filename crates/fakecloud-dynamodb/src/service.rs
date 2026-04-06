@@ -362,24 +362,24 @@ impl DynamoDbService {
     fn delete_item(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = Self::parse_body(req)?;
 
-        validate_optional_enum(
+        validate_optional_enum_value(
             "conditionalOperator",
-            body["ConditionalOperator"].as_str(),
+            &body["ConditionalOperator"],
             &["AND", "OR"],
         )?;
-        validate_optional_enum(
+        validate_optional_enum_value(
             "returnConsumedCapacity",
-            body["ReturnConsumedCapacity"].as_str(),
+            &body["ReturnConsumedCapacity"],
             &["INDEXES", "TOTAL", "NONE"],
         )?;
-        validate_optional_enum(
+        validate_optional_enum_value(
             "returnValues",
-            body["ReturnValues"].as_str(),
+            &body["ReturnValues"],
             &["NONE", "ALL_OLD", "UPDATED_OLD", "ALL_NEW", "UPDATED_NEW"],
         )?;
-        validate_optional_enum(
+        validate_optional_enum_value(
             "returnItemCollectionMetrics",
-            body["ReturnItemCollectionMetrics"].as_str(),
+            &body["ReturnItemCollectionMetrics"],
             &["SIZE", "NONE"],
         )?;
 
@@ -649,9 +649,9 @@ impl DynamoDbService {
     fn batch_get_item(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = Self::parse_body(req)?;
 
-        validate_optional_enum(
+        validate_optional_enum_value(
             "returnConsumedCapacity",
-            body["ReturnConsumedCapacity"].as_str(),
+            &body["ReturnConsumedCapacity"],
             &["INDEXES", "TOTAL", "NONE"],
         )?;
 
@@ -699,14 +699,14 @@ impl DynamoDbService {
     fn batch_write_item(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = Self::parse_body(req)?;
 
-        validate_optional_enum(
+        validate_optional_enum_value(
             "returnConsumedCapacity",
-            body["ReturnConsumedCapacity"].as_str(),
+            &body["ReturnConsumedCapacity"],
             &["INDEXES", "TOTAL", "NONE"],
         )?;
-        validate_optional_enum(
+        validate_optional_enum_value(
             "returnItemCollectionMetrics",
-            body["ReturnItemCollectionMetrics"].as_str(),
+            &body["ReturnItemCollectionMetrics"],
             &["SIZE", "NONE"],
         )?;
 

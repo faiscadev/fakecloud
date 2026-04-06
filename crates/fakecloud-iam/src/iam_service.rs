@@ -3,6 +3,9 @@ use chrono::Utc;
 use http::StatusCode;
 
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
+// NOTE: The shared validation helpers use ValidationException error codes, but real IAM
+// typically returns InvalidInput or ValidationError for input validation failures. This is
+// a known simplification — the validators are reused across services for consistency.
 use fakecloud_core::validation::*;
 
 use crate::policy_validation::validate_policy_document;
@@ -798,7 +801,7 @@ impl IamService {
 
     fn delete_user(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let user_name = required_param(&req.query_params, "UserName")?;
-        validate_string_length("userName", &user_name, 1, 128)?;
+        validate_string_length("userName", &user_name, 1, 64)?;
         let mut state = self.state.write();
 
         if !state.users.contains_key(&user_name) {
@@ -888,7 +891,7 @@ impl IamService {
 
     fn update_user(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let user_name = required_param(&req.query_params, "UserName")?;
-        validate_string_length("userName", &user_name, 1, 128)?;
+        validate_string_length("userName", &user_name, 1, 64)?;
         let new_path = req.query_params.get("NewPath").cloned();
         let new_user_name = req.query_params.get("NewUserName").cloned();
 
@@ -964,7 +967,7 @@ impl IamService {
 
     fn tag_user(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let user_name = required_param(&req.query_params, "UserName")?;
-        validate_string_length("userName", &user_name, 1, 128)?;
+        validate_string_length("userName", &user_name, 1, 64)?;
         let new_tags = parse_tags(&req.query_params);
         let mut state = self.state.write();
 
@@ -990,7 +993,7 @@ impl IamService {
 
     fn untag_user(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let user_name = required_param(&req.query_params, "UserName")?;
-        validate_string_length("userName", &user_name, 1, 128)?;
+        validate_string_length("userName", &user_name, 1, 64)?;
         let tag_keys = parse_tag_keys(&req.query_params);
         let mut state = self.state.write();
 
@@ -1010,7 +1013,7 @@ impl IamService {
 
     fn list_user_tags(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let user_name = required_param(&req.query_params, "UserName")?;
-        validate_string_length("userName", &user_name, 1, 128)?;
+        validate_string_length("userName", &user_name, 1, 64)?;
         let state = self.state.read();
 
         let user = state.users.get(&user_name).ok_or_else(|| {

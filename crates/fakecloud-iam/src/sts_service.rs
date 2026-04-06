@@ -142,9 +142,18 @@ impl StsService {
 
         // Validate optional DurationSeconds
         if let Some(ds) = req.query_params.get("DurationSeconds") {
-            if let Ok(v) = ds.parse::<i64>() {
-                validate_range_i64("durationSeconds", v, 900, 43200)?;
-            }
+            let v = ds.parse::<i64>().map_err(|_| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationError",
+                    format!(
+                        "Value '{}' at 'durationSeconds' failed to satisfy constraint: \
+                         Member must be a valid integer",
+                        ds
+                    ),
+                )
+            })?;
+            validate_range_i64("durationSeconds", v, 900, 43200)?;
         }
 
         // Validate optional SerialNumber
@@ -242,9 +251,18 @@ impl StsService {
 
         // Validate optional DurationSeconds
         if let Some(ds) = req.query_params.get("DurationSeconds") {
-            if let Ok(v) = ds.parse::<i64>() {
-                validate_range_i64("durationSeconds", v, 900, 43200)?;
-            }
+            let v = ds.parse::<i64>().map_err(|_| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationError",
+                    format!(
+                        "Value '{}' at 'durationSeconds' failed to satisfy constraint: \
+                         Member must be a valid integer",
+                        ds
+                    ),
+                )
+            })?;
+            validate_range_i64("durationSeconds", v, 900, 43200)?;
         }
 
         let partition = partition_for_region(&req.region);
@@ -315,9 +333,18 @@ impl StsService {
 
         // Validate optional DurationSeconds
         if let Some(ds) = req.query_params.get("DurationSeconds") {
-            if let Ok(v) = ds.parse::<i64>() {
-                validate_range_i64("durationSeconds", v, 900, 43200)?;
-            }
+            let v = ds.parse::<i64>().map_err(|_| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationError",
+                    format!(
+                        "Value '{}' at 'durationSeconds' failed to satisfy constraint: \
+                         Member must be a valid integer",
+                        ds
+                    ),
+                )
+            })?;
+            validate_range_i64("durationSeconds", v, 900, 43200)?;
         }
 
         // Decode the SAML assertion to extract the RoleSessionName
@@ -363,9 +390,18 @@ impl StsService {
     fn get_session_token(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         // Validate optional DurationSeconds
         if let Some(ds) = req.query_params.get("DurationSeconds") {
-            if let Ok(v) = ds.parse::<i64>() {
-                validate_range_i64("durationSeconds", v, 900, 129600)?;
-            }
+            let v = ds.parse::<i64>().map_err(|_| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationError",
+                    format!(
+                        "Value '{}' at 'durationSeconds' failed to satisfy constraint: \
+                         Member must be a valid integer",
+                        ds
+                    ),
+                )
+            })?;
+            validate_range_i64("durationSeconds", v, 900, 129600)?;
         }
 
         // Validate optional SerialNumber
@@ -400,9 +436,18 @@ impl StsService {
 
         // Validate optional DurationSeconds
         if let Some(ds) = req.query_params.get("DurationSeconds") {
-            if let Ok(v) = ds.parse::<i64>() {
-                validate_range_i64("durationSeconds", v, 900, 129600)?;
-            }
+            let v = ds.parse::<i64>().map_err(|_| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationError",
+                    format!(
+                        "Value '{}' at 'durationSeconds' failed to satisfy constraint: \
+                         Member must be a valid integer",
+                        ds
+                    ),
+                )
+            })?;
+            validate_range_i64("durationSeconds", v, 900, 129600)?;
         }
 
         // Validate policy length if provided

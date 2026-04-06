@@ -1066,6 +1066,13 @@ impl KmsService {
     fn list_aliases(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = body_json(req);
 
+        if !body["KeyId"].is_null() && !body["KeyId"].is_string() {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ValidationException",
+                "KeyId must be a string",
+            ));
+        }
         validate_optional_string_length("keyId", body["KeyId"].as_str(), 1, 2048)?;
 
         let key_id_filter = body["KeyId"].as_str();
@@ -1755,9 +1762,14 @@ impl KmsService {
         let body = body_json(req);
 
         validate_required("RetiringPrincipal", &body["RetiringPrincipal"])?;
+        let retiring_principal = body["RetiringPrincipal"].as_str().ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ValidationException",
+                "RetiringPrincipal must be a string",
+            )
+        })?;
         validate_optional_range_i64("limit", body["Limit"].as_i64(), 1, 1000)?;
-
-        let retiring_principal = body["RetiringPrincipal"].as_str().unwrap_or("");
 
         let state = self.state.read();
         let grants: Vec<Value> = state

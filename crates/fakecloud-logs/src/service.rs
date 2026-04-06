@@ -1989,6 +1989,13 @@ impl LogsService {
         let body = body_json(req);
         let prefix = body["DestinationNamePrefix"].as_str().unwrap_or("");
 
+        validate_optional_string_length(
+            "DestinationNamePrefix",
+            body["DestinationNamePrefix"].as_str(),
+            1,
+            512,
+        )?;
+
         let state = self.state.read();
         let destinations: Vec<Value> = state
             .destinations
@@ -2474,11 +2481,14 @@ impl LogsService {
 
         state.delivery_destinations.insert(name.clone(), dd);
 
-        // Build the configuration object for the response, ensuring destinationResourceArn is included
-        let config_resp = if config.contains_key("destinationResourceArn") {
-            json!(config)
-        } else {
-            json!({ "destinationResourceArn": Value::Null })
+        // Build the configuration object for the response, preserving existing fields
+        // and ensuring destinationResourceArn is always present
+        let config_resp = {
+            let mut c: serde_json::Map<String, Value> =
+                config.iter().map(|(k, v)| (k.clone(), json!(v))).collect();
+            c.entry("destinationResourceArn".to_string())
+                .or_insert(Value::Null);
+            Value::Object(c)
         };
 
         let mut resp = json!({
@@ -2950,6 +2960,9 @@ impl LogsService {
             })?
             .to_string();
 
+        validate_string_length("deliverySourceName", &delivery_source_name, 1, 60)?;
+        validate_optional_string_length("fieldDelimiter", body["fieldDelimiter"].as_str(), 0, 5)?;
+
         let tags: std::collections::HashMap<String, String> = body["tags"]
             .as_object()
             .map(|m| {
@@ -3073,6 +3086,8 @@ impl LogsService {
             )
         })?;
 
+        validate_string_length("id", delivery_id, 1, 64)?;
+
         let state = self.state.read();
         let d = state.deliveries.get(delivery_id).ok_or_else(|| {
             AwsServiceError::aws_error(
@@ -3131,6 +3146,8 @@ impl LogsService {
             )
         })?;
 
+        validate_string_length("id", delivery_id, 1, 64)?;
+
         let mut state = self.state.write();
         if state.deliveries.remove(delivery_id).is_none() {
             return Err(AwsServiceError::aws_error(
@@ -3165,6 +3182,15 @@ impl LogsService {
             })?
             .to_string();
 
+        validate_string_length("logGroupName", name, 1, 512)?;
+        validate_string_length("kmsKeyId", &kms_key_id, 0, 256)?;
+        validate_optional_string_length(
+            "resourceIdentifier",
+            body["resourceIdentifier"].as_str(),
+            1,
+            2048,
+        )?;
+
         let mut state = self.state.write();
         let group = state.log_groups.get_mut(name).ok_or_else(|| {
             AwsServiceError::aws_error(
@@ -3188,6 +3214,14 @@ impl LogsService {
                 "logGroupName is required",
             )
         })?;
+
+        validate_string_length("logGroupName", name, 1, 512)?;
+        validate_optional_string_length(
+            "resourceIdentifier",
+            body["resourceIdentifier"].as_str(),
+            1,
+            2048,
+        )?;
 
         let mut state = self.state.write();
         let group = state.log_groups.get_mut(name).ok_or_else(|| {
@@ -3241,6 +3275,15 @@ impl LogsService {
             .map(|s| s.to_string())
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
+        validate_string_length("name", &name, 1, 255)?;
+        validate_string_length("queryString", &query_string, 1, 10000)?;
+        validate_optional_string_length(
+            "queryDefinitionId",
+            body["queryDefinitionId"].as_str(),
+            1,
+            256,
+        )?;
+
         let now = Utc::now().timestamp_millis();
 
         let mut state = self.state.write();
@@ -3264,10 +3307,15 @@ impl LogsService {
         ))
     }
 
-    fn describe_query_definitions(
-        &self,
-        _req: &AwsRequest,
-    ) -> Result<AwsResponse, AwsServiceError> {
+    fn describe_query_definitions(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = body_json(req);
+        validate_optional_string_length(
+            "queryDefinitionNamePrefix",
+            body["queryDefinitionNamePrefix"].as_str(),
+            1,
+            255,
+        )?;
+
         let state = self.state.read();
         let defs: Vec<Value> = state
             .query_definitions
@@ -3298,6 +3346,8 @@ impl LogsService {
                 "queryDefinitionId is required",
             )
         })?;
+
+        validate_string_length("queryDefinitionId", qd_id, 1, 256)?;
 
         let mut state = self.state.write();
         let success = state.query_definitions.remove(qd_id).is_some();

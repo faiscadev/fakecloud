@@ -1475,12 +1475,14 @@ impl SecretsManagerService {
         let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
         validate_optional_string_length("secretId", body["SecretId"].as_str(), 1, 2048)?;
         validate_required("ResourcePolicy", &body["ResourcePolicy"])?;
-        validate_optional_string_length(
-            "resourcePolicy",
-            body["ResourcePolicy"].as_str(),
-            1,
-            20480,
-        )?;
+        let policy_str = body["ResourcePolicy"].as_str().ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterException",
+                "ResourcePolicy must be a string",
+            )
+        })?;
+        validate_string_length("resourcePolicy", policy_str, 1, 20480)?;
         let response = json!({
             "PolicyValidationPassed": true,
             "ValidationErrors": [],

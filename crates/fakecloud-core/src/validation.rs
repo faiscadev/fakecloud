@@ -115,3 +115,25 @@ pub fn validate_optional_enum(
     }
     Ok(())
 }
+
+/// Validate an optional enum from a JSON value, rejecting non-string types.
+///
+/// Unlike [`validate_optional_enum`], this takes a raw [`serde_json::Value`] so it can
+/// distinguish between a missing/null field (ok to skip) and a non-string value (error).
+pub fn validate_optional_enum_value(
+    field: &str,
+    value: &serde_json::Value,
+    allowed: &[&str],
+) -> Result<(), AwsServiceError> {
+    if value.is_null() {
+        return Ok(());
+    }
+    let s = value.as_str().ok_or_else(|| {
+        AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "SerializationException",
+            format!("Value for '{}' must be a string", field),
+        )
+    })?;
+    validate_enum(field, s, allowed)
+}

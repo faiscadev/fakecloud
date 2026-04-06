@@ -1073,8 +1073,15 @@ impl EventBridgeService {
             .as_array()
             .ok_or_else(|| missing("Entries"))?;
 
-        // Validate max 10 entries
-        if entries.is_empty() || entries.len() > 10 {
+        // Validate entries count
+        if entries.is_empty() {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ValidationException",
+                "1 validation error detected: Value '[PutEventsRequestEntry]' at 'entries' failed to satisfy constraint: Member must have length greater than or equal to 1",
+            ));
+        }
+        if entries.len() > 10 {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "ValidationException",
