@@ -1366,3 +1366,372 @@ async fn ssm_patch_baseline_update() {
         .unwrap();
     assert!(resp.instance_patch_states().is_empty());
 }
+
+// ── OpsItem Related Items ─────────────────────────────────────
+
+#[tokio::test]
+async fn ssm_ops_item_related_items() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+
+    // Create ops item
+    let create = client
+        .create_ops_item()
+        .title("Related test")
+        .source("test")
+        .send()
+        .await
+        .unwrap();
+    let ops_item_id = create.ops_item_id().unwrap().to_string();
+
+    // Associate
+    let assoc = client
+        .associate_ops_item_related_item()
+        .ops_item_id(&ops_item_id)
+        .association_type("IsParentOf")
+        .resource_type("AWS::SSMIncidents::IncidentRecord")
+        .resource_uri("arn:aws:ssm-incidents::123456789012:incident-record/test")
+        .send()
+        .await
+        .unwrap();
+    let assoc_id = assoc.association_id().unwrap().to_string();
+
+    // List - verify via raw HTTP since SDK/CLI have timestamp deserialization issues
+    let http_client = reqwest::Client::new();
+    let resp = http_client
+        .post(server.endpoint())
+        .header("Content-Type", "application/x-amz-json-1.1")
+        .header("X-Amz-Target", "AmazonSSM.ListOpsItemRelatedItems")
+        .header(
+            "Authorization",
+            "AWS4-HMAC-SHA256 Credential=test/20240101/us-east-1/ssm/aws4_request",
+        )
+        .body(format!("{{\"OpsItemId\":\"{}\"}}", ops_item_id))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["Summaries"].as_array().unwrap().len(), 1);
+
+    // Disassociate
+    client
+        .disassociate_ops_item_related_item()
+        .ops_item_id(&ops_item_id)
+        .association_id(&assoc_id)
+        .send()
+        .await
+        .unwrap();
+
+    // List ops item events (empty)
+    let resp = client.list_ops_item_events().send().await.unwrap();
+    assert!(resp.summaries().is_empty());
+}
+
+// ── OpsMetadata ───────────────────────────────────────────────
+
+#[tokio::test]
+async fn ssm_ops_metadata_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+
+    // Create
+    let create = client
+        .create_ops_metadata()
+        .resource_id("test-resource")
+        .metadata(
+            "testKey",
+            aws_sdk_ssm::types::MetadataValue::builder()
+                .value("testVal")
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let arn = create.ops_metadata_arn().unwrap().to_string();
+
+    // Get
+    let get = client
+        .get_ops_metadata()
+        .ops_metadata_arn(&arn)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get.resource_id().unwrap(), "test-resource");
+
+    // Update
+    client
+        .update_ops_metadata()
+        .ops_metadata_arn(&arn)
+        .metadata_to_update(
+            "key2",
+            aws_sdk_ssm::types::MetadataValue::builder()
+                .value("val2")
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    // List
+    let list = client.list_ops_metadata().send().await.unwrap();
+    assert_eq!(list.ops_metadata_list().len(), 1);
+
+    // Delete
+    client
+        .delete_ops_metadata()
+        .ops_metadata_arn(&arn)
+        .send()
+        .await
+        .unwrap();
+}
+
+// ── Automation ────────────────────────────────────────────────
+
+#[tokio::test]
+async fn ssm_automation_execution_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+
+    // Start
+    let start = client
+        .start_automation_execution()
+        .document_name("AWS-RunShellScript")
+        .send()
+        .await
+        .unwrap();
+    let exec_id = start.automation_execution_id().unwrap().to_string();
+
+    // Get
+    let get = client
+        .get_automation_execution()
+        .automation_execution_id(&exec_id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        get.automation_execution().unwrap().document_name().unwrap(),
+        "AWS-RunShellScript"
+    );
+
+    // Describe
+    let desc = client
+        .describe_automation_executions()
+        .send()
+        .await
+        .unwrap();
+    assert!(!desc.automation_execution_metadata_list().is_empty());
+
+    // DescribeSteps
+    let steps = client
+        .describe_automation_step_executions()
+        .automation_execution_id(&exec_id)
+        .send()
+        .await
+        .unwrap();
+    assert!(steps.step_executions().is_empty());
+
+    // Signal
+    client
+        .send_automation_signal()
+        .automation_execution_id(&exec_id)
+        .signal_type(aws_sdk_ssm::types::SignalType::Approve)
+        .send()
+        .await
+        .unwrap();
+
+    // Stop
+    client
+        .stop_automation_execution()
+        .automation_execution_id(&exec_id)
+        .send()
+        .await
+        .unwrap();
+
+    // StartChangeRequestExecution
+    let runbook = aws_sdk_ssm::types::Runbook::builder()
+        .document_name("AWS-RunShellScript")
+        .build()
+        .unwrap();
+    let cr = client
+        .start_change_request_execution()
+        .document_name("AWS-ChangeManager")
+        .runbooks(runbook)
+        .send()
+        .await
+        .unwrap();
+    assert!(cr.automation_execution_id().is_some());
+
+    // StartExecutionPreview
+    let preview = client
+        .start_execution_preview()
+        .document_name("AWS-RunShellScript")
+        .send()
+        .await
+        .unwrap();
+    let preview_id = preview.execution_preview_id().unwrap().to_string();
+
+    // GetExecutionPreview
+    let get_preview = client
+        .get_execution_preview()
+        .execution_preview_id(&preview_id)
+        .send()
+        .await
+        .unwrap();
+    assert!(get_preview.execution_preview_id().is_some());
+}
+
+// ── Sessions ──────────────────────────────────────────────────
+
+#[tokio::test]
+async fn ssm_session_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+
+    // Start
+    let start = client
+        .start_session()
+        .target("i-00000000000000001")
+        .send()
+        .await
+        .unwrap();
+    let session_id = start.session_id().unwrap().to_string();
+    assert!(start.token_value().is_some());
+
+    // Resume
+    let resume = client
+        .resume_session()
+        .session_id(&session_id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resume.session_id().unwrap(), session_id);
+
+    // Describe active
+    let desc = client
+        .describe_sessions()
+        .state(aws_sdk_ssm::types::SessionState::Active)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(desc.sessions().len(), 1);
+
+    // Terminate
+    client
+        .terminate_session()
+        .session_id(&session_id)
+        .send()
+        .await
+        .unwrap();
+
+    // Describe history
+    let desc = client
+        .describe_sessions()
+        .state(aws_sdk_ssm::types::SessionState::History)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(desc.sessions().len(), 1);
+}
+
+// ── Managed Instances ─────────────────────────────────────────
+
+#[tokio::test]
+async fn ssm_activation_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+
+    // Create
+    let create = client
+        .create_activation()
+        .iam_role("SSMServiceRole")
+        .description("test activation")
+        .send()
+        .await
+        .unwrap();
+    let activation_id = create.activation_id().unwrap().to_string();
+    assert!(create.activation_code().is_some());
+
+    // Describe
+    let desc = client.describe_activations().send().await.unwrap();
+    assert_eq!(desc.activation_list().len(), 1);
+
+    // Delete
+    client
+        .delete_activation()
+        .activation_id(&activation_id)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn ssm_describe_instance_information() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+
+    let resp = client.describe_instance_information().send().await.unwrap();
+    assert!(resp.instance_information_list().is_empty());
+}
+
+#[tokio::test]
+async fn ssm_describe_instance_properties() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+
+    let resp = client.describe_instance_properties().send().await.unwrap();
+    assert!(resp.instance_properties().is_empty());
+}
+
+#[tokio::test]
+async fn ssm_deregister_managed_instance() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+
+    // Should not error even if instance doesn't exist
+    client
+        .deregister_managed_instance()
+        .instance_id("mi-00000000000000001")
+        .send()
+        .await
+        .unwrap();
+}
+
+// ── Other ─────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn ssm_list_nodes() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+
+    let resp = client.list_nodes().send().await.unwrap();
+    assert!(resp.nodes().is_empty());
+}
+
+#[tokio::test]
+async fn ssm_describe_effective_instance_associations() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+
+    let resp = client
+        .describe_effective_instance_associations()
+        .instance_id("i-00000000000000001")
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.associations().is_empty());
+}
+
+#[tokio::test]
+async fn ssm_describe_instance_associations_status() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+
+    let resp = client
+        .describe_instance_associations_status()
+        .instance_id("i-00000000000000001")
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.instance_association_status_infos().is_empty());
+}
