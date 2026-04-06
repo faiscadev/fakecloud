@@ -477,7 +477,7 @@ EC2, RDS, ECS, Elastic Load Balancing, CloudWatch Metrics, Route 53, API Gateway
 local development. For every service it implements, the goal is 100% behavioral
 parity with real AWS — verified by 34,000+ automated conformance test variants
 against official AWS Smithy models across all 983 API operations. 13 services,
-98% conformance, and growing.
+100% conformance.
 
 **fakecloud is not** a production-ready cloud replacement. It's not designed to
 be scalable or to handle production workloads. It's for testing — making sure

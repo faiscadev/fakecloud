@@ -1,7 +1,7 @@
 +++
 title = "Why I'm building a free, open-source AWS emulator"
 date = 2026-04-06
-description = "LocalStack went proprietary. Our builds broke. So I built a free, open-source replacement in Rust — 13 AWS services, 983 API operations, 98% conformance."
+description = "LocalStack went proprietary. Our builds broke. So I built a free, open-source replacement in Rust — 13 AWS services, 983 API operations, 100% conformance."
 
 [extra]
 author = "Lucas Vieira"
@@ -37,7 +37,7 @@ fakecloud doesn't try to be a scalable production cloud. It's not that. It's a t
 
 What does that mean in practice? If you call `CreateQueue`, then `SendMessage`, then `ReceiveMessage` on real AWS and get back your message with specific attributes — fakecloud should do exactly the same thing. If it doesn't, that's a fakecloud bug.
 
-We currently verify this with 280+ E2E tests that use the official `aws-sdk-rust` crate and 34,000+ auto-generated conformance test variants validated against official AWS Smithy models — covering all 983 API operations across 13 services at 98% conformance. The plan for the near future: set up a real AWS account and run our test suite against both fakecloud and real AWS side by side, so we can verify behavioral parity automatically.
+We currently verify this with 280+ E2E tests that use the official `aws-sdk-rust` crate and 34,856 auto-generated conformance test variants validated against official AWS Smithy models — covering all 983 API operations across 13 services at 100% conformance. The plan for the near future: set up a real AWS account and run our test suite against both fakecloud and real AWS side by side, so we can verify behavioral parity automatically.
 
 ## What's here today
 
