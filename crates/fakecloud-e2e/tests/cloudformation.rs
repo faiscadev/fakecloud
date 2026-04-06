@@ -1,5 +1,7 @@
 mod helpers;
 
+use std::io::Write;
+
 use helpers::TestServer;
 
 #[tokio::test]
@@ -449,5 +451,162 @@ async fn cloudformation_update_stack() {
     assert_eq!(
         desc.stacks()[0].stack_status().map(|s| s.as_str()),
         Some("UPDATE_COMPLETE")
+    );
+}
+
+/// Create a ZIP file in memory containing a single file.
+fn make_zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
+    let buf = Vec::new();
+    let cursor = std::io::Cursor::new(buf);
+    let mut writer = zip::ZipWriter::new(cursor);
+    for (name, content) in entries {
+        let options = zip::write::SimpleFileOptions::default().unix_permissions(0o755);
+        writer.start_file(*name, options).unwrap();
+        writer.write_all(content).unwrap();
+    }
+    let cursor = writer.finish().unwrap();
+    cursor.into_inner()
+}
+
+/// CloudFormation Custom Resource invokes a Lambda function via ServiceToken.
+///
+/// 1. Create an SQS result queue
+/// 2. Create a Lambda that receives the CF custom resource event and sends
+///    ResourceProperties to the SQS queue as proof of execution
+/// 3. Create a CF stack with a Custom::MyResource pointing ServiceToken at the Lambda
+/// 4. Receive from SQS and assert the Lambda was invoked with the right event
+#[tokio::test]
+#[ignore] // requires Docker for Lambda execution
+async fn cloudformation_custom_resource_invokes_lambda() {
+    use aws_sdk_lambda::primitives::Blob;
+    use aws_sdk_lambda::types::{Environment, FunctionCode, Runtime};
+
+    let server = TestServer::start().await;
+    let cf_client = server.cloudformation_client().await;
+    let sqs_client = server.sqs_client().await;
+    let lambda_client = server.lambda_client().await;
+
+    // 1. Create result queue
+    let queue = sqs_client
+        .create_queue()
+        .queue_name("cf-custom-result")
+        .send()
+        .await
+        .unwrap();
+    let queue_url = queue.queue_url().unwrap().to_string();
+
+    // 2. Create Lambda that forwards the CF event's ResourceProperties to SQS
+    let python_code = r#"
+import json
+import os
+import urllib.request
+import urllib.parse
+
+def lambda_handler(event, context):
+    endpoint = os.environ["FAKECLOUD_ENDPOINT"]
+    queue_url = os.environ["RESULT_QUEUE_URL"]
+
+    params = urllib.parse.urlencode({
+        "Action": "SendMessage",
+        "QueueUrl": queue_url,
+        "MessageBody": json.dumps({
+            "marker": "custom-resource-invoked",
+            "request_type": event.get("RequestType", ""),
+            "resource_type": event.get("ResourceType", ""),
+            "logical_resource_id": event.get("LogicalResourceId", ""),
+            "resource_properties": event.get("ResourceProperties", {}),
+        }),
+    }).encode()
+
+    req = urllib.request.Request(endpoint, data=params, method="POST")
+    req.add_header("Content-Type", "application/x-www-form-urlencoded")
+    req.add_header("Authorization", (
+        "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20200101/us-east-1/sqs/aws4_request, "
+        "SignedHeaders=host, Signature=fake"
+    ))
+    urllib.request.urlopen(req)
+
+    return {"statusCode": 200, "body": "ok"}
+"#;
+
+    let zip = make_zip(&[("lambda_function.py", python_code.as_bytes())]);
+
+    let function_name = "cf-custom-handler";
+    lambda_client
+        .create_function()
+        .function_name(function_name)
+        .runtime(Runtime::Python312)
+        .role("arn:aws:iam::123456789012:role/lambda-role")
+        .handler("lambda_function.lambda_handler")
+        .environment(
+            Environment::builder()
+                .variables("FAKECLOUD_ENDPOINT", server.endpoint())
+                .variables("RESULT_QUEUE_URL", &queue_url)
+                .build(),
+        )
+        .code(FunctionCode::builder().zip_file(Blob::new(zip)).build())
+        .send()
+        .await
+        .unwrap();
+
+    let lambda_arn = format!(
+        "arn:aws:lambda:us-east-1:123456789012:function:{}",
+        function_name
+    );
+
+    // 3. Create a CF stack with a Custom::MyResource
+    let template = serde_json::json!({
+        "Resources": {
+            "MyCustom": {
+                "Type": "Custom::MyResource",
+                "Properties": {
+                    "ServiceToken": lambda_arn,
+                    "Foo": "bar",
+                    "Count": 42
+                }
+            }
+        }
+    });
+
+    let result = cf_client
+        .create_stack()
+        .stack_name("custom-resource-stack")
+        .template_body(template.to_string())
+        .send()
+        .await
+        .unwrap();
+    assert!(result.stack_id().is_some());
+
+    // 4. Wait and receive from SQS
+    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+
+    let msgs = sqs_client
+        .receive_message()
+        .queue_url(&queue_url)
+        .max_number_of_messages(10)
+        .wait_time_seconds(5)
+        .send()
+        .await
+        .unwrap();
+
+    let mut found = false;
+    for msg in msgs.messages() {
+        if let Some(body) = msg.body() {
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(body) {
+                if parsed["marker"] == "custom-resource-invoked" {
+                    assert_eq!(parsed["request_type"], "Create");
+                    assert_eq!(parsed["resource_type"], "Custom::MyResource");
+                    assert_eq!(parsed["logical_resource_id"], "MyCustom");
+                    assert_eq!(parsed["resource_properties"]["Foo"], "bar");
+                    assert_eq!(parsed["resource_properties"]["Count"], 42);
+                    found = true;
+                    break;
+                }
+            }
+        }
+    }
+    assert!(
+        found,
+        "Lambda should have been invoked with the custom resource event"
     );
 }

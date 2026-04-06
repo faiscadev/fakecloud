@@ -9,6 +9,8 @@ pub struct StackResource {
     pub physical_id: String,
     pub resource_type: String,
     pub status: String,
+    /// For custom resources, the Lambda ARN (ServiceToken) used for invocation.
+    pub service_token: Option<String>,
 }
 
 #[derive(Debug, Clone)]

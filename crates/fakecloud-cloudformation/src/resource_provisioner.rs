@@ -1,7 +1,9 @@
 use chrono::Utc;
 use std::collections::HashMap;
+use std::sync::Arc;
 use uuid::Uuid;
 
+use fakecloud_core::delivery::DeliveryBus;
 use fakecloud_dynamodb::state::{
     AttributeDefinition, DynamoTable, KeySchemaElement, ProvisionedThroughput, SharedDynamoDbState,
 };
@@ -26,8 +28,10 @@ pub struct ResourceProvisioner {
     pub eventbridge_state: SharedEventBridgeState,
     pub dynamodb_state: SharedDynamoDbState,
     pub logs_state: SharedLogsState,
+    pub delivery: Arc<DeliveryBus>,
     pub account_id: String,
     pub region: String,
+    pub stack_id: String,
 }
 
 impl ResourceProvisioner {
@@ -44,7 +48,22 @@ impl ResourceProvisioner {
             "AWS::Events::Rule" => self.create_eventbridge_rule(resource),
             "AWS::DynamoDB::Table" => self.create_dynamodb_table(resource),
             "AWS::Logs::LogGroup" => self.create_log_group(resource),
+            t if t.starts_with("Custom::") || t == "AWS::CloudFormation::CustomResource" => {
+                self.create_custom_resource(resource)
+            }
             other => Err(format!("Unsupported resource type: {other}")),
+        };
+
+        let is_custom = resource.resource_type.starts_with("Custom::")
+            || resource.resource_type == "AWS::CloudFormation::CustomResource";
+        let service_token = if is_custom {
+            resource
+                .properties
+                .get("ServiceToken")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        } else {
+            None
         };
 
         result.map(|physical_id| StackResource {
@@ -52,6 +71,7 @@ impl ResourceProvisioner {
             physical_id,
             resource_type: resource.resource_type.clone(),
             status: "CREATE_COMPLETE".to_string(),
+            service_token,
         })
     }
 
@@ -68,6 +88,9 @@ impl ResourceProvisioner {
             "AWS::Events::Rule" => self.delete_eventbridge_rule(&resource.physical_id),
             "AWS::DynamoDB::Table" => self.delete_dynamodb_table(&resource.physical_id),
             "AWS::Logs::LogGroup" => self.delete_log_group(&resource.physical_id),
+            t if t.starts_with("Custom::") || t == "AWS::CloudFormation::CustomResource" => {
+                self.delete_custom_resource(resource)
+            }
             other => Err(format!("Unsupported resource type: {other}")),
         }
     }
@@ -708,13 +731,118 @@ impl ResourceProvisioner {
         }
         Ok(())
     }
+
+    // --- Custom Resources ---
+
+    /// Invoke a Lambda function synchronously via the delivery bus.
+    fn invoke_lambda_sync(&self, function_arn: &str, payload: &str) -> Result<(), String> {
+        let delivery = self.delivery.clone();
+        let function_arn = function_arn.to_string();
+        let payload = payload.to_string();
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|e| format!("Failed to create runtime: {e}"))?;
+                rt.block_on(async {
+                    match delivery.invoke_lambda(&function_arn, &payload).await {
+                        Some(Ok(_)) => {
+                            tracing::info!(
+                                "Custom resource Lambda {} invoked successfully",
+                                function_arn
+                            );
+                            Ok(())
+                        }
+                        Some(Err(e)) => {
+                            tracing::warn!(
+                                "Custom resource Lambda {} invocation failed: {e}",
+                                function_arn
+                            );
+                            Err(format!("Lambda invocation failed: {e}"))
+                        }
+                        None => {
+                            tracing::warn!(
+                                "No Lambda delivery configured; skipping custom resource invocation for {}",
+                                function_arn
+                            );
+                            Ok(())
+                        }
+                    }
+                })
+            })
+            .join()
+            .map_err(|_| "Lambda invocation thread panicked".to_string())?
+        })
+    }
+
+    fn create_custom_resource(&self, resource: &ResourceDefinition) -> Result<String, String> {
+        let props = &resource.properties;
+        let service_token = props
+            .get("ServiceToken")
+            .and_then(|v| v.as_str())
+            .ok_or("Custom resource requires ServiceToken property")?;
+
+        let request_id = Uuid::new_v4().to_string();
+
+        // Build the CloudFormation custom resource event
+        let event = serde_json::json!({
+            "RequestType": "Create",
+            "ServiceToken": service_token,
+            "StackId": self.stack_id,
+            "RequestId": request_id,
+            "ResourceType": resource.resource_type,
+            "LogicalResourceId": resource.logical_id,
+            "ResourceProperties": props,
+        });
+
+        let payload = serde_json::to_string(&event).map_err(|e| e.to_string())?;
+        self.invoke_lambda_sync(service_token, &payload)?;
+
+        // Physical resource ID: use a generated ID (the Lambda could return one,
+        // but for simplicity we generate one here).
+        let physical_id = format!("{}-{}", resource.logical_id, &request_id[..8]);
+        Ok(physical_id)
+    }
+
+    fn delete_custom_resource(&self, resource: &StackResource) -> Result<(), String> {
+        let service_token = match &resource.service_token {
+            Some(token) => token.clone(),
+            None => {
+                // No ServiceToken stored — nothing to invoke
+                return Ok(());
+            }
+        };
+
+        let request_id = Uuid::new_v4().to_string();
+
+        let event = serde_json::json!({
+            "RequestType": "Delete",
+            "ServiceToken": service_token,
+            "StackId": self.stack_id,
+            "RequestId": request_id,
+            "ResourceType": resource.resource_type,
+            "LogicalResourceId": resource.logical_id,
+            "PhysicalResourceId": resource.physical_id,
+        });
+
+        let payload = serde_json::to_string(&event).map_err(|e| e.to_string())?;
+
+        // Best-effort: don't fail stack deletion if Lambda invocation fails
+        if let Err(e) = self.invoke_lambda_sync(&service_token, &payload) {
+            tracing::warn!(
+                "Custom resource delete Lambda invocation failed for {}: {e}",
+                resource.logical_id
+            );
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use parking_lot::RwLock;
-    use std::sync::Arc;
 
     fn make_provisioner() -> ResourceProvisioner {
         ResourceProvisioner {
@@ -749,8 +877,10 @@ mod tests {
                 "123456789012",
                 "us-east-1",
             ))),
+            delivery: Arc::new(DeliveryBus::new()),
             account_id: "123456789012".to_string(),
             region: "us-east-1".to_string(),
+            stack_id: "arn:aws:cloudformation:us-east-1:123456789012:stack/test/00000000-0000-0000-0000-000000000000".to_string(),
         }
     }
 
@@ -882,5 +1012,61 @@ mod tests {
         let result = prov.create_resource(&resource);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("does not exist"));
+    }
+
+    #[test]
+    fn custom_resource_requires_service_token() {
+        let prov = make_provisioner();
+        let resource = make_resource(
+            "Custom::MyResource",
+            "MyCustom",
+            serde_json::json!({
+                "Foo": "bar"
+            }),
+        );
+        let result = prov.create_resource(&resource);
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().contains("ServiceToken"),
+            "Should require ServiceToken property"
+        );
+    }
+
+    #[test]
+    fn custom_resource_succeeds_without_lambda_delivery() {
+        // When no Lambda delivery is configured, custom resource creation
+        // should still succeed (the invocation is silently skipped).
+        let prov = make_provisioner();
+        let resource = make_resource(
+            "Custom::MyResource",
+            "MyCustom",
+            serde_json::json!({
+                "ServiceToken": "arn:aws:lambda:us-east-1:123456789012:function:my-func",
+                "Foo": "bar"
+            }),
+        );
+        let result = prov.create_resource(&resource);
+        assert!(result.is_ok());
+        let sr = result.unwrap();
+        assert_eq!(sr.logical_id, "MyCustom");
+        assert_eq!(sr.resource_type, "Custom::MyResource");
+        assert!(sr.physical_id.starts_with("MyCustom-"));
+    }
+
+    #[test]
+    fn cloudformation_custom_resource_type_succeeds() {
+        let prov = make_provisioner();
+        let resource = make_resource(
+            "AWS::CloudFormation::CustomResource",
+            "MyCustom2",
+            serde_json::json!({
+                "ServiceToken": "arn:aws:lambda:us-east-1:123456789012:function:my-func",
+                "Key": "value"
+            }),
+        );
+        let result = prov.create_resource(&resource);
+        assert!(result.is_ok());
+        let sr = result.unwrap();
+        assert_eq!(sr.resource_type, "AWS::CloudFormation::CustomResource");
     }
 }
