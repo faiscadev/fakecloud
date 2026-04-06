@@ -412,10 +412,7 @@ async fn logs_put_metric_filter_requires_filter_pattern() {
         ])
         .await;
     // The CLI should fail because filterPattern is required
-    assert!(
-        !result.success(),
-        "omitting filterPattern should fail"
-    );
+    assert!(!result.success(), "omitting filterPattern should fail");
 }
 
 #[tokio::test]
