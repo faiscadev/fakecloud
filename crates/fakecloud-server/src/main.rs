@@ -233,7 +233,10 @@ async fn main() {
     let lifecycle_processor = fakecloud_s3::lifecycle::LifecycleProcessor::new(s3_state);
     tokio::spawn(lifecycle_processor.run());
 
-    let sqs_lambda_poller = SqsLambdaPoller::new(sqs_state, lambda_state);
+    let mut sqs_lambda_poller = SqsLambdaPoller::new(sqs_state, lambda_state);
+    if let Some(ref ld) = lambda_delivery {
+        sqs_lambda_poller = sqs_lambda_poller.with_lambda_delivery(ld.clone());
+    }
     tokio::spawn(sqs_lambda_poller.run());
 
     if let Some(ref rt) = container_runtime {
