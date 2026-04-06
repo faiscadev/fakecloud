@@ -1431,6 +1431,7 @@ impl DynamoDbService {
             billing_mode: table.billing_mode.clone(),
             item_count: table.item_count,
             size_bytes: table.size_bytes,
+            items: table.items.clone(),
         };
 
         state.backups.insert(backup_arn.clone(), backup);
@@ -1606,13 +1607,14 @@ impl DynamoDbService {
             state.region, state.account_id, target_table_name
         );
 
-        let table = DynamoTable {
+        let restored_items = backup.items.clone();
+        let mut table = DynamoTable {
             name: target_table_name.to_string(),
             arn: arn.clone(),
             key_schema: backup.key_schema.clone(),
             attribute_definitions: backup.attribute_definitions.clone(),
             provisioned_throughput: backup.provisioned_throughput.clone(),
-            items: Vec::new(),
+            items: restored_items,
             gsi: Vec::new(),
             lsi: Vec::new(),
             tags: HashMap::new(),
@@ -1628,6 +1630,7 @@ impl DynamoDbService {
             kinesis_destinations: Vec::new(),
             contributor_insights_status: "DISABLED".to_string(),
         };
+        table.recalculate_stats();
 
         let desc = build_table_description(&table);
         state.tables.insert(target_table_name.to_string(), table);
@@ -1675,13 +1678,13 @@ impl DynamoDbService {
             state.region, state.account_id, target_table_name
         );
 
-        let table = DynamoTable {
+        let mut table = DynamoTable {
             name: target_table_name.to_string(),
             arn: arn.clone(),
             key_schema: source.key_schema.clone(),
             attribute_definitions: source.attribute_definitions.clone(),
             provisioned_throughput: source.provisioned_throughput.clone(),
-            items: Vec::new(),
+            items: source.items.clone(),
             gsi: Vec::new(),
             lsi: Vec::new(),
             tags: HashMap::new(),
@@ -1697,6 +1700,7 @@ impl DynamoDbService {
             kinesis_destinations: Vec::new(),
             contributor_insights_status: "DISABLED".to_string(),
         };
+        table.recalculate_stats();
 
         let desc = build_table_description(&table);
         state.tables.insert(target_table_name.to_string(), table);
@@ -5372,5 +5376,76 @@ mod tests {
         let resp = svc.describe_table(&req).unwrap();
         let body: Value = serde_json::from_slice(&resp.body).unwrap();
         assert_eq!(body["Table"]["TableStatus"], "ACTIVE");
+    }
+
+    #[test]
+    fn backup_restore_preserves_items() {
+        let svc = make_service();
+        create_test_table(&svc);
+
+        // Put 3 items
+        for i in 1..=3 {
+            let req = make_request(
+                "PutItem",
+                json!({
+                    "TableName": "test-table",
+                    "Item": {
+                        "pk": { "S": format!("key{i}") },
+                        "data": { "S": format!("value{i}") }
+                    }
+                }),
+            );
+            svc.put_item(&req).unwrap();
+        }
+
+        // Create backup
+        let req = make_request(
+            "CreateBackup",
+            json!({
+                "TableName": "test-table",
+                "BackupName": "my-backup"
+            }),
+        );
+        let resp = svc.create_backup(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let backup_arn = body["BackupDetails"]["BackupArn"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // Delete all items from the original table
+        for i in 1..=3 {
+            let req = make_request(
+                "DeleteItem",
+                json!({
+                    "TableName": "test-table",
+                    "Key": { "pk": { "S": format!("key{i}") } }
+                }),
+            );
+            svc.delete_item(&req).unwrap();
+        }
+
+        // Verify original table is empty
+        let req = make_request("Scan", json!({ "TableName": "test-table" }));
+        let resp = svc.scan(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["Count"], 0);
+
+        // Restore from backup
+        let req = make_request(
+            "RestoreTableFromBackup",
+            json!({
+                "BackupArn": backup_arn,
+                "TargetTableName": "restored-table"
+            }),
+        );
+        svc.restore_table_from_backup(&req).unwrap();
+
+        // Scan restored table — should have 3 items
+        let req = make_request("Scan", json!({ "TableName": "restored-table" }));
+        let resp = svc.scan(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["Count"], 3);
+        assert_eq!(body["Items"].as_array().unwrap().len(), 3);
     }
 }
