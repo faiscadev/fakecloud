@@ -187,6 +187,30 @@ impl StsService {
             validate_range_i64("durationSeconds", v, 900, 43200)?;
         }
 
+        // Validate optional ExternalId
+        validate_optional_string_length(
+            "externalId",
+            req.query_params.get("ExternalId").map(|s| s.as_str()),
+            2,
+            1224,
+        )?;
+
+        // Validate optional Policy
+        validate_optional_string_length(
+            "policy",
+            req.query_params.get("Policy").map(|s| s.as_str()),
+            1,
+            2048,
+        )?;
+
+        // Validate optional SourceIdentity
+        validate_optional_string_length(
+            "sourceIdentity",
+            req.query_params.get("SourceIdentity").map(|s| s.as_str()),
+            2,
+            64,
+        )?;
+
         // Validate and accept optional MFA SerialNumber
         validate_optional_string_length(
             "serialNumber",
@@ -291,6 +315,22 @@ impl StsService {
         validate_string_length("webIdentityToken", web_identity_token, 4, 20000)?;
         let _web_identity_token = web_identity_token.clone();
 
+        // Validate optional Policy
+        validate_optional_string_length(
+            "policy",
+            req.query_params.get("Policy").map(|s| s.as_str()),
+            1,
+            2048,
+        )?;
+
+        // Validate optional ProviderId
+        validate_optional_string_length(
+            "providerId",
+            req.query_params.get("ProviderId").map(|s| s.as_str()),
+            4,
+            2048,
+        )?;
+
         // Validate optional DurationSeconds (used below for expiration)
         if let Some(ds) = req.query_params.get("DurationSeconds") {
             let v = ds.parse::<i64>().map_err(|_| {
@@ -377,6 +417,14 @@ impl StsService {
             )
         })?;
         validate_string_length("sAMLAssertion", saml_assertion, 4, 100000)?;
+
+        // Validate optional Policy
+        validate_optional_string_length(
+            "policy",
+            req.query_params.get("Policy").map(|s| s.as_str()),
+            1,
+            2048,
+        )?;
 
         // Validate optional DurationSeconds (used below for expiration)
         if let Some(ds) = req.query_params.get("DurationSeconds") {
