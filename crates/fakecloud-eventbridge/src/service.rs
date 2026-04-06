@@ -1841,7 +1841,12 @@ impl EventBridgeService {
             &auth_type,
             &["BASIC", "OAUTH_CLIENT_CREDENTIALS", "API_KEY"],
         )?;
-        validate_optional_string_length("kmsKeyIdentifier", body["KmsKeyIdentifier"].as_str(), 0, 2048)?;
+        validate_optional_string_length(
+            "kmsKeyIdentifier",
+            body["KmsKeyIdentifier"].as_str(),
+            0,
+            2048,
+        )?;
         validate_required("AuthParameters", &body["AuthParameters"])?;
         let auth_params = body["AuthParameters"].clone();
 

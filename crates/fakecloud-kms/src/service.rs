@@ -304,7 +304,12 @@ impl KmsService {
         validate_optional_enum(
             "keyUsage",
             body["KeyUsage"].as_str(),
-            &["SIGN_VERIFY", "ENCRYPT_DECRYPT", "GENERATE_VERIFY_MAC", "KEY_AGREEMENT"],
+            &[
+                "SIGN_VERIFY",
+                "ENCRYPT_DECRYPT",
+                "GENERATE_VERIFY_MAC",
+                "KEY_AGREEMENT",
+            ],
         )?;
         validate_optional_enum(
             "origin",

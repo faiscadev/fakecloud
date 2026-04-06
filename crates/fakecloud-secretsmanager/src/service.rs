@@ -940,7 +940,12 @@ impl SecretsManagerService {
         let exclude_punctuation = body["ExcludePunctuation"].as_bool().unwrap_or(false);
         let include_space = body["IncludeSpace"].as_bool().unwrap_or(false);
         let require_each = body["RequireEachIncludedType"].as_bool().unwrap_or(true);
-        validate_optional_string_length("excludeCharacters", body["ExcludeCharacters"].as_str(), 0, 4096)?;
+        validate_optional_string_length(
+            "excludeCharacters",
+            body["ExcludeCharacters"].as_str(),
+            0,
+            4096,
+        )?;
         let exclude_chars = body["ExcludeCharacters"].as_str().unwrap_or("").to_string();
 
         let lowercase = "abcdefghijklmnopqrstuvwxyz";
