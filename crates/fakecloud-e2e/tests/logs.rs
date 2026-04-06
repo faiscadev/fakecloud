@@ -718,6 +718,189 @@ async fn logs_transformer_lifecycle() {
 }
 
 #[tokio::test]
+async fn logs_transformer_applies_processors() {
+    let server = TestServer::start().await;
+    let client = server.logs_client().await;
+
+    // Create log group and stream
+    client
+        .create_log_group()
+        .log_group_name("/tx/processors")
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .create_log_stream()
+        .log_group_name("/tx/processors")
+        .log_stream_name("stream1")
+        .send()
+        .await
+        .unwrap();
+
+    // Put a transformer with addKeys + deleteKeys + renameKeys
+    client
+        .put_transformer()
+        .log_group_identifier("/tx/processors")
+        .transformer_config(
+            aws_sdk_cloudwatchlogs::types::Processor::builder()
+                .add_keys(
+                    aws_sdk_cloudwatchlogs::types::AddKeys::builder()
+                        .entries(
+                            aws_sdk_cloudwatchlogs::types::AddKeyEntry::builder()
+                                .key("env")
+                                .value("staging")
+                                .build()
+                                .unwrap(),
+                        )
+                        .entries(
+                            aws_sdk_cloudwatchlogs::types::AddKeyEntry::builder()
+                                .key("tmp")
+                                .value("remove_me")
+                                .build()
+                                .unwrap(),
+                        )
+                        .build()
+                        .unwrap(),
+                )
+                .build(),
+        )
+        .transformer_config(
+            aws_sdk_cloudwatchlogs::types::Processor::builder()
+                .delete_keys(
+                    aws_sdk_cloudwatchlogs::types::DeleteKeys::builder()
+                        .with_keys("tmp")
+                        .build()
+                        .unwrap(),
+                )
+                .build(),
+        )
+        .transformer_config(
+            aws_sdk_cloudwatchlogs::types::Processor::builder()
+                .rename_keys(
+                    aws_sdk_cloudwatchlogs::types::RenameKeys::builder()
+                        .entries(
+                            aws_sdk_cloudwatchlogs::types::RenameKeyEntry::builder()
+                                .key("message")
+                                .rename_to("original_message")
+                                .build()
+                                .unwrap(),
+                        )
+                        .build()
+                        .unwrap(),
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    // Test transformer via TestTransformer
+    let test_resp = client
+        .test_transformer()
+        .transformer_config(
+            aws_sdk_cloudwatchlogs::types::Processor::builder()
+                .add_keys(
+                    aws_sdk_cloudwatchlogs::types::AddKeys::builder()
+                        .entries(
+                            aws_sdk_cloudwatchlogs::types::AddKeyEntry::builder()
+                                .key("env")
+                                .value("staging")
+                                .build()
+                                .unwrap(),
+                        )
+                        .entries(
+                            aws_sdk_cloudwatchlogs::types::AddKeyEntry::builder()
+                                .key("tmp")
+                                .value("remove_me")
+                                .build()
+                                .unwrap(),
+                        )
+                        .build()
+                        .unwrap(),
+                )
+                .build(),
+        )
+        .transformer_config(
+            aws_sdk_cloudwatchlogs::types::Processor::builder()
+                .delete_keys(
+                    aws_sdk_cloudwatchlogs::types::DeleteKeys::builder()
+                        .with_keys("tmp")
+                        .build()
+                        .unwrap(),
+                )
+                .build(),
+        )
+        .transformer_config(
+            aws_sdk_cloudwatchlogs::types::Processor::builder()
+                .rename_keys(
+                    aws_sdk_cloudwatchlogs::types::RenameKeys::builder()
+                        .entries(
+                            aws_sdk_cloudwatchlogs::types::RenameKeyEntry::builder()
+                                .key("message")
+                                .rename_to("original_message")
+                                .build()
+                                .unwrap(),
+                        )
+                        .build()
+                        .unwrap(),
+                )
+                .build(),
+        )
+        .log_event_messages("hello world")
+        .send()
+        .await
+        .unwrap();
+
+    let transformed_logs = test_resp.transformed_logs();
+    assert_eq!(transformed_logs.len(), 1);
+
+    let record = &transformed_logs[0];
+    assert_eq!(record.event_message(), Some("hello world"));
+    let transformed_str = record.transformed_event_message().unwrap();
+    let transformed: Value = serde_json::from_str(transformed_str).unwrap();
+    assert_eq!(transformed["env"], "staging");
+    assert!(transformed.get("tmp").is_none());
+    assert!(transformed.get("message").is_none());
+    assert_eq!(transformed["original_message"], "hello world");
+
+    // Push events via PutLogEvents — transformer should be applied before storage
+    let now = chrono::Utc::now().timestamp_millis();
+    client
+        .put_log_events()
+        .log_group_name("/tx/processors")
+        .log_stream_name("stream1")
+        .log_events(
+            InputLogEvent::builder()
+                .message("test event")
+                .timestamp(now)
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    // Retrieve events and verify transformation was applied
+    let events_resp = client
+        .get_log_events()
+        .log_group_name("/tx/processors")
+        .log_stream_name("stream1")
+        .send()
+        .await
+        .unwrap();
+
+    let events = events_resp.events();
+    assert_eq!(events.len(), 1);
+    let stored_message = events[0].message().unwrap();
+    let stored: Value = serde_json::from_str(stored_message).unwrap();
+    assert_eq!(stored["env"], "staging");
+    assert!(stored.get("tmp").is_none());
+    assert!(stored.get("message").is_none());
+    assert_eq!(stored["original_message"], "test event");
+}
+
+#[tokio::test]
 async fn logs_anomaly_detector_lifecycle() {
     let server = TestServer::start().await;
     let client = server.logs_client().await;

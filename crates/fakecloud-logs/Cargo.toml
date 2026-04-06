@@ -19,6 +19,7 @@ thiserror = { workspace = true }
 uuid = { workspace = true }
 base64 = { workspace = true }
 flate2 = { workspace = true }
+regex = { workspace = true }
 
 [dev-dependencies]
 bytes = { workspace = true }

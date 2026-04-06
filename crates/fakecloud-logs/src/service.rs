@@ -21,6 +21,7 @@ use crate::state::{
     LogGroup, LogStream, LookupTable, MetricFilter, MetricTransformation, QueryDefinition,
     QueryInfo, ResourcePolicy, ScheduledQuery, SharedLogsState, SubscriptionFilter, Transformer,
 };
+use crate::transformer;
 
 pub struct LogsService {
     state: SharedLogsState,
@@ -871,6 +872,15 @@ impl LogsService {
                 format!("The specified log group does not exist: {group_name}"),
             )
         })?;
+
+        // Apply transformer if configured on the log group
+        if let Some(ref tx) = group.transformer {
+            for event in &mut new_events {
+                let transformed =
+                    transformer::apply_transformer(&tx.transformer_config, &event.message);
+                event.message = serde_json::to_string(&transformed).unwrap();
+            }
+        }
 
         let stream = group.log_streams.get_mut(stream_name).ok_or_else(|| {
             AwsServiceError::aws_error(
@@ -4465,7 +4475,7 @@ impl LogsService {
 
     fn test_transformer(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = body_json(req);
-        let _transformer_config = body.get("transformerConfig").ok_or_else(|| {
+        let transformer_config = body.get("transformerConfig").ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "InvalidParameterException",
@@ -4480,13 +4490,15 @@ impl LogsService {
             )
         })?;
 
-        // Stub: return the input events as transformed output unchanged
         let transformed: Vec<Value> = log_event_messages
             .iter()
             .map(|msg| {
+                let message = msg.as_str().unwrap_or("");
+                let transformed_event = transformer::apply_transformer(transformer_config, message);
+                let transformed_str = serde_json::to_string(&transformed_event).unwrap();
                 json!({
                     "eventMessage": msg,
-                    "transformedEventMessage": msg,
+                    "transformedEventMessage": transformed_str,
                 })
             })
             .collect();
