@@ -10,11 +10,12 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceErr
 use fakecloud_core::validation::*;
 
 use crate::state::{
-    ComplianceItem, InventoryDeletion, InventoryEntry, InventoryItem, MaintenanceWindow,
-    MaintenanceWindowTarget, MaintenanceWindowTask, PatchBaseline, PatchGroup, ResourceDataSync,
-    SharedSsmState, SsmAssociation, SsmAssociationVersion, SsmCommand, SsmDocument,
+    AutomationExecution, ComplianceItem, ExecutionPreview, InventoryDeletion, InventoryEntry,
+    InventoryItem, MaintenanceWindow, MaintenanceWindowTarget, MaintenanceWindowTask,
+    OpsItemRelatedItem, OpsMetadataEntry, PatchBaseline, PatchGroup, ResourceDataSync,
+    SharedSsmState, SsmActivation, SsmAssociation, SsmAssociationVersion, SsmCommand, SsmDocument,
     SsmDocumentVersion, SsmOpsItem, SsmParameter, SsmParameterVersion, SsmResourcePolicy,
-    SsmServiceSetting,
+    SsmServiceSetting, SsmSession,
 };
 
 use fakecloud_secretsmanager::state::SharedSecretsManagerState;
@@ -185,8 +186,53 @@ impl AwsService for SsmService {
             "DeleteResourceDataSync" => self.delete_resource_data_sync(&req),
             "ListResourceDataSync" => self.list_resource_data_sync(&req),
             "UpdateResourceDataSync" => self.update_resource_data_sync(&req),
+            // OpsItem related items
+            "AssociateOpsItemRelatedItem" => self.associate_ops_item_related_item(&req),
+            "DisassociateOpsItemRelatedItem" => self.disassociate_ops_item_related_item(&req),
+            "ListOpsItemRelatedItems" => self.list_ops_item_related_items(&req),
+            "ListOpsItemEvents" => self.list_ops_item_events(&req),
+            // OpsMetadata
+            "CreateOpsMetadata" => self.create_ops_metadata(&req),
+            "GetOpsMetadata" => self.get_ops_metadata(&req),
+            "UpdateOpsMetadata" => self.update_ops_metadata(&req),
+            "DeleteOpsMetadata" => self.delete_ops_metadata(&req),
+            "ListOpsMetadata" => self.list_ops_metadata(&req),
             // OpsMetadata extras
             "GetOpsSummary" => self.get_ops_summary(&req),
+            // Automation
+            "StartAutomationExecution" => self.start_automation_execution(&req),
+            "StopAutomationExecution" => self.stop_automation_execution(&req),
+            "GetAutomationExecution" => self.get_automation_execution(&req),
+            "DescribeAutomationExecutions" => self.describe_automation_executions(&req),
+            "DescribeAutomationStepExecutions" => self.describe_automation_step_executions(&req),
+            "SendAutomationSignal" => self.send_automation_signal(&req),
+            "StartChangeRequestExecution" => self.start_change_request_execution(&req),
+            "StartExecutionPreview" => self.start_execution_preview(&req),
+            "GetExecutionPreview" => self.get_execution_preview(&req),
+            // Sessions
+            "StartSession" => self.start_session(&req),
+            "ResumeSession" => self.resume_session(&req),
+            "TerminateSession" => self.terminate_session(&req),
+            "DescribeSessions" => self.describe_sessions(&req),
+            "StartAccessRequest" => self.start_access_request(&req),
+            "GetAccessToken" => self.get_access_token(&req),
+            // Managed instances
+            "CreateActivation" => self.create_activation(&req),
+            "DeleteActivation" => self.delete_activation(&req),
+            "DescribeActivations" => self.describe_activations(&req),
+            "DeregisterManagedInstance" => self.deregister_managed_instance(&req),
+            "DescribeInstanceInformation" => self.describe_instance_information(&req),
+            "DescribeInstanceProperties" => self.describe_instance_properties(&req),
+            "UpdateManagedInstanceRole" => self.update_managed_instance_role(&req),
+            // Other
+            "ListNodes" => self.list_nodes(&req),
+            "ListNodesSummary" => self.list_nodes_summary(&req),
+            "DescribeEffectiveInstanceAssociations" => {
+                self.describe_effective_instance_associations(&req)
+            }
+            "DescribeInstanceAssociationsStatus" => {
+                self.describe_instance_associations_status(&req)
+            }
             // Stubs
             "GetConnectionStatus" => self.get_connection_status(&req),
             "GetCalendarState" => self.get_calendar_state(&req),
@@ -313,8 +359,49 @@ impl AwsService for SsmService {
             "DeleteResourceDataSync",
             "ListResourceDataSync",
             "UpdateResourceDataSync",
+            // OpsItem related items
+            "AssociateOpsItemRelatedItem",
+            "DisassociateOpsItemRelatedItem",
+            "ListOpsItemRelatedItems",
+            "ListOpsItemEvents",
+            // OpsMetadata
+            "CreateOpsMetadata",
+            "GetOpsMetadata",
+            "UpdateOpsMetadata",
+            "DeleteOpsMetadata",
+            "ListOpsMetadata",
             // OpsMetadata extras
             "GetOpsSummary",
+            // Automation
+            "StartAutomationExecution",
+            "StopAutomationExecution",
+            "GetAutomationExecution",
+            "DescribeAutomationExecutions",
+            "DescribeAutomationStepExecutions",
+            "SendAutomationSignal",
+            "StartChangeRequestExecution",
+            "StartExecutionPreview",
+            "GetExecutionPreview",
+            // Sessions
+            "StartSession",
+            "ResumeSession",
+            "TerminateSession",
+            "DescribeSessions",
+            "StartAccessRequest",
+            "GetAccessToken",
+            // Managed instances
+            "CreateActivation",
+            "DeleteActivation",
+            "DescribeActivations",
+            "DeregisterManagedInstance",
+            "DescribeInstanceInformation",
+            "DescribeInstanceProperties",
+            "UpdateManagedInstanceRole",
+            // Other
+            "ListNodes",
+            "ListNodesSummary",
+            "DescribeEffectiveInstanceAssociations",
+            "DescribeInstanceAssociationsStatus",
             // Stubs
             "GetConnectionStatus",
             "GetCalendarState",
@@ -6404,6 +6491,1067 @@ impl SsmService {
     fn get_ops_summary(&self, _req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         Ok(json_resp(json!({ "Entities": [] })))
     }
+
+    // ── OpsItem Related Items ─────────────────────────────────────
+
+    fn associate_ops_item_related_item(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let ops_item_id = body["OpsItemId"]
+            .as_str()
+            .ok_or_else(|| missing("OpsItemId"))?
+            .to_string();
+        let association_type = body["AssociationType"]
+            .as_str()
+            .ok_or_else(|| missing("AssociationType"))?
+            .to_string();
+        let resource_type = body["ResourceType"]
+            .as_str()
+            .ok_or_else(|| missing("ResourceType"))?
+            .to_string();
+        let resource_uri = body["ResourceUri"]
+            .as_str()
+            .ok_or_else(|| missing("ResourceUri"))?
+            .to_string();
+
+        let now = Utc::now();
+        let mut state = self.state.write();
+
+        // Verify ops item exists
+        if !state.ops_items.contains_key(&ops_item_id) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "OpsItemNotFoundException",
+                format!("OpsItem ID {ops_item_id} not found"),
+            ));
+        }
+
+        state.ops_item_related_item_counter += 1;
+        let association_id = format!("oiri-{:012x}", state.ops_item_related_item_counter);
+        let account_id = state.account_id.clone();
+
+        state.ops_item_related_items.push(OpsItemRelatedItem {
+            association_id: association_id.clone(),
+            ops_item_id,
+            association_type,
+            resource_type,
+            resource_uri,
+            created_time: now,
+            created_by: format!("arn:aws:iam::{account_id}:root"),
+            last_modified_time: now,
+            last_modified_by: format!("arn:aws:iam::{account_id}:root"),
+        });
+
+        Ok(json_resp(json!({ "AssociationId": association_id })))
+    }
+
+    fn disassociate_ops_item_related_item(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let ops_item_id = body["OpsItemId"]
+            .as_str()
+            .ok_or_else(|| missing("OpsItemId"))?;
+        let association_id = body["AssociationId"]
+            .as_str()
+            .ok_or_else(|| missing("AssociationId"))?;
+
+        let mut state = self.state.write();
+        let before = state.ops_item_related_items.len();
+        state
+            .ops_item_related_items
+            .retain(|ri| !(ri.ops_item_id == ops_item_id && ri.association_id == association_id));
+        if state.ops_item_related_items.len() == before {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "OpsItemRelatedItemAssociationNotFoundException",
+                format!("Association {association_id} not found for OpsItem {ops_item_id}"),
+            ));
+        }
+
+        Ok(json_resp(json!({})))
+    }
+
+    fn list_ops_item_related_items(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let state = self.state.read();
+        let ops_item_id = body["OpsItemId"].as_str();
+
+        let items: Vec<Value> = state
+            .ops_item_related_items
+            .iter()
+            .filter(|ri| ops_item_id.is_none_or(|id| ri.ops_item_id == id))
+            .map(|ri| {
+                json!({
+                    "OpsItemId": ri.ops_item_id,
+                    "AssociationId": ri.association_id,
+                    "AssociationType": ri.association_type,
+                    "ResourceType": ri.resource_type,
+                    "ResourceUri": ri.resource_uri,
+                    "CreatedTime": ri.created_time.timestamp_millis() as f64 / 1000.0,
+                    "CreatedBy": ri.created_by,
+                    "LastModifiedTime": ri.last_modified_time.timestamp_millis() as f64 / 1000.0,
+                    "LastModifiedBy": ri.last_modified_by,
+                })
+            })
+            .collect();
+
+        Ok(json_resp(json!({ "Summaries": items })))
+    }
+
+    fn list_ops_item_events(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let state = self.state.read();
+
+        // Filter by OpsItemId if provided in Filters
+        let filter_id = body["Filters"].as_array().and_then(|filters| {
+            filters.iter().find_map(|f| {
+                if f["Key"].as_str() == Some("OpsItemId") {
+                    f["Values"]
+                        .as_array()
+                        .and_then(|v| v.first())
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                } else {
+                    None
+                }
+            })
+        });
+
+        let events: Vec<Value> = state
+            .ops_item_events
+            .iter()
+            .filter(|e| filter_id.as_ref().is_none_or(|id| e.ops_item_id == *id))
+            .map(|e| {
+                json!({
+                    "OpsItemId": e.ops_item_id,
+                    "EventId": e.event_id,
+                    "Source": e.source,
+                    "DetailType": e.detail_type,
+                    "CreatedTime": e.created_time.timestamp_millis() as f64 / 1000.0,
+                    "CreatedBy": e.created_by,
+                })
+            })
+            .collect();
+
+        Ok(json_resp(json!({ "Summaries": events })))
+    }
+
+    // ── OpsMetadata ───────────────────────────────────────────────
+
+    fn create_ops_metadata(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let resource_id = body["ResourceId"]
+            .as_str()
+            .ok_or_else(|| missing("ResourceId"))?
+            .to_string();
+        let metadata: HashMap<String, serde_json::Value> = body["Metadata"]
+            .as_object()
+            .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+            .unwrap_or_default();
+
+        let mut state = self.state.write();
+        let arn = format!(
+            "arn:aws:ssm:{}:{}:opsmetadata/{}",
+            state.region, state.account_id, resource_id
+        );
+
+        if state.ops_metadata.contains_key(&arn) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "OpsMetadataAlreadyExistsException",
+                format!("OpsMetadata for {resource_id} already exists"),
+            ));
+        }
+
+        let entry = OpsMetadataEntry {
+            ops_metadata_arn: arn.clone(),
+            resource_id,
+            metadata,
+            creation_date: Utc::now(),
+        };
+        state.ops_metadata.insert(arn.clone(), entry);
+
+        Ok(json_resp(json!({ "OpsMetadataArn": arn })))
+    }
+
+    fn get_ops_metadata(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let arn = body["OpsMetadataArn"]
+            .as_str()
+            .ok_or_else(|| missing("OpsMetadataArn"))?;
+
+        let state = self.state.read();
+        let entry = state.ops_metadata.get(arn).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "OpsMetadataNotFoundException",
+                format!("OpsMetadata {arn} not found"),
+            )
+        })?;
+
+        Ok(json_resp(json!({
+            "ResourceId": entry.resource_id,
+            "Metadata": entry.metadata,
+        })))
+    }
+
+    fn update_ops_metadata(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let arn = body["OpsMetadataArn"]
+            .as_str()
+            .ok_or_else(|| missing("OpsMetadataArn"))?;
+
+        let mut state = self.state.write();
+        let entry = state.ops_metadata.get_mut(arn).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "OpsMetadataNotFoundException",
+                format!("OpsMetadata {arn} not found"),
+            )
+        })?;
+
+        if let Some(to_add) = body["MetadataToUpdate"].as_object() {
+            for (k, v) in to_add {
+                entry.metadata.insert(k.clone(), v.clone());
+            }
+        }
+        if let Some(to_del) = body["KeysToDelete"].as_array() {
+            for k in to_del {
+                if let Some(key) = k.as_str() {
+                    entry.metadata.remove(key);
+                }
+            }
+        }
+
+        Ok(json_resp(json!({ "OpsMetadataArn": arn })))
+    }
+
+    fn delete_ops_metadata(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let arn = body["OpsMetadataArn"]
+            .as_str()
+            .ok_or_else(|| missing("OpsMetadataArn"))?;
+
+        let mut state = self.state.write();
+        if state.ops_metadata.remove(arn).is_none() {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "OpsMetadataNotFoundException",
+                format!("OpsMetadata {arn} not found"),
+            ));
+        }
+
+        Ok(json_resp(json!({})))
+    }
+
+    fn list_ops_metadata(&self, _req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let state = self.state.read();
+        let items: Vec<Value> = state
+            .ops_metadata
+            .values()
+            .map(|e| {
+                json!({
+                    "OpsMetadataArn": e.ops_metadata_arn,
+                    "ResourceId": e.resource_id,
+                    "CreationDate": e.creation_date.timestamp_millis() as f64 / 1000.0,
+                })
+            })
+            .collect();
+
+        Ok(json_resp(json!({ "OpsMetadataList": items })))
+    }
+
+    // ── Automation ────────────────────────────────────────────────
+
+    fn start_automation_execution(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let document_name = body["DocumentName"]
+            .as_str()
+            .ok_or_else(|| missing("DocumentName"))?
+            .to_string();
+        let document_version = body["DocumentVersion"].as_str().map(|s| s.to_string());
+        let parameters: HashMap<String, Vec<String>> = body["Parameters"]
+            .as_object()
+            .map(|obj| {
+                obj.iter()
+                    .map(|(k, v)| {
+                        let vals = v
+                            .as_array()
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(|i| i.as_str().map(|s| s.to_string()))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        (k.clone(), vals)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mode = body["Mode"].as_str().unwrap_or("Auto").to_string();
+        let target = body["TargetParameterName"].as_str().map(|s| s.to_string());
+        let targets: Vec<serde_json::Value> =
+            body["Targets"].as_array().cloned().unwrap_or_default();
+        let max_concurrency = body["MaxConcurrency"].as_str().map(|s| s.to_string());
+        let max_errors = body["MaxErrors"].as_str().map(|s| s.to_string());
+
+        let now = Utc::now();
+        let mut state = self.state.write();
+        state.automation_execution_counter += 1;
+        let exec_id = format!(
+            "{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
+            state.automation_execution_counter, 0, 0, 0, state.automation_execution_counter
+        );
+        let account_id = state.account_id.clone();
+
+        let execution = AutomationExecution {
+            automation_execution_id: exec_id.clone(),
+            document_name,
+            document_version,
+            automation_execution_status: "InProgress".to_string(),
+            execution_start_time: now,
+            execution_end_time: None,
+            parameters,
+            outputs: HashMap::new(),
+            mode,
+            target,
+            targets,
+            max_concurrency,
+            max_errors,
+            executed_by: format!("arn:aws:iam::{account_id}:root"),
+            step_executions: Vec::new(),
+            automation_subtype: None,
+            runbooks: Vec::new(),
+            change_request_name: None,
+            scheduled_time: None,
+        };
+
+        state
+            .automation_executions
+            .insert(exec_id.clone(), execution);
+
+        Ok(json_resp(json!({ "AutomationExecutionId": exec_id })))
+    }
+
+    fn stop_automation_execution(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let exec_id = body["AutomationExecutionId"]
+            .as_str()
+            .ok_or_else(|| missing("AutomationExecutionId"))?;
+
+        let mut state = self.state.write();
+        let exec = state
+            .automation_executions
+            .get_mut(exec_id)
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "AutomationExecutionNotFoundException",
+                    format!("Automation execution {exec_id} not found"),
+                )
+            })?;
+
+        exec.automation_execution_status = "Cancelled".to_string();
+        exec.execution_end_time = Some(Utc::now());
+
+        Ok(json_resp(json!({})))
+    }
+
+    fn get_automation_execution(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let exec_id = body["AutomationExecutionId"]
+            .as_str()
+            .ok_or_else(|| missing("AutomationExecutionId"))?;
+
+        let state = self.state.read();
+        let exec = state.automation_executions.get(exec_id).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "AutomationExecutionNotFoundException",
+                format!("Automation execution {exec_id} not found"),
+            )
+        })?;
+
+        Ok(json_resp(
+            json!({ "AutomationExecution": automation_execution_to_json(exec) }),
+        ))
+    }
+
+    fn describe_automation_executions(
+        &self,
+        _req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let state = self.state.read();
+        let items: Vec<Value> = state
+            .automation_executions
+            .values()
+            .map(|e| {
+                json!({
+                    "AutomationExecutionId": e.automation_execution_id,
+                    "DocumentName": e.document_name,
+                    "AutomationExecutionStatus": e.automation_execution_status,
+                    "ExecutionStartTime": e.execution_start_time.timestamp_millis() as f64 / 1000.0,
+                    "ExecutedBy": e.executed_by,
+                    "Mode": e.mode,
+                    "Targets": e.targets,
+                })
+            })
+            .collect();
+
+        Ok(json_resp(
+            json!({ "AutomationExecutionMetadataList": items }),
+        ))
+    }
+
+    fn describe_automation_step_executions(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let exec_id = body["AutomationExecutionId"]
+            .as_str()
+            .ok_or_else(|| missing("AutomationExecutionId"))?;
+
+        let state = self.state.read();
+        let exec = state.automation_executions.get(exec_id).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "AutomationExecutionNotFoundException",
+                format!("Automation execution {exec_id} not found"),
+            )
+        })?;
+
+        let steps: Vec<Value> = exec
+            .step_executions
+            .iter()
+            .map(|s| {
+                json!({
+                    "StepName": s.step_name,
+                    "Action": s.action,
+                    "StepStatus": s.step_status,
+                    "StepExecutionId": s.step_execution_id,
+                    "Inputs": s.inputs,
+                    "Outputs": s.outputs,
+                })
+            })
+            .collect();
+
+        Ok(json_resp(json!({ "StepExecutions": steps })))
+    }
+
+    fn send_automation_signal(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let exec_id = body["AutomationExecutionId"]
+            .as_str()
+            .ok_or_else(|| missing("AutomationExecutionId"))?;
+        let _signal_type = body["SignalType"]
+            .as_str()
+            .ok_or_else(|| missing("SignalType"))?;
+
+        let state = self.state.read();
+        if !state.automation_executions.contains_key(exec_id) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "AutomationExecutionNotFoundException",
+                format!("Automation execution {exec_id} not found"),
+            ));
+        }
+
+        Ok(json_resp(json!({})))
+    }
+
+    fn start_change_request_execution(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let document_name = body["DocumentName"]
+            .as_str()
+            .ok_or_else(|| missing("DocumentName"))?
+            .to_string();
+        let _runbooks = body["Runbooks"]
+            .as_array()
+            .ok_or_else(|| missing("Runbooks"))?;
+        let change_request_name = body["ChangeRequestName"].as_str().map(|s| s.to_string());
+        let runbooks: Vec<serde_json::Value> =
+            body["Runbooks"].as_array().cloned().unwrap_or_default();
+
+        let now = Utc::now();
+        let mut state = self.state.write();
+        state.automation_execution_counter += 1;
+        let exec_id = format!(
+            "{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
+            state.automation_execution_counter, 0, 0, 0, state.automation_execution_counter
+        );
+        let account_id = state.account_id.clone();
+
+        let execution = AutomationExecution {
+            automation_execution_id: exec_id.clone(),
+            document_name,
+            document_version: None,
+            automation_execution_status: "Pending".to_string(),
+            execution_start_time: now,
+            execution_end_time: None,
+            parameters: HashMap::new(),
+            outputs: HashMap::new(),
+            mode: "Auto".to_string(),
+            target: None,
+            targets: Vec::new(),
+            max_concurrency: None,
+            max_errors: None,
+            executed_by: format!("arn:aws:iam::{account_id}:root"),
+            step_executions: Vec::new(),
+            automation_subtype: Some("ChangeRequest".to_string()),
+            runbooks,
+            change_request_name,
+            scheduled_time: None,
+        };
+
+        state
+            .automation_executions
+            .insert(exec_id.clone(), execution);
+
+        Ok(json_resp(json!({ "AutomationExecutionId": exec_id })))
+    }
+
+    fn start_execution_preview(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let document_name = body["DocumentName"]
+            .as_str()
+            .ok_or_else(|| missing("DocumentName"))?
+            .to_string();
+
+        let now = Utc::now();
+        let mut state = self.state.write();
+        state.execution_preview_counter += 1;
+        let preview_id = format!(
+            "{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
+            state.execution_preview_counter, 0, 0, 0, state.execution_preview_counter
+        );
+
+        let preview = ExecutionPreview {
+            execution_preview_id: preview_id.clone(),
+            document_name,
+            status: "Success".to_string(),
+            created_time: now,
+        };
+        state.execution_previews.insert(preview_id.clone(), preview);
+
+        Ok(json_resp(json!({ "ExecutionPreviewId": preview_id })))
+    }
+
+    fn get_execution_preview(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let preview_id = body["ExecutionPreviewId"]
+            .as_str()
+            .ok_or_else(|| missing("ExecutionPreviewId"))?;
+
+        let state = self.state.read();
+        let preview = state.execution_previews.get(preview_id).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("Execution preview {preview_id} not found"),
+            )
+        })?;
+
+        Ok(json_resp(json!({
+            "ExecutionPreviewId": preview.execution_preview_id,
+            "Status": preview.status,
+            "EndedAt": preview.created_time.timestamp_millis() as f64 / 1000.0,
+        })))
+    }
+
+    // ── Sessions ──────────────────────────────────────────────────
+
+    fn start_session(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let target = body["Target"]
+            .as_str()
+            .ok_or_else(|| missing("Target"))?
+            .to_string();
+        let reason = body["Reason"].as_str().map(|s| s.to_string());
+
+        let now = Utc::now();
+        let mut state = self.state.write();
+        state.session_counter += 1;
+        let session_id = format!("session-{:012x}", state.session_counter);
+        let account_id = state.account_id.clone();
+
+        let session = SsmSession {
+            session_id: session_id.clone(),
+            target: target.clone(),
+            status: "Connected".to_string(),
+            start_date: now,
+            end_date: None,
+            owner: format!("arn:aws:iam::{account_id}:root"),
+            reason,
+        };
+        state.sessions.insert(session_id.clone(), session);
+
+        Ok(json_resp(json!({
+            "SessionId": session_id,
+            "TokenValue": format!("token-{session_id}"),
+            "StreamUrl": format!("wss://ssm.us-east-1.amazonaws.com/session/{session_id}"),
+        })))
+    }
+
+    fn resume_session(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let session_id = body["SessionId"]
+            .as_str()
+            .ok_or_else(|| missing("SessionId"))?;
+
+        let state = self.state.read();
+        let session = state.sessions.get(session_id).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "DoesNotExistException",
+                format!("Session {session_id} not found"),
+            )
+        })?;
+
+        Ok(json_resp(json!({
+            "SessionId": session.session_id,
+            "TokenValue": format!("token-{}", session.session_id),
+            "StreamUrl": format!("wss://ssm.us-east-1.amazonaws.com/session/{}", session.session_id),
+        })))
+    }
+
+    fn terminate_session(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let session_id = body["SessionId"]
+            .as_str()
+            .ok_or_else(|| missing("SessionId"))?;
+
+        let mut state = self.state.write();
+        if let Some(session) = state.sessions.get_mut(session_id) {
+            session.status = "Terminated".to_string();
+            session.end_date = Some(Utc::now());
+        }
+        // AWS TerminateSession doesn't error on non-existent sessions
+
+        Ok(json_resp(json!({ "SessionId": session_id })))
+    }
+
+    fn describe_sessions(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let state_filter = body["State"].as_str().ok_or_else(|| missing("State"))?;
+
+        let state = self.state.read();
+        let sessions: Vec<Value> = state
+            .sessions
+            .values()
+            .filter(|s| match state_filter {
+                "Active" => s.status == "Connected",
+                "History" => s.status == "Terminated",
+                _ => true,
+            })
+            .map(|s| {
+                let mut v = json!({
+                    "SessionId": s.session_id,
+                    "Target": s.target,
+                    "Status": s.status,
+                    "StartDate": s.start_date.timestamp_millis() as f64 / 1000.0,
+                    "Owner": s.owner,
+                });
+                if let Some(ref end) = s.end_date {
+                    v["EndDate"] = json!(end.timestamp_millis() as f64 / 1000.0);
+                }
+                if let Some(ref reason) = s.reason {
+                    v["Reason"] = json!(reason);
+                }
+                v
+            })
+            .collect();
+
+        Ok(json_resp(json!({ "Sessions": sessions })))
+    }
+
+    fn start_access_request(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let _reason = body["Reason"].as_str().ok_or_else(|| missing("Reason"))?;
+        let _targets = body["Targets"]
+            .as_array()
+            .ok_or_else(|| missing("Targets"))?;
+
+        let mut state = self.state.write();
+        state.session_counter += 1;
+        let access_request_id = format!("ar-{:012x}", state.session_counter);
+
+        Ok(json_resp(
+            json!({ "AccessRequestId": access_request_id, "AccessRequestStatus": "Approved" }),
+        ))
+    }
+
+    fn get_access_token(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let access_request_id = body["AccessRequestId"]
+            .as_str()
+            .ok_or_else(|| missing("AccessRequestId"))?;
+
+        Ok(json_resp(json!({
+            "AccessRequestId": access_request_id,
+            "AccessRequestStatus": "Approved",
+            "TokenValue": format!("token-{access_request_id}"),
+            "SessionId": format!("session-{access_request_id}"),
+        })))
+    }
+
+    // ── Managed Instances ─────────────────────────────────────────
+
+    fn create_activation(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let iam_role = body["IamRole"]
+            .as_str()
+            .ok_or_else(|| missing("IamRole"))?
+            .to_string();
+        let description = body["Description"].as_str().map(|s| s.to_string());
+        let default_instance_name = body["DefaultInstanceName"].as_str().map(|s| s.to_string());
+        let registration_limit = body["RegistrationLimit"].as_i64().unwrap_or(1);
+        let tags: HashMap<String, String> = body["Tags"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|t| {
+                        let k = t["Key"].as_str()?;
+                        let v = t["Value"].as_str()?;
+                        Some((k.to_string(), v.to_string()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let now = Utc::now();
+        let mut state = self.state.write();
+        state.activation_counter += 1;
+        let activation_id = format!(
+            "{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
+            state.activation_counter, 0, 0, 0, state.activation_counter
+        );
+        let activation_code = format!("code-{}", activation_id);
+
+        let activation = SsmActivation {
+            activation_id: activation_id.clone(),
+            iam_role,
+            registration_limit,
+            registrations_count: 0,
+            expiration_date: None,
+            description,
+            default_instance_name,
+            created_date: now,
+            expired: false,
+            tags,
+        };
+        state.activations.insert(activation_id.clone(), activation);
+
+        Ok(json_resp(json!({
+            "ActivationId": activation_id,
+            "ActivationCode": activation_code,
+        })))
+    }
+
+    fn delete_activation(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let activation_id = body["ActivationId"]
+            .as_str()
+            .ok_or_else(|| missing("ActivationId"))?;
+
+        let mut state = self.state.write();
+        if state.activations.remove(activation_id).is_none() {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidActivationId",
+                format!("Activation ID {activation_id} not found"),
+            ));
+        }
+
+        Ok(json_resp(json!({})))
+    }
+
+    fn describe_activations(&self, _req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let state = self.state.read();
+        let activations: Vec<Value> = state
+            .activations
+            .values()
+            .map(|a| {
+                let mut v = json!({
+                    "ActivationId": a.activation_id,
+                    "IamRole": a.iam_role,
+                    "RegistrationLimit": a.registration_limit,
+                    "RegistrationsCount": a.registrations_count,
+                    "CreatedDate": a.created_date.timestamp_millis() as f64 / 1000.0,
+                    "Expired": a.expired,
+                });
+                if let Some(ref d) = a.description {
+                    v["Description"] = json!(d);
+                }
+                if let Some(ref n) = a.default_instance_name {
+                    v["DefaultInstanceName"] = json!(n);
+                }
+                if let Some(ref e) = a.expiration_date {
+                    v["ExpirationDate"] = json!(e.timestamp_millis() as f64 / 1000.0);
+                }
+                if !a.tags.is_empty() {
+                    v["Tags"] = json!(a
+                        .tags
+                        .iter()
+                        .map(|(k, v)| json!({"Key": k, "Value": v}))
+                        .collect::<Vec<_>>());
+                }
+                v
+            })
+            .collect();
+
+        Ok(json_resp(json!({ "ActivationList": activations })))
+    }
+
+    fn deregister_managed_instance(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let instance_id = body["InstanceId"]
+            .as_str()
+            .ok_or_else(|| missing("InstanceId"))?;
+
+        let mut state = self.state.write();
+        state.managed_instances.remove(instance_id);
+        // AWS doesn't error on non-existent instances
+
+        Ok(json_resp(json!({})))
+    }
+
+    fn describe_instance_information(
+        &self,
+        _req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let state = self.state.read();
+        let instances: Vec<Value> = state
+            .managed_instances
+            .values()
+            .map(|i| {
+                json!({
+                    "InstanceId": i.instance_id,
+                    "PingStatus": i.ping_status,
+                    "LastPingDateTime": i.last_ping_date_time.timestamp_millis() as f64 / 1000.0,
+                    "AgentVersion": i.agent_version,
+                    "IsLatestVersion": i.is_latest_version,
+                    "PlatformType": i.platform_type,
+                    "PlatformName": i.platform_name,
+                    "PlatformVersion": i.platform_version,
+                    "ResourceType": i.resource_type,
+                    "IPAddress": i.ip_address,
+                    "ComputerName": i.computer_name,
+                    "IamRole": i.iam_role,
+                    "RegistrationDate": i.registration_date.timestamp_millis() as f64 / 1000.0,
+                })
+            })
+            .collect();
+
+        Ok(json_resp(json!({ "InstanceInformationList": instances })))
+    }
+
+    fn describe_instance_properties(
+        &self,
+        _req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let state = self.state.read();
+        let instances: Vec<Value> = state
+            .managed_instances
+            .values()
+            .map(|i| {
+                json!({
+                    "InstanceId": i.instance_id,
+                    "PingStatus": i.ping_status,
+                    "LastPingDateTime": i.last_ping_date_time.timestamp_millis() as f64 / 1000.0,
+                    "AgentVersion": i.agent_version,
+                    "PlatformType": i.platform_type,
+                    "PlatformName": i.platform_name,
+                    "PlatformVersion": i.platform_version,
+                    "ResourceType": i.resource_type,
+                    "IPAddress": i.ip_address,
+                    "ComputerName": i.computer_name,
+                })
+            })
+            .collect();
+
+        Ok(json_resp(json!({ "InstanceProperties": instances })))
+    }
+
+    fn update_managed_instance_role(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let instance_id = body["InstanceId"]
+            .as_str()
+            .ok_or_else(|| missing("InstanceId"))?;
+        let iam_role = body["IamRole"]
+            .as_str()
+            .ok_or_else(|| missing("IamRole"))?
+            .to_string();
+
+        let mut state = self.state.write();
+        let instance = state
+            .managed_instances
+            .get_mut(instance_id)
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidInstanceId",
+                    format!("Instance {instance_id} not found"),
+                )
+            })?;
+        instance.iam_role = iam_role;
+
+        Ok(json_resp(json!({})))
+    }
+
+    // ── Other ─────────────────────────────────────────────────────
+
+    fn list_nodes(&self, _req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        Ok(json_resp(json!({ "Nodes": [] })))
+    }
+
+    fn list_nodes_summary(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let _aggregators = body["Aggregators"]
+            .as_array()
+            .ok_or_else(|| missing("Aggregators"))?;
+        Ok(json_resp(json!({ "Summary": [] })))
+    }
+
+    fn describe_effective_instance_associations(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let instance_id = body["InstanceId"]
+            .as_str()
+            .ok_or_else(|| missing("InstanceId"))?;
+
+        let state = self.state.read();
+        let associations: Vec<Value> = state
+            .associations
+            .values()
+            .filter(|a| {
+                // Match by direct instance_id or by targets containing the instance
+                a.instance_id.as_deref() == Some(instance_id)
+                    || a.targets.iter().any(|t| {
+                        t["Key"].as_str() == Some("InstanceIds")
+                            && t["Values"].as_array().is_some_and(|vals| {
+                                vals.iter().any(|v| v.as_str() == Some(instance_id))
+                            })
+                    })
+            })
+            .map(|a| {
+                json!({
+                    "AssociationId": a.association_id,
+                    "InstanceId": instance_id,
+                    "Content": a.name,
+                    "AssociationVersion": a.versions.len().to_string(),
+                })
+            })
+            .collect();
+
+        Ok(json_resp(json!({ "Associations": associations })))
+    }
+
+    fn describe_instance_associations_status(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let instance_id = body["InstanceId"]
+            .as_str()
+            .ok_or_else(|| missing("InstanceId"))?;
+
+        let state = self.state.read();
+        let statuses: Vec<Value> = state
+            .associations
+            .values()
+            .filter(|a| {
+                a.instance_id.as_deref() == Some(instance_id)
+                    || a.targets.iter().any(|t| {
+                        t["Key"].as_str() == Some("InstanceIds")
+                            && t["Values"].as_array().is_some_and(|vals| {
+                                vals.iter().any(|v| v.as_str() == Some(instance_id))
+                            })
+                    })
+            })
+            .map(|a| {
+                json!({
+                    "AssociationId": a.association_id,
+                    "Name": a.name,
+                    "InstanceId": instance_id,
+                    "AssociationVersion": a.versions.len().to_string(),
+                    "ExecutionDate": a.status_date.timestamp_millis() as f64 / 1000.0,
+                    "Status": a.status,
+                    "DetailedStatus": a.status,
+                    "ExecutionSummary": format!("1 out of 1 plugin processed, 1 success"),
+                })
+            })
+            .collect();
+
+        Ok(json_resp(
+            json!({ "InstanceAssociationStatusInfos": statuses }),
+        ))
+    }
+}
+
+fn automation_execution_to_json(e: &AutomationExecution) -> Value {
+    let mut v = json!({
+        "AutomationExecutionId": e.automation_execution_id,
+        "DocumentName": e.document_name,
+        "AutomationExecutionStatus": e.automation_execution_status,
+        "ExecutionStartTime": e.execution_start_time.timestamp_millis() as f64 / 1000.0,
+        "ExecutedBy": e.executed_by,
+        "Mode": e.mode,
+        "Parameters": e.parameters,
+        "Outputs": e.outputs,
+        "Targets": e.targets,
+        "StepExecutions": e.step_executions.iter().map(|s| json!({
+            "StepName": s.step_name,
+            "Action": s.action,
+            "StepStatus": s.step_status,
+            "StepExecutionId": s.step_execution_id,
+            "Inputs": s.inputs,
+            "Outputs": s.outputs,
+        })).collect::<Vec<Value>>(),
+    });
+    if let Some(ref dv) = e.document_version {
+        v["DocumentVersion"] = json!(dv);
+    }
+    if let Some(ref end) = e.execution_end_time {
+        v["ExecutionEndTime"] = json!(end.timestamp_millis() as f64 / 1000.0);
+    }
+    if let Some(ref target) = e.target {
+        v["TargetParameterName"] = json!(target);
+    }
+    if let Some(ref mc) = e.max_concurrency {
+        v["MaxConcurrency"] = json!(mc);
+    }
+    if let Some(ref me) = e.max_errors {
+        v["MaxErrors"] = json!(me);
+    }
+    if let Some(ref subtype) = e.automation_subtype {
+        v["AutomationSubtype"] = json!(subtype);
+    }
+    if !e.runbooks.is_empty() {
+        v["Runbooks"] = json!(e.runbooks);
+    }
+    if let Some(ref crn) = e.change_request_name {
+        v["ChangeRequestName"] = json!(crn);
+    }
+    v
 }
 
 fn association_to_json(a: &SsmAssociation) -> Value {
@@ -8244,5 +9392,367 @@ mod tests {
         let resp = svc.get_ops_summary(&req).unwrap();
         let body: Value = serde_json::from_slice(&resp.body).unwrap();
         assert!(body["Entities"].as_array().unwrap().is_empty());
+    }
+
+    // ── OpsItem Related Items ─────────────────────────────────────
+
+    #[test]
+    fn associate_and_disassociate_ops_item_related_item() {
+        let svc = make_service();
+        // Create an ops item first
+        let req = make_request(
+            "CreateOpsItem",
+            json!({ "Title": "Test", "Source": "test" }),
+        );
+        let resp = svc.create_ops_item(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let ops_item_id = body["OpsItemId"].as_str().unwrap().to_string();
+
+        // Associate
+        let req = make_request(
+            "AssociateOpsItemRelatedItem",
+            json!({
+                "OpsItemId": ops_item_id,
+                "AssociationType": "IsParentOf",
+                "ResourceType": "AWS::SSMIncidents::IncidentRecord",
+                "ResourceUri": "arn:aws:ssm-incidents::123456789012:incident-record/test"
+            }),
+        );
+        let resp = svc.associate_ops_item_related_item(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let assoc_id = body["AssociationId"].as_str().unwrap().to_string();
+
+        // List
+        let req = make_request(
+            "ListOpsItemRelatedItems",
+            json!({ "OpsItemId": ops_item_id }),
+        );
+        let resp = svc.list_ops_item_related_items(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["Summaries"].as_array().unwrap().len(), 1);
+
+        // Disassociate
+        let req = make_request(
+            "DisassociateOpsItemRelatedItem",
+            json!({ "OpsItemId": ops_item_id, "AssociationId": assoc_id }),
+        );
+        svc.disassociate_ops_item_related_item(&req).unwrap();
+    }
+
+    #[test]
+    fn list_ops_item_events_returns_empty() {
+        let svc = make_service();
+        let req = make_request("ListOpsItemEvents", json!({}));
+        let resp = svc.list_ops_item_events(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert!(body["Summaries"].as_array().unwrap().is_empty());
+    }
+
+    // ── OpsMetadata ───────────────────────────────────────────────
+
+    #[test]
+    fn ops_metadata_lifecycle() {
+        let svc = make_service();
+
+        // Create
+        let req = make_request(
+            "CreateOpsMetadata",
+            json!({
+                "ResourceId": "test-resource",
+                "Metadata": { "key1": { "Value": "val1" } }
+            }),
+        );
+        let resp = svc.create_ops_metadata(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let arn = body["OpsMetadataArn"].as_str().unwrap().to_string();
+
+        // Get
+        let req = make_request("GetOpsMetadata", json!({ "OpsMetadataArn": arn }));
+        let resp = svc.get_ops_metadata(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["ResourceId"].as_str().unwrap(), "test-resource");
+
+        // Update
+        let req = make_request(
+            "UpdateOpsMetadata",
+            json!({
+                "OpsMetadataArn": arn,
+                "MetadataToUpdate": { "key2": { "Value": "val2" } }
+            }),
+        );
+        svc.update_ops_metadata(&req).unwrap();
+
+        // List
+        let req = make_request("ListOpsMetadata", json!({}));
+        let resp = svc.list_ops_metadata(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["OpsMetadataList"].as_array().unwrap().len(), 1);
+
+        // Delete
+        let req = make_request("DeleteOpsMetadata", json!({ "OpsMetadataArn": arn }));
+        svc.delete_ops_metadata(&req).unwrap();
+    }
+
+    // ── Automation ────────────────────────────────────────────────
+
+    #[test]
+    fn automation_execution_lifecycle() {
+        let svc = make_service();
+
+        // Start
+        let req = make_request(
+            "StartAutomationExecution",
+            json!({ "DocumentName": "AWS-RunShellScript" }),
+        );
+        let resp = svc.start_automation_execution(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let exec_id = body["AutomationExecutionId"].as_str().unwrap().to_string();
+
+        // Get
+        let req = make_request(
+            "GetAutomationExecution",
+            json!({ "AutomationExecutionId": exec_id }),
+        );
+        let resp = svc.get_automation_execution(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(
+            body["AutomationExecution"]["AutomationExecutionStatus"]
+                .as_str()
+                .unwrap(),
+            "InProgress"
+        );
+
+        // Describe
+        let req = make_request("DescribeAutomationExecutions", json!({}));
+        let resp = svc.describe_automation_executions(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(
+            body["AutomationExecutionMetadataList"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+
+        // DescribeSteps
+        let req = make_request(
+            "DescribeAutomationStepExecutions",
+            json!({ "AutomationExecutionId": exec_id }),
+        );
+        let resp = svc.describe_automation_step_executions(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert!(body["StepExecutions"].as_array().unwrap().is_empty());
+
+        // Signal
+        let req = make_request(
+            "SendAutomationSignal",
+            json!({ "AutomationExecutionId": exec_id, "SignalType": "Approve" }),
+        );
+        svc.send_automation_signal(&req).unwrap();
+
+        // Stop
+        let req = make_request(
+            "StopAutomationExecution",
+            json!({ "AutomationExecutionId": exec_id }),
+        );
+        svc.stop_automation_execution(&req).unwrap();
+    }
+
+    #[test]
+    fn start_change_request_execution_works() {
+        let svc = make_service();
+        let req = make_request(
+            "StartChangeRequestExecution",
+            json!({
+                "DocumentName": "AWS-ChangeManager",
+                "Runbooks": [{ "DocumentName": "AWS-RunShellScript" }]
+            }),
+        );
+        let resp = svc.start_change_request_execution(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert!(body["AutomationExecutionId"].as_str().is_some());
+    }
+
+    #[test]
+    fn execution_preview_lifecycle() {
+        let svc = make_service();
+
+        let req = make_request(
+            "StartExecutionPreview",
+            json!({ "DocumentName": "AWS-RunShellScript" }),
+        );
+        let resp = svc.start_execution_preview(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let preview_id = body["ExecutionPreviewId"].as_str().unwrap().to_string();
+
+        let req = make_request(
+            "GetExecutionPreview",
+            json!({ "ExecutionPreviewId": preview_id }),
+        );
+        let resp = svc.get_execution_preview(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["Status"].as_str().unwrap(), "Success");
+    }
+
+    // ── Sessions ──────────────────────────────────────────────────
+
+    #[test]
+    fn session_lifecycle() {
+        let svc = make_service();
+
+        // Start
+        let req = make_request("StartSession", json!({ "Target": "i-001" }));
+        let resp = svc.start_session(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let session_id = body["SessionId"].as_str().unwrap().to_string();
+        assert!(body["TokenValue"].as_str().is_some());
+
+        // Resume
+        let req = make_request("ResumeSession", json!({ "SessionId": session_id }));
+        let resp = svc.resume_session(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["SessionId"].as_str().unwrap(), session_id);
+
+        // Describe (Active)
+        let req = make_request("DescribeSessions", json!({ "State": "Active" }));
+        let resp = svc.describe_sessions(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["Sessions"].as_array().unwrap().len(), 1);
+
+        // Terminate
+        let req = make_request("TerminateSession", json!({ "SessionId": session_id }));
+        svc.terminate_session(&req).unwrap();
+
+        // Describe (History)
+        let req = make_request("DescribeSessions", json!({ "State": "History" }));
+        let resp = svc.describe_sessions(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["Sessions"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn start_access_request_and_get_token() {
+        let svc = make_service();
+
+        let req = make_request(
+            "StartAccessRequest",
+            json!({ "Reason": "test", "Targets": [{"Key": "InstanceIds", "Values": ["i-001"]}] }),
+        );
+        let resp = svc.start_access_request(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let ar_id = body["AccessRequestId"].as_str().unwrap().to_string();
+
+        let req = make_request("GetAccessToken", json!({ "AccessRequestId": ar_id }));
+        let resp = svc.get_access_token(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert!(body["TokenValue"].as_str().is_some());
+    }
+
+    // ── Managed Instances ─────────────────────────────────────────
+
+    #[test]
+    fn activation_lifecycle() {
+        let svc = make_service();
+
+        // Create
+        let req = make_request(
+            "CreateActivation",
+            json!({ "IamRole": "SSMServiceRole", "Description": "test" }),
+        );
+        let resp = svc.create_activation(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let activation_id = body["ActivationId"].as_str().unwrap().to_string();
+        assert!(body["ActivationCode"].as_str().is_some());
+
+        // Describe
+        let req = make_request("DescribeActivations", json!({}));
+        let resp = svc.describe_activations(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["ActivationList"].as_array().unwrap().len(), 1);
+
+        // Delete
+        let req = make_request("DeleteActivation", json!({ "ActivationId": activation_id }));
+        svc.delete_activation(&req).unwrap();
+    }
+
+    #[test]
+    fn deregister_managed_instance_no_error() {
+        let svc = make_service();
+        let req = make_request(
+            "DeregisterManagedInstance",
+            json!({ "InstanceId": "mi-001" }),
+        );
+        svc.deregister_managed_instance(&req).unwrap();
+    }
+
+    #[test]
+    fn describe_instance_information_empty() {
+        let svc = make_service();
+        let req = make_request("DescribeInstanceInformation", json!({}));
+        let resp = svc.describe_instance_information(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert!(body["InstanceInformationList"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn describe_instance_properties_empty() {
+        let svc = make_service();
+        let req = make_request("DescribeInstanceProperties", json!({}));
+        let resp = svc.describe_instance_properties(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert!(body["InstanceProperties"].as_array().unwrap().is_empty());
+    }
+
+    // ── Other ─────────────────────────────────────────────────────
+
+    #[test]
+    fn list_nodes_returns_empty() {
+        let svc = make_service();
+        let req = make_request("ListNodes", json!({}));
+        let resp = svc.list_nodes(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert!(body["Nodes"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn list_nodes_summary_returns_empty() {
+        let svc = make_service();
+        let req = make_request(
+            "ListNodesSummary",
+            json!({ "Aggregators": [{"AggregatorType": "Count"}] }),
+        );
+        let resp = svc.list_nodes_summary(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert!(body["Summary"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn describe_effective_instance_associations_empty() {
+        let svc = make_service();
+        let req = make_request(
+            "DescribeEffectiveInstanceAssociations",
+            json!({ "InstanceId": "i-001" }),
+        );
+        let resp = svc.describe_effective_instance_associations(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert!(body["Associations"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn describe_instance_associations_status_empty() {
+        let svc = make_service();
+        let req = make_request(
+            "DescribeInstanceAssociationsStatus",
+            json!({ "InstanceId": "i-001" }),
+        );
+        let resp = svc.describe_instance_associations_status(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert!(body["InstanceAssociationStatusInfos"]
+            .as_array()
+            .unwrap()
+            .is_empty());
     }
 }

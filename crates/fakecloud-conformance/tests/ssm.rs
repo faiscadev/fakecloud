@@ -1722,3 +1722,443 @@ async fn ssm_get_ops_summary() {
     let resp = client.get_ops_summary().send().await.unwrap();
     assert!(resp.entities().is_empty());
 }
+
+// -- OpsItem Related Items --
+
+#[test_action("ssm", "AssociateOpsItemRelatedItem", checksum = "a54779e7")]
+#[test_action("ssm", "DisassociateOpsItemRelatedItem", checksum = "f99bed51")]
+#[test_action("ssm", "ListOpsItemRelatedItems", checksum = "ebe48d0d")]
+#[tokio::test]
+async fn ssm_ops_item_related_items() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+
+    let create = client
+        .create_ops_item()
+        .title("Related")
+        .source("conf-test")
+        .send()
+        .await
+        .unwrap();
+    let ops_item_id = create.ops_item_id().unwrap().to_string();
+
+    let assoc = client
+        .associate_ops_item_related_item()
+        .ops_item_id(&ops_item_id)
+        .association_type("IsParentOf")
+        .resource_type("AWS::SSMIncidents::IncidentRecord")
+        .resource_uri("arn:aws:ssm-incidents::123456789012:incident-record/conf")
+        .send()
+        .await
+        .unwrap();
+    let assoc_id = assoc.association_id().unwrap().to_string();
+
+    let list = client
+        .list_ops_item_related_items()
+        .ops_item_id(&ops_item_id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(list.summaries().len(), 1);
+
+    client
+        .disassociate_ops_item_related_item()
+        .ops_item_id(&ops_item_id)
+        .association_id(&assoc_id)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ssm", "ListOpsItemEvents", checksum = "543a37ae")]
+#[tokio::test]
+async fn ssm_list_ops_item_events() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+    let resp = client.list_ops_item_events().send().await.unwrap();
+    assert!(resp.summaries().is_empty());
+}
+
+// -- OpsMetadata --
+
+#[test_action("ssm", "CreateOpsMetadata", checksum = "78160ee3")]
+#[test_action("ssm", "GetOpsMetadata", checksum = "ae27a60e")]
+#[test_action("ssm", "UpdateOpsMetadata", checksum = "8f8c0f08")]
+#[test_action("ssm", "ListOpsMetadata", checksum = "3d271490")]
+#[test_action("ssm", "DeleteOpsMetadata", checksum = "25691922")]
+#[tokio::test]
+async fn ssm_ops_metadata_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+
+    let create = client
+        .create_ops_metadata()
+        .resource_id("conf-resource")
+        .metadata(
+            "confKey",
+            aws_sdk_ssm::types::MetadataValue::builder()
+                .value("confVal")
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let arn = create.ops_metadata_arn().unwrap().to_string();
+
+    let get = client
+        .get_ops_metadata()
+        .ops_metadata_arn(&arn)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get.resource_id().unwrap(), "conf-resource");
+
+    client
+        .update_ops_metadata()
+        .ops_metadata_arn(&arn)
+        .metadata_to_update(
+            "key2",
+            aws_sdk_ssm::types::MetadataValue::builder()
+                .value("val2")
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let list = client.list_ops_metadata().send().await.unwrap();
+    assert_eq!(list.ops_metadata_list().len(), 1);
+
+    client
+        .delete_ops_metadata()
+        .ops_metadata_arn(&arn)
+        .send()
+        .await
+        .unwrap();
+}
+
+// -- Automation --
+
+#[test_action("ssm", "StartAutomationExecution", checksum = "623d906e")]
+#[test_action("ssm", "GetAutomationExecution", checksum = "77a91a2d")]
+#[test_action("ssm", "DescribeAutomationExecutions", checksum = "630f0f37")]
+#[test_action("ssm", "DescribeAutomationStepExecutions", checksum = "837ae952")]
+#[test_action("ssm", "SendAutomationSignal", checksum = "d85c40bb")]
+#[test_action("ssm", "StopAutomationExecution", checksum = "4200ac33")]
+#[tokio::test]
+async fn ssm_automation_execution_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+
+    let start = client
+        .start_automation_execution()
+        .document_name("AWS-RunShellScript")
+        .send()
+        .await
+        .unwrap();
+    let exec_id = start.automation_execution_id().unwrap().to_string();
+
+    let get = client
+        .get_automation_execution()
+        .automation_execution_id(&exec_id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        get.automation_execution().unwrap().document_name().unwrap(),
+        "AWS-RunShellScript"
+    );
+
+    let desc = client
+        .describe_automation_executions()
+        .send()
+        .await
+        .unwrap();
+    assert!(!desc.automation_execution_metadata_list().is_empty());
+
+    let steps = client
+        .describe_automation_step_executions()
+        .automation_execution_id(&exec_id)
+        .send()
+        .await
+        .unwrap();
+    assert!(steps.step_executions().is_empty());
+
+    client
+        .send_automation_signal()
+        .automation_execution_id(&exec_id)
+        .signal_type(aws_sdk_ssm::types::SignalType::Approve)
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .stop_automation_execution()
+        .automation_execution_id(&exec_id)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ssm", "StartChangeRequestExecution", checksum = "c37a3f1c")]
+#[tokio::test]
+async fn ssm_start_change_request_execution() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+
+    let runbook = aws_sdk_ssm::types::Runbook::builder()
+        .document_name("AWS-RunShellScript")
+        .build()
+        .unwrap();
+    let resp = client
+        .start_change_request_execution()
+        .document_name("AWS-ChangeManager")
+        .runbooks(runbook)
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.automation_execution_id().is_some());
+}
+
+#[test_action("ssm", "StartExecutionPreview", checksum = "db7e07c5")]
+#[test_action("ssm", "GetExecutionPreview", checksum = "91faf997")]
+#[tokio::test]
+async fn ssm_execution_preview() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+
+    let start = client
+        .start_execution_preview()
+        .document_name("AWS-RunShellScript")
+        .send()
+        .await
+        .unwrap();
+    let preview_id = start.execution_preview_id().unwrap().to_string();
+
+    let get = client
+        .get_execution_preview()
+        .execution_preview_id(&preview_id)
+        .send()
+        .await
+        .unwrap();
+    assert!(get.execution_preview_id().is_some());
+}
+
+// -- Sessions --
+
+#[test_action("ssm", "StartSession", checksum = "bbfb0d76")]
+#[test_action("ssm", "ResumeSession", checksum = "da827500")]
+#[test_action("ssm", "DescribeSessions", checksum = "6bc26ec4")]
+#[test_action("ssm", "TerminateSession", checksum = "e8d1b586")]
+#[tokio::test]
+async fn ssm_session_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+
+    let start = client
+        .start_session()
+        .target("i-conf001")
+        .send()
+        .await
+        .unwrap();
+    let session_id = start.session_id().unwrap().to_string();
+    assert!(start.token_value().is_some());
+
+    let resume = client
+        .resume_session()
+        .session_id(&session_id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resume.session_id().unwrap(), session_id);
+
+    let desc = client
+        .describe_sessions()
+        .state(aws_sdk_ssm::types::SessionState::Active)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(desc.sessions().len(), 1);
+
+    client
+        .terminate_session()
+        .session_id(&session_id)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ssm", "StartAccessRequest", checksum = "1b32a067")]
+#[test_action("ssm", "GetAccessToken", checksum = "cff0c4cc")]
+#[tokio::test]
+async fn ssm_access_request() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+
+    let resp = client
+        .start_access_request()
+        .reason("conf-test")
+        .targets(
+            aws_sdk_ssm::types::Target::builder()
+                .key("InstanceIds")
+                .values("i-conf001")
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let ar_id = resp.access_request_id().unwrap().to_string();
+
+    let token = client
+        .get_access_token()
+        .access_request_id(&ar_id)
+        .send()
+        .await
+        .unwrap();
+    assert!(token.access_request_status().is_some());
+}
+
+// -- Managed Instances --
+
+#[test_action("ssm", "CreateActivation", checksum = "db31fde7")]
+#[test_action("ssm", "DescribeActivations", checksum = "5481f5f0")]
+#[test_action("ssm", "DeleteActivation", checksum = "3f2973d0")]
+#[tokio::test]
+async fn ssm_activation_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+
+    let create = client
+        .create_activation()
+        .iam_role("SSMServiceRole")
+        .description("conf activation")
+        .send()
+        .await
+        .unwrap();
+    let activation_id = create.activation_id().unwrap().to_string();
+    assert!(create.activation_code().is_some());
+
+    let desc = client.describe_activations().send().await.unwrap();
+    assert_eq!(desc.activation_list().len(), 1);
+
+    client
+        .delete_activation()
+        .activation_id(&activation_id)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ssm", "DeregisterManagedInstance", checksum = "c3e05cb9")]
+#[tokio::test]
+async fn ssm_deregister_managed_instance() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+
+    client
+        .deregister_managed_instance()
+        .instance_id("mi-conf001")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ssm", "DescribeInstanceInformation", checksum = "2b439b42")]
+#[tokio::test]
+async fn ssm_describe_instance_information() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+
+    let resp = client.describe_instance_information().send().await.unwrap();
+    assert!(resp.instance_information_list().is_empty());
+}
+
+#[test_action("ssm", "DescribeInstanceProperties", checksum = "0a3f70ed")]
+#[tokio::test]
+async fn ssm_describe_instance_properties() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+
+    let resp = client.describe_instance_properties().send().await.unwrap();
+    assert!(resp.instance_properties().is_empty());
+}
+
+#[test_action("ssm", "UpdateManagedInstanceRole", checksum = "de3c4cf2")]
+#[tokio::test]
+async fn ssm_update_managed_instance_role() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+
+    // This should fail since instance doesn't exist, but we test the endpoint works
+    let result = client
+        .update_managed_instance_role()
+        .instance_id("mi-conf001")
+        .iam_role("NewRole")
+        .send()
+        .await;
+    assert!(result.is_err()); // Expected: instance not found
+}
+
+// -- Other --
+
+#[test_action("ssm", "ListNodes", checksum = "11c898a4")]
+#[tokio::test]
+async fn ssm_list_nodes() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+
+    let resp = client.list_nodes().send().await.unwrap();
+    assert!(resp.nodes().is_empty());
+}
+
+#[test_action("ssm", "ListNodesSummary", checksum = "5f0509db")]
+#[tokio::test]
+async fn ssm_list_nodes_summary() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+
+    let resp = client
+        .list_nodes_summary()
+        .aggregators(
+            aws_sdk_ssm::types::NodeAggregator::builder()
+                .aggregator_type(aws_sdk_ssm::types::NodeAggregatorType::Count)
+                .type_name(aws_sdk_ssm::types::NodeTypeName::Instance)
+                .attribute_name(aws_sdk_ssm::types::NodeAttributeName::AgentVersion)
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.summary().is_empty());
+}
+
+#[test_action("ssm", "DescribeEffectiveInstanceAssociations", checksum = "20fc257d")]
+#[tokio::test]
+async fn ssm_describe_effective_instance_associations() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+
+    let resp = client
+        .describe_effective_instance_associations()
+        .instance_id("i-conf001")
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.associations().is_empty());
+}
+
+#[test_action("ssm", "DescribeInstanceAssociationsStatus", checksum = "309b1833")]
+#[tokio::test]
+async fn ssm_describe_instance_associations_status() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+
+    let resp = client
+        .describe_instance_associations_status()
+        .instance_id("i-conf001")
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.instance_association_status_infos().is_empty());
+}

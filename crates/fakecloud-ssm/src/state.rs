@@ -241,6 +241,126 @@ pub struct SsmServiceSetting {
     pub status: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct OpsItemRelatedItem {
+    pub association_id: String,
+    pub ops_item_id: String,
+    pub association_type: String,
+    pub resource_type: String,
+    pub resource_uri: String,
+    pub created_time: DateTime<Utc>,
+    pub created_by: String,
+    pub last_modified_time: DateTime<Utc>,
+    pub last_modified_by: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct OpsItemEvent {
+    pub ops_item_id: String,
+    pub event_id: String,
+    pub source: String,
+    pub detail_type: String,
+    pub created_time: DateTime<Utc>,
+    pub created_by: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct OpsMetadataEntry {
+    pub ops_metadata_arn: String,
+    pub resource_id: String,
+    pub metadata: HashMap<String, serde_json::Value>,
+    pub creation_date: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AutomationExecution {
+    pub automation_execution_id: String,
+    pub document_name: String,
+    pub document_version: Option<String>,
+    pub automation_execution_status: String,
+    pub execution_start_time: DateTime<Utc>,
+    pub execution_end_time: Option<DateTime<Utc>>,
+    pub parameters: HashMap<String, Vec<String>>,
+    pub outputs: HashMap<String, Vec<String>>,
+    pub mode: String,
+    pub target: Option<String>,
+    pub targets: Vec<serde_json::Value>,
+    pub max_concurrency: Option<String>,
+    pub max_errors: Option<String>,
+    pub executed_by: String,
+    pub step_executions: Vec<AutomationStepExecution>,
+    pub automation_subtype: Option<String>,
+    pub runbooks: Vec<serde_json::Value>,
+    pub change_request_name: Option<String>,
+    pub scheduled_time: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AutomationStepExecution {
+    pub step_name: String,
+    pub action: String,
+    pub step_status: String,
+    pub execution_start_time: Option<DateTime<Utc>>,
+    pub execution_end_time: Option<DateTime<Utc>>,
+    pub inputs: HashMap<String, String>,
+    pub outputs: HashMap<String, Vec<String>>,
+    pub step_execution_id: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct SsmSession {
+    pub session_id: String,
+    pub target: String,
+    pub status: String,
+    pub start_date: DateTime<Utc>,
+    pub end_date: Option<DateTime<Utc>>,
+    pub owner: String,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SsmActivation {
+    pub activation_id: String,
+    pub iam_role: String,
+    pub registration_limit: i64,
+    pub registrations_count: i64,
+    pub expiration_date: Option<DateTime<Utc>>,
+    pub description: Option<String>,
+    pub default_instance_name: Option<String>,
+    pub created_date: DateTime<Utc>,
+    pub expired: bool,
+    pub tags: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ManagedInstance {
+    pub instance_id: String,
+    pub activation_id: Option<String>,
+    pub iam_role: String,
+    pub ping_status: String,
+    pub platform_type: String,
+    pub platform_name: String,
+    pub platform_version: String,
+    pub agent_version: String,
+    pub last_ping_date_time: DateTime<Utc>,
+    pub registration_date: DateTime<Utc>,
+    pub resource_type: String,
+    pub computer_name: String,
+    pub ip_address: String,
+    pub is_latest_version: bool,
+    pub association_status: Option<String>,
+    pub source_id: Option<String>,
+    pub source_type: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExecutionPreview {
+    pub execution_preview_id: String,
+    pub document_name: String,
+    pub status: String,
+    pub created_time: DateTime<Utc>,
+}
+
 pub struct SsmState {
     pub account_id: String,
     pub region: String,
@@ -263,6 +383,19 @@ pub struct SsmState {
     pub resource_data_syncs: HashMap<String, ResourceDataSync>,
     pub mw_execution_counter: u64,
     pub inventory_deletion_counter: u64,
+    pub ops_item_related_items: Vec<OpsItemRelatedItem>,
+    pub ops_item_related_item_counter: u64,
+    pub ops_item_events: Vec<OpsItemEvent>,
+    pub ops_metadata: HashMap<String, OpsMetadataEntry>,
+    pub automation_executions: HashMap<String, AutomationExecution>,
+    pub automation_execution_counter: u64,
+    pub sessions: HashMap<String, SsmSession>,
+    pub session_counter: u64,
+    pub activations: HashMap<String, SsmActivation>,
+    pub activation_counter: u64,
+    pub managed_instances: HashMap<String, ManagedInstance>,
+    pub execution_previews: HashMap<String, ExecutionPreview>,
+    pub execution_preview_counter: u64,
 }
 
 impl SsmState {
@@ -289,6 +422,19 @@ impl SsmState {
             resource_data_syncs: HashMap::new(),
             mw_execution_counter: 0,
             inventory_deletion_counter: 0,
+            ops_item_related_items: Vec::new(),
+            ops_item_related_item_counter: 0,
+            ops_item_events: Vec::new(),
+            ops_metadata: HashMap::new(),
+            automation_executions: HashMap::new(),
+            automation_execution_counter: 0,
+            sessions: HashMap::new(),
+            session_counter: 0,
+            activations: HashMap::new(),
+            activation_counter: 0,
+            managed_instances: HashMap::new(),
+            execution_previews: HashMap::new(),
+            execution_preview_counter: 0,
         };
         state.seed_defaults();
         state
@@ -314,6 +460,19 @@ impl SsmState {
         self.resource_data_syncs.clear();
         self.mw_execution_counter = 0;
         self.inventory_deletion_counter = 0;
+        self.ops_item_related_items.clear();
+        self.ops_item_related_item_counter = 0;
+        self.ops_item_events.clear();
+        self.ops_metadata.clear();
+        self.automation_executions.clear();
+        self.automation_execution_counter = 0;
+        self.sessions.clear();
+        self.session_counter = 0;
+        self.activations.clear();
+        self.activation_counter = 0;
+        self.managed_instances.clear();
+        self.execution_previews.clear();
+        self.execution_preview_counter = 0;
         self.seed_defaults();
     }
 
