@@ -452,14 +452,14 @@ async fn logs_queries() {
         .unwrap();
     let query_id = start.query_id().unwrap().to_string();
 
-    let _ = client
+    client
         .get_query_results()
         .query_id(&query_id)
         .send()
         .await
         .unwrap();
 
-    let _ = client.describe_queries().send().await.unwrap();
+    client.describe_queries().send().await.unwrap();
 }
 
 // -- Export tasks --
@@ -490,7 +490,7 @@ async fn logs_export_tasks() {
         .unwrap();
     let task_id = create.task_id().unwrap().to_string();
 
-    let _ = client.describe_export_tasks().send().await.unwrap();
+    client.describe_export_tasks().send().await.unwrap();
 
     let _ = client.cancel_export_task().task_id(&task_id).send().await;
 }
@@ -519,14 +519,14 @@ async fn logs_delivery_destinations() {
         .await
         .unwrap();
 
-    let _ = client
+    client
         .get_delivery_destination()
         .name("conf-dd")
         .send()
         .await
         .unwrap();
 
-    let _ = client
+    client
         .describe_delivery_destinations()
         .send()
         .await
@@ -605,14 +605,14 @@ async fn logs_delivery_sources() {
         .await
         .unwrap();
 
-    let _ = client
+    client
         .get_delivery_source()
         .name("conf-ds")
         .send()
         .await
         .unwrap();
 
-    let _ = client.describe_delivery_sources().send().await.unwrap();
+    client.describe_delivery_sources().send().await.unwrap();
 
     client
         .delete_delivery_source()
@@ -667,9 +667,9 @@ async fn logs_deliveries() {
         .unwrap();
     let delivery_id = create.delivery().unwrap().id().unwrap().to_string();
 
-    let _ = client.get_delivery().id(&delivery_id).send().await.unwrap();
+    client.get_delivery().id(&delivery_id).send().await.unwrap();
 
-    let _ = client.describe_deliveries().send().await.unwrap();
+    client.describe_deliveries().send().await.unwrap();
 
     client
         .delete_delivery()
@@ -730,7 +730,7 @@ async fn logs_query_definitions() {
         .unwrap();
     let qd_id = put.query_definition_id().unwrap().to_string();
 
-    let _ = client.describe_query_definitions().send().await.unwrap();
+    client.describe_query_definitions().send().await.unwrap();
 
     client
         .delete_query_definition()

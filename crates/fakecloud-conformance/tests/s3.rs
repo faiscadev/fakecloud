@@ -33,7 +33,7 @@ async fn s3_bucket_lifecycle() {
         .await
         .unwrap();
 
-    let _ = client
+    client
         .get_bucket_location()
         .bucket("conf-bucket")
         .send()
@@ -241,7 +241,7 @@ async fn s3_list_object_versions() {
         .send()
         .await
         .unwrap();
-    let _ = client
+    client
         .list_object_versions()
         .bucket("conf-versions")
         .send()
@@ -409,7 +409,7 @@ async fn s3_object_acl() {
         .await
         .unwrap();
 
-    let _ = client
+    client
         .get_object_acl()
         .bucket("conf-oacl")
         .key("acl.txt")
@@ -581,7 +581,7 @@ async fn s3_bucket_acl() {
         .await
         .unwrap();
 
-    let _ = client
+    client
         .get_bucket_acl()
         .bucket("conf-bacl")
         .send()
@@ -665,7 +665,7 @@ async fn s3_bucket_cors() {
         .await
         .unwrap();
 
-    let _ = client
+    client
         .get_bucket_cors()
         .bucket("conf-cors")
         .send()
@@ -704,7 +704,7 @@ async fn s3_bucket_notification() {
         .await
         .unwrap();
 
-    let _ = client
+    client
         .get_bucket_notification_configuration()
         .bucket("conf-notif")
         .send()
@@ -746,7 +746,7 @@ async fn s3_bucket_website() {
         .await
         .unwrap();
 
-    let _ = client
+    client
         .get_bucket_website()
         .bucket("conf-web")
         .send()
@@ -789,7 +789,7 @@ async fn s3_bucket_accelerate() {
         .await
         .unwrap();
 
-    let _ = client
+    client
         .get_bucket_accelerate_configuration()
         .bucket("conf-accel")
         .send()
@@ -826,7 +826,7 @@ async fn s3_public_access_block() {
         .await
         .unwrap();
 
-    let _ = client
+    client
         .get_public_access_block()
         .bucket("conf-pab")
         .send()
@@ -880,7 +880,7 @@ async fn s3_bucket_encryption() {
         .await
         .unwrap();
 
-    let _ = client
+    client
         .get_bucket_encryption()
         .bucket("conf-enc")
         .send()
@@ -941,7 +941,7 @@ async fn s3_bucket_lifecycle_config() {
         .await
         .unwrap();
 
-    let _ = client
+    client
         .get_bucket_lifecycle_configuration()
         .bucket("conf-lc")
         .send()
@@ -980,7 +980,7 @@ async fn s3_bucket_logging() {
         .await
         .unwrap();
 
-    let _ = client
+    client
         .get_bucket_logging()
         .bucket("conf-log")
         .send()
@@ -1166,7 +1166,7 @@ async fn s3_bucket_ownership_controls() {
         .await
         .unwrap();
 
-    let _ = client
+    client
         .get_bucket_ownership_controls()
         .bucket("conf-own")
         .send()

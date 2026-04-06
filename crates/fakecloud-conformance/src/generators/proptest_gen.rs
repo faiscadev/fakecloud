@@ -49,8 +49,9 @@ impl Xorshift64 {
         if lo >= hi {
             return lo;
         }
-        let span = (hi as i128 - lo as i128) as u64;
-        lo.wrapping_add((self.next_u64() % (span + 1)) as i64)
+        let span = (hi as i128 - lo as i128 + 1) as u128;
+        let offset = (self.next_u64() as u128) % span;
+        lo.wrapping_add(offset as i64)
     }
 
     /// Random f64 in [lo, hi].
@@ -384,15 +385,24 @@ mod tests {
         let mut rng = Xorshift64::new(123);
         for _ in 0..1000 {
             let v = rng.range_u64(5, 10);
-            assert!(v >= 5 && v <= 10);
+            assert!((5..=10).contains(&v));
         }
         for _ in 0..1000 {
             let v = rng.range_i64(-10, 10);
-            assert!(v >= -10 && v <= 10);
+            assert!((-10..=10).contains(&v));
         }
         for _ in 0..1000 {
             let v = rng.range_f64(0.0, 1.0);
-            assert!(v >= 0.0 && v <= 1.0);
+            assert!((0.0..=1.0).contains(&v));
+        }
+    }
+
+    #[test]
+    fn range_i64_full_span_does_not_overflow() {
+        let mut rng = Xorshift64::new(999);
+        // This used to panic due to overflow in (max - min + 1).
+        for _ in 0..100 {
+            let _ = rng.range_i64(i64::MIN, i64::MAX);
         }
     }
 

@@ -241,6 +241,7 @@ async fn sqs_delete_message() {
         .send()
         .await
         .unwrap();
+    assert!(!msgs.messages().is_empty(), "expected at least one message");
     let receipt = msgs.messages()[0].receipt_handle().unwrap();
     client
         .delete_message()
@@ -278,6 +279,7 @@ async fn sqs_delete_message_batch() {
         .send()
         .await
         .unwrap();
+    assert!(!msgs.messages().is_empty(), "expected at least one message");
     let receipt = msgs.messages()[0].receipt_handle().unwrap();
     let resp = client
         .delete_message_batch()
@@ -346,6 +348,7 @@ async fn sqs_change_message_visibility() {
         .send()
         .await
         .unwrap();
+    assert!(!msgs.messages().is_empty(), "expected at least one message");
     let receipt = msgs.messages()[0].receipt_handle().unwrap();
     client
         .change_message_visibility()
@@ -384,6 +387,7 @@ async fn sqs_change_message_visibility_batch() {
         .send()
         .await
         .unwrap();
+    assert!(!msgs.messages().is_empty(), "expected at least one message");
     let receipt = msgs.messages()[0].receipt_handle().unwrap();
     let resp = client
         .change_message_visibility_batch()
