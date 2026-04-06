@@ -11,6 +11,8 @@ pub struct DeliveryBus {
     sqs_sender: Option<Arc<dyn SqsDelivery>>,
     /// Publish a message to an SNS topic by ARN.
     sns_sender: Option<Arc<dyn SnsDelivery>>,
+    /// Invoke a Lambda function by ARN.
+    lambda_invoker: Option<Arc<dyn LambdaDelivery>>,
 }
 
 /// Message attribute for SQS delivery from SNS.
@@ -50,11 +52,23 @@ pub trait SnsDelivery: Send + Sync {
     fn publish_to_topic(&self, topic_arn: &str, message: &str, subject: Option<&str>);
 }
 
+/// Trait for invoking Lambda functions from cross-service integrations.
+pub trait LambdaDelivery: Send + Sync {
+    /// Invoke a Lambda function with the given payload.
+    /// The function is identified by ARN. Returns the response bytes on success.
+    fn invoke_lambda(
+        &self,
+        function_arn: &str,
+        payload: &str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<u8>, String>> + Send>>;
+}
+
 impl DeliveryBus {
     pub fn new() -> Self {
         Self {
             sqs_sender: None,
             sns_sender: None,
+            lambda_invoker: None,
         }
     }
 
@@ -65,6 +79,11 @@ impl DeliveryBus {
 
     pub fn with_sns(mut self, sender: Arc<dyn SnsDelivery>) -> Self {
         self.sns_sender = Some(sender);
+        self
+    }
+
+    pub fn with_lambda(mut self, invoker: Arc<dyn LambdaDelivery>) -> Self {
+        self.lambda_invoker = Some(invoker);
         self
     }
 
@@ -104,6 +123,19 @@ impl DeliveryBus {
     pub fn publish_to_sns(&self, topic_arn: &str, message: &str, subject: Option<&str>) {
         if let Some(ref sender) = self.sns_sender {
             sender.publish_to_topic(topic_arn, message, subject);
+        }
+    }
+
+    /// Invoke a Lambda function identified by ARN.
+    pub async fn invoke_lambda(
+        &self,
+        function_arn: &str,
+        payload: &str,
+    ) -> Option<Result<Vec<u8>, String>> {
+        if let Some(ref invoker) = self.lambda_invoker {
+            Some(invoker.invoke_lambda(function_arn, payload).await)
+        } else {
+            None
         }
     }
 }

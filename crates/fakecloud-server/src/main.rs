@@ -10,6 +10,7 @@ use fakecloud_core::delivery::DeliveryBus;
 use fakecloud_core::dispatch::{self, DispatchConfig};
 use fakecloud_core::registry::ServiceRegistry;
 
+mod lambda_delivery;
 mod sqs_lambda_poller;
 use sqs_lambda_poller::SqsLambdaPoller;
 
@@ -118,7 +119,23 @@ async fn main() {
     let sqs_delivery = Arc::new(fakecloud_sqs::delivery::SqsDeliveryImpl::new(
         sqs_state.clone(),
     ));
-    let delivery_for_sns = Arc::new(DeliveryBus::new().with_sqs(sqs_delivery.clone()));
+
+    // Lambda delivery (SNS can invoke Lambda functions via container runtime)
+    let lambda_delivery: Option<Arc<dyn fakecloud_core::delivery::LambdaDelivery>> =
+        container_runtime.as_ref().map(|rt| {
+            Arc::new(lambda_delivery::LambdaDeliveryImpl::new(
+                lambda_state.clone(),
+                rt.clone(),
+            )) as Arc<dyn fakecloud_core::delivery::LambdaDelivery>
+        });
+
+    let delivery_for_sns = {
+        let mut bus = DeliveryBus::new().with_sqs(sqs_delivery.clone());
+        if let Some(ref ld) = lambda_delivery {
+            bus = bus.with_lambda(ld.clone());
+        }
+        Arc::new(bus)
+    };
 
     // Step 2: SNS delivery (EventBridge can publish to SNS topics, which then fan out to SQS)
     let sns_delivery = Arc::new(fakecloud_sns::delivery::SnsDeliveryImpl::new(

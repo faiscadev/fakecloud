@@ -1044,26 +1044,84 @@ impl SnsService {
             });
         }
 
-        // Deliver to Lambda subscribers (stub — log and store)
+        // Deliver to Lambda subscribers
         if !lambda_subscribers.is_empty() {
             let now = Utc::now();
-            let mut state = self.state.write();
-            for function_arn in lambda_subscribers {
-                tracing::info!(
-                    function_arn = %function_arn,
-                    message = %default_message,
-                    topic_arn = %topic_arn,
-                    "SNS delivering to Lambda function (stub)"
-                );
-                state
-                    .lambda_invocations
-                    .push(crate::state::LambdaInvocation {
-                        function_arn,
-                        message: default_message.clone(),
-                        subject: subject.clone(),
-                        timestamp: now,
+
+            // Build SNS Lambda event payloads
+            let lambda_payloads: Vec<(String, String)> = lambda_subscribers
+                .iter()
+                .map(|function_arn| {
+                    let sns_event = serde_json::json!({
+                        "Records": [{
+                            "EventVersion": "1.0",
+                            "EventSubscriptionArn": format!("{}:lambda-sub", topic_arn),
+                            "EventSource": "aws:sns",
+                            "Sns": {
+                                "SignatureVersion": "1",
+                                "Timestamp": now.to_rfc3339(),
+                                "Signature": "FAKE_SIGNATURE",
+                                "SigningCertUrl": "https://sns.us-east-1.amazonaws.com/SimpleNotificationService-0000000000000000000000.pem",
+                                "MessageId": msg_id.clone(),
+                                "Message": &default_message,
+                                "MessageAttributes": &envelope_attrs,
+                                "Type": "Notification",
+                                "UnsubscribeUrl": format!("http://localhost:4566/?Action=Unsubscribe&SubscriptionArn={}", topic_arn),
+                                "TopicArn": &topic_arn,
+                                "Subject": subject.as_deref().unwrap_or(""),
+                            }
+                        }]
                     });
+                    (function_arn.clone(), sns_event.to_string())
+                })
+                .collect();
+
+            // Record invocations in state
+            {
+                let mut state = self.state.write();
+                for (function_arn, _) in &lambda_payloads {
+                    state
+                        .lambda_invocations
+                        .push(crate::state::LambdaInvocation {
+                            function_arn: function_arn.clone(),
+                            message: default_message.clone(),
+                            subject: subject.clone(),
+                            timestamp: now,
+                        });
+                }
             }
+
+            // Invoke Lambda functions asynchronously via container runtime
+            let delivery = self.delivery.clone();
+            tokio::spawn(async move {
+                for (function_arn, payload) in lambda_payloads {
+                    tracing::info!(
+                        function_arn = %function_arn,
+                        "SNS invoking Lambda function"
+                    );
+                    match delivery.invoke_lambda(&function_arn, &payload).await {
+                        Some(Ok(_)) => {
+                            tracing::info!(
+                                function_arn = %function_arn,
+                                "SNS->Lambda invocation succeeded"
+                            );
+                        }
+                        Some(Err(e)) => {
+                            tracing::error!(
+                                function_arn = %function_arn,
+                                error = %e,
+                                "SNS->Lambda invocation failed"
+                            );
+                        }
+                        None => {
+                            tracing::debug!(
+                                function_arn = %function_arn,
+                                "SNS->Lambda: no container runtime, skipping real execution"
+                            );
+                        }
+                    }
+                }
+            });
         }
 
         // Deliver to email subscribers (stub — log and store)

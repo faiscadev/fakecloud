@@ -1,12 +1,30 @@
 mod helpers;
 
+use std::io::Write;
+
 use aws_sdk_dynamodb::types::{
     AttributeDefinition, AttributeValue, BillingMode, KeySchemaElement, KeyType,
     ScalarAttributeType,
 };
 use aws_sdk_eventbridge::types::{PutEventsRequestEntry, Target};
+use aws_sdk_lambda::primitives::Blob;
+use aws_sdk_lambda::types::{Environment, FunctionCode, Runtime};
 use aws_sdk_s3::primitives::ByteStream;
 use helpers::TestServer;
+
+/// Create a ZIP file in memory containing a single file.
+fn make_zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
+    let buf = Vec::new();
+    let cursor = std::io::Cursor::new(buf);
+    let mut writer = zip::ZipWriter::new(cursor);
+    for (name, content) in entries {
+        let options = zip::write::SimpleFileOptions::default().unix_permissions(0o755);
+        writer.start_file(*name, options).unwrap();
+        writer.write_all(content).unwrap();
+    }
+    let cursor = writer.finish().unwrap();
+    cursor.into_inner()
+}
 
 /// Query recorded Lambda invocations via internal API.
 async fn get_lambda_invocations(endpoint: &str) -> serde_json::Value {
@@ -1050,4 +1068,142 @@ async fn dynamodb_export_import_roundtrip() {
             "Item should have 'count' attribute"
         );
     }
+}
+
+/// SNS -> Lambda real execution: publishing to an SNS topic with a Lambda subscriber
+/// actually invokes the Lambda function via a container. The Lambda function writes
+/// proof to an SQS queue to confirm it ran and received the SNS event.
+#[tokio::test]
+#[ignore] // Requires Docker with host.docker.internal networking — run locally, not in CI
+async fn sns_to_lambda_actually_executes() {
+    let server = TestServer::start().await;
+    let sqs = server.sqs_client().await;
+    let sns = server.sns_client().await;
+    let lambda = server.lambda_client().await;
+
+    // 1. Create an SQS queue where Lambda will write proof that it ran
+    let queue = sqs
+        .create_queue()
+        .queue_name("lambda-proof-queue")
+        .send()
+        .await
+        .unwrap();
+    let queue_url = queue.queue_url().unwrap().to_string();
+    let _queue_arn = get_queue_arn(&sqs, &queue_url).await;
+
+    // 2. Create a Lambda function with Python code that sends a message to SQS
+    //    containing the SNS event it received.
+    // Inside Docker, host.docker.internal resolves to the host machine.
+    let docker_endpoint = format!("http://host.docker.internal:{}", server.port());
+    // The queue URL returned by SQS uses localhost:4566, but from inside Docker
+    // we need to use host.docker.internal:{port}. Construct it directly.
+    let docker_queue_url = format!(
+        "http://host.docker.internal:{}/123456789012/lambda-proof-queue",
+        server.port()
+    );
+    let python_code = format!(
+        r#"
+import json
+import urllib.request
+import urllib.parse
+
+def handler(event, context):
+    endpoint = "{docker_endpoint}"
+    queue_url = "{docker_queue_url}"
+    params = urllib.parse.urlencode({{
+        "Action": "SendMessage",
+        "QueueUrl": queue_url,
+        "MessageBody": json.dumps(event),
+        "Version": "2012-11-05",
+    }})
+    req = urllib.request.Request(
+        endpoint + "/",
+        data=params.encode("utf-8"),
+        headers={{
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Authorization": "AWS4-HMAC-SHA256 Credential=test/20260101/us-east-1/sqs/aws4_request, SignedHeaders=host, Signature=fake",
+        }},
+    )
+    urllib.request.urlopen(req, timeout=5)
+    return {{"statusCode": 200, "body": "ok"}}
+"#
+    );
+
+    let zip = make_zip(&[("index.py", python_code.as_bytes())]);
+
+    lambda
+        .create_function()
+        .function_name("sns-proof-func")
+        .runtime(Runtime::Python312)
+        .role("arn:aws:iam::123456789012:role/lambda-role")
+        .handler("index.handler")
+        .environment(
+            Environment::builder()
+                .variables("FAKECLOUD_ENDPOINT", server.endpoint())
+                .build(),
+        )
+        .code(FunctionCode::builder().zip_file(Blob::new(zip)).build())
+        .send()
+        .await
+        .unwrap();
+
+    // 3. Create an SNS topic
+    let topic = sns
+        .create_topic()
+        .name("lambda-trigger-topic")
+        .send()
+        .await
+        .unwrap();
+    let topic_arn = topic.topic_arn().unwrap().to_string();
+
+    // 4. Subscribe the Lambda function to the topic
+    let lambda_arn = "arn:aws:lambda:us-east-1:123456789012:function:sns-proof-func";
+    sns.subscribe()
+        .topic_arn(&topic_arn)
+        .protocol("lambda")
+        .endpoint(lambda_arn)
+        .send()
+        .await
+        .unwrap();
+
+    // 5. Publish a message to the topic
+    sns.publish()
+        .topic_arn(&topic_arn)
+        .message("hello from SNS")
+        .subject("Test Subject")
+        .send()
+        .await
+        .unwrap();
+
+    // 6. Wait for Lambda to execute and write to SQS
+    let mut proof_message = None;
+    for _ in 0..30 {
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        let msgs = sqs
+            .receive_message()
+            .queue_url(&queue_url)
+            .max_number_of_messages(1)
+            .send()
+            .await
+            .unwrap();
+        if !msgs.messages().is_empty() {
+            proof_message = Some(msgs.messages()[0].body().unwrap().to_string());
+            break;
+        }
+    }
+
+    // 7. Assert the queue has a message proving Lambda ran and received the SNS event
+    let proof = proof_message
+        .expect("Lambda did not write proof to SQS — SNS->Lambda execution did not happen");
+    let event: serde_json::Value = serde_json::from_str(&proof).unwrap();
+
+    // The Lambda receives an SNS event with Records array
+    assert!(
+        event["Records"].is_array(),
+        "Expected SNS event with Records array, got: {event}"
+    );
+    let record = &event["Records"][0];
+    assert_eq!(record["EventSource"], "aws:sns");
+    assert_eq!(record["Sns"]["Message"], "hello from SNS");
+    assert_eq!(record["Sns"]["Subject"], "Test Subject");
 }

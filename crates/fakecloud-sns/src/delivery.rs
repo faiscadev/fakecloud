@@ -74,14 +74,37 @@ impl SnsDelivery for SnsDeliveryImpl {
             .map(|s| s.endpoint.clone())
             .collect();
 
-        // Store Lambda invocations
+        // Build SNS Lambda event payload (matches real AWS format)
         let now = Utc::now();
-        for function_arn in &lambda_subscribers {
-            tracing::info!(
-                function_arn = %function_arn,
-                topic_arn = %topic_arn,
-                "SNS cross-service delivering to Lambda (stub)"
-            );
+        let lambda_payloads: Vec<(String, String)> = lambda_subscribers
+            .iter()
+            .map(|function_arn| {
+                let sns_event = serde_json::json!({
+                    "Records": [{
+                        "EventVersion": "1.0",
+                        "EventSubscriptionArn": format!("{}:lambda-sub", topic_arn),
+                        "EventSource": "aws:sns",
+                        "Sns": {
+                            "SignatureVersion": "1",
+                            "Timestamp": now.to_rfc3339(),
+                            "Signature": "FAKE_SIGNATURE",
+                            "SigningCertUrl": "https://sns.us-east-1.amazonaws.com/SimpleNotificationService-0000000000000000000000.pem",
+                            "MessageId": msg_id.clone(),
+                            "Message": message,
+                            "MessageAttributes": {},
+                            "Type": "Notification",
+                            "UnsubscribeUrl": format!("http://localhost:4566/?Action=Unsubscribe&SubscriptionArn={}", topic_arn),
+                            "TopicArn": topic_arn,
+                            "Subject": subject.unwrap_or(""),
+                        }
+                    }]
+                });
+                (function_arn.clone(), sns_event.to_string())
+            })
+            .collect();
+
+        // Record invocations in state
+        for (function_arn, _) in &lambda_payloads {
             state
                 .lambda_invocations
                 .push(crate::state::LambdaInvocation {
@@ -141,6 +164,40 @@ impl SnsDelivery for SnsDeliveryImpl {
         for queue_arn in sqs_subscribers {
             self.delivery
                 .send_to_sqs(&queue_arn, &envelope_str, &HashMap::new());
+        }
+
+        // Invoke Lambda subscribers via container runtime
+        if !lambda_payloads.is_empty() {
+            let delivery = self.delivery.clone();
+            tokio::spawn(async move {
+                for (function_arn, payload) in lambda_payloads {
+                    tracing::info!(
+                        function_arn = %function_arn,
+                        "SNS invoking Lambda function"
+                    );
+                    match delivery.invoke_lambda(&function_arn, &payload).await {
+                        Some(Ok(_)) => {
+                            tracing::info!(
+                                function_arn = %function_arn,
+                                "SNS->Lambda invocation succeeded"
+                            );
+                        }
+                        Some(Err(e)) => {
+                            tracing::error!(
+                                function_arn = %function_arn,
+                                error = %e,
+                                "SNS->Lambda invocation failed"
+                            );
+                        }
+                        None => {
+                            tracing::info!(
+                                function_arn = %function_arn,
+                                "SNS->Lambda: no container runtime available, skipping real execution"
+                            );
+                        }
+                    }
+                }
+            });
         }
     }
 }
