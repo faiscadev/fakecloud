@@ -11,7 +11,9 @@ use fakecloud_core::validation::*;
 
 use crate::state::{
     MaintenanceWindow, MaintenanceWindowTarget, MaintenanceWindowTask, PatchBaseline, PatchGroup,
-    SharedSsmState, SsmCommand, SsmDocument, SsmDocumentVersion, SsmParameter, SsmParameterVersion,
+    SharedSsmState, SsmAssociation, SsmAssociationVersion, SsmCommand, SsmDocument,
+    SsmDocumentVersion, SsmOpsItem, SsmParameter, SsmParameterVersion, SsmResourcePolicy,
+    SsmServiceSetting,
 };
 
 use fakecloud_secretsmanager::state::SharedSecretsManagerState;
@@ -101,6 +103,45 @@ impl AwsService for SsmService {
             }
             "GetPatchBaselineForPatchGroup" => self.get_patch_baseline_for_patch_group(&req),
             "DescribePatchGroups" => self.describe_patch_groups(&req),
+            // Associations
+            "CreateAssociation" => self.create_association(&req),
+            "DescribeAssociation" => self.describe_association(&req),
+            "DeleteAssociation" => self.delete_association(&req),
+            "ListAssociations" => self.list_associations(&req),
+            "UpdateAssociation" => self.update_association(&req),
+            "ListAssociationVersions" => self.list_association_versions(&req),
+            "UpdateAssociationStatus" => self.update_association_status(&req),
+            "StartAssociationsOnce" => self.start_associations_once(&req),
+            "CreateAssociationBatch" => self.create_association_batch(&req),
+            "DescribeAssociationExecutions" => self.describe_association_executions(&req),
+            "DescribeAssociationExecutionTargets" => {
+                self.describe_association_execution_targets(&req)
+            }
+            // OpsItems
+            "CreateOpsItem" => self.create_ops_item(&req),
+            "GetOpsItem" => self.get_ops_item(&req),
+            "UpdateOpsItem" => self.update_ops_item(&req),
+            "DeleteOpsItem" => self.delete_ops_item(&req),
+            "DescribeOpsItems" => self.describe_ops_items(&req),
+            // Document extras
+            "ListDocumentVersions" => self.list_document_versions(&req),
+            "ListDocumentMetadataHistory" => self.list_document_metadata_history(&req),
+            "UpdateDocumentMetadata" => self.update_document_metadata(&req),
+            // Resource policies
+            "PutResourcePolicy" => self.put_resource_policy(&req),
+            "GetResourcePolicies" => self.get_resource_policies(&req),
+            "DeleteResourcePolicy" => self.delete_resource_policy(&req),
+            // Stubs
+            "GetConnectionStatus" => self.get_connection_status(&req),
+            "GetCalendarState" => self.get_calendar_state(&req),
+            "DescribePatchGroupState" => self.describe_patch_group_state(&req),
+            "DescribePatchProperties" => self.describe_patch_properties(&req),
+            "GetDefaultPatchBaseline" => self.get_default_patch_baseline(&req),
+            "RegisterDefaultPatchBaseline" => self.register_default_patch_baseline(&req),
+            "DescribeAvailablePatches" => self.describe_available_patches(&req),
+            "GetServiceSetting" => self.get_service_setting(&req),
+            "ResetServiceSetting" => self.reset_service_setting(&req),
+            "UpdateServiceSetting" => self.update_service_setting(&req),
             _ => Err(AwsServiceError::action_not_implemented("ssm", &req.action)),
         }
     }
@@ -153,6 +194,43 @@ impl AwsService for SsmService {
             "DeregisterPatchBaselineForPatchGroup",
             "GetPatchBaselineForPatchGroup",
             "DescribePatchGroups",
+            // Associations
+            "CreateAssociation",
+            "DescribeAssociation",
+            "DeleteAssociation",
+            "ListAssociations",
+            "UpdateAssociation",
+            "ListAssociationVersions",
+            "UpdateAssociationStatus",
+            "StartAssociationsOnce",
+            "CreateAssociationBatch",
+            "DescribeAssociationExecutions",
+            "DescribeAssociationExecutionTargets",
+            // OpsItems
+            "CreateOpsItem",
+            "GetOpsItem",
+            "UpdateOpsItem",
+            "DeleteOpsItem",
+            "DescribeOpsItems",
+            // Document extras
+            "ListDocumentVersions",
+            "ListDocumentMetadataHistory",
+            "UpdateDocumentMetadata",
+            // Resource policies
+            "PutResourcePolicy",
+            "GetResourcePolicies",
+            "DeleteResourcePolicy",
+            // Stubs
+            "GetConnectionStatus",
+            "GetCalendarState",
+            "DescribePatchGroupState",
+            "DescribePatchProperties",
+            "GetDefaultPatchBaseline",
+            "RegisterDefaultPatchBaseline",
+            "DescribeAvailablePatches",
+            "GetServiceSetting",
+            "ResetServiceSetting",
+            "UpdateServiceSetting",
         ]
     }
 }
@@ -3792,6 +3870,1203 @@ impl SsmService {
 
         Ok(json_resp(resp))
     }
+
+    // -----------------------------------------------------------------------
+    // Associations
+    // -----------------------------------------------------------------------
+
+    fn create_association_inner(&self, body: &Value) -> Result<Value, AwsServiceError> {
+        let name = body["Name"]
+            .as_str()
+            .ok_or_else(|| missing("Name"))?
+            .to_string();
+
+        let targets: Vec<serde_json::Value> =
+            body["Targets"].as_array().cloned().unwrap_or_default();
+        let instance_id = body["InstanceId"].as_str().map(|s| s.to_string());
+
+        // Must have either Targets or InstanceId
+        if targets.is_empty() && instance_id.is_none() {
+            // Accept it anyway like AWS does for document-only associations
+        }
+
+        let schedule_expression = body["ScheduleExpression"].as_str().map(|s| s.to_string());
+        let parameters: HashMap<String, Vec<String>> = body["Parameters"]
+            .as_object()
+            .map(|obj| {
+                obj.iter()
+                    .map(|(k, v)| {
+                        let vals = v
+                            .as_array()
+                            .map(|a| {
+                                a.iter()
+                                    .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        (k.clone(), vals)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let association_name = body["AssociationName"].as_str().map(|s| s.to_string());
+        let document_version = body["DocumentVersion"].as_str().map(|s| s.to_string());
+        let output_location = body.get("OutputLocation").filter(|v| !v.is_null()).cloned();
+        let automation_target_parameter_name = body["AutomationTargetParameterName"]
+            .as_str()
+            .map(|s| s.to_string());
+        let max_errors = body["MaxErrors"].as_str().map(|s| s.to_string());
+        let max_concurrency = body["MaxConcurrency"].as_str().map(|s| s.to_string());
+        let compliance_severity = body["ComplianceSeverity"].as_str().map(|s| s.to_string());
+        let sync_compliance = body["SyncCompliance"].as_str().map(|s| s.to_string());
+        let apply_only_at_cron_interval =
+            body["ApplyOnlyAtCronInterval"].as_bool().unwrap_or(false);
+        let calendar_names: Vec<String> = body["CalendarNames"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let target_locations: Vec<serde_json::Value> = body["TargetLocations"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let schedule_offset = body["ScheduleOffset"].as_i64();
+        let target_maps: Vec<serde_json::Value> =
+            body["TargetMaps"].as_array().cloned().unwrap_or_default();
+        let tags: HashMap<String, String> = body["Tags"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|t| {
+                        let k = t["Key"].as_str()?;
+                        let v = t["Value"].as_str()?;
+                        Some((k.to_string(), v.to_string()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let now = Utc::now();
+        let association_id = uuid::Uuid::new_v4().to_string();
+
+        let version = SsmAssociationVersion {
+            version: 1,
+            name: name.clone(),
+            targets: targets.clone(),
+            schedule_expression: schedule_expression.clone(),
+            parameters: parameters.clone(),
+            document_version: document_version.clone(),
+            created_date: now,
+            association_name: association_name.clone(),
+            max_errors: max_errors.clone(),
+            max_concurrency: max_concurrency.clone(),
+            compliance_severity: compliance_severity.clone(),
+        };
+
+        let assoc = SsmAssociation {
+            association_id: association_id.clone(),
+            name: name.clone(),
+            targets: targets.clone(),
+            schedule_expression,
+            parameters,
+            association_name: association_name.clone(),
+            document_version,
+            output_location,
+            automation_target_parameter_name,
+            max_errors,
+            max_concurrency,
+            compliance_severity,
+            sync_compliance,
+            apply_only_at_cron_interval,
+            calendar_names,
+            target_locations,
+            schedule_offset,
+            target_maps,
+            tags,
+            status: "Pending".to_string(),
+            status_date: now,
+            overview: json!({"Status": "Pending", "DetailedStatus": "Creating", "AssociationStatusAggregatedCount": {}}),
+            created_date: now,
+            last_update_association_date: now,
+            last_execution_date: None,
+            instance_id,
+            versions: vec![version],
+        };
+
+        let resp = association_to_json(&assoc);
+
+        let mut state = self.state.write();
+        state.associations.insert(association_id, assoc);
+
+        Ok(resp)
+    }
+
+    fn create_association(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let resp = self.create_association_inner(&body)?;
+        Ok(json_resp(json!({ "AssociationDescription": resp })))
+    }
+
+    fn describe_association(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let association_id = body["AssociationId"].as_str();
+        let name = body["Name"].as_str();
+        let instance_id = body["InstanceId"].as_str();
+
+        let state = self.state.read();
+
+        let assoc = if let Some(id) = association_id {
+            state.associations.get(id)
+        } else if let Some(n) = name {
+            state.associations.values().find(|a| {
+                a.name == n && (instance_id.is_none() || a.instance_id.as_deref() == instance_id)
+            })
+        } else {
+            return Err(missing("AssociationId"));
+        };
+
+        match assoc {
+            Some(a) => Ok(json_resp(
+                json!({ "AssociationDescription": association_to_json(a) }),
+            )),
+            None => Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "AssociationDoesNotExist",
+                "The specified association does not exist.".to_string(),
+            )),
+        }
+    }
+
+    fn delete_association(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let association_id = body["AssociationId"].as_str();
+        let name = body["Name"].as_str();
+        let instance_id = body["InstanceId"].as_str();
+
+        let mut state = self.state.write();
+
+        let key = if let Some(id) = association_id {
+            if state.associations.contains_key(id) {
+                Some(id.to_string())
+            } else {
+                None
+            }
+        } else if let Some(n) = name {
+            state
+                .associations
+                .iter()
+                .find(|(_, a)| {
+                    a.name == n
+                        && (instance_id.is_none() || a.instance_id.as_deref() == instance_id)
+                })
+                .map(|(k, _)| k.clone())
+        } else {
+            return Err(missing("AssociationId"));
+        };
+
+        match key {
+            Some(k) => {
+                state.associations.remove(&k);
+                Ok(json_resp(json!({})))
+            }
+            None => Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "AssociationDoesNotExist",
+                "The specified association does not exist.".to_string(),
+            )),
+        }
+    }
+
+    fn list_associations(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        validate_optional_range_i64("MaxResults", body["MaxResults"].as_i64(), 1, 50)?;
+        let max_results = body["MaxResults"].as_i64().unwrap_or(50) as usize;
+        let next_token_offset: usize = body["NextToken"]
+            .as_str()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+
+        let state = self.state.read();
+        let all: Vec<Value> = state
+            .associations
+            .values()
+            .map(|a| {
+                let mut v = json!({
+                    "AssociationId": a.association_id,
+                    "Name": a.name,
+                    "LastExecutionDate": a.last_execution_date.map(|d| d.timestamp_millis() as f64 / 1000.0),
+                });
+                if let Some(ref an) = a.association_name {
+                    v["AssociationName"] = json!(an);
+                }
+                if let Some(ref s) = a.schedule_expression {
+                    v["ScheduleExpression"] = json!(s);
+                }
+                if !a.targets.is_empty() {
+                    v["Targets"] = json!(a.targets);
+                }
+                if let Some(ref iid) = a.instance_id {
+                    v["InstanceId"] = json!(iid);
+                }
+                v["Overview"] = a.overview.clone();
+                v
+            })
+            .collect();
+
+        let page = if next_token_offset < all.len() {
+            &all[next_token_offset..]
+        } else {
+            &[]
+        };
+        let has_more = page.len() > max_results;
+        let items: Vec<Value> = page.iter().take(max_results).cloned().collect();
+
+        let mut resp = json!({ "Associations": items });
+        if has_more {
+            resp["NextToken"] = json!((next_token_offset + max_results).to_string());
+        }
+        Ok(json_resp(resp))
+    }
+
+    fn update_association(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let association_id = body["AssociationId"]
+            .as_str()
+            .ok_or_else(|| missing("AssociationId"))?;
+
+        let mut state = self.state.write();
+        let assoc = state.associations.get_mut(association_id).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "AssociationDoesNotExist",
+                "The specified association does not exist.".to_string(),
+            )
+        })?;
+
+        let now = Utc::now();
+
+        if let Some(n) = body["Name"].as_str() {
+            assoc.name = n.to_string();
+        }
+        if let Some(targets) = body["Targets"].as_array() {
+            assoc.targets = targets.clone();
+        }
+        if let Some(s) = body["ScheduleExpression"].as_str() {
+            assoc.schedule_expression = Some(s.to_string());
+        }
+        if let Some(obj) = body["Parameters"].as_object() {
+            assoc.parameters = obj
+                .iter()
+                .map(|(k, v)| {
+                    let vals = v
+                        .as_array()
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    (k.clone(), vals)
+                })
+                .collect();
+        }
+        if let Some(an) = body["AssociationName"].as_str() {
+            assoc.association_name = Some(an.to_string());
+        }
+        if let Some(dv) = body["DocumentVersion"].as_str() {
+            assoc.document_version = Some(dv.to_string());
+        }
+        if let Some(me) = body["MaxErrors"].as_str() {
+            assoc.max_errors = Some(me.to_string());
+        }
+        if let Some(mc) = body["MaxConcurrency"].as_str() {
+            assoc.max_concurrency = Some(mc.to_string());
+        }
+        if let Some(cs) = body["ComplianceSeverity"].as_str() {
+            assoc.compliance_severity = Some(cs.to_string());
+        }
+
+        assoc.last_update_association_date = now;
+
+        let next_version = assoc.versions.len() as i64 + 1;
+        assoc.versions.push(SsmAssociationVersion {
+            version: next_version,
+            name: assoc.name.clone(),
+            targets: assoc.targets.clone(),
+            schedule_expression: assoc.schedule_expression.clone(),
+            parameters: assoc.parameters.clone(),
+            document_version: assoc.document_version.clone(),
+            created_date: now,
+            association_name: assoc.association_name.clone(),
+            max_errors: assoc.max_errors.clone(),
+            max_concurrency: assoc.max_concurrency.clone(),
+            compliance_severity: assoc.compliance_severity.clone(),
+        });
+
+        let resp = association_to_json(assoc);
+        Ok(json_resp(json!({ "AssociationDescription": resp })))
+    }
+
+    fn list_association_versions(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let association_id = body["AssociationId"]
+            .as_str()
+            .ok_or_else(|| missing("AssociationId"))?;
+        let max_results = body["MaxResults"].as_i64().unwrap_or(50) as usize;
+        let next_token_offset: usize = body["NextToken"]
+            .as_str()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+
+        let state = self.state.read();
+        let assoc = state.associations.get(association_id).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "AssociationDoesNotExist",
+                "The specified association does not exist.".to_string(),
+            )
+        })?;
+
+        let all: Vec<Value> = assoc
+            .versions
+            .iter()
+            .map(|v| {
+                let mut j = json!({
+                    "AssociationId": association_id,
+                    "AssociationVersion": v.version.to_string(),
+                    "Name": v.name,
+                    "CreatedDate": v.created_date.timestamp_millis() as f64 / 1000.0,
+                });
+                if !v.targets.is_empty() {
+                    j["Targets"] = json!(v.targets);
+                }
+                if let Some(ref s) = v.schedule_expression {
+                    j["ScheduleExpression"] = json!(s);
+                }
+                if let Some(ref an) = v.association_name {
+                    j["AssociationName"] = json!(an);
+                }
+                if let Some(ref dv) = v.document_version {
+                    j["DocumentVersion"] = json!(dv);
+                }
+                if let Some(ref me) = v.max_errors {
+                    j["MaxErrors"] = json!(me);
+                }
+                if let Some(ref mc) = v.max_concurrency {
+                    j["MaxConcurrency"] = json!(mc);
+                }
+                if let Some(ref cs) = v.compliance_severity {
+                    j["ComplianceSeverity"] = json!(cs);
+                }
+                j
+            })
+            .collect();
+
+        let page = if next_token_offset < all.len() {
+            &all[next_token_offset..]
+        } else {
+            &[]
+        };
+        let has_more = page.len() > max_results;
+        let items: Vec<Value> = page.iter().take(max_results).cloned().collect();
+
+        let mut resp = json!({ "AssociationVersions": items });
+        if has_more {
+            resp["NextToken"] = json!((next_token_offset + max_results).to_string());
+        }
+        Ok(json_resp(resp))
+    }
+
+    fn update_association_status(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let name = body["Name"].as_str().ok_or_else(|| missing("Name"))?;
+        let instance_id = body["InstanceId"]
+            .as_str()
+            .ok_or_else(|| missing("InstanceId"))?;
+        let association_status = &body["AssociationStatus"];
+        let new_status = association_status["Name"]
+            .as_str()
+            .unwrap_or("Pending")
+            .to_string();
+
+        let mut state = self.state.write();
+        let assoc = state
+            .associations
+            .values_mut()
+            .find(|a| a.name == name && a.instance_id.as_deref() == Some(instance_id))
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "AssociationDoesNotExist",
+                    "The specified association does not exist.".to_string(),
+                )
+            })?;
+
+        assoc.status = new_status;
+        assoc.status_date = Utc::now();
+
+        let resp = association_to_json(assoc);
+        Ok(json_resp(json!({ "AssociationDescription": resp })))
+    }
+
+    fn start_associations_once(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let _association_ids = body["AssociationIds"]
+            .as_array()
+            .ok_or_else(|| missing("AssociationIds"))?;
+        // No-op: return success
+        Ok(json_resp(json!({})))
+    }
+
+    fn create_association_batch(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let entries = body["Entries"]
+            .as_array()
+            .ok_or_else(|| missing("Entries"))?;
+
+        let mut successful = Vec::new();
+        let mut failed = Vec::new();
+
+        for entry in entries {
+            match self.create_association_inner(entry) {
+                Ok(desc) => successful.push(desc),
+                Err(e) => {
+                    let entry_name = entry["Name"].as_str().unwrap_or("");
+                    failed.push(json!({
+                        "Entry": entry,
+                        "Message": e.to_string(),
+                        "Fault": "Client",
+                    }));
+                    let _ = entry_name; // suppress unused
+                }
+            }
+        }
+
+        Ok(json_resp(json!({
+            "Successful": successful,
+            "Failed": failed,
+        })))
+    }
+
+    fn describe_association_executions(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let _association_id = body["AssociationId"]
+            .as_str()
+            .ok_or_else(|| missing("AssociationId"))?;
+        // Return empty list — associations don't actually run
+        Ok(json_resp(json!({ "AssociationExecutions": [] })))
+    }
+
+    fn describe_association_execution_targets(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let _association_id = body["AssociationId"]
+            .as_str()
+            .ok_or_else(|| missing("AssociationId"))?;
+        let _execution_id = body["ExecutionId"]
+            .as_str()
+            .ok_or_else(|| missing("ExecutionId"))?;
+        Ok(json_resp(json!({ "AssociationExecutionTargets": [] })))
+    }
+
+    // -----------------------------------------------------------------------
+    // OpsItems
+    // -----------------------------------------------------------------------
+
+    fn create_ops_item(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let title = body["Title"]
+            .as_str()
+            .ok_or_else(|| missing("Title"))?
+            .to_string();
+        let source = body["Source"]
+            .as_str()
+            .ok_or_else(|| missing("Source"))?
+            .to_string();
+        let description = body["Description"].as_str().map(|s| s.to_string());
+        let priority = body["Priority"].as_i64();
+        let severity = body["Severity"].as_str().map(|s| s.to_string());
+        let category = body["Category"].as_str().map(|s| s.to_string());
+        let ops_item_type = body["OpsItemType"].as_str().map(|s| s.to_string());
+        let operational_data: HashMap<String, serde_json::Value> = body["OperationalData"]
+            .as_object()
+            .map(|obj| obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+            .unwrap_or_default();
+        let notifications: Vec<serde_json::Value> = body["Notifications"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let related_ops_items: Vec<serde_json::Value> = body["RelatedOpsItems"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let tags: HashMap<String, String> = body["Tags"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|t| {
+                        let k = t["Key"].as_str()?;
+                        let v = t["Value"].as_str()?;
+                        Some((k.to_string(), v.to_string()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let now = Utc::now();
+        let mut state = self.state.write();
+        state.ops_item_counter += 1;
+        let ops_item_id = format!("oi-{:012x}", state.ops_item_counter);
+
+        let item = SsmOpsItem {
+            ops_item_id: ops_item_id.clone(),
+            title,
+            description,
+            source,
+            status: "Open".to_string(),
+            priority,
+            severity,
+            category,
+            operational_data,
+            notifications,
+            related_ops_items,
+            tags,
+            created_time: now,
+            last_modified_time: now,
+            created_by: format!("arn:aws:iam::{}:root", state.account_id),
+            last_modified_by: format!("arn:aws:iam::{}:root", state.account_id),
+            ops_item_type,
+            planned_start_time: None,
+            planned_end_time: None,
+            actual_start_time: None,
+            actual_end_time: None,
+        };
+
+        state.ops_items.insert(ops_item_id.clone(), item);
+
+        Ok(json_resp(json!({ "OpsItemId": ops_item_id })))
+    }
+
+    fn get_ops_item(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let ops_item_id = body["OpsItemId"]
+            .as_str()
+            .ok_or_else(|| missing("OpsItemId"))?;
+
+        let state = self.state.read();
+        let item = state.ops_items.get(ops_item_id).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "OpsItemNotFoundException",
+                format!("OpsItem ID {ops_item_id} not found"),
+            )
+        })?;
+
+        Ok(json_resp(json!({ "OpsItem": ops_item_to_json(item) })))
+    }
+
+    fn update_ops_item(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let ops_item_id = body["OpsItemId"]
+            .as_str()
+            .ok_or_else(|| missing("OpsItemId"))?;
+
+        let mut state = self.state.write();
+        let account_id = state.account_id.clone();
+        let item = state.ops_items.get_mut(ops_item_id).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "OpsItemNotFoundException",
+                format!("OpsItem ID {ops_item_id} not found"),
+            )
+        })?;
+
+        if let Some(t) = body["Title"].as_str() {
+            item.title = t.to_string();
+        }
+        if let Some(d) = body["Description"].as_str() {
+            item.description = Some(d.to_string());
+        }
+        if let Some(s) = body["Status"].as_str() {
+            item.status = s.to_string();
+        }
+        if let Some(p) = body["Priority"].as_i64() {
+            item.priority = Some(p);
+        }
+        if let Some(s) = body["Severity"].as_str() {
+            item.severity = Some(s.to_string());
+        }
+        if let Some(c) = body["Category"].as_str() {
+            item.category = Some(c.to_string());
+        }
+        if let Some(obj) = body["OperationalData"].as_object() {
+            for (k, v) in obj {
+                item.operational_data.insert(k.clone(), v.clone());
+            }
+        }
+        if let Some(arr) = body["Notifications"].as_array() {
+            item.notifications = arr.clone();
+        }
+        if let Some(arr) = body["RelatedOpsItems"].as_array() {
+            item.related_ops_items = arr.clone();
+        }
+
+        item.last_modified_time = Utc::now();
+        item.last_modified_by = format!("arn:aws:iam::{}:root", account_id);
+
+        Ok(json_resp(json!({})))
+    }
+
+    fn delete_ops_item(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let ops_item_id = body["OpsItemId"]
+            .as_str()
+            .ok_or_else(|| missing("OpsItemId"))?;
+
+        let mut state = self.state.write();
+        state.ops_items.remove(ops_item_id);
+        Ok(json_resp(json!({})))
+    }
+
+    fn describe_ops_items(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let max_results = body["MaxResults"].as_i64().unwrap_or(50) as usize;
+        let next_token_offset: usize = body["NextToken"]
+            .as_str()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+
+        let state = self.state.read();
+        let all: Vec<Value> = state
+            .ops_items
+            .values()
+            .map(|item| {
+                json!({
+                    "OpsItemId": item.ops_item_id,
+                    "Title": item.title,
+                    "Status": item.status,
+                    "Source": item.source,
+                    "Priority": item.priority,
+                    "Severity": item.severity,
+                    "Category": item.category,
+                    "CreatedTime": item.created_time.timestamp_millis() as f64 / 1000.0,
+                    "LastModifiedTime": item.last_modified_time.timestamp_millis() as f64 / 1000.0,
+                    "CreatedBy": item.created_by,
+                    "LastModifiedBy": item.last_modified_by,
+                })
+            })
+            .collect();
+
+        let page = if next_token_offset < all.len() {
+            &all[next_token_offset..]
+        } else {
+            &[]
+        };
+        let has_more = page.len() > max_results;
+        let items: Vec<Value> = page.iter().take(max_results).cloned().collect();
+
+        let mut resp = json!({ "OpsItemSummaries": items });
+        if has_more {
+            resp["NextToken"] = json!((next_token_offset + max_results).to_string());
+        }
+        Ok(json_resp(resp))
+    }
+
+    // -----------------------------------------------------------------------
+    // Document extras
+    // -----------------------------------------------------------------------
+
+    fn list_document_versions(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let name = body["Name"].as_str().ok_or_else(|| missing("Name"))?;
+        let max_results = body["MaxResults"].as_i64().unwrap_or(50) as usize;
+        let next_token_offset: usize = body["NextToken"]
+            .as_str()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+
+        let state = self.state.read();
+        let doc = state
+            .documents
+            .get(name)
+            .ok_or_else(|| doc_not_found(name))?;
+
+        let all: Vec<Value> = doc
+            .versions
+            .iter()
+            .map(|v| {
+                json!({
+                    "Name": name,
+                    "DocumentVersion": v.document_version,
+                    "CreatedDate": v.created_date.timestamp_millis() as f64 / 1000.0,
+                    "IsDefaultVersion": v.is_default_version,
+                    "DocumentFormat": v.document_format,
+                    "Status": v.status,
+                    "VersionName": v.version_name,
+                })
+            })
+            .collect();
+
+        let page = if next_token_offset < all.len() {
+            &all[next_token_offset..]
+        } else {
+            &[]
+        };
+        let has_more = page.len() > max_results;
+        let items: Vec<Value> = page.iter().take(max_results).cloned().collect();
+
+        let mut resp = json!({ "DocumentVersions": items });
+        if has_more {
+            resp["NextToken"] = json!((next_token_offset + max_results).to_string());
+        }
+        Ok(json_resp(resp))
+    }
+
+    fn list_document_metadata_history(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let _name = body["Name"].as_str().ok_or_else(|| missing("Name"))?;
+        let _metadata = body["Metadata"]
+            .as_str()
+            .ok_or_else(|| missing("Metadata"))?;
+
+        // Stub: return empty metadata
+        Ok(json_resp(json!({
+            "Name": _name,
+            "Author": "",
+            "Metadata": {
+                "ReviewerResponse": []
+            }
+        })))
+    }
+
+    fn update_document_metadata(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let name = body["Name"].as_str().ok_or_else(|| missing("Name"))?;
+
+        let state = self.state.read();
+        if !state.documents.contains_key(name) {
+            return Err(doc_not_found(name));
+        }
+
+        // Stub: accept but do nothing
+        Ok(json_resp(json!({})))
+    }
+
+    // -----------------------------------------------------------------------
+    // Resource policies
+    // -----------------------------------------------------------------------
+
+    fn put_resource_policy(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let resource_arn = body["ResourceArn"]
+            .as_str()
+            .ok_or_else(|| missing("ResourceArn"))?
+            .to_string();
+        let policy = body["Policy"]
+            .as_str()
+            .ok_or_else(|| missing("Policy"))?
+            .to_string();
+
+        let policy_id = body["PolicyId"].as_str().map(|s| s.to_string());
+        let policy_hash = body["PolicyHash"].as_str().map(|s| s.to_string());
+
+        let mut state = self.state.write();
+
+        // If PolicyId is provided, update existing
+        if let Some(ref pid) = policy_id {
+            if let Some(existing) = state
+                .resource_policies
+                .iter_mut()
+                .find(|p| p.policy_id == *pid && p.resource_arn == resource_arn)
+            {
+                // Verify hash matches if provided
+                if let Some(ref expected_hash) = policy_hash {
+                    if existing.policy_hash != *expected_hash {
+                        return Err(AwsServiceError::aws_error(
+                            StatusCode::BAD_REQUEST,
+                            "ResourcePolicyConflictException",
+                            "The policy hash does not match.".to_string(),
+                        ));
+                    }
+                }
+                existing.policy = policy;
+                let new_hash = format!("{:x}", md5::compute(existing.policy.as_bytes()));
+                existing.policy_hash = new_hash.clone();
+                return Ok(json_resp(json!({
+                    "PolicyId": pid,
+                    "PolicyHash": new_hash,
+                })));
+            }
+        }
+
+        // Create new
+        let new_id = uuid::Uuid::new_v4().to_string();
+        let new_hash = format!("{:x}", md5::compute(policy.as_bytes()));
+        state.resource_policies.push(SsmResourcePolicy {
+            policy_id: new_id.clone(),
+            policy_hash: new_hash.clone(),
+            policy,
+            resource_arn,
+        });
+
+        Ok(json_resp(json!({
+            "PolicyId": new_id,
+            "PolicyHash": new_hash,
+        })))
+    }
+
+    fn get_resource_policies(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let resource_arn = body["ResourceArn"]
+            .as_str()
+            .ok_or_else(|| missing("ResourceArn"))?;
+
+        let state = self.state.read();
+        let policies: Vec<Value> = state
+            .resource_policies
+            .iter()
+            .filter(|p| p.resource_arn == resource_arn)
+            .map(|p| {
+                json!({
+                    "PolicyId": p.policy_id,
+                    "PolicyHash": p.policy_hash,
+                    "Policy": p.policy,
+                })
+            })
+            .collect();
+
+        Ok(json_resp(json!({ "Policies": policies })))
+    }
+
+    fn delete_resource_policy(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let resource_arn = body["ResourceArn"]
+            .as_str()
+            .ok_or_else(|| missing("ResourceArn"))?;
+        let policy_id = body["PolicyId"]
+            .as_str()
+            .ok_or_else(|| missing("PolicyId"))?;
+        let policy_hash = body["PolicyHash"]
+            .as_str()
+            .ok_or_else(|| missing("PolicyHash"))?;
+
+        let mut state = self.state.write();
+        let idx = state
+            .resource_policies
+            .iter()
+            .position(|p| p.resource_arn == resource_arn && p.policy_id == policy_id);
+
+        match idx {
+            Some(i) => {
+                if state.resource_policies[i].policy_hash != policy_hash {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "ResourcePolicyConflictException",
+                        "The policy hash does not match.".to_string(),
+                    ));
+                }
+                state.resource_policies.remove(i);
+                Ok(json_resp(json!({})))
+            }
+            None => Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourcePolicyNotFoundException",
+                "The resource policy was not found.".to_string(),
+            )),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Stubs
+    // -----------------------------------------------------------------------
+
+    fn get_connection_status(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let target = body["Target"].as_str().ok_or_else(|| missing("Target"))?;
+        Ok(json_resp(json!({
+            "Target": target,
+            "Status": "connected",
+        })))
+    }
+
+    fn get_calendar_state(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let _calendar_names = body["CalendarNames"]
+            .as_array()
+            .ok_or_else(|| missing("CalendarNames"))?;
+        Ok(json_resp(json!({
+            "State": "OPEN",
+            "AtTime": Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+            "NextTransitionTime": null,
+        })))
+    }
+
+    fn describe_patch_group_state(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let _patch_group = body["PatchGroup"]
+            .as_str()
+            .ok_or_else(|| missing("PatchGroup"))?;
+        Ok(json_resp(json!({
+            "Instances": 0,
+            "InstancesWithInstalledPatches": 0,
+            "InstancesWithInstalledOtherPatches": 0,
+            "InstancesWithInstalledRejectedPatches": 0,
+            "InstancesWithInstalledPendingRebootPatches": 0,
+            "InstancesWithMissingPatches": 0,
+            "InstancesWithFailedPatches": 0,
+            "InstancesWithNotApplicablePatches": 0,
+            "InstancesWithUnreportedNotApplicablePatches": 0,
+            "InstancesWithCriticalNonCompliantPatches": 0,
+            "InstancesWithSecurityNonCompliantPatches": 0,
+            "InstancesWithOtherNonCompliantPatches": 0,
+        })))
+    }
+
+    fn describe_patch_properties(&self, _req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        Ok(json_resp(json!({ "Properties": [] })))
+    }
+
+    fn get_default_patch_baseline(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let operating_system = body["OperatingSystem"].as_str().unwrap_or("WINDOWS");
+
+        let state = self.state.read();
+
+        // Check if a custom default has been registered
+        if let Some(ref baseline_id) = state.default_patch_baseline_id {
+            return Ok(json_resp(json!({
+                "BaselineId": baseline_id,
+                "OperatingSystem": operating_system,
+            })));
+        }
+
+        // Otherwise look up from defaults
+        let baseline_id =
+            default_patch_baseline(&state.region, operating_system).unwrap_or_default();
+        Ok(json_resp(json!({
+            "BaselineId": baseline_id,
+            "OperatingSystem": operating_system,
+        })))
+    }
+
+    fn register_default_patch_baseline(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let baseline_id = body["BaselineId"]
+            .as_str()
+            .ok_or_else(|| missing("BaselineId"))?
+            .to_string();
+
+        let mut state = self.state.write();
+
+        // Verify baseline exists (custom or default)
+        if !state.patch_baselines.contains_key(&baseline_id)
+            && !is_default_patch_baseline(&baseline_id)
+        {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "DoesNotExistException",
+                format!("Patch baseline {baseline_id} does not exist"),
+            ));
+        }
+
+        state.default_patch_baseline_id = Some(baseline_id.clone());
+        Ok(json_resp(json!({
+            "BaselineId": baseline_id,
+        })))
+    }
+
+    fn describe_available_patches(
+        &self,
+        _req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        Ok(json_resp(json!({ "Patches": [] })))
+    }
+
+    fn get_service_setting(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let setting_id = body["SettingId"]
+            .as_str()
+            .ok_or_else(|| missing("SettingId"))?;
+
+        let state = self.state.read();
+        if let Some(setting) = state.service_settings.get(setting_id) {
+            Ok(json_resp(json!({
+                "ServiceSetting": {
+                    "SettingId": setting.setting_id,
+                    "SettingValue": setting.setting_value,
+                    "LastModifiedDate": setting.last_modified_date.timestamp_millis() as f64 / 1000.0,
+                    "LastModifiedUser": setting.last_modified_user,
+                    "ARN": format!("arn:aws:ssm:{}:{}:servicesetting/{}", state.region, state.account_id, setting.setting_id),
+                    "Status": setting.status,
+                }
+            })))
+        } else {
+            // Return sensible default for known settings
+            Ok(json_resp(json!({
+                "ServiceSetting": {
+                    "SettingId": setting_id,
+                    "SettingValue": get_default_service_setting(setting_id),
+                    "LastModifiedDate": Utc::now().timestamp_millis() as f64 / 1000.0,
+                    "LastModifiedUser": "System",
+                    "ARN": format!("arn:aws:ssm:{}:{}:servicesetting/{}", state.region, state.account_id, setting_id),
+                    "Status": "Default",
+                }
+            })))
+        }
+    }
+
+    fn reset_service_setting(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let setting_id = body["SettingId"]
+            .as_str()
+            .ok_or_else(|| missing("SettingId"))?;
+
+        let mut state = self.state.write();
+        state.service_settings.remove(setting_id);
+
+        let default_value = get_default_service_setting(setting_id);
+        Ok(json_resp(json!({
+            "ServiceSetting": {
+                "SettingId": setting_id,
+                "SettingValue": default_value,
+                "LastModifiedDate": Utc::now().timestamp_millis() as f64 / 1000.0,
+                "LastModifiedUser": "System",
+                "ARN": format!("arn:aws:ssm:{}:{}:servicesetting/{}", state.region, state.account_id, setting_id),
+                "Status": "Default",
+            }
+        })))
+    }
+
+    fn update_service_setting(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let setting_id = body["SettingId"]
+            .as_str()
+            .ok_or_else(|| missing("SettingId"))?
+            .to_string();
+        let setting_value = body["SettingValue"]
+            .as_str()
+            .ok_or_else(|| missing("SettingValue"))?
+            .to_string();
+
+        let mut state = self.state.write();
+        let now = Utc::now();
+        let account_id = state.account_id.clone();
+        state.service_settings.insert(
+            setting_id.clone(),
+            SsmServiceSetting {
+                setting_id,
+                setting_value,
+                last_modified_date: now,
+                last_modified_user: format!("arn:aws:iam::{}:root", account_id),
+                status: "Customized".to_string(),
+            },
+        );
+
+        Ok(json_resp(json!({})))
+    }
+}
+
+fn association_to_json(a: &SsmAssociation) -> Value {
+    let mut v = json!({
+        "AssociationId": a.association_id,
+        "Name": a.name,
+        "AssociationVersion": a.versions.len().to_string(),
+        "Date": a.created_date.timestamp_millis() as f64 / 1000.0,
+        "LastUpdateAssociationDate": a.last_update_association_date.timestamp_millis() as f64 / 1000.0,
+        "Status": {
+            "Date": a.status_date.timestamp_millis() as f64 / 1000.0,
+            "Name": a.status,
+            "Message": "",
+            "AdditionalInfo": "",
+        },
+        "Overview": a.overview,
+        "ApplyOnlyAtCronInterval": a.apply_only_at_cron_interval,
+    });
+    if !a.targets.is_empty() {
+        v["Targets"] = json!(a.targets);
+    }
+    if let Some(ref s) = a.schedule_expression {
+        v["ScheduleExpression"] = json!(s);
+    }
+    if !a.parameters.is_empty() {
+        v["Parameters"] = json!(a.parameters);
+    }
+    if let Some(ref an) = a.association_name {
+        v["AssociationName"] = json!(an);
+    }
+    if let Some(ref dv) = a.document_version {
+        v["DocumentVersion"] = json!(dv);
+    }
+    if let Some(ref ol) = a.output_location {
+        v["OutputLocation"] = ol.clone();
+    }
+    if let Some(ref me) = a.max_errors {
+        v["MaxErrors"] = json!(me);
+    }
+    if let Some(ref mc) = a.max_concurrency {
+        v["MaxConcurrency"] = json!(mc);
+    }
+    if let Some(ref cs) = a.compliance_severity {
+        v["ComplianceSeverity"] = json!(cs);
+    }
+    if let Some(ref sc) = a.sync_compliance {
+        v["SyncCompliance"] = json!(sc);
+    }
+    if let Some(ref iid) = a.instance_id {
+        v["InstanceId"] = json!(iid);
+    }
+    if let Some(so) = a.schedule_offset {
+        v["ScheduleOffset"] = json!(so);
+    }
+    if let Some(ref led) = a.last_execution_date {
+        v["LastExecutionDate"] = json!(led.timestamp_millis() as f64 / 1000.0);
+    }
+    v
+}
+
+fn ops_item_to_json(item: &SsmOpsItem) -> Value {
+    json!({
+        "OpsItemId": item.ops_item_id,
+        "Title": item.title,
+        "Description": item.description,
+        "Source": item.source,
+        "Status": item.status,
+        "Priority": item.priority,
+        "Severity": item.severity,
+        "Category": item.category,
+        "OperationalData": item.operational_data,
+        "Notifications": item.notifications,
+        "RelatedOpsItems": item.related_ops_items,
+        "CreatedTime": item.created_time.timestamp_millis() as f64 / 1000.0,
+        "LastModifiedTime": item.last_modified_time.timestamp_millis() as f64 / 1000.0,
+        "CreatedBy": item.created_by,
+        "LastModifiedBy": item.last_modified_by,
+        "OpsItemType": item.ops_item_type,
+    })
+}
+
+fn get_default_service_setting(setting_id: &str) -> String {
+    match setting_id {
+        s if s.contains("parameter-store") && s.contains("throughput") => "standard".to_string(),
+        s if s.contains("parameter-store") && s.contains("high-throughput") => "false".to_string(),
+        s if s.contains("session-manager") => "".to_string(),
+        s if s.contains("managed-instance") => "".to_string(),
+        _ => "".to_string(),
+    }
 }
 
 /// Validate a path value for parameter path filters.
@@ -4642,5 +5917,379 @@ mod tests {
         let body: Value = serde_json::from_slice(&resp.body).unwrap();
         assert_eq!(body["WindowIdentities"].as_array().unwrap().len(), 1);
         assert!(body.get("NextToken").is_none() || body["NextToken"].is_null());
+    }
+
+    // -- Associations --
+
+    #[test]
+    fn association_crud() {
+        let svc = make_service();
+
+        // Create
+        let req = make_request(
+            "CreateAssociation",
+            json!({
+                "Name": "AWS-RunShellScript",
+                "Targets": [{"Key": "InstanceIds", "Values": ["i-1234567890abcdef0"]}],
+                "ScheduleExpression": "rate(1 hour)",
+                "AssociationName": "my-assoc",
+            }),
+        );
+        let resp = svc.create_association(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let assoc_id = body["AssociationDescription"]["AssociationId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(
+            body["AssociationDescription"]["Name"].as_str().unwrap(),
+            "AWS-RunShellScript"
+        );
+
+        // Describe
+        let req = make_request("DescribeAssociation", json!({ "AssociationId": assoc_id }));
+        let resp = svc.describe_association(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(
+            body["AssociationDescription"]["AssociationName"]
+                .as_str()
+                .unwrap(),
+            "my-assoc"
+        );
+
+        // List
+        let req = make_request("ListAssociations", json!({}));
+        let resp = svc.list_associations(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["Associations"].as_array().unwrap().len(), 1);
+
+        // Update
+        let req = make_request(
+            "UpdateAssociation",
+            json!({
+                "AssociationId": assoc_id,
+                "AssociationName": "updated-assoc",
+            }),
+        );
+        let resp = svc.update_association(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(
+            body["AssociationDescription"]["AssociationName"]
+                .as_str()
+                .unwrap(),
+            "updated-assoc"
+        );
+
+        // ListAssociationVersions
+        let req = make_request(
+            "ListAssociationVersions",
+            json!({ "AssociationId": assoc_id }),
+        );
+        let resp = svc.list_association_versions(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["AssociationVersions"].as_array().unwrap().len(), 2);
+
+        // Delete
+        let req = make_request("DeleteAssociation", json!({ "AssociationId": assoc_id }));
+        svc.delete_association(&req).unwrap();
+
+        // Verify deleted
+        let req = make_request("DescribeAssociation", json!({ "AssociationId": assoc_id }));
+        assert!(svc.describe_association(&req).is_err());
+    }
+
+    #[test]
+    fn association_batch_create() {
+        let svc = make_service();
+        let req = make_request(
+            "CreateAssociationBatch",
+            json!({
+                "Entries": [
+                    {"Name": "AWS-RunShellScript", "Targets": [{"Key": "InstanceIds", "Values": ["i-001"]}]},
+                    {"Name": "AWS-RunShellScript", "Targets": [{"Key": "InstanceIds", "Values": ["i-002"]}]},
+                ]
+            }),
+        );
+        let resp = svc.create_association_batch(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["Successful"].as_array().unwrap().len(), 2);
+        assert!(body["Failed"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn start_associations_once_noop() {
+        let svc = make_service();
+        let req = make_request(
+            "StartAssociationsOnce",
+            json!({ "AssociationIds": ["fake-id"] }),
+        );
+        svc.start_associations_once(&req).unwrap();
+    }
+
+    // -- OpsItems --
+
+    #[test]
+    fn ops_item_crud() {
+        let svc = make_service();
+
+        // Create
+        let req = make_request(
+            "CreateOpsItem",
+            json!({
+                "Title": "Test OpsItem",
+                "Source": "test",
+                "Description": "A test ops item",
+            }),
+        );
+        let resp = svc.create_ops_item(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let ops_item_id = body["OpsItemId"].as_str().unwrap().to_string();
+
+        // Get
+        let req = make_request("GetOpsItem", json!({ "OpsItemId": ops_item_id }));
+        let resp = svc.get_ops_item(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["OpsItem"]["Title"].as_str().unwrap(), "Test OpsItem");
+        assert_eq!(body["OpsItem"]["Status"].as_str().unwrap(), "Open");
+
+        // Update
+        let req = make_request(
+            "UpdateOpsItem",
+            json!({
+                "OpsItemId": ops_item_id,
+                "Title": "Updated OpsItem",
+                "Status": "Resolved",
+            }),
+        );
+        svc.update_ops_item(&req).unwrap();
+
+        // Verify update
+        let req = make_request("GetOpsItem", json!({ "OpsItemId": ops_item_id }));
+        let resp = svc.get_ops_item(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(
+            body["OpsItem"]["Title"].as_str().unwrap(),
+            "Updated OpsItem"
+        );
+        assert_eq!(body["OpsItem"]["Status"].as_str().unwrap(), "Resolved");
+
+        // Describe
+        let req = make_request("DescribeOpsItems", json!({}));
+        let resp = svc.describe_ops_items(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["OpsItemSummaries"].as_array().unwrap().len(), 1);
+
+        // Delete
+        let req = make_request("DeleteOpsItem", json!({ "OpsItemId": ops_item_id }));
+        svc.delete_ops_item(&req).unwrap();
+
+        // Verify deleted
+        let req = make_request("GetOpsItem", json!({ "OpsItemId": ops_item_id }));
+        assert!(svc.get_ops_item(&req).is_err());
+    }
+
+    // -- Resource policies --
+
+    #[test]
+    fn resource_policy_crud() {
+        let svc = make_service();
+        let resource_arn = "arn:aws:ssm:us-east-1:123456789012:parameter/test";
+
+        // Put
+        let req = make_request(
+            "PutResourcePolicy",
+            json!({
+                "ResourceArn": resource_arn,
+                "Policy": r#"{"Version":"2012-10-17","Statement":[]}"#,
+            }),
+        );
+        let resp = svc.put_resource_policy(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let policy_id = body["PolicyId"].as_str().unwrap().to_string();
+        let policy_hash = body["PolicyHash"].as_str().unwrap().to_string();
+
+        // Get
+        let req = make_request(
+            "GetResourcePolicies",
+            json!({ "ResourceArn": resource_arn }),
+        );
+        let resp = svc.get_resource_policies(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["Policies"].as_array().unwrap().len(), 1);
+
+        // Delete
+        let req = make_request(
+            "DeleteResourcePolicy",
+            json!({
+                "ResourceArn": resource_arn,
+                "PolicyId": policy_id,
+                "PolicyHash": policy_hash,
+            }),
+        );
+        svc.delete_resource_policy(&req).unwrap();
+
+        // Verify deleted
+        let req = make_request(
+            "GetResourcePolicies",
+            json!({ "ResourceArn": resource_arn }),
+        );
+        let resp = svc.get_resource_policies(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert!(body["Policies"].as_array().unwrap().is_empty());
+    }
+
+    // -- Stubs --
+
+    #[test]
+    fn get_connection_status_returns_connected() {
+        let svc = make_service();
+        let req = make_request(
+            "GetConnectionStatus",
+            json!({ "Target": "i-1234567890abcdef0" }),
+        );
+        let resp = svc.get_connection_status(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["Status"].as_str().unwrap(), "connected");
+    }
+
+    #[test]
+    fn get_calendar_state_returns_open() {
+        let svc = make_service();
+        let req = make_request(
+            "GetCalendarState",
+            json!({ "CalendarNames": ["arn:aws:ssm:us-east-1:123456789012:document/cal"] }),
+        );
+        let resp = svc.get_calendar_state(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["State"].as_str().unwrap(), "OPEN");
+    }
+
+    #[test]
+    fn service_setting_crud() {
+        let svc = make_service();
+
+        // Get default
+        let req = make_request(
+            "GetServiceSetting",
+            json!({ "SettingId": "/ssm/parameter-store/high-throughput-enabled" }),
+        );
+        let resp = svc.get_service_setting(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(
+            body["ServiceSetting"]["Status"].as_str().unwrap(),
+            "Default"
+        );
+
+        // Update
+        let req = make_request(
+            "UpdateServiceSetting",
+            json!({
+                "SettingId": "/ssm/parameter-store/high-throughput-enabled",
+                "SettingValue": "true",
+            }),
+        );
+        svc.update_service_setting(&req).unwrap();
+
+        // Verify
+        let req = make_request(
+            "GetServiceSetting",
+            json!({ "SettingId": "/ssm/parameter-store/high-throughput-enabled" }),
+        );
+        let resp = svc.get_service_setting(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(
+            body["ServiceSetting"]["Status"].as_str().unwrap(),
+            "Customized"
+        );
+        assert_eq!(
+            body["ServiceSetting"]["SettingValue"].as_str().unwrap(),
+            "true"
+        );
+
+        // Reset
+        let req = make_request(
+            "ResetServiceSetting",
+            json!({ "SettingId": "/ssm/parameter-store/high-throughput-enabled" }),
+        );
+        svc.reset_service_setting(&req).unwrap();
+
+        // Verify reset
+        let req = make_request(
+            "GetServiceSetting",
+            json!({ "SettingId": "/ssm/parameter-store/high-throughput-enabled" }),
+        );
+        let resp = svc.get_service_setting(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(
+            body["ServiceSetting"]["Status"].as_str().unwrap(),
+            "Default"
+        );
+    }
+
+    #[test]
+    fn list_document_versions_works() {
+        let svc = make_service();
+
+        // Create a document
+        let req = make_request(
+            "CreateDocument",
+            json!({
+                "Name": "TestDocVer",
+                "Content": r#"{"schemaVersion":"2.2","mainSteps":[]}"#,
+                "DocumentType": "Command",
+            }),
+        );
+        svc.create_document(&req).unwrap();
+
+        // List versions
+        let req = make_request("ListDocumentVersions", json!({ "Name": "TestDocVer" }));
+        let resp = svc.list_document_versions(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert!(!body["DocumentVersions"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn describe_patch_group_state_returns_zeros() {
+        let svc = make_service();
+        let req = make_request(
+            "DescribePatchGroupState",
+            json!({ "PatchGroup": "test-group" }),
+        );
+        let resp = svc.describe_patch_group_state(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["Instances"].as_i64().unwrap(), 0);
+    }
+
+    #[test]
+    fn get_default_patch_baseline_works() {
+        let svc = make_service();
+        let req = make_request(
+            "GetDefaultPatchBaseline",
+            json!({ "OperatingSystem": "WINDOWS" }),
+        );
+        let resp = svc.get_default_patch_baseline(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert!(body["BaselineId"].is_string());
+    }
+
+    #[test]
+    fn describe_available_patches_returns_empty() {
+        let svc = make_service();
+        let req = make_request("DescribeAvailablePatches", json!({}));
+        let resp = svc.describe_available_patches(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert!(body["Patches"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn describe_patch_properties_returns_empty() {
+        let svc = make_service();
+        let req = make_request(
+            "DescribePatchProperties",
+            json!({ "OperatingSystem": "WINDOWS", "Property": "PRODUCT" }),
+        );
+        let resp = svc.describe_patch_properties(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert!(body["Properties"].as_array().unwrap().is_empty());
     }
 }
