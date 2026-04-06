@@ -844,25 +844,19 @@ async fn iam_tag_user() {
 #[tokio::test]
 async fn iam_list_policies_validates_max_items() {
     let server = TestServer::start().await;
-    let output = server
-        .aws_cli(&["iam", "list-policies", "--max-items", "0"])
-        .await;
-    assert!(
-        !output.success(),
-        "MaxItems=0 should fail validation but got success"
-    );
+    let client = server.iam_client().await;
+    // MaxItems=0 should fail validation (range is 1-1000)
+    let result = client.list_policies().max_items(0).send().await;
+    assert!(result.is_err(), "MaxItems=0 should fail validation");
 }
 
 #[tokio::test]
 async fn iam_list_users_validates_path_prefix() {
     let server = TestServer::start().await;
-    let output = server
-        .aws_cli(&["iam", "list-users", "--path-prefix", ""])
-        .await;
-    assert!(
-        !output.success(),
-        "Empty PathPrefix should fail validation but got success"
-    );
+    let client = server.iam_client().await;
+    // Empty PathPrefix should fail validation (min length 1)
+    let result = client.list_users().path_prefix("").send().await;
+    assert!(result.is_err(), "Empty PathPrefix should fail validation");
 }
 
 #[tokio::test]
