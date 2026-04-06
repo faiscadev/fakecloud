@@ -321,7 +321,7 @@ impl LogsService {
         let mut state = self.state.write();
         // Check deletion protection
         if let Some(group) = state.log_groups.get(name) {
-            if group.deletion_protected {
+            if group.deletion_protection {
                 return Err(AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
                     "OperationAbortedException",
