@@ -1,7 +1,22 @@
 mod helpers;
 
+use std::io::Write;
+
 use aws_sdk_lambda::primitives::Blob;
 use helpers::TestServer;
+
+fn make_python_zip() -> Vec<u8> {
+    let buf = Vec::new();
+    let cursor = std::io::Cursor::new(buf);
+    let mut writer = zip::ZipWriter::new(cursor);
+    let options = zip::write::SimpleFileOptions::default();
+    writer.start_file("index.py", options).unwrap();
+    writer
+        .write_all(b"def handler(event, context):\n    return {\"statusCode\": 200}\n")
+        .unwrap();
+    let cursor = writer.finish().unwrap();
+    cursor.into_inner()
+}
 
 #[tokio::test]
 async fn lambda_create_get_delete_function() {
@@ -17,7 +32,7 @@ async fn lambda_create_get_delete_function() {
         .handler("index.handler")
         .code(
             aws_sdk_lambda::types::FunctionCode::builder()
-                .zip_file(Blob::new(b"fake-code"))
+                .zip_file(Blob::new(make_python_zip()))
                 .build(),
         )
         .send()
@@ -66,7 +81,7 @@ async fn lambda_list_functions() {
             .handler("index.handler")
             .code(
                 aws_sdk_lambda::types::FunctionCode::builder()
-                    .zip_file(Blob::new(b"fake"))
+                    .zip_file(Blob::new(make_python_zip()))
                     .build(),
             )
             .send()
@@ -91,7 +106,7 @@ async fn lambda_invoke() {
         .handler("index.handler")
         .code(
             aws_sdk_lambda::types::FunctionCode::builder()
-                .zip_file(Blob::new(b"fake"))
+                .zip_file(Blob::new(make_python_zip()))
                 .build(),
         )
         .send()
@@ -107,6 +122,8 @@ async fn lambda_invoke() {
         .unwrap();
 
     assert_eq!(resp.status_code(), 200);
+    let body: serde_json::Value = serde_json::from_slice(resp.payload().unwrap().as_ref()).unwrap();
+    assert_eq!(body["statusCode"], 200);
 }
 
 #[tokio::test]
@@ -122,7 +139,7 @@ async fn lambda_create_function_conflict() {
         .handler("index.handler")
         .code(
             aws_sdk_lambda::types::FunctionCode::builder()
-                .zip_file(Blob::new(b"fake"))
+                .zip_file(Blob::new(make_python_zip()))
                 .build(),
         )
         .send()
@@ -138,7 +155,7 @@ async fn lambda_create_function_conflict() {
         .handler("index.handler")
         .code(
             aws_sdk_lambda::types::FunctionCode::builder()
-                .zip_file(Blob::new(b"fake"))
+                .zip_file(Blob::new(make_python_zip()))
                 .build(),
         )
         .send()
