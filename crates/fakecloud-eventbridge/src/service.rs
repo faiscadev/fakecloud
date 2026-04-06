@@ -3601,6 +3601,10 @@ pub fn deliver_to_logs(
             log_streams: HashMap::new(),
             stored_bytes: 0,
             subscription_filters: Vec::new(),
+            data_protection_policy: None,
+            index_policies: Vec::new(),
+            transformer: None,
+            deletion_protection: false,
         });
 
     let stream = group

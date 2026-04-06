@@ -679,6 +679,10 @@ impl ResourceProvisioner {
             log_streams: HashMap::new(),
             tags: HashMap::new(),
             subscription_filters: Vec::new(),
+            data_protection_policy: None,
+            index_policies: Vec::new(),
+            transformer: None,
+            deletion_protection: false,
         };
 
         state

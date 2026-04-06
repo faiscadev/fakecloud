@@ -7,9 +7,10 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceErr
 use fakecloud_core::validation::*;
 
 use crate::state::{
-    Delivery, DeliveryDestination, DeliverySource, Destination, ExportTask, LogEvent, LogGroup,
-    LogStream, MetricFilter, MetricTransformation, QueryDefinition, QueryInfo, ResourcePolicy,
-    SharedLogsState, SubscriptionFilter,
+    AccountPolicy, AnomalyDetector, DataProtectionPolicy, Delivery, DeliveryDestination,
+    DeliverySource, Destination, ExportTask, IndexPolicy, LogEvent, LogGroup, LogStream,
+    MetricFilter, MetricTransformation, QueryDefinition, QueryInfo, ResourcePolicy,
+    SharedLogsState, SubscriptionFilter, Transformer,
 };
 
 pub struct LogsService {
@@ -86,6 +87,32 @@ impl AwsService for LogsService {
             "PutQueryDefinition" => self.put_query_definition(&req),
             "DescribeQueryDefinitions" => self.describe_query_definitions(&req),
             "DeleteQueryDefinition" => self.delete_query_definition(&req),
+            "PutAccountPolicy" => self.put_account_policy(&req),
+            "DescribeAccountPolicies" => self.describe_account_policies(&req),
+            "DeleteAccountPolicy" => self.delete_account_policy(&req),
+            "PutDataProtectionPolicy" => self.put_data_protection_policy(&req),
+            "GetDataProtectionPolicy" => self.get_data_protection_policy(&req),
+            "DeleteDataProtectionPolicy" => self.delete_data_protection_policy(&req),
+            "PutIndexPolicy" => self.put_index_policy(&req),
+            "DescribeIndexPolicies" => self.describe_index_policies(&req),
+            "DeleteIndexPolicy" => self.delete_index_policy(&req),
+            "DescribeFieldIndexes" => self.describe_field_indexes(&req),
+            "PutTransformer" => self.put_transformer(&req),
+            "GetTransformer" => self.get_transformer(&req),
+            "DeleteTransformer" => self.delete_transformer(&req),
+            "TestTransformer" => self.test_transformer(&req),
+            "CreateLogAnomalyDetector" => self.create_log_anomaly_detector(&req),
+            "GetLogAnomalyDetector" => self.get_log_anomaly_detector(&req),
+            "DeleteLogAnomalyDetector" => self.delete_log_anomaly_detector(&req),
+            "ListLogAnomalyDetectors" => self.list_log_anomaly_detectors(&req),
+            "UpdateLogAnomalyDetector" => self.update_log_anomaly_detector(&req),
+            "GetLogGroupFields" => self.get_log_group_fields(&req),
+            "TestMetricFilter" => self.test_metric_filter(&req),
+            "StopQuery" => self.stop_query(&req),
+            "PutLogGroupDeletionProtection" => self.put_log_group_deletion_protection(&req),
+            "GetLogRecord" => self.get_log_record(&req),
+            "ListAnomalies" => self.list_anomalies(&req),
+            "UpdateAnomaly" => self.update_anomaly(&req),
             _ => Err(AwsServiceError::action_not_implemented("logs", &req.action)),
         }
     }
@@ -148,6 +175,32 @@ impl AwsService for LogsService {
             "PutQueryDefinition",
             "DescribeQueryDefinitions",
             "DeleteQueryDefinition",
+            "PutAccountPolicy",
+            "DescribeAccountPolicies",
+            "DeleteAccountPolicy",
+            "PutDataProtectionPolicy",
+            "GetDataProtectionPolicy",
+            "DeleteDataProtectionPolicy",
+            "PutIndexPolicy",
+            "DescribeIndexPolicies",
+            "DeleteIndexPolicy",
+            "DescribeFieldIndexes",
+            "PutTransformer",
+            "GetTransformer",
+            "DeleteTransformer",
+            "TestTransformer",
+            "CreateLogAnomalyDetector",
+            "GetLogAnomalyDetector",
+            "DeleteLogAnomalyDetector",
+            "ListLogAnomalyDetectors",
+            "UpdateLogAnomalyDetector",
+            "GetLogGroupFields",
+            "TestMetricFilter",
+            "StopQuery",
+            "PutLogGroupDeletionProtection",
+            "GetLogRecord",
+            "ListAnomalies",
+            "UpdateAnomaly",
         ]
     }
 }
@@ -243,6 +296,10 @@ impl LogsService {
                 log_streams: std::collections::HashMap::new(),
                 stored_bytes: 0,
                 subscription_filters: Vec::new(),
+                data_protection_policy: None,
+                index_policies: Vec::new(),
+                transformer: None,
+                deletion_protection: false,
             },
         );
 
@@ -3490,6 +3547,1056 @@ impl LogsService {
             serde_json::to_string(&json!({ "success": success })).unwrap(),
         ))
     }
+
+    // ---- Account Policies ----
+
+    fn put_account_policy(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = body_json(req);
+        let policy_name = body["policyName"].as_str().ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterException",
+                "policyName is required",
+            )
+        })?;
+        let policy_type = body["policyType"].as_str().ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterException",
+                "policyType is required",
+            )
+        })?;
+        let policy_document = body["policyDocument"].as_str().ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterException",
+                "policyDocument is required",
+            )
+        })?;
+
+        let now = Utc::now().timestamp_millis();
+        let mut state = self.state.write();
+        let account_id = state.account_id.clone();
+        let scope = body["scope"].as_str().map(|s| s.to_string());
+        let selection_criteria = body["selectionCriteria"].as_str().map(|s| s.to_string());
+
+        let policy = AccountPolicy {
+            policy_name: policy_name.to_string(),
+            policy_type: policy_type.to_string(),
+            policy_document: policy_document.to_string(),
+            scope: scope.clone(),
+            selection_criteria: selection_criteria.clone(),
+            account_id: account_id.clone(),
+            last_updated_time: now,
+        };
+
+        let key = (policy_name.to_string(), policy_type.to_string());
+        state.account_policies.insert(key, policy);
+
+        let mut result = json!({
+            "accountPolicy": {
+                "policyName": policy_name,
+                "policyType": policy_type,
+                "policyDocument": policy_document,
+                "accountId": account_id,
+                "lastUpdatedTime": now,
+            }
+        });
+        if let Some(s) = scope {
+            result["accountPolicy"]["scope"] = json!(s);
+        }
+        if let Some(s) = selection_criteria {
+            result["accountPolicy"]["selectionCriteria"] = json!(s);
+        }
+
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            serde_json::to_string(&result).unwrap(),
+        ))
+    }
+
+    fn describe_account_policies(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = body_json(req);
+        let policy_type = body["policyType"].as_str().ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterException",
+                "policyType is required",
+            )
+        })?;
+        let policy_name = body["policyName"].as_str();
+
+        let state = self.state.read();
+        let policies: Vec<Value> = state
+            .account_policies
+            .values()
+            .filter(|p| {
+                p.policy_type == policy_type && policy_name.is_none_or(|n| p.policy_name == n)
+            })
+            .map(|p| {
+                let mut obj = json!({
+                    "policyName": p.policy_name,
+                    "policyType": p.policy_type,
+                    "policyDocument": p.policy_document,
+                    "accountId": p.account_id,
+                    "lastUpdatedTime": p.last_updated_time,
+                });
+                if let Some(ref s) = p.scope {
+                    obj["scope"] = json!(s);
+                }
+                if let Some(ref s) = p.selection_criteria {
+                    obj["selectionCriteria"] = json!(s);
+                }
+                obj
+            })
+            .collect();
+
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            serde_json::to_string(&json!({ "accountPolicies": policies })).unwrap(),
+        ))
+    }
+
+    fn delete_account_policy(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = body_json(req);
+        let policy_name = body["policyName"].as_str().ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterException",
+                "policyName is required",
+            )
+        })?;
+        let policy_type = body["policyType"].as_str().ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterException",
+                "policyType is required",
+            )
+        })?;
+
+        let key = (policy_name.to_string(), policy_type.to_string());
+        let mut state = self.state.write();
+        if state.account_policies.remove(&key).is_none() {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("Account policy {policy_name} of type {policy_type} not found"),
+            ));
+        }
+
+        Ok(AwsResponse::json(StatusCode::OK, "{}"))
+    }
+
+    // ---- Data Protection Policies ----
+
+    fn put_data_protection_policy(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = body_json(req);
+        let log_group_id = body["logGroupIdentifier"]
+            .as_str()
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterException",
+                    "logGroupIdentifier is required",
+                )
+            })?
+            .to_string();
+        let policy_document = body["policyDocument"]
+            .as_str()
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterException",
+                    "policyDocument is required",
+                )
+            })?
+            .to_string();
+
+        let group_name = if log_group_id.starts_with("arn:") {
+            extract_log_group_from_arn(&log_group_id).ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterException",
+                    format!("Invalid ARN: {log_group_id}"),
+                )
+            })?
+        } else {
+            log_group_id.clone()
+        };
+
+        let now = Utc::now().timestamp_millis();
+        let mut state = self.state.write();
+        let group = state.log_groups.get_mut(&group_name).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("The specified log group does not exist: {group_name}"),
+            )
+        })?;
+        let log_group_id_resp = group.arn.clone();
+
+        group.data_protection_policy = Some(DataProtectionPolicy {
+            policy_document: policy_document.clone(),
+            last_updated_time: now,
+        });
+
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            serde_json::to_string(&json!({
+                "logGroupIdentifier": log_group_id_resp,
+                "policyDocument": policy_document,
+                "lastUpdatedTime": now,
+            }))
+            .unwrap(),
+        ))
+    }
+
+    fn get_data_protection_policy(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = body_json(req);
+        let log_group_id = body["logGroupIdentifier"]
+            .as_str()
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterException",
+                    "logGroupIdentifier is required",
+                )
+            })?
+            .to_string();
+
+        let group_name = if log_group_id.starts_with("arn:") {
+            extract_log_group_from_arn(&log_group_id).ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterException",
+                    format!("Invalid ARN: {log_group_id}"),
+                )
+            })?
+        } else {
+            log_group_id.clone()
+        };
+
+        let state = self.state.read();
+        let group = state.log_groups.get(&group_name).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("The specified log group does not exist: {group_name}"),
+            )
+        })?;
+
+        let mut result = json!({
+            "logGroupIdentifier": group.arn,
+        });
+        if let Some(ref dp) = group.data_protection_policy {
+            result["policyDocument"] = json!(dp.policy_document);
+            result["lastUpdatedTime"] = json!(dp.last_updated_time);
+        }
+
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            serde_json::to_string(&result).unwrap(),
+        ))
+    }
+
+    fn delete_data_protection_policy(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = body_json(req);
+        let log_group_id = body["logGroupIdentifier"]
+            .as_str()
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterException",
+                    "logGroupIdentifier is required",
+                )
+            })?
+            .to_string();
+
+        let group_name = if log_group_id.starts_with("arn:") {
+            extract_log_group_from_arn(&log_group_id).ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterException",
+                    format!("Invalid ARN: {log_group_id}"),
+                )
+            })?
+        } else {
+            log_group_id
+        };
+
+        let mut state = self.state.write();
+        let group = state.log_groups.get_mut(&group_name).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("The specified log group does not exist: {group_name}"),
+            )
+        })?;
+
+        if group.data_protection_policy.is_none() {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                "No data protection policy found for this log group",
+            ));
+        }
+
+        group.data_protection_policy = None;
+        Ok(AwsResponse::json(StatusCode::OK, "{}"))
+    }
+
+    // ---- Index Policies ----
+
+    fn put_index_policy(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = body_json(req);
+        let log_group_id = body["logGroupIdentifier"]
+            .as_str()
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterException",
+                    "logGroupIdentifier is required",
+                )
+            })?
+            .to_string();
+        let policy_document = body["policyDocument"]
+            .as_str()
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterException",
+                    "policyDocument is required",
+                )
+            })?
+            .to_string();
+
+        let group_name = if log_group_id.starts_with("arn:") {
+            extract_log_group_from_arn(&log_group_id).ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterException",
+                    format!("Invalid ARN: {log_group_id}"),
+                )
+            })?
+        } else {
+            log_group_id.clone()
+        };
+
+        let policy_name = body["policyName"].as_str().unwrap_or("default").to_string();
+
+        let now = Utc::now().timestamp_millis();
+        let mut state = self.state.write();
+        let group = state.log_groups.get_mut(&group_name).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("The specified log group does not exist: {group_name}"),
+            )
+        })?;
+
+        // Replace existing policy with same name, or add new one
+        if let Some(existing) = group
+            .index_policies
+            .iter_mut()
+            .find(|p| p.policy_name == policy_name)
+        {
+            existing.policy_document = policy_document.clone();
+            existing.last_updated_time = now;
+        } else {
+            group.index_policies.push(IndexPolicy {
+                policy_name: policy_name.clone(),
+                policy_document: policy_document.clone(),
+                last_updated_time: now,
+            });
+        }
+
+        let result = json!({
+            "indexPolicy": {
+                "policyName": policy_name,
+                "policyDocument": policy_document,
+                "logGroupIdentifier": group.arn,
+                "lastUpdateTime": now,
+            }
+        });
+
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            serde_json::to_string(&result).unwrap(),
+        ))
+    }
+
+    fn describe_index_policies(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = body_json(req);
+        let log_group_ids = body["logGroupIdentifiers"].as_array().ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterException",
+                "logGroupIdentifiers is required",
+            )
+        })?;
+
+        let state = self.state.read();
+        let mut policies = Vec::new();
+
+        for id_val in log_group_ids {
+            let id = id_val.as_str().unwrap_or("");
+            let group_name = if id.starts_with("arn:") {
+                extract_log_group_from_arn(id).unwrap_or_default()
+            } else {
+                id.to_string()
+            };
+            if let Some(group) = state.log_groups.get(&group_name) {
+                for p in &group.index_policies {
+                    policies.push(json!({
+                        "policyName": p.policy_name,
+                        "policyDocument": p.policy_document,
+                        "logGroupIdentifier": group.arn,
+                        "lastUpdateTime": p.last_updated_time,
+                    }));
+                }
+            }
+        }
+
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            serde_json::to_string(&json!({ "indexPolicies": policies })).unwrap(),
+        ))
+    }
+
+    fn delete_index_policy(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = body_json(req);
+        let log_group_id = body["logGroupIdentifier"]
+            .as_str()
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterException",
+                    "logGroupIdentifier is required",
+                )
+            })?
+            .to_string();
+
+        let group_name = if log_group_id.starts_with("arn:") {
+            extract_log_group_from_arn(&log_group_id).ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterException",
+                    format!("Invalid ARN: {log_group_id}"),
+                )
+            })?
+        } else {
+            log_group_id
+        };
+
+        let mut state = self.state.write();
+        let group = state.log_groups.get_mut(&group_name).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("The specified log group does not exist: {group_name}"),
+            )
+        })?;
+
+        if group.index_policies.is_empty() {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                "No index policy found for this log group",
+            ));
+        }
+
+        group.index_policies.clear();
+        Ok(AwsResponse::json(StatusCode::OK, "{}"))
+    }
+
+    fn describe_field_indexes(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = body_json(req);
+        // Validate that logGroupIdentifiers is provided
+        let _log_group_ids = body["logGroupIdentifiers"].as_array().ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterException",
+                "logGroupIdentifiers is required",
+            )
+        })?;
+
+        // Stub: return empty list
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            serde_json::to_string(&json!({ "fieldIndexes": [] })).unwrap(),
+        ))
+    }
+
+    // ---- Transformers ----
+
+    fn put_transformer(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = body_json(req);
+        let log_group_id = body["logGroupIdentifier"]
+            .as_str()
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterException",
+                    "logGroupIdentifier is required",
+                )
+            })?
+            .to_string();
+        let transformer_config = body.get("transformerConfig").cloned().ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterException",
+                "transformerConfig is required",
+            )
+        })?;
+
+        let group_name = if log_group_id.starts_with("arn:") {
+            extract_log_group_from_arn(&log_group_id).ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterException",
+                    format!("Invalid ARN: {log_group_id}"),
+                )
+            })?
+        } else {
+            log_group_id.clone()
+        };
+
+        let now = Utc::now().timestamp_millis();
+        let mut state = self.state.write();
+        let group = state.log_groups.get_mut(&group_name).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("The specified log group does not exist: {group_name}"),
+            )
+        })?;
+
+        group.transformer = Some(Transformer {
+            transformer_config,
+            creation_time: now,
+            last_modified_time: now,
+        });
+
+        Ok(AwsResponse::json(StatusCode::OK, "{}"))
+    }
+
+    fn get_transformer(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = body_json(req);
+        let log_group_id = body["logGroupIdentifier"]
+            .as_str()
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterException",
+                    "logGroupIdentifier is required",
+                )
+            })?
+            .to_string();
+
+        let group_name = if log_group_id.starts_with("arn:") {
+            extract_log_group_from_arn(&log_group_id).ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterException",
+                    format!("Invalid ARN: {log_group_id}"),
+                )
+            })?
+        } else {
+            log_group_id.clone()
+        };
+
+        let state = self.state.read();
+        let group = state.log_groups.get(&group_name).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("The specified log group does not exist: {group_name}"),
+            )
+        })?;
+
+        let mut result = json!({
+            "logGroupIdentifier": group.arn,
+        });
+        if let Some(ref t) = group.transformer {
+            result["transformerConfig"] = t.transformer_config.clone();
+            result["creationTime"] = json!(t.creation_time);
+            result["lastModifiedTime"] = json!(t.last_modified_time);
+        }
+
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            serde_json::to_string(&result).unwrap(),
+        ))
+    }
+
+    fn delete_transformer(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = body_json(req);
+        let log_group_id = body["logGroupIdentifier"]
+            .as_str()
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterException",
+                    "logGroupIdentifier is required",
+                )
+            })?
+            .to_string();
+
+        let group_name = if log_group_id.starts_with("arn:") {
+            extract_log_group_from_arn(&log_group_id).ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterException",
+                    format!("Invalid ARN: {log_group_id}"),
+                )
+            })?
+        } else {
+            log_group_id
+        };
+
+        let mut state = self.state.write();
+        let group = state.log_groups.get_mut(&group_name).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("The specified log group does not exist: {group_name}"),
+            )
+        })?;
+
+        group.transformer = None;
+        Ok(AwsResponse::json(StatusCode::OK, "{}"))
+    }
+
+    fn test_transformer(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = body_json(req);
+        let _transformer_config = body.get("transformerConfig").ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterException",
+                "transformerConfig is required",
+            )
+        })?;
+        let log_event_messages = body["logEventMessages"].as_array().ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterException",
+                "logEventMessages is required",
+            )
+        })?;
+
+        // Stub: return the input events as transformed output unchanged
+        let transformed: Vec<Value> = log_event_messages
+            .iter()
+            .map(|msg| {
+                json!({
+                    "eventMessage": msg,
+                    "transformedEventMessage": msg,
+                })
+            })
+            .collect();
+
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            serde_json::to_string(&json!({
+                "transformedLogs": transformed,
+            }))
+            .unwrap(),
+        ))
+    }
+
+    // ---- Anomaly Detectors ----
+
+    fn create_log_anomaly_detector(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = body_json(req);
+        let log_group_arn_list = body["logGroupArnList"]
+            .as_array()
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterException",
+                    "logGroupArnList is required",
+                )
+            })?
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect::<Vec<_>>();
+
+        let detector_name = body["detectorName"].as_str().unwrap_or("").to_string();
+        let evaluation_frequency = body["evaluationFrequency"].as_str().map(|s| s.to_string());
+        let filter_pattern = body["filterPattern"].as_str().map(|s| s.to_string());
+        let anomaly_visibility_time = body["anomalyVisibilityTime"].as_i64();
+
+        let now = Utc::now().timestamp_millis();
+        let mut state = self.state.write();
+        let detector_id = uuid::Uuid::new_v4().to_string();
+        let arn = format!(
+            "arn:aws:logs:{}:{}:anomaly-detector:{}",
+            state.region, state.account_id, detector_id
+        );
+
+        let detector = AnomalyDetector {
+            detector_name: detector_name.clone(),
+            arn: arn.clone(),
+            log_group_arn_list,
+            evaluation_frequency,
+            filter_pattern,
+            anomaly_visibility_time,
+            creation_time: now,
+            last_modified_time: now,
+            enabled: true,
+        };
+
+        state.anomaly_detectors.insert(arn.clone(), detector);
+
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            serde_json::to_string(&json!({ "anomalyDetectorArn": arn })).unwrap(),
+        ))
+    }
+
+    fn get_log_anomaly_detector(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = body_json(req);
+        let arn = body["anomalyDetectorArn"].as_str().ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterException",
+                "anomalyDetectorArn is required",
+            )
+        })?;
+
+        let state = self.state.read();
+        let detector = state.anomaly_detectors.get(arn).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("Anomaly detector not found: {arn}"),
+            )
+        })?;
+
+        let mut result = json!({
+            "anomalyDetectorArn": detector.arn,
+            "detectorName": detector.detector_name,
+            "logGroupArnList": detector.log_group_arn_list,
+            "creationTimeStamp": detector.creation_time,
+            "lastModifiedTimeStamp": detector.last_modified_time,
+            "anomalyDetectorStatus": if detector.enabled { "TRAINING" } else { "PAUSED" },
+        });
+        if let Some(ref f) = detector.evaluation_frequency {
+            result["evaluationFrequency"] = json!(f);
+        }
+        if let Some(ref f) = detector.filter_pattern {
+            result["filterPattern"] = json!(f);
+        }
+        if let Some(t) = detector.anomaly_visibility_time {
+            result["anomalyVisibilityTime"] = json!(t);
+        }
+
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            serde_json::to_string(&result).unwrap(),
+        ))
+    }
+
+    fn delete_log_anomaly_detector(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = body_json(req);
+        let arn = body["anomalyDetectorArn"].as_str().ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterException",
+                "anomalyDetectorArn is required",
+            )
+        })?;
+
+        let mut state = self.state.write();
+        if state.anomaly_detectors.remove(arn).is_none() {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("Anomaly detector not found: {arn}"),
+            ));
+        }
+
+        Ok(AwsResponse::json(StatusCode::OK, "{}"))
+    }
+
+    fn list_log_anomaly_detectors(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = body_json(req);
+        let filter_log_group_arn = body["filterLogGroupArn"].as_str();
+        let _limit = body["limit"].as_i64().unwrap_or(50);
+
+        let state = self.state.read();
+        let detectors: Vec<Value> = state
+            .anomaly_detectors
+            .values()
+            .filter(|d| {
+                filter_log_group_arn.is_none_or(|arn| d.log_group_arn_list.iter().any(|a| a == arn))
+            })
+            .map(|d| {
+                let mut obj = json!({
+                    "anomalyDetectorArn": d.arn,
+                    "detectorName": d.detector_name,
+                    "logGroupArnList": d.log_group_arn_list,
+                    "creationTimeStamp": d.creation_time,
+                    "lastModifiedTimeStamp": d.last_modified_time,
+                    "anomalyDetectorStatus": if d.enabled { "TRAINING" } else { "PAUSED" },
+                });
+                if let Some(ref f) = d.evaluation_frequency {
+                    obj["evaluationFrequency"] = json!(f);
+                }
+                if let Some(ref f) = d.filter_pattern {
+                    obj["filterPattern"] = json!(f);
+                }
+                if let Some(t) = d.anomaly_visibility_time {
+                    obj["anomalyVisibilityTime"] = json!(t);
+                }
+                obj
+            })
+            .collect();
+
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            serde_json::to_string(&json!({ "anomalyDetectors": detectors })).unwrap(),
+        ))
+    }
+
+    fn update_log_anomaly_detector(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = body_json(req);
+        let arn = body["anomalyDetectorArn"].as_str().ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterException",
+                "anomalyDetectorArn is required",
+            )
+        })?;
+        let enabled = body["enabled"].as_bool().unwrap_or(true);
+
+        let mut state = self.state.write();
+        let detector = state.anomaly_detectors.get_mut(arn).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("Anomaly detector not found: {arn}"),
+            )
+        })?;
+
+        detector.enabled = enabled;
+        if let Some(f) = body["evaluationFrequency"].as_str() {
+            detector.evaluation_frequency = Some(f.to_string());
+        }
+        if let Some(f) = body["filterPattern"].as_str() {
+            detector.filter_pattern = Some(f.to_string());
+        }
+        if let Some(t) = body["anomalyVisibilityTime"].as_i64() {
+            detector.anomaly_visibility_time = Some(t);
+        }
+        detector.last_modified_time = Utc::now().timestamp_millis();
+
+        Ok(AwsResponse::json(StatusCode::OK, "{}"))
+    }
+
+    // ---- Misc Operations ----
+
+    fn get_log_group_fields(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = body_json(req);
+        let log_group_id = body["logGroupName"]
+            .as_str()
+            .or_else(|| body["logGroupIdentifier"].as_str())
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterException",
+                    "logGroupName or logGroupIdentifier is required",
+                )
+            })?;
+
+        let group_name = if log_group_id.starts_with("arn:") {
+            extract_log_group_from_arn(log_group_id).ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterException",
+                    format!("Invalid ARN: {log_group_id}"),
+                )
+            })?
+        } else {
+            log_group_id.to_string()
+        };
+
+        let state = self.state.read();
+        if !state.log_groups.contains_key(&group_name) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("The specified log group does not exist: {group_name}"),
+            ));
+        }
+
+        // Stub response with common fields
+        let fields = json!([
+            { "fieldName": "@timestamp", "percent": 100 },
+            { "fieldName": "@message", "percent": 100 },
+        ]);
+
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            serde_json::to_string(&json!({ "logGroupFields": fields })).unwrap(),
+        ))
+    }
+
+    fn test_metric_filter(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = body_json(req);
+        let filter_pattern = body["filterPattern"].as_str().ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterException",
+                "filterPattern is required",
+            )
+        })?;
+        let log_event_messages = body["logEventMessages"].as_array().ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterException",
+                "logEventMessages is required",
+            )
+        })?;
+
+        let matches: Vec<Value> = log_event_messages
+            .iter()
+            .enumerate()
+            .filter(|(_, msg)| {
+                let msg_str = msg.as_str().unwrap_or("");
+                matches_filter_pattern(filter_pattern, msg_str)
+            })
+            .map(|(i, msg)| {
+                json!({
+                    "eventNumber": i + 1,
+                    "eventMessage": msg,
+                    "extractedValues": {},
+                })
+            })
+            .collect();
+
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            serde_json::to_string(
+                &json!({ "matches": matches, "testResults": !matches.is_empty() }),
+            )
+            .unwrap(),
+        ))
+    }
+
+    fn stop_query(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = body_json(req);
+        let query_id = body["queryId"].as_str().ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterException",
+                "queryId is required",
+            )
+        })?;
+
+        let mut state = self.state.write();
+        let query = state.queries.get_mut(query_id).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterException",
+                format!("Query {query_id} is not in a cancellable state"),
+            )
+        })?;
+
+        let was_running = query.status == "Running" || query.status == "Scheduled";
+        if was_running {
+            query.status = "Cancelled".to_string();
+        }
+
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            serde_json::to_string(&json!({ "success": was_running })).unwrap(),
+        ))
+    }
+
+    fn put_log_group_deletion_protection(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = body_json(req);
+        let log_group_id = body["logGroupIdentifier"]
+            .as_str()
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterException",
+                    "logGroupIdentifier is required",
+                )
+            })?
+            .to_string();
+        let deletion_protection = body["deletionProtectionEnabled"].as_bool().unwrap_or(true);
+
+        let group_name = if log_group_id.starts_with("arn:") {
+            extract_log_group_from_arn(&log_group_id).ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterException",
+                    format!("Invalid ARN: {log_group_id}"),
+                )
+            })?
+        } else {
+            log_group_id
+        };
+
+        let mut state = self.state.write();
+        let group = state.log_groups.get_mut(&group_name).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("The specified log group does not exist: {group_name}"),
+            )
+        })?;
+
+        group.deletion_protection = deletion_protection;
+        Ok(AwsResponse::json(StatusCode::OK, "{}"))
+    }
+
+    fn get_log_record(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = body_json(req);
+        let _log_record_pointer = body["logRecordPointer"].as_str().ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterException",
+                "logRecordPointer is required",
+            )
+        })?;
+
+        // Stub: return empty log record
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            serde_json::to_string(&json!({ "logRecord": {} })).unwrap(),
+        ))
+    }
+
+    fn list_anomalies(&self, _req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        // Stub: return empty anomalies list
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            serde_json::to_string(&json!({ "anomalies": [] })).unwrap(),
+        ))
+    }
+
+    fn update_anomaly(&self, _req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        // No-op stub
+        Ok(AwsResponse::json(StatusCode::OK, "{}"))
+    }
 }
 
 /// Resolve log group name from either logGroupName or resourceIdentifier.
@@ -3945,5 +5052,324 @@ mod tests {
     #[test]
     fn extract_log_group_from_arn_invalid() {
         assert_eq!(extract_log_group_from_arn("not-an-arn"), None);
+    }
+
+    // ---- Account policies ----
+
+    #[test]
+    fn account_policy_lifecycle() {
+        let svc = make_service();
+
+        let req = make_request(
+            "PutAccountPolicy",
+            json!({
+                "policyName": "test-policy",
+                "policyType": "DATA_PROTECTION_POLICY",
+                "policyDocument": "{\"Name\":\"test\"}",
+            }),
+        );
+        let resp = svc.put_account_policy(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["accountPolicy"]["policyName"], "test-policy");
+
+        let req = make_request(
+            "DescribeAccountPolicies",
+            json!({ "policyType": "DATA_PROTECTION_POLICY" }),
+        );
+        let resp = svc.describe_account_policies(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["accountPolicies"].as_array().unwrap().len(), 1);
+
+        let req = make_request(
+            "DeleteAccountPolicy",
+            json!({
+                "policyName": "test-policy",
+                "policyType": "DATA_PROTECTION_POLICY",
+            }),
+        );
+        svc.delete_account_policy(&req).unwrap();
+
+        let req = make_request(
+            "DescribeAccountPolicies",
+            json!({ "policyType": "DATA_PROTECTION_POLICY" }),
+        );
+        let resp = svc.describe_account_policies(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert!(body["accountPolicies"].as_array().unwrap().is_empty());
+    }
+
+    // ---- Data protection policy ----
+
+    #[test]
+    fn data_protection_policy_lifecycle() {
+        let svc = make_service();
+        create_group(&svc, "dp-group");
+
+        let req = make_request(
+            "PutDataProtectionPolicy",
+            json!({
+                "logGroupIdentifier": "dp-group",
+                "policyDocument": "{\"Name\":\"dp\"}",
+            }),
+        );
+        svc.put_data_protection_policy(&req).unwrap();
+
+        let req = make_request(
+            "GetDataProtectionPolicy",
+            json!({ "logGroupIdentifier": "dp-group" }),
+        );
+        let resp = svc.get_data_protection_policy(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["policyDocument"], "{\"Name\":\"dp\"}");
+
+        let req = make_request(
+            "DeleteDataProtectionPolicy",
+            json!({ "logGroupIdentifier": "dp-group" }),
+        );
+        svc.delete_data_protection_policy(&req).unwrap();
+
+        let req = make_request(
+            "GetDataProtectionPolicy",
+            json!({ "logGroupIdentifier": "dp-group" }),
+        );
+        let resp = svc.get_data_protection_policy(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert!(body.get("policyDocument").is_none());
+    }
+
+    // ---- Index policies ----
+
+    #[test]
+    fn index_policy_lifecycle() {
+        let svc = make_service();
+        create_group(&svc, "idx-group");
+
+        let req = make_request(
+            "PutIndexPolicy",
+            json!({
+                "logGroupIdentifier": "idx-group",
+                "policyDocument": "{\"Fields\":[\"field1\"]}",
+            }),
+        );
+        svc.put_index_policy(&req).unwrap();
+
+        let req = make_request(
+            "DescribeIndexPolicies",
+            json!({ "logGroupIdentifiers": ["idx-group"] }),
+        );
+        let resp = svc.describe_index_policies(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["indexPolicies"].as_array().unwrap().len(), 1);
+
+        let req = make_request(
+            "DeleteIndexPolicy",
+            json!({
+                "logGroupIdentifier": "idx-group",
+            }),
+        );
+        svc.delete_index_policy(&req).unwrap();
+    }
+
+    // ---- Transformers ----
+
+    #[test]
+    fn transformer_lifecycle() {
+        let svc = make_service();
+        create_group(&svc, "tx-group");
+
+        let req = make_request(
+            "PutTransformer",
+            json!({
+                "logGroupIdentifier": "tx-group",
+                "transformerConfig": [{"addKeys":{"entries":[{"key":"new","value":"val"}]}}],
+            }),
+        );
+        svc.put_transformer(&req).unwrap();
+
+        let req = make_request(
+            "GetTransformer",
+            json!({ "logGroupIdentifier": "tx-group" }),
+        );
+        let resp = svc.get_transformer(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert!(body["transformerConfig"].is_array());
+
+        let req = make_request(
+            "DeleteTransformer",
+            json!({ "logGroupIdentifier": "tx-group" }),
+        );
+        svc.delete_transformer(&req).unwrap();
+    }
+
+    #[test]
+    fn test_transformer_returns_transformed_events() {
+        let svc = make_service();
+
+        let req = make_request(
+            "TestTransformer",
+            json!({
+                "transformerConfig": [{"addKeys":{"entries":[]}}],
+                "logEventMessages": ["hello", "world"],
+            }),
+        );
+        let resp = svc.test_transformer(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["transformedLogs"].as_array().unwrap().len(), 2);
+    }
+
+    // ---- Anomaly detectors ----
+
+    #[test]
+    fn anomaly_detector_lifecycle() {
+        let svc = make_service();
+
+        let req = make_request(
+            "CreateLogAnomalyDetector",
+            json!({
+                "logGroupArnList": ["arn:aws:logs:us-east-1:123456789012:log-group:test:*"],
+                "detectorName": "my-detector",
+            }),
+        );
+        let resp = svc.create_log_anomaly_detector(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let arn = body["anomalyDetectorArn"].as_str().unwrap().to_string();
+
+        let req = make_request(
+            "GetLogAnomalyDetector",
+            json!({ "anomalyDetectorArn": &arn }),
+        );
+        let resp = svc.get_log_anomaly_detector(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["detectorName"], "my-detector");
+
+        let req = make_request("ListLogAnomalyDetectors", json!({}));
+        let resp = svc.list_log_anomaly_detectors(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["anomalyDetectors"].as_array().unwrap().len(), 1);
+
+        let req = make_request(
+            "UpdateLogAnomalyDetector",
+            json!({ "anomalyDetectorArn": &arn, "enabled": false }),
+        );
+        svc.update_log_anomaly_detector(&req).unwrap();
+
+        let req = make_request(
+            "DeleteLogAnomalyDetector",
+            json!({ "anomalyDetectorArn": &arn }),
+        );
+        svc.delete_log_anomaly_detector(&req).unwrap();
+    }
+
+    // ---- Misc operations ----
+
+    #[test]
+    fn get_log_group_fields_returns_stub() {
+        let svc = make_service();
+        create_group(&svc, "fields-group");
+
+        let req = make_request(
+            "GetLogGroupFields",
+            json!({ "logGroupName": "fields-group" }),
+        );
+        let resp = svc.get_log_group_fields(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["logGroupFields"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_metric_filter_matches() {
+        let svc = make_service();
+
+        let req = make_request(
+            "TestMetricFilter",
+            json!({
+                "filterPattern": "ERROR",
+                "logEventMessages": ["ERROR: oops", "INFO: ok", "ERROR: again"],
+            }),
+        );
+        let resp = svc.test_metric_filter(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["matches"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn stop_query_marks_as_cancelled() {
+        let svc = make_service();
+        create_group(&svc, "sq-group");
+
+        let req = make_request(
+            "StartQuery",
+            json!({
+                "logGroupName": "sq-group",
+                "startTime": 0,
+                "endTime": 9999999999i64,
+                "queryString": "fields @timestamp",
+            }),
+        );
+        let resp = svc.start_query(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let qid = body["queryId"].as_str().unwrap().to_string();
+
+        // Manually set query status to Running so we can test cancellation
+        {
+            let mut state = svc.state.write();
+            state.queries.get_mut(&qid).unwrap().status = "Running".to_string();
+        }
+
+        let req = make_request("StopQuery", json!({ "queryId": &qid }));
+        let resp = svc.stop_query(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["success"], true);
+
+        let state = svc.state.read();
+        assert_eq!(state.queries[&qid].status, "Cancelled");
+    }
+
+    #[test]
+    fn put_log_group_deletion_protection() {
+        let svc = make_service();
+        create_group(&svc, "prot-group");
+
+        let req = make_request(
+            "PutLogGroupDeletionProtection",
+            json!({
+                "logGroupIdentifier": "prot-group",
+                "deletionProtectionEnabled": true,
+            }),
+        );
+        svc.put_log_group_deletion_protection(&req).unwrap();
+
+        let state = svc.state.read();
+        assert!(state.log_groups["prot-group"].deletion_protection);
+    }
+
+    #[test]
+    fn get_log_record_returns_empty_stub() {
+        let svc = make_service();
+
+        let req = make_request(
+            "GetLogRecord",
+            json!({ "logRecordPointer": "some-pointer" }),
+        );
+        let resp = svc.get_log_record(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert!(body["logRecord"].is_object());
+    }
+
+    #[test]
+    fn list_anomalies_returns_empty() {
+        let svc = make_service();
+
+        let req = make_request("ListAnomalies", json!({}));
+        let resp = svc.list_anomalies(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert!(body["anomalies"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn update_anomaly_noop() {
+        let svc = make_service();
+        let req = make_request("UpdateAnomaly", json!({}));
+        svc.update_anomaly(&req).unwrap();
     }
 }
