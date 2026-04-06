@@ -4058,6 +4058,39 @@ impl SsmService {
     // -----------------------------------------------------------------------
 
     fn create_association_inner(&self, body: &Value) -> Result<Value, AwsServiceError> {
+        validate_optional_string_length(
+            "AssociationDispatchAssumeRole",
+            body["AssociationDispatchAssumeRole"].as_str(),
+            1,
+            512,
+        )?;
+        validate_optional_string_length(
+            "AutomationTargetParameterName",
+            body["AutomationTargetParameterName"].as_str(),
+            1,
+            50,
+        )?;
+        validate_optional_string_length(
+            "ScheduleExpression",
+            body["ScheduleExpression"].as_str(),
+            1,
+            256,
+        )?;
+        validate_optional_string_length("MaxConcurrency", body["MaxConcurrency"].as_str(), 1, 7)?;
+        validate_optional_string_length("MaxErrors", body["MaxErrors"].as_str(), 1, 7)?;
+        validate_optional_enum(
+            "ComplianceSeverity",
+            body["ComplianceSeverity"].as_str(),
+            &["Critical", "High", "Medium", "Low", "Unspecified"],
+        )?;
+        validate_optional_enum(
+            "SyncCompliance",
+            body["SyncCompliance"].as_str(),
+            &["Auto", "Manual"],
+        )?;
+        validate_optional_range_i64("Duration", body["Duration"].as_i64(), 1, 24)?;
+        validate_optional_range_i64("ScheduleOffset", body["ScheduleOffset"].as_i64(), 1, 6)?;
+
         let name = body["Name"]
             .as_str()
             .ok_or_else(|| missing("Name"))?
@@ -4279,8 +4312,10 @@ impl SsmService {
                 let mut v = json!({
                     "AssociationId": a.association_id,
                     "Name": a.name,
-                    "LastExecutionDate": a.last_execution_date.map(|d| d.timestamp_millis() as f64 / 1000.0),
                 });
+                if let Some(d) = a.last_execution_date {
+                    v["LastExecutionDate"] = json!(d.timestamp_millis() as f64 / 1000.0);
+                }
                 if let Some(ref an) = a.association_name {
                     v["AssociationName"] = json!(an);
                 }
@@ -4468,6 +4503,7 @@ impl SsmService {
         let instance_id = body["InstanceId"]
             .as_str()
             .ok_or_else(|| missing("InstanceId"))?;
+        validate_required("AssociationStatus", &body["AssociationStatus"])?;
         let association_status = &body["AssociationStatus"];
         let new_status = association_status["Name"]
             .as_str()
@@ -4505,6 +4541,12 @@ impl SsmService {
 
     fn create_association_batch(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = parse_body(req);
+        validate_optional_string_length(
+            "AssociationDispatchAssumeRole",
+            body["AssociationDispatchAssumeRole"].as_str(),
+            1,
+            512,
+        )?;
         let entries = body["Entries"]
             .as_array()
             .ok_or_else(|| missing("Entries"))?;
@@ -4538,6 +4580,7 @@ impl SsmService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = parse_body(req);
+        validate_optional_range_i64("MaxResults", body["MaxResults"].as_i64(), 1, 50)?;
         let _association_id = body["AssociationId"]
             .as_str()
             .ok_or_else(|| missing("AssociationId"))?;
@@ -4550,6 +4593,7 @@ impl SsmService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = parse_body(req);
+        validate_optional_range_i64("MaxResults", body["MaxResults"].as_i64(), 1, 50)?;
         let _association_id = body["AssociationId"]
             .as_str()
             .ok_or_else(|| missing("AssociationId"))?;
@@ -4565,6 +4609,13 @@ impl SsmService {
 
     fn create_ops_item(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = parse_body(req);
+        validate_required("Description", &body["Description"])?;
+        validate_optional_string_length("Title", body["Title"].as_str(), 1, 1024)?;
+        validate_optional_string_length("Source", body["Source"].as_str(), 1, 128)?;
+        validate_optional_string_length("Description", body["Description"].as_str(), 1, 2048)?;
+        validate_optional_string_length("Category", body["Category"].as_str(), 1, 64)?;
+        validate_optional_string_length("Severity", body["Severity"].as_str(), 1, 64)?;
+        validate_optional_range_i64("Priority", body["Priority"].as_i64(), 1, 5)?;
         let title = body["Title"]
             .as_str()
             .ok_or_else(|| missing("Title"))?
@@ -4720,6 +4771,7 @@ impl SsmService {
 
     fn describe_ops_items(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = parse_body(req);
+        validate_optional_range_i64("MaxResults", body["MaxResults"].as_i64(), 1, 50)?;
         let max_results = body["MaxResults"].as_i64().unwrap_or(50) as usize;
         let next_token_offset: usize = body["NextToken"]
             .as_str()
@@ -4731,19 +4783,26 @@ impl SsmService {
             .ops_items
             .values()
             .map(|item| {
-                json!({
+                let mut v = json!({
                     "OpsItemId": item.ops_item_id,
                     "Title": item.title,
                     "Status": item.status,
                     "Source": item.source,
-                    "Priority": item.priority,
-                    "Severity": item.severity,
-                    "Category": item.category,
                     "CreatedTime": item.created_time.timestamp_millis() as f64 / 1000.0,
                     "LastModifiedTime": item.last_modified_time.timestamp_millis() as f64 / 1000.0,
                     "CreatedBy": item.created_by,
                     "LastModifiedBy": item.last_modified_by,
-                })
+                });
+                if let Some(p) = item.priority {
+                    v["Priority"] = json!(p);
+                }
+                if let Some(ref s) = item.severity {
+                    v["Severity"] = json!(s);
+                }
+                if let Some(ref c) = item.category {
+                    v["Category"] = json!(c);
+                }
+                v
             })
             .collect();
 
@@ -4818,9 +4877,12 @@ impl SsmService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = parse_body(req);
         let _name = body["Name"].as_str().ok_or_else(|| missing("Name"))?;
+        validate_required("Metadata", &body["Metadata"])?;
+        validate_optional_enum("Metadata", body["Metadata"].as_str(), &["DocumentReviews"])?;
         let _metadata = body["Metadata"]
             .as_str()
             .ok_or_else(|| missing("Metadata"))?;
+        validate_optional_range_i64("MaxResults", body["MaxResults"].as_i64(), 1, 50)?;
 
         // Stub: return empty metadata
         Ok(json_resp(json!({
@@ -4851,6 +4913,7 @@ impl SsmService {
 
     fn put_resource_policy(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = parse_body(req);
+        validate_optional_string_length("ResourceArn", body["ResourceArn"].as_str(), 20, 2048)?;
         let resource_arn = body["ResourceArn"]
             .as_str()
             .ok_or_else(|| missing("ResourceArn"))?
@@ -4910,6 +4973,8 @@ impl SsmService {
 
     fn get_resource_policies(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = parse_body(req);
+        validate_optional_string_length("ResourceArn", body["ResourceArn"].as_str(), 20, 2048)?;
+        validate_optional_range_i64("MaxResults", body["MaxResults"].as_i64(), 1, 50)?;
         let resource_arn = body["ResourceArn"]
             .as_str()
             .ok_or_else(|| missing("ResourceArn"))?;
@@ -4975,6 +5040,7 @@ impl SsmService {
 
     fn get_connection_status(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = parse_body(req);
+        validate_optional_string_length("Target", body["Target"].as_str(), 1, 400)?;
         let target = body["Target"].as_str().ok_or_else(|| missing("Target"))?;
         Ok(json_resp(json!({
             "Target": target,
@@ -4990,12 +5056,12 @@ impl SsmService {
         Ok(json_resp(json!({
             "State": "OPEN",
             "AtTime": Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
-            "NextTransitionTime": null,
         })))
     }
 
     fn describe_patch_group_state(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = parse_body(req);
+        validate_optional_string_length("PatchGroup", body["PatchGroup"].as_str(), 1, 256)?;
         let _patch_group = body["PatchGroup"]
             .as_str()
             .ok_or_else(|| missing("PatchGroup"))?;
@@ -5015,12 +5081,75 @@ impl SsmService {
         })))
     }
 
-    fn describe_patch_properties(&self, _req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+    fn describe_patch_properties(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        validate_required("OperatingSystem", &body["OperatingSystem"])?;
+        validate_optional_enum(
+            "OperatingSystem",
+            body["OperatingSystem"].as_str(),
+            &[
+                "WINDOWS",
+                "AMAZON_LINUX",
+                "AMAZON_LINUX_2",
+                "AMAZON_LINUX_2022",
+                "UBUNTU",
+                "REDHAT_ENTERPRISE_LINUX",
+                "SUSE",
+                "CENTOS",
+                "ORACLE_LINUX",
+                "DEBIAN",
+                "MACOS",
+                "RASPBIAN",
+                "ROCKY_LINUX",
+                "ALMA_LINUX",
+                "AMAZON_LINUX_2023",
+            ],
+        )?;
+        validate_required("Property", &body["Property"])?;
+        validate_optional_enum(
+            "Property",
+            body["Property"].as_str(),
+            &[
+                "PRODUCT",
+                "PRODUCT_FAMILY",
+                "CLASSIFICATION",
+                "MSRC_SEVERITY",
+                "PRIORITY",
+                "SEVERITY",
+            ],
+        )?;
+        validate_optional_enum(
+            "PatchSet",
+            body["PatchSet"].as_str(),
+            &["OS", "APPLICATION"],
+        )?;
+        validate_optional_range_i64("MaxResults", body["MaxResults"].as_i64(), 1, 50)?;
         Ok(json_resp(json!({ "Properties": [] })))
     }
 
     fn get_default_patch_baseline(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = parse_body(req);
+        validate_optional_enum(
+            "OperatingSystem",
+            body["OperatingSystem"].as_str(),
+            &[
+                "WINDOWS",
+                "AMAZON_LINUX",
+                "AMAZON_LINUX_2",
+                "AMAZON_LINUX_2022",
+                "UBUNTU",
+                "REDHAT_ENTERPRISE_LINUX",
+                "SUSE",
+                "CENTOS",
+                "ORACLE_LINUX",
+                "DEBIAN",
+                "MACOS",
+                "RASPBIAN",
+                "ROCKY_LINUX",
+                "ALMA_LINUX",
+                "AMAZON_LINUX_2023",
+            ],
+        )?;
         let operating_system = body["OperatingSystem"].as_str().unwrap_or("WINDOWS");
 
         let state = self.state.read();
@@ -5071,15 +5200,15 @@ impl SsmService {
         })))
     }
 
-    fn describe_available_patches(
-        &self,
-        _req: &AwsRequest,
-    ) -> Result<AwsResponse, AwsServiceError> {
+    fn describe_available_patches(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        validate_optional_range_i64("MaxResults", body["MaxResults"].as_i64(), 1, 100)?;
         Ok(json_resp(json!({ "Patches": [] })))
     }
 
     fn get_service_setting(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = parse_body(req);
+        validate_optional_string_length("SettingId", body["SettingId"].as_str(), 1, 1000)?;
         let setting_id = body["SettingId"]
             .as_str()
             .ok_or_else(|| missing("SettingId"))?;
@@ -5113,6 +5242,7 @@ impl SsmService {
 
     fn reset_service_setting(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = parse_body(req);
+        validate_optional_string_length("SettingId", body["SettingId"].as_str(), 1, 1000)?;
         let setting_id = body["SettingId"]
             .as_str()
             .ok_or_else(|| missing("SettingId"))?;
@@ -5135,6 +5265,8 @@ impl SsmService {
 
     fn update_service_setting(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = parse_body(req);
+        validate_optional_string_length("SettingId", body["SettingId"].as_str(), 1, 1000)?;
+        validate_optional_string_length("SettingValue", body["SettingValue"].as_str(), 1, 4096)?;
         let setting_id = body["SettingId"]
             .as_str()
             .ok_or_else(|| missing("SettingId"))?
@@ -5245,7 +5377,9 @@ impl SsmService {
         ))
     }
 
-    fn get_inventory(&self, _req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+    fn get_inventory(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        validate_optional_range_i64("MaxResults", body["MaxResults"].as_i64(), 1, 50)?;
         let state = self.state.read();
         let entities: Vec<Value> = state
             .inventory_entries
@@ -5275,7 +5409,10 @@ impl SsmService {
         Ok(json_resp(json!({ "Entities": entities })))
     }
 
-    fn get_inventory_schema(&self, _req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+    fn get_inventory_schema(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        validate_optional_string_length("TypeName", body["TypeName"].as_str(), 0, 100)?;
+        validate_optional_range_i64("MaxResults", body["MaxResults"].as_i64(), 50, 200)?;
         // Return standard inventory type schemas
         let schemas = vec![
             json!({
@@ -5326,6 +5463,8 @@ impl SsmService {
 
     fn list_inventory_entries(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = parse_body(req);
+        validate_optional_string_length("TypeName", body["TypeName"].as_str(), 1, 100)?;
+        validate_optional_range_i64("MaxResults", body["MaxResults"].as_i64(), 1, 50)?;
         let instance_id = body["InstanceId"]
             .as_str()
             .ok_or_else(|| missing("InstanceId"))?;
@@ -5371,6 +5510,12 @@ impl SsmService {
 
     fn delete_inventory(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = parse_body(req);
+        validate_optional_string_length("TypeName", body["TypeName"].as_str(), 1, 100)?;
+        validate_optional_enum(
+            "SchemaDeleteOption",
+            body["SchemaDeleteOption"].as_str(),
+            &["DISABLE_SCHEMA", "DELETE_SCHEMA"],
+        )?;
         let type_name = body["TypeName"]
             .as_str()
             .ok_or_else(|| missing("TypeName"))?
@@ -5414,8 +5559,10 @@ impl SsmService {
 
     fn describe_inventory_deletions(
         &self,
-        _req: &AwsRequest,
+        req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        validate_optional_range_i64("MaxResults", body["MaxResults"].as_i64(), 1, 50)?;
         let state = self.state.read();
         let deletions: Vec<Value> = state
             .inventory_deletions
@@ -5439,6 +5586,20 @@ impl SsmService {
 
     fn put_compliance_items(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = parse_body(req);
+        validate_optional_string_length("ResourceId", body["ResourceId"].as_str(), 1, 100)?;
+        validate_optional_string_length("ResourceType", body["ResourceType"].as_str(), 1, 50)?;
+        validate_optional_string_length("ComplianceType", body["ComplianceType"].as_str(), 1, 100)?;
+        validate_optional_string_length(
+            "ItemContentHash",
+            body["ItemContentHash"].as_str(),
+            0,
+            256,
+        )?;
+        validate_optional_enum(
+            "UploadType",
+            body["UploadType"].as_str(),
+            &["COMPLETE", "PARTIAL"],
+        )?;
         let resource_id = body["ResourceId"]
             .as_str()
             .ok_or_else(|| missing("ResourceId"))?
@@ -5499,6 +5660,7 @@ impl SsmService {
 
     fn list_compliance_items(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = parse_body(req);
+        validate_optional_range_i64("MaxResults", body["MaxResults"].as_i64(), 1, 50)?;
         let max_results = body["MaxResults"].as_i64().unwrap_or(50) as usize;
         let next_token_offset: usize = body["NextToken"]
             .as_str()
@@ -5564,7 +5726,9 @@ impl SsmService {
         Ok(json_resp(resp))
     }
 
-    fn list_compliance_summaries(&self, _req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+    fn list_compliance_summaries(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        validate_optional_range_i64("MaxResults", body["MaxResults"].as_i64(), 1, 50)?;
         let state = self.state.read();
 
         // Group by compliance_type
@@ -5602,8 +5766,10 @@ impl SsmService {
 
     fn list_resource_compliance_summaries(
         &self,
-        _req: &AwsRequest,
+        req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        validate_optional_range_i64("MaxResults", body["MaxResults"].as_i64(), 1, 50)?;
         let state = self.state.read();
 
         // Group by resource_id
@@ -6013,6 +6179,8 @@ impl SsmService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = parse_body(req);
+        validate_optional_string_length("WindowId", body["WindowId"].as_str(), 20, 20)?;
+        validate_optional_range_i64("MaxResults", body["MaxResults"].as_i64(), 10, 100)?;
         let window_id = body["WindowId"]
             .as_str()
             .ok_or_else(|| missing("WindowId"))?;
@@ -6060,6 +6228,13 @@ impl SsmService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = parse_body(req);
+        validate_optional_string_length(
+            "WindowExecutionId",
+            body["WindowExecutionId"].as_str(),
+            36,
+            36,
+        )?;
+        validate_optional_range_i64("MaxResults", body["MaxResults"].as_i64(), 10, 100)?;
         let execution_id = body["WindowExecutionId"]
             .as_str()
             .ok_or_else(|| missing("WindowExecutionId"))?;
@@ -6098,6 +6273,14 @@ impl SsmService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = parse_body(req);
+        validate_optional_string_length(
+            "WindowExecutionId",
+            body["WindowExecutionId"].as_str(),
+            36,
+            36,
+        )?;
+        validate_optional_string_length("TaskId", body["TaskId"].as_str(), 36, 36)?;
+        validate_optional_range_i64("MaxResults", body["MaxResults"].as_i64(), 10, 100)?;
         let execution_id = body["WindowExecutionId"]
             .as_str()
             .ok_or_else(|| missing("WindowExecutionId"))?;
@@ -6139,8 +6322,16 @@ impl SsmService {
 
     fn describe_maintenance_window_schedule(
         &self,
-        _req: &AwsRequest,
+        req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        validate_optional_string_length("WindowId", body["WindowId"].as_str(), 20, 20)?;
+        validate_optional_enum(
+            "ResourceType",
+            body["ResourceType"].as_str(),
+            &["INSTANCE", "RESOURCE_GROUP"],
+        )?;
+        validate_optional_range_i64("MaxResults", body["MaxResults"].as_i64(), 1, i64::MAX)?;
         Ok(json_resp(json!({ "ScheduledWindowExecutions": [] })))
     }
 
@@ -6149,6 +6340,12 @@ impl SsmService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = parse_body(req);
+        validate_optional_enum(
+            "ResourceType",
+            body["ResourceType"].as_str(),
+            &["INSTANCE", "RESOURCE_GROUP"],
+        )?;
+        validate_optional_range_i64("MaxResults", body["MaxResults"].as_i64(), 1, i64::MAX)?;
         let _resource_type = body["ResourceType"]
             .as_str()
             .ok_or_else(|| missing("ResourceType"))?;
@@ -6311,6 +6508,7 @@ impl SsmService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = parse_body(req);
+        validate_optional_range_i64("MaxResults", body["MaxResults"].as_i64(), 10, 100)?;
         let _instance_ids = body["InstanceIds"]
             .as_array()
             .ok_or_else(|| missing("InstanceIds"))?;
@@ -6323,6 +6521,8 @@ impl SsmService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = parse_body(req);
+        validate_optional_string_length("PatchGroup", body["PatchGroup"].as_str(), 1, 256)?;
+        validate_optional_range_i64("MaxResults", body["MaxResults"].as_i64(), 10, 100)?;
         let _patch_group = body["PatchGroup"]
             .as_str()
             .ok_or_else(|| missing("PatchGroup"))?;
@@ -6331,6 +6531,7 @@ impl SsmService {
 
     fn describe_instance_patches(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = parse_body(req);
+        validate_optional_range_i64("MaxResults", body["MaxResults"].as_i64(), 10, 100)?;
         let _instance_id = body["InstanceId"]
             .as_str()
             .ok_or_else(|| missing("InstanceId"))?;
@@ -6342,6 +6543,8 @@ impl SsmService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = parse_body(req);
+        validate_optional_string_length("BaselineId", body["BaselineId"].as_str(), 20, 128)?;
+        validate_optional_range_i64("MaxResults", body["MaxResults"].as_i64(), 1, 100)?;
         let _baseline_id = body["BaselineId"]
             .as_str()
             .ok_or_else(|| missing("BaselineId"))?;
@@ -6353,6 +6556,7 @@ impl SsmService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = parse_body(req);
+        validate_optional_string_length("SnapshotId", body["SnapshotId"].as_str(), 36, 36)?;
         let instance_id = body["InstanceId"]
             .as_str()
             .ok_or_else(|| missing("InstanceId"))?;
@@ -6372,6 +6576,7 @@ impl SsmService {
 
     fn create_resource_data_sync(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = parse_body(req);
+        validate_optional_string_length("SyncName", body["SyncName"].as_str(), 1, 64)?;
         let sync_name = body["SyncName"]
             .as_str()
             .ok_or_else(|| missing("SyncName"))?
@@ -6405,6 +6610,7 @@ impl SsmService {
 
     fn delete_resource_data_sync(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = parse_body(req);
+        validate_optional_string_length("SyncName", body["SyncName"].as_str(), 1, 64)?;
         let sync_name = body["SyncName"]
             .as_str()
             .ok_or_else(|| missing("SyncName"))?;
@@ -6421,7 +6627,10 @@ impl SsmService {
         Ok(json_resp(json!({})))
     }
 
-    fn list_resource_data_sync(&self, _req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+    fn list_resource_data_sync(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        validate_optional_string_length("SyncType", body["SyncType"].as_str(), 1, 64)?;
+        validate_optional_range_i64("MaxResults", body["MaxResults"].as_i64(), 1, 50)?;
         let state = self.state.read();
         let syncs: Vec<Value> = state
             .resource_data_syncs
@@ -6488,7 +6697,10 @@ impl SsmService {
 
     // ── GetOpsSummary ─────────────────────────────────────────────
 
-    fn get_ops_summary(&self, _req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+    fn get_ops_summary(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        validate_optional_string_length("SyncName", body["SyncName"].as_str(), 1, 64)?;
+        validate_optional_range_i64("MaxResults", body["MaxResults"].as_i64(), 1, 50)?;
         Ok(json_resp(json!({ "Entities": [] })))
     }
 
@@ -6580,6 +6792,7 @@ impl SsmService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = parse_body(req);
+        validate_optional_range_i64("MaxResults", body["MaxResults"].as_i64(), 1, 50)?;
         let state = self.state.read();
         let ops_item_id = body["OpsItemId"].as_str();
 
@@ -6607,6 +6820,7 @@ impl SsmService {
 
     fn list_ops_item_events(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = parse_body(req);
+        validate_optional_range_i64("MaxResults", body["MaxResults"].as_i64(), 1, 50)?;
         let state = self.state.read();
 
         // Filter by OpsItemId if provided in Filters
@@ -6647,6 +6861,7 @@ impl SsmService {
 
     fn create_ops_metadata(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = parse_body(req);
+        validate_optional_string_length("ResourceId", body["ResourceId"].as_str(), 1, 1024)?;
         let resource_id = body["ResourceId"]
             .as_str()
             .ok_or_else(|| missing("ResourceId"))?
@@ -6751,7 +6966,9 @@ impl SsmService {
         Ok(json_resp(json!({})))
     }
 
-    fn list_ops_metadata(&self, _req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+    fn list_ops_metadata(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        validate_optional_range_i64("MaxResults", body["MaxResults"].as_i64(), 1, 50)?;
         let state = self.state.read();
         let items: Vec<Value> = state
             .ops_metadata
@@ -6772,6 +6989,16 @@ impl SsmService {
 
     fn start_automation_execution(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = parse_body(req);
+        validate_optional_string_length("ClientToken", body["ClientToken"].as_str(), 36, 36)?;
+        validate_optional_string_length("MaxConcurrency", body["MaxConcurrency"].as_str(), 1, 7)?;
+        validate_optional_string_length("MaxErrors", body["MaxErrors"].as_str(), 1, 7)?;
+        validate_optional_enum("Mode", body["Mode"].as_str(), &["Auto", "Interactive"])?;
+        validate_optional_string_length(
+            "TargetParameterName",
+            body["TargetParameterName"].as_str(),
+            1,
+            50,
+        )?;
         let document_name = body["DocumentName"]
             .as_str()
             .ok_or_else(|| missing("DocumentName"))?
@@ -6886,8 +7113,10 @@ impl SsmService {
 
     fn describe_automation_executions(
         &self,
-        _req: &AwsRequest,
+        req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        validate_optional_range_i64("MaxResults", body["MaxResults"].as_i64(), 1, 50)?;
         let state = self.state.read();
         let items: Vec<Value> = state
             .automation_executions
@@ -6972,6 +7201,14 @@ impl SsmService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = parse_body(req);
+        validate_optional_string_length("ClientToken", body["ClientToken"].as_str(), 36, 36)?;
+        validate_optional_string_length(
+            "ChangeRequestName",
+            body["ChangeRequestName"].as_str(),
+            1,
+            1024,
+        )?;
+        validate_optional_string_length("ChangeDetails", body["ChangeDetails"].as_str(), 1, 32768)?;
         let document_name = body["DocumentName"]
             .as_str()
             .ok_or_else(|| missing("DocumentName"))?
@@ -7073,6 +7310,8 @@ impl SsmService {
 
     fn start_session(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = parse_body(req);
+        validate_optional_string_length("Target", body["Target"].as_str(), 1, 400)?;
+        validate_optional_string_length("Reason", body["Reason"].as_str(), 1, 256)?;
         let target = body["Target"]
             .as_str()
             .ok_or_else(|| missing("Target"))?
@@ -7127,6 +7366,7 @@ impl SsmService {
 
     fn terminate_session(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = parse_body(req);
+        validate_optional_string_length("SessionId", body["SessionId"].as_str(), 1, 96)?;
         let session_id = body["SessionId"]
             .as_str()
             .ok_or_else(|| missing("SessionId"))?;
@@ -7143,6 +7383,8 @@ impl SsmService {
 
     fn describe_sessions(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = parse_body(req);
+        validate_optional_enum("State", body["State"].as_str(), &["Active", "History"])?;
+        validate_optional_range_i64("MaxResults", body["MaxResults"].as_i64(), 1, 200)?;
         let state_filter = body["State"].as_str().ok_or_else(|| missing("State"))?;
 
         let state = self.state.read();
@@ -7177,6 +7419,7 @@ impl SsmService {
 
     fn start_access_request(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = parse_body(req);
+        validate_optional_string_length("Reason", body["Reason"].as_str(), 1, 256)?;
         let _reason = body["Reason"].as_str().ok_or_else(|| missing("Reason"))?;
         let _targets = body["Targets"]
             .as_array()
@@ -7186,22 +7429,23 @@ impl SsmService {
         state.session_counter += 1;
         let access_request_id = format!("ar-{:012x}", state.session_counter);
 
-        Ok(json_resp(
-            json!({ "AccessRequestId": access_request_id, "AccessRequestStatus": "Approved" }),
-        ))
+        Ok(json_resp(json!({ "AccessRequestId": access_request_id })))
     }
 
     fn get_access_token(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = parse_body(req);
-        let access_request_id = body["AccessRequestId"]
+        let _access_request_id = body["AccessRequestId"]
             .as_str()
             .ok_or_else(|| missing("AccessRequestId"))?;
 
         Ok(json_resp(json!({
-            "AccessRequestId": access_request_id,
             "AccessRequestStatus": "Approved",
-            "TokenValue": format!("token-{access_request_id}"),
-            "SessionId": format!("session-{access_request_id}"),
+            "Credentials": {
+                "AccessKeyId": "AKIAIOSFODNN7EXAMPLE",
+                "SecretAccessKey": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+                "SessionToken": "FwoGZXIvYXdzEA...",
+                "ExpirationTime": Utc::now().timestamp_millis() as f64 / 1000.0 + 3600.0,
+            },
         })))
     }
 
@@ -7209,6 +7453,20 @@ impl SsmService {
 
     fn create_activation(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = parse_body(req);
+        validate_optional_string_length("IamRole", body["IamRole"].as_str(), 0, 64)?;
+        validate_optional_string_length("Description", body["Description"].as_str(), 0, 256)?;
+        validate_optional_string_length(
+            "DefaultInstanceName",
+            body["DefaultInstanceName"].as_str(),
+            0,
+            256,
+        )?;
+        validate_optional_range_i64(
+            "RegistrationLimit",
+            body["RegistrationLimit"].as_i64(),
+            1,
+            1000,
+        )?;
         let iam_role = body["IamRole"]
             .as_str()
             .ok_or_else(|| missing("IamRole"))?
@@ -7276,7 +7534,9 @@ impl SsmService {
         Ok(json_resp(json!({})))
     }
 
-    fn describe_activations(&self, _req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+    fn describe_activations(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        validate_optional_range_i64("MaxResults", body["MaxResults"].as_i64(), 1, 50)?;
         let state = self.state.read();
         let activations: Vec<Value> = state
             .activations
@@ -7318,6 +7578,7 @@ impl SsmService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = parse_body(req);
+        validate_optional_string_length("InstanceId", body["InstanceId"].as_str(), 20, 124)?;
         let instance_id = body["InstanceId"]
             .as_str()
             .ok_or_else(|| missing("InstanceId"))?;
@@ -7331,8 +7592,10 @@ impl SsmService {
 
     fn describe_instance_information(
         &self,
-        _req: &AwsRequest,
+        req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        validate_optional_range_i64("MaxResults", body["MaxResults"].as_i64(), 5, 50)?;
         let state = self.state.read();
         let instances: Vec<Value> = state
             .managed_instances
@@ -7361,8 +7624,10 @@ impl SsmService {
 
     fn describe_instance_properties(
         &self,
-        _req: &AwsRequest,
+        req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        validate_optional_range_i64("MaxResults", body["MaxResults"].as_i64(), 5, 1000)?;
         let state = self.state.read();
         let instances: Vec<Value> = state
             .managed_instances
@@ -7417,12 +7682,17 @@ impl SsmService {
 
     // ── Other ─────────────────────────────────────────────────────
 
-    fn list_nodes(&self, _req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+    fn list_nodes(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        validate_optional_string_length("SyncName", body["SyncName"].as_str(), 1, 64)?;
+        validate_optional_range_i64("MaxResults", body["MaxResults"].as_i64(), 1, 50)?;
         Ok(json_resp(json!({ "Nodes": [] })))
     }
 
     fn list_nodes_summary(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = parse_body(req);
+        validate_optional_string_length("SyncName", body["SyncName"].as_str(), 1, 64)?;
+        validate_optional_range_i64("MaxResults", body["MaxResults"].as_i64(), 1, 50)?;
         let _aggregators = body["Aggregators"]
             .as_array()
             .ok_or_else(|| missing("Aggregators"))?;
@@ -7434,6 +7704,7 @@ impl SsmService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = parse_body(req);
+        validate_optional_range_i64("MaxResults", body["MaxResults"].as_i64(), 1, 5)?;
         let instance_id = body["InstanceId"]
             .as_str()
             .ok_or_else(|| missing("InstanceId"))?;
@@ -7470,6 +7741,7 @@ impl SsmService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = parse_body(req);
+        validate_optional_range_i64("MaxResults", body["MaxResults"].as_i64(), 1, 50)?;
         let instance_id = body["InstanceId"]
             .as_str()
             .ok_or_else(|| missing("InstanceId"))?;
@@ -9106,19 +9378,22 @@ mod tests {
         let svc = make_service();
         let (window_id, _, _) = create_mw_with_target_and_task(&svc);
 
+        let exec_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+        let task_exec_id = "11111111-2222-3333-4444-555555555555";
+
         // Manually insert an execution for testing
         {
             let now = chrono::Utc::now();
             let mut state = svc.state.write();
             let exec = crate::state::MaintenanceWindowExecution {
-                window_execution_id: "exec-001".to_string(),
+                window_execution_id: exec_id.to_string(),
                 window_id: window_id.clone(),
                 status: "IN_PROGRESS".to_string(),
                 start_time: now,
                 end_time: None,
                 tasks: vec![crate::state::MaintenanceWindowExecutionTask {
-                    task_execution_id: "task-exec-001".to_string(),
-                    window_execution_id: "exec-001".to_string(),
+                    task_execution_id: task_exec_id.to_string(),
+                    window_execution_id: exec_id.to_string(),
                     task_arn: "AWS-RunShellScript".to_string(),
                     task_type: "RUN_COMMAND".to_string(),
                     status: "IN_PROGRESS".to_string(),
@@ -9126,8 +9401,8 @@ mod tests {
                     end_time: None,
                     invocations: vec![crate::state::MaintenanceWindowExecutionTaskInvocation {
                         invocation_id: "inv-001".to_string(),
-                        task_execution_id: "task-exec-001".to_string(),
-                        window_execution_id: "exec-001".to_string(),
+                        task_execution_id: task_exec_id.to_string(),
+                        window_execution_id: exec_id.to_string(),
                         execution_id: Some("cmd-001".to_string()),
                         status: "IN_PROGRESS".to_string(),
                         start_time: now,
@@ -9154,7 +9429,7 @@ mod tests {
         // GetMaintenanceWindowExecution
         let req = make_request(
             "GetMaintenanceWindowExecution",
-            json!({ "WindowExecutionId": "exec-001" }),
+            json!({ "WindowExecutionId": exec_id }),
         );
         let resp = svc.get_maintenance_window_execution(&req).unwrap();
         let body: Value = serde_json::from_slice(&resp.body).unwrap();
@@ -9163,7 +9438,7 @@ mod tests {
         // DescribeMaintenanceWindowExecutionTasks
         let req = make_request(
             "DescribeMaintenanceWindowExecutionTasks",
-            json!({ "WindowExecutionId": "exec-001" }),
+            json!({ "WindowExecutionId": exec_id }),
         );
         let resp = svc
             .describe_maintenance_window_execution_tasks(&req)
@@ -9181,8 +9456,8 @@ mod tests {
         let req = make_request(
             "GetMaintenanceWindowExecutionTask",
             json!({
-                "WindowExecutionId": "exec-001",
-                "TaskId": "task-exec-001",
+                "WindowExecutionId": exec_id,
+                "TaskId": task_exec_id,
             }),
         );
         let resp = svc.get_maintenance_window_execution_task(&req).unwrap();
@@ -9193,8 +9468,8 @@ mod tests {
         let req = make_request(
             "DescribeMaintenanceWindowExecutionTaskInvocations",
             json!({
-                "WindowExecutionId": "exec-001",
-                "TaskId": "task-exec-001",
+                "WindowExecutionId": exec_id,
+                "TaskId": task_exec_id,
             }),
         );
         let resp = svc
@@ -9213,8 +9488,8 @@ mod tests {
         let req = make_request(
             "GetMaintenanceWindowExecutionTaskInvocation",
             json!({
-                "WindowExecutionId": "exec-001",
-                "TaskId": "task-exec-001",
+                "WindowExecutionId": exec_id,
+                "TaskId": task_exec_id,
                 "InvocationId": "inv-001",
             }),
         );
@@ -9227,11 +9502,11 @@ mod tests {
         // CancelMaintenanceWindowExecution
         let req = make_request(
             "CancelMaintenanceWindowExecution",
-            json!({ "WindowExecutionId": "exec-001" }),
+            json!({ "WindowExecutionId": exec_id }),
         );
         let resp = svc.cancel_maintenance_window_execution(&req).unwrap();
         let body: Value = serde_json::from_slice(&resp.body).unwrap();
-        assert_eq!(body["WindowExecutionId"].as_str().unwrap(), "exec-001");
+        assert_eq!(body["WindowExecutionId"].as_str().unwrap(), exec_id);
 
         // DescribeMaintenanceWindowSchedule
         let req = make_request("DescribeMaintenanceWindowSchedule", json!({}));
@@ -9402,7 +9677,7 @@ mod tests {
         // Create an ops item first
         let req = make_request(
             "CreateOpsItem",
-            json!({ "Title": "Test", "Source": "test" }),
+            json!({ "Title": "Test", "Source": "test", "Description": "test desc" }),
         );
         let resp = svc.create_ops_item(&req).unwrap();
         let body: Value = serde_json::from_slice(&resp.body).unwrap();
@@ -9645,7 +9920,8 @@ mod tests {
         let req = make_request("GetAccessToken", json!({ "AccessRequestId": ar_id }));
         let resp = svc.get_access_token(&req).unwrap();
         let body: Value = serde_json::from_slice(&resp.body).unwrap();
-        assert!(body["TokenValue"].as_str().is_some());
+        assert!(body["Credentials"]["AccessKeyId"].as_str().is_some());
+        assert_eq!(body["AccessRequestStatus"].as_str(), Some("Approved"));
     }
 
     // ── Managed Instances ─────────────────────────────────────────
@@ -9680,7 +9956,7 @@ mod tests {
         let svc = make_service();
         let req = make_request(
             "DeregisterManagedInstance",
-            json!({ "InstanceId": "mi-001" }),
+            json!({ "InstanceId": "mi-01234567890123456" }),
         );
         svc.deregister_managed_instance(&req).unwrap();
     }
