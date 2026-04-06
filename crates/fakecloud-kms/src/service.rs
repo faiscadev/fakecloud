@@ -496,10 +496,10 @@ impl KmsService {
     fn list_keys(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = body_json(req);
 
-        validate_optional_range_i64("limit", body["Limit"].as_i64(), 1, 1000)?;
+        validate_optional_json_range("limit", &body["Limit"], 1, 1000)?;
         validate_optional_string_length("marker", body["Marker"].as_str(), 1, 320)?;
 
-        let limit = body["Limit"].as_u64().unwrap_or(1000) as usize;
+        let limit = body["Limit"].as_i64().unwrap_or(1000) as usize;
         let marker = body["Marker"].as_str();
 
         let state = self.state.read();
@@ -1261,7 +1261,7 @@ impl KmsService {
     fn list_aliases(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = body_json(req);
 
-        validate_optional_range_i64("limit", body["Limit"].as_i64(), 1, 100)?;
+        validate_optional_json_range("limit", &body["Limit"], 1, 100)?;
         validate_optional_string_length("marker", body["Marker"].as_str(), 1, 320)?;
 
         if !body["KeyId"].is_null() && !body["KeyId"].is_string() {
@@ -1600,7 +1600,8 @@ impl KmsService {
     fn list_key_rotations(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = body_json(req);
         let resolved = self.resolve_required_key(&body)?;
-        let limit = body["Limit"].as_u64().unwrap_or(1000) as usize;
+        validate_optional_json_range("limit", &body["Limit"], 1, 1000)?;
+        let limit = body["Limit"].as_i64().unwrap_or(1000) as usize;
         let marker = body["Marker"].as_str();
 
         let state = self.state.read();
@@ -1968,10 +1969,10 @@ impl KmsService {
             )
         })?;
         validate_string_length("retiringPrincipal", retiring_principal, 1, 256)?;
-        validate_optional_range_i64("limit", body["Limit"].as_i64(), 1, 1000)?;
+        validate_optional_json_range("limit", &body["Limit"], 1, 1000)?;
         validate_optional_string_length("marker", body["Marker"].as_str(), 1, 320)?;
 
-        let limit = body["Limit"].as_u64().unwrap_or(1000) as usize;
+        let limit = body["Limit"].as_i64().unwrap_or(1000) as usize;
         let marker = body["Marker"].as_str();
 
         let state = self.state.read();
@@ -2796,12 +2797,12 @@ impl KmsService {
             1,
             256,
         )?;
-        validate_optional_range_i64("limit", body["Limit"].as_i64(), 1, 1000)?;
+        validate_optional_json_range("limit", &body["Limit"], 1, 1000)?;
         validate_optional_string_length("marker", body["Marker"].as_str(), 1, 1024)?;
 
         let filter_id = body["CustomKeyStoreId"].as_str();
         let filter_name = body["CustomKeyStoreName"].as_str();
-        let limit = body["Limit"].as_u64().unwrap_or(1000) as usize;
+        let limit = body["Limit"].as_i64().unwrap_or(1000) as usize;
         let marker = body["Marker"].as_str();
 
         let state = self.state.read();
@@ -4029,5 +4030,35 @@ mod tests {
             result.is_err(),
             "Decrypt should fail after key material deletion"
         );
+    }
+
+    #[test]
+    fn list_keys_rejects_non_integer_limit() {
+        let svc = make_service();
+        // String value should fail validation
+        let req = make_request("ListKeys", json!({ "Limit": "abc" }));
+        let result = svc.list_keys(&req);
+        assert!(result.is_err(), "non-integer Limit should be rejected");
+    }
+
+    #[test]
+    fn list_keys_rejects_large_unsigned_limit() {
+        let svc = make_service();
+        // Value larger than i64::MAX should fail validation
+        let req = make_request("ListKeys", json!({ "Limit": u64::MAX }));
+        let result = svc.list_keys(&req);
+        assert!(result.is_err(), "large unsigned Limit should be rejected");
+    }
+
+    #[test]
+    fn list_keys_rejects_out_of_range_limit() {
+        let svc = make_service();
+        let req = make_request("ListKeys", json!({ "Limit": 0 }));
+        let result = svc.list_keys(&req);
+        assert!(result.is_err(), "Limit=0 should be rejected");
+
+        let req = make_request("ListKeys", json!({ "Limit": 1001 }));
+        let result = svc.list_keys(&req);
+        assert!(result.is_err(), "Limit=1001 should be rejected");
     }
 }

@@ -49,11 +49,11 @@ impl SnsDelivery for SnsDeliveryImpl {
             .collect();
 
         // Collect Lambda, email, and SMS subscribers
-        let lambda_subscribers: Vec<String> = state
+        let lambda_subscribers: Vec<(String, String)> = state
             .subscriptions
             .values()
             .filter(|s| s.topic_arn == topic_arn && s.protocol == "lambda" && s.confirmed)
-            .map(|s| s.endpoint.clone())
+            .map(|s| (s.endpoint.clone(), s.subscription_arn.clone()))
             .collect();
 
         let email_subscribers: Vec<String> = state
@@ -76,30 +76,20 @@ impl SnsDelivery for SnsDeliveryImpl {
 
         // Build SNS Lambda event payload (matches real AWS format)
         let now = Utc::now();
+        let empty_attrs = serde_json::Map::new();
         let lambda_payloads: Vec<(String, String)> = lambda_subscribers
             .iter()
-            .map(|function_arn| {
-                let sns_event = serde_json::json!({
-                    "Records": [{
-                        "EventVersion": "1.0",
-                        "EventSubscriptionArn": format!("{}:lambda-sub", topic_arn),
-                        "EventSource": "aws:sns",
-                        "Sns": {
-                            "SignatureVersion": "1",
-                            "Timestamp": now.to_rfc3339(),
-                            "Signature": "FAKE_SIGNATURE",
-                            "SigningCertUrl": "https://sns.us-east-1.amazonaws.com/SimpleNotificationService-0000000000000000000000.pem",
-                            "MessageId": msg_id.clone(),
-                            "Message": message,
-                            "MessageAttributes": {},
-                            "Type": "Notification",
-                            "UnsubscribeUrl": format!("http://localhost:4566/?Action=Unsubscribe&SubscriptionArn={}", topic_arn),
-                            "TopicArn": topic_arn,
-                            "Subject": subject.unwrap_or(""),
-                        }
-                    }]
-                });
-                (function_arn.clone(), sns_event.to_string())
+            .map(|(function_arn, subscription_arn)| {
+                let payload = crate::service::build_sns_lambda_event(
+                    &msg_id,
+                    topic_arn,
+                    subscription_arn,
+                    message,
+                    subject,
+                    &empty_attrs,
+                    &now,
+                );
+                (function_arn.clone(), payload)
             })
             .collect();
 

@@ -340,7 +340,7 @@ fn apply_csv(config: &Value, event: &mut Value) {
     };
 
     let delim_char = delimiter.chars().next().unwrap_or(',');
-    let values: Vec<&str> = raw.split(delim_char).collect();
+    let values = parse_csv_fields(&raw, delim_char);
 
     for (i, col) in columns.iter().enumerate() {
         if let Some(col_name) = col.as_str() {
@@ -349,6 +349,57 @@ fn apply_csv(config: &Value, event: &mut Value) {
             }
         }
     }
+}
+
+/// Parse CSV fields with RFC 4180 quoted field support.
+/// Fields wrapped in double quotes may contain the delimiter and escaped quotes ("").
+fn parse_csv_fields(input: &str, delimiter: char) -> Vec<String> {
+    let mut fields = Vec::new();
+    let mut chars = input.chars().peekable();
+    let mut field = String::new();
+
+    while chars.peek().is_some() {
+        if chars.peek() == Some(&'"') {
+            // Quoted field
+            chars.next(); // consume opening quote
+            loop {
+                match chars.next() {
+                    Some('"') => {
+                        if chars.peek() == Some(&'"') {
+                            // Escaped quote
+                            field.push('"');
+                            chars.next();
+                        } else {
+                            // End of quoted field
+                            break;
+                        }
+                    }
+                    Some(c) => field.push(c),
+                    None => break, // Unterminated quote, end of input
+                }
+            }
+            // Consume delimiter after quoted field if present
+            if chars.peek() == Some(&delimiter) {
+                chars.next();
+            }
+            fields.push(std::mem::take(&mut field));
+        } else {
+            // Unquoted field
+            loop {
+                match chars.peek() {
+                    Some(&c) if c == delimiter => {
+                        chars.next();
+                        break;
+                    }
+                    Some(_) => field.push(chars.next().unwrap()),
+                    None => break,
+                }
+            }
+            fields.push(std::mem::take(&mut field));
+        }
+    }
+
+    fields
 }
 
 fn apply_parse_key_value(config: &Value, event: &mut Value) {
@@ -599,6 +650,47 @@ mod tests {
         assert_eq!(result["name"], "Alice");
         assert_eq!(result["age"], "30");
         assert_eq!(result["city"], "NYC");
+    }
+
+    #[test]
+    fn test_csv_quoted_fields() {
+        let config = json!([{"csv": {"source": "message", "delimiter": ",", "columns": ["name", "desc", "city"]}}]);
+        let result = apply_transformer(&config, r#"Alice,"hello, world",NYC"#);
+        assert_eq!(result["name"], "Alice");
+        assert_eq!(result["desc"], "hello, world");
+        assert_eq!(result["city"], "NYC");
+    }
+
+    #[test]
+    fn test_csv_escaped_quotes() {
+        let config =
+            json!([{"csv": {"source": "message", "delimiter": ",", "columns": ["name", "quote"]}}]);
+        let result = apply_transformer(&config, r#"Alice,"She said ""hi"""#);
+        assert_eq!(result["name"], "Alice");
+        assert_eq!(result["quote"], r#"She said "hi""#);
+    }
+
+    #[test]
+    fn test_csv_quoted_field_with_custom_delimiter() {
+        let config =
+            json!([{"csv": {"source": "message", "delimiter": "|", "columns": ["a", "b", "c"]}}]);
+        let result = apply_transformer(&config, r#"one|"two|three"|four"#);
+        assert_eq!(result["a"], "one");
+        assert_eq!(result["b"], "two|three");
+        assert_eq!(result["c"], "four");
+    }
+
+    #[test]
+    fn test_parse_csv_fields_unit() {
+        let fields = parse_csv_fields(r#"a,"b,c",d"#, ',');
+        assert_eq!(fields, vec!["a", "b,c", "d"]);
+
+        let fields = parse_csv_fields(r#""escaped ""quotes""",normal"#, ',');
+        assert_eq!(fields, vec![r#"escaped "quotes""#, "normal"]);
+
+        // Simple unquoted
+        let fields = parse_csv_fields("a,b,c", ',');
+        assert_eq!(fields, vec!["a", "b", "c"]);
     }
 
     #[test]

@@ -664,11 +664,15 @@ impl DynamoDbService {
         if !accessed_keys.is_empty() {
             let mut state = self.state.write();
             if let Some(table) = state.tables.get_mut(table_name) {
-                for key_str in accessed_keys {
-                    *table
-                        .contributor_insights_counters
-                        .entry(key_str)
-                        .or_insert(0) += 1;
+                // Re-check insights status after acquiring write lock in case it
+                // was disabled between the read and write lock acquisitions.
+                if table.contributor_insights_status == "ENABLED" {
+                    for key_str in accessed_keys {
+                        *table
+                            .contributor_insights_counters
+                            .entry(key_str)
+                            .or_insert(0) += 1;
+                    }
                 }
             }
         }
@@ -732,11 +736,15 @@ impl DynamoDbService {
         if !accessed_keys.is_empty() {
             let mut state = self.state.write();
             if let Some(table) = state.tables.get_mut(table_name) {
-                for key_str in accessed_keys {
-                    *table
-                        .contributor_insights_counters
-                        .entry(key_str)
-                        .or_insert(0) += 1;
+                // Re-check insights status after acquiring write lock in case it
+                // was disabled between the read and write lock acquisitions.
+                if table.contributor_insights_status == "ENABLED" {
+                    for key_str in accessed_keys {
+                        *table
+                            .contributor_insights_counters
+                            .entry(key_str)
+                            .or_insert(0) += 1;
+                    }
                 }
             }
         }
@@ -5813,5 +5821,77 @@ mod tests {
 
         let contributors = body["TopContributors"].as_array().unwrap();
         assert!(contributors.is_empty());
+    }
+
+    #[test]
+    fn contributor_insights_disabled_table_no_counters_after_scan() {
+        let svc = make_service();
+        create_test_table(&svc);
+
+        // Put items
+        for key in &["alpha", "beta"] {
+            let req = make_request(
+                "PutItem",
+                json!({
+                    "TableName": "test-table",
+                    "Item": { "pk": { "S": key } }
+                }),
+            );
+            svc.put_item(&req).unwrap();
+        }
+
+        // Enable insights, then scan, then disable, then check counters are cleared
+        let req = make_request(
+            "UpdateContributorInsights",
+            json!({
+                "TableName": "test-table",
+                "ContributorInsightsAction": "ENABLE"
+            }),
+        );
+        svc.update_contributor_insights(&req).unwrap();
+
+        // Scan to trigger counter collection
+        let req = make_request("Scan", json!({ "TableName": "test-table" }));
+        svc.scan(&req).unwrap();
+
+        // Verify counters were collected
+        let req = make_request(
+            "DescribeContributorInsights",
+            json!({ "TableName": "test-table" }),
+        );
+        let resp = svc.describe_contributor_insights(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let contributors = body["TopContributors"].as_array().unwrap();
+        assert!(
+            !contributors.is_empty(),
+            "counters should be non-empty while enabled"
+        );
+
+        // Disable insights (this clears counters)
+        let req = make_request(
+            "UpdateContributorInsights",
+            json!({
+                "TableName": "test-table",
+                "ContributorInsightsAction": "DISABLE"
+            }),
+        );
+        svc.update_contributor_insights(&req).unwrap();
+
+        // Scan again -- should NOT accumulate counters since insights is disabled
+        let req = make_request("Scan", json!({ "TableName": "test-table" }));
+        svc.scan(&req).unwrap();
+
+        // Verify counters are still empty
+        let req = make_request(
+            "DescribeContributorInsights",
+            json!({ "TableName": "test-table" }),
+        );
+        let resp = svc.describe_contributor_insights(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let contributors = body["TopContributors"].as_array().unwrap();
+        assert!(
+            contributors.is_empty(),
+            "counters should be empty after disabling insights"
+        );
     }
 }

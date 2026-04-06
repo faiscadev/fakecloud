@@ -910,12 +910,12 @@ impl SnsService {
             .map(|s| s.endpoint.clone())
             .collect();
 
-        let lambda_subscribers: Vec<String> = state
+        let lambda_subscribers: Vec<(String, String)> = state
             .subscriptions
             .values()
             .filter(|s| s.topic_arn == topic_arn && s.protocol == "lambda" && s.confirmed)
             .filter(|s| matches_filter_policy(s, &message_attributes, &message))
-            .map(|s| s.endpoint.clone())
+            .map(|s| (s.endpoint.clone(), s.subscription_arn.clone()))
             .collect();
 
         let email_subscribers: Vec<String> = state
@@ -1051,28 +1051,17 @@ impl SnsService {
             // Build SNS Lambda event payloads
             let lambda_payloads: Vec<(String, String)> = lambda_subscribers
                 .iter()
-                .map(|function_arn| {
-                    let sns_event = serde_json::json!({
-                        "Records": [{
-                            "EventVersion": "1.0",
-                            "EventSubscriptionArn": format!("{}:lambda-sub", topic_arn),
-                            "EventSource": "aws:sns",
-                            "Sns": {
-                                "SignatureVersion": "1",
-                                "Timestamp": now.to_rfc3339(),
-                                "Signature": "FAKE_SIGNATURE",
-                                "SigningCertUrl": "https://sns.us-east-1.amazonaws.com/SimpleNotificationService-0000000000000000000000.pem",
-                                "MessageId": msg_id.clone(),
-                                "Message": &default_message,
-                                "MessageAttributes": &envelope_attrs,
-                                "Type": "Notification",
-                                "UnsubscribeUrl": format!("http://localhost:4566/?Action=Unsubscribe&SubscriptionArn={}", topic_arn),
-                                "TopicArn": &topic_arn,
-                                "Subject": subject.as_deref().unwrap_or(""),
-                            }
-                        }]
-                    });
-                    (function_arn.clone(), sns_event.to_string())
+                .map(|(function_arn, subscription_arn)| {
+                    let payload = build_sns_lambda_event(
+                        &msg_id,
+                        &topic_arn,
+                        subscription_arn,
+                        &default_message,
+                        subject.as_deref(),
+                        &envelope_attrs,
+                        &now,
+                    );
+                    (function_arn.clone(), payload)
                 })
                 .collect();
 
@@ -2519,6 +2508,40 @@ impl SnsService {
     }
 }
 
+/// Build an SNS Lambda event payload (matches real AWS format).
+/// Used by both direct Publish and cross-service delivery.
+pub(crate) fn build_sns_lambda_event(
+    message_id: &str,
+    topic_arn: &str,
+    subscription_arn: &str,
+    message: &str,
+    subject: Option<&str>,
+    message_attributes: &serde_json::Map<String, Value>,
+    timestamp: &chrono::DateTime<Utc>,
+) -> String {
+    let sns_event = serde_json::json!({
+        "Records": [{
+            "EventVersion": "1.0",
+            "EventSubscriptionArn": subscription_arn,
+            "EventSource": "aws:sns",
+            "Sns": {
+                "SignatureVersion": "1",
+                "Timestamp": timestamp.to_rfc3339(),
+                "Signature": "FAKE_SIGNATURE",
+                "SigningCertUrl": "https://sns.us-east-1.amazonaws.com/SimpleNotificationService-0000000000000000000000.pem",
+                "MessageId": message_id,
+                "Message": message,
+                "MessageAttributes": message_attributes,
+                "Type": "Notification",
+                "UnsubscribeUrl": format!("http://localhost:4566/?Action=Unsubscribe&SubscriptionArn={}", subscription_arn),
+                "TopicArn": topic_arn,
+                "Subject": subject.unwrap_or(""),
+            }
+        }]
+    });
+    sns_event.to_string()
+}
+
 /// Build an SNS notification envelope as JSON string.
 /// Subject and MessageAttributes are only included when present.
 fn build_sns_envelope(
@@ -3435,4 +3458,42 @@ fn validate_numeric_filter(arr: &[Value]) -> Result<(), AwsServiceError> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_sns_lambda_event_uses_real_subscription_arn() {
+        let now = Utc::now();
+        let sub_arn = "arn:aws:sns:us-east-1:123456789012:my-topic:abc-def-123";
+        let topic_arn = "arn:aws:sns:us-east-1:123456789012:my-topic";
+        let attrs = serde_json::Map::new();
+
+        let payload = build_sns_lambda_event(
+            "msg-001",
+            topic_arn,
+            sub_arn,
+            "hello",
+            Some("test subject"),
+            &attrs,
+            &now,
+        );
+
+        let parsed: Value = serde_json::from_str(&payload).unwrap();
+        let record = &parsed["Records"][0];
+        assert_eq!(record["EventSubscriptionArn"], sub_arn);
+        assert_eq!(record["EventSource"], "aws:sns");
+        assert_eq!(record["Sns"]["TopicArn"], topic_arn);
+        assert_eq!(record["Sns"]["Message"], "hello");
+        assert_eq!(record["Sns"]["Subject"], "test subject");
+        assert_eq!(record["Sns"]["MessageId"], "msg-001");
+        // UnsubscribeUrl should use subscription ARN, not topic ARN
+        let unsub_url = record["Sns"]["UnsubscribeUrl"].as_str().unwrap();
+        assert!(
+            unsub_url.contains(sub_arn),
+            "UnsubscribeUrl should contain subscription ARN"
+        );
+    }
 }

@@ -535,12 +535,16 @@ fn tags_xml(tags: &[Tag]) -> String {
         .join("\n")
 }
 
-fn paginated_tags_response(action: &str, tags: &[Tag], req: &AwsRequest) -> String {
-    let max_items: usize = req
-        .query_params
-        .get("MaxItems")
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(100);
+fn paginated_tags_response(
+    action: &str,
+    tags: &[Tag],
+    req: &AwsRequest,
+) -> Result<String, AwsServiceError> {
+    let max_items: usize = parse_optional_i64_param(
+        "maxItems",
+        req.query_params.get("MaxItems").map(|s| s.as_str()),
+    )?
+    .unwrap_or(100) as usize;
     let offset: usize = req
         .query_params
         .get("Marker")
@@ -557,7 +561,7 @@ fn paginated_tags_response(action: &str, tags: &[Tag], req: &AwsRequest) -> Stri
         String::new()
     };
 
-    format!(
+    Ok(format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <{action}Response xmlns="https://iam.amazonaws.com/doc/2010-05-08/">
   <{action}Result>
@@ -572,7 +576,7 @@ fn paginated_tags_response(action: &str, tags: &[Tag], req: &AwsRequest) -> Stri
   </ResponseMetadata>
 </{action}Response>"#,
         req.request_id
-    )
+    ))
 }
 
 fn validate_tags(tags: &[Tag], existing_count: usize) -> Result<(), AwsServiceError> {
@@ -893,9 +897,10 @@ impl IamService {
         )?;
         validate_optional_range_i64(
             "maxItems",
-            req.query_params
-                .get("MaxItems")
-                .and_then(|v| v.parse::<i64>().ok()),
+            parse_optional_i64_param(
+                "maxItems",
+                req.query_params.get("MaxItems").map(|s| s.as_str()),
+            )?,
             1,
             1000,
         )?;
@@ -1198,9 +1203,10 @@ impl IamService {
         let marker = req.query_params.get("Marker").cloned();
         validate_optional_range_i64(
             "maxItems",
-            req.query_params
-                .get("MaxItems")
-                .and_then(|v| v.parse::<i64>().ok()),
+            parse_optional_i64_param(
+                "maxItems",
+                req.query_params.get("MaxItems").map(|s| s.as_str()),
+            )?,
             1,
             1000,
         )?;
@@ -1454,9 +1460,10 @@ impl IamService {
         )?;
         validate_optional_range_i64(
             "maxItems",
-            req.query_params
-                .get("MaxItems")
-                .and_then(|v| v.parse::<i64>().ok()),
+            parse_optional_i64_param(
+                "maxItems",
+                req.query_params.get("MaxItems").map(|s| s.as_str()),
+            )?,
             1,
             1000,
         )?;
@@ -1700,7 +1707,7 @@ impl IamService {
             )
         })?;
 
-        let xml = paginated_tags_response("ListRoleTags", &role.tags, req);
+        let xml = paginated_tags_response("ListRoleTags", &role.tags, req)?;
         Ok(AwsResponse::xml(StatusCode::OK, xml))
     }
 
@@ -1891,9 +1898,10 @@ impl IamService {
         )?;
         validate_optional_range_i64(
             "maxItems",
-            req.query_params
-                .get("MaxItems")
-                .and_then(|v| v.parse::<i64>().ok()),
+            parse_optional_i64_param(
+                "maxItems",
+                req.query_params.get("MaxItems").map(|s| s.as_str()),
+            )?,
             1,
             1000,
         )?;
@@ -1987,7 +1995,7 @@ impl IamService {
             )
         })?;
 
-        let xml = paginated_tags_response("ListPolicyTags", &policy.tags, req);
+        let xml = paginated_tags_response("ListPolicyTags", &policy.tags, req)?;
         Ok(AwsResponse::xml(StatusCode::OK, xml))
     }
 }
@@ -4445,7 +4453,7 @@ impl IamService {
             )
         })?;
 
-        let xml = paginated_tags_response("ListOpenIDConnectProviderTags", &provider.tags, req);
+        let xml = paginated_tags_response("ListOpenIDConnectProviderTags", &provider.tags, req)?;
         Ok(AwsResponse::xml(StatusCode::OK, xml))
     }
 }
@@ -6042,10 +6050,11 @@ impl IamService {
     fn list_virtual_mfa_devices(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let state = self.state.read();
         let assignment_status = req.query_params.get("AssignmentStatus").cloned();
-        let max_items: Option<usize> = req
-            .query_params
-            .get("MaxItems")
-            .and_then(|v| v.parse().ok());
+        let max_items: Option<usize> = parse_optional_i64_param(
+            "maxItems",
+            req.query_params.get("MaxItems").map(|s| s.as_str()),
+        )?
+        .map(|v| v as usize);
         let marker: Option<usize> = req
             .query_params
             .get("Marker")
@@ -6437,5 +6446,38 @@ mod tests {
         );
         let result = svc.list_access_keys(&req);
         assert!(result.is_err(), "MaxItems=0 should return an error");
+    }
+
+    #[test]
+    fn list_users_rejects_non_numeric_max_items() {
+        let svc = make_service();
+        let req = make_request("ListUsers", vec![("MaxItems", "abc")]);
+        let result = svc.list_users(&req);
+        assert!(
+            result.is_err(),
+            "non-numeric MaxItems should return an error"
+        );
+    }
+
+    #[test]
+    fn list_roles_rejects_non_numeric_max_items() {
+        let svc = make_service();
+        let req = make_request("ListRoles", vec![("MaxItems", "xyz")]);
+        let result = svc.list_roles(&req);
+        assert!(
+            result.is_err(),
+            "non-numeric MaxItems should return an error"
+        );
+    }
+
+    #[test]
+    fn list_policies_rejects_non_numeric_max_items() {
+        let svc = make_service();
+        let req = make_request("ListPolicies", vec![("MaxItems", "notanumber")]);
+        let result = svc.list_policies(&req);
+        assert!(
+            result.is_err(),
+            "non-numeric MaxItems should return an error"
+        );
     }
 }
