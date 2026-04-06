@@ -908,6 +908,11 @@ impl DynamoDbService {
 
     fn transact_get_items(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = Self::parse_body(req)?;
+        validate_optional_enum_value(
+            "returnConsumedCapacity",
+            &body["ReturnConsumedCapacity"],
+            &["INDEXES", "TOTAL", "NONE"],
+        )?;
         let transact_items = body["TransactItems"].as_array().ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
@@ -947,6 +952,22 @@ impl DynamoDbService {
 
     fn transact_write_items(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = Self::parse_body(req)?;
+        validate_optional_string_length(
+            "clientRequestToken",
+            body["ClientRequestToken"].as_str(),
+            1,
+            36,
+        )?;
+        validate_optional_enum_value(
+            "returnConsumedCapacity",
+            &body["ReturnConsumedCapacity"],
+            &["INDEXES", "TOTAL", "NONE"],
+        )?;
+        validate_optional_enum_value(
+            "returnItemCollectionMetrics",
+            &body["ReturnItemCollectionMetrics"],
+            &["SIZE", "NONE"],
+        )?;
         let transact_items = body["TransactItems"].as_array().ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
@@ -1139,6 +1160,11 @@ impl DynamoDbService {
 
     fn batch_execute_statement(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = Self::parse_body(req)?;
+        validate_optional_enum_value(
+            "returnConsumedCapacity",
+            &body["ReturnConsumedCapacity"],
+            &["INDEXES", "TOTAL", "NONE"],
+        )?;
         let statements = body["Statements"].as_array().ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
@@ -1176,6 +1202,17 @@ impl DynamoDbService {
 
     fn execute_transaction(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = Self::parse_body(req)?;
+        validate_optional_string_length(
+            "clientRequestToken",
+            body["ClientRequestToken"].as_str(),
+            1,
+            36,
+        )?;
+        validate_optional_enum_value(
+            "returnConsumedCapacity",
+            &body["ReturnConsumedCapacity"],
+            &["INDEXES", "TOTAL", "NONE"],
+        )?;
         let transact_statements = body["TransactStatements"].as_array().ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
@@ -1502,6 +1539,19 @@ impl DynamoDbService {
 
     fn list_backups(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = Self::parse_body(req)?;
+        validate_optional_string_length("tableName", body["TableName"].as_str(), 1, 1024)?;
+        validate_optional_string_length(
+            "exclusiveStartBackupArn",
+            body["ExclusiveStartBackupArn"].as_str(),
+            37,
+            1024,
+        )?;
+        validate_optional_range_i64("limit", body["Limit"].as_i64(), 1, 100)?;
+        validate_optional_enum_value(
+            "backupType",
+            &body["BackupType"],
+            &["USER", "SYSTEM", "AWS_BACKUP", "ALL"],
+        )?;
         let table_name = body["TableName"].as_str();
 
         let state = self.state.read();
@@ -1723,6 +1773,7 @@ impl DynamoDbService {
     fn create_global_table(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = Self::parse_body(req)?;
         let global_table_name = require_str(&body, "GlobalTableName")?;
+        validate_string_length("globalTableName", global_table_name, 3, 255)?;
 
         let replication_group = body["ReplicationGroup"]
             .as_array()
@@ -1787,6 +1838,7 @@ impl DynamoDbService {
     fn describe_global_table(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = Self::parse_body(req)?;
         let global_table_name = require_str(&body, "GlobalTableName")?;
+        validate_string_length("globalTableName", global_table_name, 3, 255)?;
 
         let state = self.state.read();
         let gt = state.global_tables.get(global_table_name).ok_or_else(|| {
@@ -1817,6 +1869,7 @@ impl DynamoDbService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = Self::parse_body(req)?;
         let global_table_name = require_str(&body, "GlobalTableName")?;
+        validate_string_length("globalTableName", global_table_name, 3, 255)?;
 
         let state = self.state.read();
         let gt = state.global_tables.get(global_table_name).ok_or_else(|| {
@@ -1848,6 +1901,13 @@ impl DynamoDbService {
 
     fn list_global_tables(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = Self::parse_body(req)?;
+        validate_optional_string_length(
+            "exclusiveStartGlobalTableName",
+            body["ExclusiveStartGlobalTableName"].as_str(),
+            3,
+            255,
+        )?;
+        validate_optional_range_i64("limit", body["Limit"].as_i64(), 1, i64::MAX)?;
         let limit = body["Limit"].as_i64().unwrap_or(100) as usize;
 
         let state = self.state.read();
@@ -1873,6 +1933,8 @@ impl DynamoDbService {
     fn update_global_table(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = Self::parse_body(req)?;
         let global_table_name = require_str(&body, "GlobalTableName")?;
+        validate_string_length("globalTableName", global_table_name, 3, 255)?;
+        validate_required("replicaUpdates", &body["ReplicaUpdates"])?;
 
         let mut state = self.state.write();
         let gt = state
@@ -1924,6 +1986,18 @@ impl DynamoDbService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = Self::parse_body(req)?;
         let global_table_name = require_str(&body, "GlobalTableName")?;
+        validate_string_length("globalTableName", global_table_name, 3, 255)?;
+        validate_optional_enum_value(
+            "globalTableBillingMode",
+            &body["GlobalTableBillingMode"],
+            &["PROVISIONED", "PAY_PER_REQUEST"],
+        )?;
+        validate_optional_range_i64(
+            "globalTableProvisionedWriteCapacityUnits",
+            body["GlobalTableProvisionedWriteCapacityUnits"].as_i64(),
+            1,
+            i64::MAX,
+        )?;
 
         let state = self.state.read();
         let gt = state.global_tables.get(global_table_name).ok_or_else(|| {
@@ -2174,6 +2248,8 @@ impl DynamoDbService {
 
     fn list_contributor_insights(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = Self::parse_body(req)?;
+        validate_optional_string_length("tableName", body["TableName"].as_str(), 1, 1024)?;
+        validate_optional_range_i64("maxResults", body["MaxResults"].as_i64(), 0, 100)?;
         let table_name = body["TableName"].as_str();
 
         let state = self.state.read();
@@ -2286,6 +2362,8 @@ impl DynamoDbService {
 
     fn list_exports(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = Self::parse_body(req)?;
+        validate_optional_string_length("tableArn", body["TableArn"].as_str(), 1, 1024)?;
+        validate_optional_range_i64("maxResults", body["MaxResults"].as_i64(), 1, 25)?;
         let table_arn = body["TableArn"].as_str();
 
         let state = self.state.read();
@@ -2411,6 +2489,18 @@ impl DynamoDbService {
         };
         state.imports.insert(import_arn.clone(), import_desc);
 
+        let table_ref = state.tables.get(table_name).unwrap();
+        let ks: Vec<Value> = table_ref
+            .key_schema
+            .iter()
+            .map(|k| json!({"AttributeName": k.attribute_name, "KeyType": k.key_type}))
+            .collect();
+        let ad: Vec<Value> = table_ref
+            .attribute_definitions
+            .iter()
+            .map(|a| json!({"AttributeName": a.attribute_name, "AttributeType": a.attribute_type}))
+            .collect();
+
         Self::ok_json(json!({
             "ImportTableDescription": {
                 "ImportArn": import_arn,
@@ -2422,7 +2512,9 @@ impl DynamoDbService {
                 },
                 "InputFormat": input_format,
                 "TableCreationParameters": {
-                    "TableName": table_name
+                    "TableName": table_name,
+                    "KeySchema": ks,
+                    "AttributeDefinitions": ad
                 },
                 "StartTime": now.timestamp() as f64,
                 "EndTime": now.timestamp() as f64,
@@ -2464,6 +2556,9 @@ impl DynamoDbService {
 
     fn list_imports(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = Self::parse_body(req)?;
+        validate_optional_string_length("tableArn", body["TableArn"].as_str(), 1, 1024)?;
+        validate_optional_string_length("nextToken", body["NextToken"].as_str(), 112, 1024)?;
+        validate_optional_range_i64("pageSize", body["PageSize"].as_i64(), 1, 25)?;
         let table_arn = body["TableArn"].as_str();
 
         let state = self.state.read();

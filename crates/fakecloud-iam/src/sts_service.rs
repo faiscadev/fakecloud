@@ -585,13 +585,14 @@ impl StsService {
         &self,
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let _encoded_message = req.query_params.get("EncodedMessage").ok_or_else(|| {
+        let encoded_message = req.query_params.get("EncodedMessage").ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "MissingParameter",
                 "The request must contain the parameter EncodedMessage",
             )
         })?;
+        validate_string_length("encodedMessage", encoded_message, 1, 10240)?;
 
         let decoded_message =
             r#"{"allowed":true,"explicitDeny":false,"matchedStatements":{"items":[]}}"#;
