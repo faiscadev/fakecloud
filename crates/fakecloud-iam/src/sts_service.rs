@@ -63,6 +63,7 @@ impl AwsService for StsService {
             "GetSessionToken" => self.get_session_token(&req),
             "GetFederationToken" => self.get_federation_token(&req),
             "GetAccessKeyInfo" => self.get_access_key_info(&req),
+            "DecodeAuthorizationMessage" => self.decode_authorization_message(&req),
             _ => Err(AwsServiceError::action_not_implemented("sts", &req.action)),
         }
     }
@@ -76,6 +77,7 @@ impl AwsService for StsService {
             "GetSessionToken",
             "GetFederationToken",
             "GetAccessKeyInfo",
+            "DecodeAuthorizationMessage",
         ]
     }
 }
@@ -579,6 +581,25 @@ impl StsService {
         Ok(AwsResponse::xml(StatusCode::OK, xml))
     }
 
+    fn decode_authorization_message(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let _encoded_message = req.query_params.get("EncodedMessage").ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "MissingParameter",
+                "The request must contain the parameter EncodedMessage",
+            )
+        })?;
+
+        let decoded_message =
+            r#"{"allowed":true,"explicitDeny":false,"matchedStatements":{"items":[]}}"#;
+        let xml =
+            xml_responses::decode_authorization_message_response(decoded_message, &req.request_id);
+        Ok(AwsResponse::xml(StatusCode::OK, xml))
+    }
+
     fn get_access_key_info(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let access_key_id = req.query_params.get("AccessKeyId").ok_or_else(|| {
             AwsServiceError::aws_error(
@@ -724,6 +745,48 @@ mod tests {
         let id = xml_responses::generate_role_id();
         assert_eq!(id.len(), 21);
         assert!(id.starts_with("AROA"));
+    }
+
+    #[test]
+    fn test_decode_authorization_message() {
+        use crate::state::IamState;
+        use parking_lot::RwLock;
+        use std::collections::HashMap;
+        use std::sync::Arc;
+
+        let state: SharedIamState = Arc::new(RwLock::new(IamState::new("123456789012")));
+        let service = StsService::new(state);
+
+        let mut params = HashMap::new();
+        params.insert(
+            "EncodedMessage".to_string(),
+            "some-encoded-message".to_string(),
+        );
+
+        let req = make_test_request(params);
+        let resp = service.decode_authorization_message(&req).unwrap();
+        let body = std::str::from_utf8(&resp.body).unwrap();
+        assert!(body.contains("DecodedMessage"));
+        assert!(body.contains("allowed"));
+        assert!(body.contains("matchedStatements"));
+    }
+
+    #[test]
+    fn test_decode_authorization_message_missing_param() {
+        use crate::state::IamState;
+        use parking_lot::RwLock;
+        use std::collections::HashMap;
+        use std::sync::Arc;
+
+        let state: SharedIamState = Arc::new(RwLock::new(IamState::new("123456789012")));
+        let service = StsService::new(state);
+
+        let req = make_test_request(HashMap::new());
+        let result = service.decode_authorization_message(&req);
+        assert!(result.is_err());
+        let err = result.err().unwrap();
+        let msg = format!("{:?}", err);
+        assert!(msg.contains("EncodedMessage"));
     }
 
     fn make_test_request(params: std::collections::HashMap<String, String>) -> AwsRequest {
