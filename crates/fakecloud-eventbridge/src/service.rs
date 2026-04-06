@@ -1105,9 +1105,31 @@ impl EventBridgeService {
             .ok_or_else(|| missing("Name"))?
             .to_string();
         validate_required("Account", &body["Account"])?;
+        let account = body["Account"]
+            .as_str()
+            .ok_or_else(|| missing("Account"))?
+            .to_string();
 
         let mut state = self.state.write();
-        state.partner_event_sources.remove(&name);
+        match state.partner_event_sources.get(&name) {
+            Some(ps) if ps.account == account => {
+                state.partner_event_sources.remove(&name);
+            }
+            Some(_) => {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::NOT_FOUND,
+                    "ResourceNotFoundException",
+                    format!("Partner event source {name} does not exist for account {account}."),
+                ));
+            }
+            None => {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::NOT_FOUND,
+                    "ResourceNotFoundException",
+                    format!("Partner event source {name} does not exist."),
+                ));
+            }
+        }
 
         Ok(json_resp(json!({})))
     }
@@ -1203,14 +1225,48 @@ impl EventBridgeService {
     fn activate_event_source(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = parse_body(req);
         validate_required("Name", &body["Name"])?;
-        // No-op: partner source activation stub
+        let name = body["Name"]
+            .as_str()
+            .ok_or_else(|| missing("Name"))?
+            .to_string();
+
+        let mut state = self.state.write();
+        let ps = state
+            .partner_event_sources
+            .get_mut(&name)
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::NOT_FOUND,
+                    "ResourceNotFoundException",
+                    format!("Event source {name} does not exist."),
+                )
+            })?;
+        ps.state = "ACTIVE".to_string();
+
         Ok(json_resp(json!({})))
     }
 
     fn deactivate_event_source(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = parse_body(req);
         validate_required("Name", &body["Name"])?;
-        // No-op: partner source deactivation stub
+        let name = body["Name"]
+            .as_str()
+            .ok_or_else(|| missing("Name"))?
+            .to_string();
+
+        let mut state = self.state.write();
+        let ps = state
+            .partner_event_sources
+            .get_mut(&name)
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::NOT_FOUND,
+                    "ResourceNotFoundException",
+                    format!("Event source {name} does not exist."),
+                )
+            })?;
+        ps.state = "INACTIVE".to_string();
+
         Ok(json_resp(json!({})))
     }
 
@@ -4635,13 +4691,74 @@ mod tests {
     }
 
     #[test]
-    fn activate_deactivate_event_source_noop() {
+    fn activate_deactivate_event_source() {
         let svc = make_service();
-        let req = make_request("ActivateEventSource", json!({ "Name": "some-source" }));
-        svc.activate_event_source(&req).unwrap();
 
-        let req = make_request("DeactivateEventSource", json!({ "Name": "some-source" }));
+        // Create a partner event source first
+        let req = make_request(
+            "CreatePartnerEventSource",
+            json!({ "Name": "aws.partner/test", "Account": "123456789012" }),
+        );
+        svc.create_partner_event_source(&req).unwrap();
+
+        // Deactivate it
+        let req = make_request("DeactivateEventSource", json!({ "Name": "aws.partner/test" }));
         svc.deactivate_event_source(&req).unwrap();
+        {
+            let state = svc.state.read();
+            assert_eq!(state.partner_event_sources["aws.partner/test"].state, "INACTIVE");
+        }
+
+        // Activate it
+        let req = make_request("ActivateEventSource", json!({ "Name": "aws.partner/test" }));
+        svc.activate_event_source(&req).unwrap();
+        {
+            let state = svc.state.read();
+            assert_eq!(state.partner_event_sources["aws.partner/test"].state, "ACTIVE");
+        }
+
+        // Not-found returns error
+        let req = make_request("ActivateEventSource", json!({ "Name": "nonexistent" }));
+        assert!(svc.activate_event_source(&req).is_err());
+
+        let req = make_request("DeactivateEventSource", json!({ "Name": "nonexistent" }));
+        assert!(svc.deactivate_event_source(&req).is_err());
+    }
+
+    #[test]
+    fn delete_partner_event_source_verifies_account() {
+        let svc = make_service();
+
+        // Create a partner event source
+        let req = make_request(
+            "CreatePartnerEventSource",
+            json!({ "Name": "aws.partner/test", "Account": "123456789012" }),
+        );
+        svc.create_partner_event_source(&req).unwrap();
+
+        // Deleting with wrong account fails
+        let req = make_request(
+            "DeletePartnerEventSource",
+            json!({ "Name": "aws.partner/test", "Account": "999999999999" }),
+        );
+        assert!(svc.delete_partner_event_source(&req).is_err());
+        // Source still exists
+        assert!(svc.state.read().partner_event_sources.contains_key("aws.partner/test"));
+
+        // Deleting with correct account succeeds
+        let req = make_request(
+            "DeletePartnerEventSource",
+            json!({ "Name": "aws.partner/test", "Account": "123456789012" }),
+        );
+        svc.delete_partner_event_source(&req).unwrap();
+        assert!(!svc.state.read().partner_event_sources.contains_key("aws.partner/test"));
+
+        // Deleting non-existent source returns error
+        let req = make_request(
+            "DeletePartnerEventSource",
+            json!({ "Name": "aws.partner/test", "Account": "123456789012" }),
+        );
+        assert!(svc.delete_partner_event_source(&req).is_err());
     }
 
     #[test]
