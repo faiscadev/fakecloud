@@ -2427,4 +2427,103 @@ mod tests {
         let result = resolve_nested_path(&item, "items[0].sku");
         assert_eq!(result, Some(json!({"S": "ABC"})));
     }
+
+    // -- Integration-style tests using DynamoDbService --
+
+    use crate::state::SharedDynamoDbState;
+    use parking_lot::RwLock;
+    use std::sync::Arc;
+
+    fn make_service() -> DynamoDbService {
+        let state: SharedDynamoDbState = Arc::new(RwLock::new(crate::state::DynamoDbState::new(
+            "123456789012",
+            "us-east-1",
+        )));
+        DynamoDbService::new(state)
+    }
+
+    fn make_request(action: &str, body: Value) -> AwsRequest {
+        AwsRequest {
+            service: "dynamodb".to_string(),
+            action: action.to_string(),
+            region: "us-east-1".to_string(),
+            account_id: "123456789012".to_string(),
+            request_id: "test-id".to_string(),
+            headers: http::HeaderMap::new(),
+            query_params: HashMap::new(),
+            body: serde_json::to_vec(&body).unwrap().into(),
+            path_segments: vec![],
+            raw_path: "/".to_string(),
+            method: http::Method::POST,
+            is_query_protocol: false,
+            access_key_id: None,
+        }
+    }
+
+    fn create_test_table(svc: &DynamoDbService) {
+        let req = make_request(
+            "CreateTable",
+            json!({
+                "TableName": "test-table",
+                "KeySchema": [
+                    { "AttributeName": "pk", "KeyType": "HASH" }
+                ],
+                "AttributeDefinitions": [
+                    { "AttributeName": "pk", "AttributeType": "S" }
+                ],
+                "BillingMode": "PAY_PER_REQUEST"
+            }),
+        );
+        svc.create_table(&req).unwrap();
+    }
+
+    #[test]
+    fn delete_item_return_values_all_old() {
+        let svc = make_service();
+        create_test_table(&svc);
+
+        // Put an item
+        let req = make_request(
+            "PutItem",
+            json!({
+                "TableName": "test-table",
+                "Item": {
+                    "pk": { "S": "key1" },
+                    "name": { "S": "Alice" },
+                    "age": { "N": "30" }
+                }
+            }),
+        );
+        svc.put_item(&req).unwrap();
+
+        // Delete with ReturnValues=ALL_OLD
+        let req = make_request(
+            "DeleteItem",
+            json!({
+                "TableName": "test-table",
+                "Key": { "pk": { "S": "key1" } },
+                "ReturnValues": "ALL_OLD"
+            }),
+        );
+        let resp = svc.delete_item(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+
+        // Verify the old item is returned
+        let attrs = &body["Attributes"];
+        assert_eq!(attrs["pk"]["S"].as_str().unwrap(), "key1");
+        assert_eq!(attrs["name"]["S"].as_str().unwrap(), "Alice");
+        assert_eq!(attrs["age"]["N"].as_str().unwrap(), "30");
+
+        // Verify the item is actually deleted
+        let req = make_request(
+            "GetItem",
+            json!({
+                "TableName": "test-table",
+                "Key": { "pk": { "S": "key1" } }
+            }),
+        );
+        let resp = svc.get_item(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert!(body.get("Item").is_none(), "item should be deleted");
+    }
 }

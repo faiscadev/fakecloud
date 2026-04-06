@@ -4462,3 +4462,127 @@ fn json_dumps(val: &Value) -> String {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use parking_lot::RwLock;
+    use serde_json::json;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    fn make_service() -> SsmService {
+        let state: SharedSsmState = Arc::new(RwLock::new(crate::state::SsmState::new(
+            "123456789012",
+            "us-east-1",
+        )));
+        SsmService::new(state)
+    }
+
+    fn make_request(action: &str, body: Value) -> AwsRequest {
+        AwsRequest {
+            service: "ssm".to_string(),
+            action: action.to_string(),
+            region: "us-east-1".to_string(),
+            account_id: "123456789012".to_string(),
+            request_id: "test-id".to_string(),
+            headers: http::HeaderMap::new(),
+            query_params: HashMap::new(),
+            body: serde_json::to_vec(&body).unwrap().into(),
+            path_segments: vec![],
+            raw_path: "/".to_string(),
+            method: http::Method::POST,
+            is_query_protocol: false,
+            access_key_id: None,
+        }
+    }
+
+    fn send_command(svc: &SsmService, doc_name: &str) -> String {
+        let req = make_request(
+            "SendCommand",
+            json!({
+                "DocumentName": doc_name,
+                "InstanceIds": ["i-1234567890abcdef0"]
+            }),
+        );
+        let resp = svc.send_command(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        body["Command"]["CommandId"].as_str().unwrap().to_string()
+    }
+
+    #[test]
+    fn list_commands_pagination() {
+        let svc = make_service();
+
+        // Send 3 commands
+        let mut command_ids = Vec::new();
+        for i in 0..3 {
+            command_ids.push(send_command(&svc, &format!("AWS-RunShellScript-{i}")));
+        }
+
+        // First page: MaxResults=1
+        let req = make_request("ListCommands", json!({ "MaxResults": 1 }));
+        let resp = svc.list_commands(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["Commands"].as_array().unwrap().len(), 1);
+        let token = body["NextToken"].as_str().unwrap();
+
+        // Second page
+        let req = make_request(
+            "ListCommands",
+            json!({ "MaxResults": 1, "NextToken": token }),
+        );
+        let resp = svc.list_commands(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["Commands"].as_array().unwrap().len(), 1);
+        let token = body["NextToken"].as_str().unwrap();
+
+        // Third page (last)
+        let req = make_request(
+            "ListCommands",
+            json!({ "MaxResults": 1, "NextToken": token }),
+        );
+        let resp = svc.list_commands(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["Commands"].as_array().unwrap().len(), 1);
+        assert!(body.get("NextToken").is_none() || body["NextToken"].is_null());
+    }
+
+    #[test]
+    fn describe_maintenance_windows_pagination() {
+        let svc = make_service();
+
+        // Create 3 maintenance windows (min MaxResults for this API is 10,
+        // so we create 11 to test pagination with the minimum page size)
+        for i in 0..11 {
+            let req = make_request(
+                "CreateMaintenanceWindow",
+                json!({
+                    "Name": format!("test-window-{i:02}"),
+                    "Schedule": "cron(0 2 ? * SUN *)",
+                    "Duration": 3,
+                    "Cutoff": 1,
+                    "AllowUnassociatedTargets": true
+                }),
+            );
+            svc.create_maintenance_window(&req).unwrap();
+        }
+
+        // First page: MaxResults=10 (minimum allowed)
+        let req = make_request("DescribeMaintenanceWindows", json!({ "MaxResults": 10 }));
+        let resp = svc.describe_maintenance_windows(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["WindowIdentities"].as_array().unwrap().len(), 10);
+        let token = body["NextToken"].as_str().unwrap();
+
+        // Second page (1 remaining)
+        let req = make_request(
+            "DescribeMaintenanceWindows",
+            json!({ "MaxResults": 10, "NextToken": token }),
+        );
+        let resp = svc.describe_maintenance_windows(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["WindowIdentities"].as_array().unwrap().len(), 1);
+        assert!(body.get("NextToken").is_none() || body["NextToken"].is_null());
+    }
+}

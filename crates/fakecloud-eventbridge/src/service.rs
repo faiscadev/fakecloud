@@ -3811,4 +3811,16 @@ mod tests {
         assert_eq!(body["Replays"].as_array().unwrap().len(), 1);
         assert!(body["NextToken"].is_null());
     }
+
+    #[test]
+    fn list_event_buses_invalid_next_token_returns_error() {
+        let svc = make_service();
+
+        let req = make_request("ListEventBuses", json!({ "NextToken": "not-a-number" }));
+        let result = svc.list_event_buses(&req);
+        assert!(
+            result.is_err(),
+            "non-numeric NextToken should return an error"
+        );
+    }
 }

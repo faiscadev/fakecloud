@@ -6311,3 +6311,57 @@ impl IamService {
         Ok(AwsResponse::xml(StatusCode::OK, xml))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use parking_lot::RwLock;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    fn make_service() -> IamService {
+        let state: SharedIamState =
+            Arc::new(RwLock::new(crate::state::IamState::new("123456789012")));
+        IamService::new(state)
+    }
+
+    fn make_request(action: &str, params: Vec<(&str, &str)>) -> AwsRequest {
+        let mut query_params = HashMap::new();
+        query_params.insert("Action".to_string(), action.to_string());
+        for (k, v) in params {
+            query_params.insert(k.to_string(), v.to_string());
+        }
+        AwsRequest {
+            service: "iam".to_string(),
+            action: action.to_string(),
+            region: "us-east-1".to_string(),
+            account_id: "123456789012".to_string(),
+            request_id: "test-id".to_string(),
+            headers: http::HeaderMap::new(),
+            query_params,
+            body: bytes::Bytes::new(),
+            path_segments: vec![],
+            raw_path: "/".to_string(),
+            method: http::Method::POST,
+            is_query_protocol: true,
+            access_key_id: None,
+        }
+    }
+
+    #[test]
+    fn list_access_keys_max_items_zero_returns_error() {
+        let svc = make_service();
+
+        // Create a user first
+        let req = make_request("CreateUser", vec![("UserName", "testuser")]);
+        svc.create_user(&req).unwrap();
+
+        // Try listing access keys with MaxItems=0
+        let req = make_request(
+            "ListAccessKeys",
+            vec![("UserName", "testuser"), ("MaxItems", "0")],
+        );
+        let result = svc.list_access_keys(&req);
+        assert!(result.is_err(), "MaxItems=0 should return an error");
+    }
+}

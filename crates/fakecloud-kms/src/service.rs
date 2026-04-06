@@ -2375,3 +2375,155 @@ fn action_matches(policy_action: &str, requested_action: &str) -> bool {
     }
     false
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use parking_lot::RwLock;
+    use serde_json::json;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    fn make_service() -> KmsService {
+        let state: SharedKmsState = Arc::new(RwLock::new(crate::state::KmsState::new(
+            "123456789012",
+            "us-east-1",
+        )));
+        KmsService::new(state)
+    }
+
+    fn make_request(action: &str, body: Value) -> AwsRequest {
+        AwsRequest {
+            service: "kms".to_string(),
+            action: action.to_string(),
+            region: "us-east-1".to_string(),
+            account_id: "123456789012".to_string(),
+            request_id: "test-id".to_string(),
+            headers: http::HeaderMap::new(),
+            query_params: HashMap::new(),
+            body: serde_json::to_vec(&body).unwrap().into(),
+            path_segments: vec![],
+            raw_path: "/".to_string(),
+            method: http::Method::POST,
+            is_query_protocol: false,
+            access_key_id: None,
+        }
+    }
+
+    fn create_key(svc: &KmsService) -> String {
+        let req = make_request("CreateKey", json!({}));
+        let resp = svc.create_key(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        body["KeyMetadata"]["KeyId"].as_str().unwrap().to_string()
+    }
+
+    #[test]
+    fn list_keys_pagination_no_duplicates() {
+        let svc = make_service();
+        let mut all_key_ids: Vec<String> = Vec::new();
+        for _ in 0..5 {
+            all_key_ids.push(create_key(&svc));
+        }
+
+        let mut collected_ids: Vec<String> = Vec::new();
+        let mut marker: Option<String> = None;
+
+        loop {
+            let mut body = json!({ "Limit": 2 });
+            if let Some(ref m) = marker {
+                body["Marker"] = json!(m);
+            }
+            let req = make_request("ListKeys", body);
+            let resp = svc.list_keys(&req).unwrap();
+            let resp_body: Value = serde_json::from_slice(&resp.body).unwrap();
+
+            for key in resp_body["Keys"].as_array().unwrap() {
+                collected_ids.push(key["KeyId"].as_str().unwrap().to_string());
+            }
+
+            if resp_body["Truncated"].as_bool().unwrap_or(false) {
+                marker = resp_body["NextMarker"].as_str().map(|s| s.to_string());
+            } else {
+                break;
+            }
+        }
+
+        // Verify no duplicates
+        let mut deduped = collected_ids.clone();
+        deduped.sort();
+        deduped.dedup();
+        assert_eq!(
+            collected_ids.len(),
+            deduped.len(),
+            "pagination produced duplicate keys"
+        );
+
+        // Verify all keys returned
+        for kid in &all_key_ids {
+            assert!(
+                collected_ids.contains(kid),
+                "key {kid} missing from paginated results"
+            );
+        }
+    }
+
+    #[test]
+    fn list_retirable_grants_pagination() {
+        let svc = make_service();
+        let key_id = create_key(&svc);
+        let retiring = "arn:aws:iam::123456789012:user/retiring-user";
+
+        // Create 5 grants with the same retiring principal
+        for i in 0..5 {
+            let req = make_request(
+                "CreateGrant",
+                json!({
+                    "KeyId": key_id,
+                    "GranteePrincipal": format!("arn:aws:iam::123456789012:user/grantee-{i}"),
+                    "RetiringPrincipal": retiring,
+                    "Operations": ["Encrypt"]
+                }),
+            );
+            svc.create_grant(&req).unwrap();
+        }
+
+        let mut collected_ids: Vec<String> = Vec::new();
+        let mut marker: Option<String> = None;
+
+        loop {
+            let mut body = json!({
+                "RetiringPrincipal": retiring,
+                "Limit": 2
+            });
+            if let Some(ref m) = marker {
+                body["Marker"] = json!(m);
+            }
+            let req = make_request("ListRetirableGrants", body);
+            let resp = svc.list_retirable_grants(&req).unwrap();
+            let resp_body: Value = serde_json::from_slice(&resp.body).unwrap();
+
+            for grant in resp_body["Grants"].as_array().unwrap() {
+                collected_ids.push(grant["GrantId"].as_str().unwrap().to_string());
+            }
+
+            if resp_body["Truncated"].as_bool().unwrap_or(false) {
+                marker = resp_body["NextMarker"].as_str().map(|s| s.to_string());
+            } else {
+                break;
+            }
+        }
+
+        // Verify no duplicates
+        let mut deduped = collected_ids.clone();
+        deduped.sort();
+        deduped.dedup();
+        assert_eq!(
+            collected_ids.len(),
+            deduped.len(),
+            "pagination produced duplicate grants"
+        );
+
+        // All 5 grants returned
+        assert_eq!(collected_ids.len(), 5, "expected 5 grants total");
+    }
+}
