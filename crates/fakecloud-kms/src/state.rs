@@ -56,6 +56,10 @@ pub struct KmsKey {
     pub mac_algorithms: Option<Vec<String>>,
     pub custom_key_store_id: Option<String>,
     pub imported_key_material: bool,
+    /// Raw bytes of imported key material (used as AES key for encrypt/decrypt).
+    pub imported_material_bytes: Option<Vec<u8>>,
+    /// Deterministic seed for the key (used for DeriveSharedSecret).
+    pub private_key_seed: Vec<u8>,
     pub primary_region: Option<String>,
 }
 
