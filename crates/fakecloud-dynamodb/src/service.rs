@@ -2971,10 +2971,20 @@ fn find_partiql_where_indices(
     parameters: &[Value],
 ) -> Result<Vec<usize>, AwsServiceError> {
     // Support: col = 'val' AND col2 = 'val2'  or  col = ? AND col2 = ?
-    let conditions = if where_clause.contains(" AND ") {
-        where_clause.split(" AND ").collect::<Vec<_>>()
+    // Case-insensitive AND splitting
+    let upper = where_clause.to_uppercase();
+    let conditions = if upper.contains(" AND ") {
+        // Find positions of " AND " case-insensitively and split
+        let mut parts = Vec::new();
+        let mut last = 0;
+        for (i, _) in upper.match_indices(" AND ") {
+            parts.push(where_clause[last..i].trim());
+            last = i + 5;
+        }
+        parts.push(where_clause[last..].trim());
+        parts
     } else {
-        where_clause.split(" and ").collect::<Vec<_>>()
+        vec![where_clause.trim()]
     };
 
     let mut param_idx = 0usize;
