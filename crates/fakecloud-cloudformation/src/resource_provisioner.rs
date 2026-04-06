@@ -191,6 +191,12 @@ impl ResourceProvisioner {
             .ok_or("SNS Subscription requires Endpoint")?;
 
         let mut state = self.sns_state.write();
+
+        // Validate that the topic exists
+        if !state.topics.contains_key(topic_arn) {
+            return Err(format!("Topic ARN does not exist: {topic_arn}"));
+        }
+
         let sub_arn = format!("{}:{}", topic_arn, Uuid::new_v4());
 
         let subscription = SnsSubscription {
@@ -446,10 +452,23 @@ impl ResourceProvisioner {
             .unwrap_or("default");
 
         let mut state = self.eventbridge_state.write();
-        let arn = format!(
-            "arn:aws:events:{}:{}:rule/{}/{}",
-            state.region, state.account_id, event_bus_name, rule_name
-        );
+
+        // Validate that the event bus exists
+        if !state.buses.contains_key(event_bus_name) {
+            return Err(format!("Event bus does not exist: {event_bus_name}"));
+        }
+
+        let arn = if event_bus_name == "default" {
+            format!(
+                "arn:aws:events:{}:{}:rule/{}",
+                state.region, state.account_id, rule_name
+            )
+        } else {
+            format!(
+                "arn:aws:events:{}:{}:rule/{}/{}",
+                state.region, state.account_id, event_bus_name, rule_name
+            )
+        };
 
         let rule = EventRule {
             name: rule_name.to_string(),
@@ -677,5 +696,180 @@ impl ResourceProvisioner {
             state.log_groups.remove(&name);
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use parking_lot::RwLock;
+    use std::sync::Arc;
+
+    fn make_provisioner() -> ResourceProvisioner {
+        ResourceProvisioner {
+            sqs_state: Arc::new(RwLock::new(fakecloud_sqs::state::SqsState::new(
+                "123456789012",
+                "us-east-1",
+                "http://localhost:4566",
+            ))),
+            sns_state: Arc::new(RwLock::new(fakecloud_sns::state::SnsState::new(
+                "123456789012",
+                "us-east-1",
+            ))),
+            ssm_state: Arc::new(RwLock::new(fakecloud_ssm::state::SsmState::new(
+                "123456789012",
+                "us-east-1",
+            ))),
+            iam_state: Arc::new(RwLock::new(fakecloud_iam::state::IamState::new(
+                "123456789012",
+            ))),
+            s3_state: Arc::new(RwLock::new(fakecloud_s3::state::S3State::new(
+                "123456789012",
+                "us-east-1",
+            ))),
+            eventbridge_state: Arc::new(RwLock::new(
+                fakecloud_eventbridge::state::EventBridgeState::new("123456789012", "us-east-1"),
+            )),
+            dynamodb_state: Arc::new(RwLock::new(fakecloud_dynamodb::state::DynamoDbState::new(
+                "123456789012",
+                "us-east-1",
+            ))),
+            logs_state: Arc::new(RwLock::new(fakecloud_logs::state::LogsState::new(
+                "123456789012",
+                "us-east-1",
+            ))),
+            account_id: "123456789012".to_string(),
+            region: "us-east-1".to_string(),
+        }
+    }
+
+    fn make_resource(
+        resource_type: &str,
+        logical_id: &str,
+        props: serde_json::Value,
+    ) -> ResourceDefinition {
+        ResourceDefinition {
+            logical_id: logical_id.to_string(),
+            resource_type: resource_type.to_string(),
+            properties: props,
+        }
+    }
+
+    #[test]
+    fn sns_subscription_rejects_nonexistent_topic() {
+        let prov = make_provisioner();
+        let resource = make_resource(
+            "AWS::SNS::Subscription",
+            "MySub",
+            serde_json::json!({
+                "TopicArn": "arn:aws:sns:us-east-1:123456789012:NonExistent",
+                "Protocol": "sqs",
+                "Endpoint": "arn:aws:sqs:us-east-1:123456789012:my-queue"
+            }),
+        );
+        let result = prov.create_resource(&resource);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("does not exist"));
+    }
+
+    #[test]
+    fn sns_subscription_succeeds_when_topic_exists() {
+        let prov = make_provisioner();
+        // First create the topic
+        let topic = make_resource(
+            "AWS::SNS::Topic",
+            "MyTopic",
+            serde_json::json!({ "TopicName": "my-topic" }),
+        );
+        let topic_result = prov.create_resource(&topic);
+        assert!(topic_result.is_ok());
+        let topic_arn = topic_result.unwrap().physical_id;
+
+        // Now create subscription referencing that topic
+        let sub = make_resource(
+            "AWS::SNS::Subscription",
+            "MySub",
+            serde_json::json!({
+                "TopicArn": topic_arn,
+                "Protocol": "sqs",
+                "Endpoint": "arn:aws:sqs:us-east-1:123456789012:my-queue"
+            }),
+        );
+        let result = prov.create_resource(&sub);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn eventbridge_rule_arn_default_bus_omits_bus_name() {
+        let prov = make_provisioner();
+        let resource = make_resource(
+            "AWS::Events::Rule",
+            "MyRule",
+            serde_json::json!({
+                "Name": "my-rule",
+                "ScheduleExpression": "rate(1 hour)"
+            }),
+        );
+        let result = prov.create_resource(&resource).unwrap();
+        // For default bus, ARN should be rule/<name> without /default/
+        assert_eq!(
+            result.physical_id,
+            "arn:aws:events:us-east-1:123456789012:rule/my-rule"
+        );
+        assert!(!result.physical_id.contains("rule/default/"));
+    }
+
+    #[test]
+    fn eventbridge_rule_arn_custom_bus_includes_bus_name() {
+        let prov = make_provisioner();
+        // Create a custom bus first
+        {
+            let mut state = prov.eventbridge_state.write();
+            state.buses.insert(
+                "custom-bus".to_string(),
+                fakecloud_eventbridge::state::EventBus {
+                    name: "custom-bus".to_string(),
+                    arn: "arn:aws:events:us-east-1:123456789012:event-bus/custom-bus".to_string(),
+                    policy: None,
+                    creation_time: Utc::now(),
+                    last_modified_time: Utc::now(),
+                    description: None,
+                    kms_key_identifier: None,
+                    dead_letter_config: None,
+                    tags: HashMap::new(),
+                },
+            );
+        }
+        let resource = make_resource(
+            "AWS::Events::Rule",
+            "MyRule",
+            serde_json::json!({
+                "Name": "my-rule",
+                "EventBusName": "custom-bus",
+                "ScheduleExpression": "rate(1 hour)"
+            }),
+        );
+        let result = prov.create_resource(&resource).unwrap();
+        assert_eq!(
+            result.physical_id,
+            "arn:aws:events:us-east-1:123456789012:rule/custom-bus/my-rule"
+        );
+    }
+
+    #[test]
+    fn eventbridge_rule_rejects_nonexistent_bus() {
+        let prov = make_provisioner();
+        let resource = make_resource(
+            "AWS::Events::Rule",
+            "MyRule",
+            serde_json::json!({
+                "Name": "my-rule",
+                "EventBusName": "nonexistent-bus",
+                "ScheduleExpression": "rate(1 hour)"
+            }),
+        );
+        let result = prov.create_resource(&resource);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("does not exist"));
     }
 }

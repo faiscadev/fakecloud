@@ -28,3 +28,6 @@ serde_yaml = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
 tracing = { workspace = true }
+
+[dev-dependencies]
+bytes = { workspace = true }

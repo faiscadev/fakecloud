@@ -157,27 +157,77 @@ impl CloudFormationService {
         let tags = Self::extract_tags(&params);
         let parameters = Self::extract_parameters(&params);
 
+        // First pass: parse to get resource definitions (without physical ID resolution)
         let parsed = template::parse_template(template_body, &parameters).map_err(|e| {
             AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "ValidationError", e)
         })?;
 
         let provisioner = self.provisioner();
         let mut resources = Vec::new();
+        let mut physical_ids: HashMap<String, String> = HashMap::new();
 
-        for resource_def in &parsed.resources {
-            match provisioner.create_resource(resource_def) {
-                Ok(stack_resource) => resources.push(stack_resource),
-                Err(e) => {
-                    // Rollback: delete all resources created so far
-                    for r in &resources {
-                        let _ = provisioner.delete_resource(r);
+        // Create resources incrementally, re-resolving Refs with known physical IDs.
+        // Use multi-pass to handle dependency ordering (resources may reference each
+        // other via Ref, and JSON object key order is not guaranteed).
+        let mut pending: Vec<&template::ResourceDefinition> = parsed.resources.iter().collect();
+        let max_passes = pending.len() + 1;
+        for _ in 0..max_passes {
+            if pending.is_empty() {
+                break;
+            }
+            let mut still_pending = Vec::new();
+            let mut made_progress = false;
+
+            for resource_def in pending {
+                let resolved_def = template::resolve_resource_properties(
+                    resource_def,
+                    template_body,
+                    &parameters,
+                    &physical_ids,
+                )
+                .map_err(|e| {
+                    AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "ValidationError", e)
+                })?;
+
+                match provisioner.create_resource(&resolved_def) {
+                    Ok(stack_resource) => {
+                        physical_ids.insert(
+                            stack_resource.logical_id.clone(),
+                            stack_resource.physical_id.clone(),
+                        );
+                        resources.push(stack_resource);
+                        made_progress = true;
                     }
-                    return Err(AwsServiceError::aws_error(
-                        StatusCode::BAD_REQUEST,
-                        "ValidationError",
-                        format!("Failed to create resource {}: {e}", resource_def.logical_id),
-                    ));
+                    Err(_) => {
+                        still_pending.push(resource_def);
+                    }
                 }
+            }
+
+            pending = still_pending;
+            if !made_progress && !pending.is_empty() {
+                // No progress made — report the first failure
+                let resource_def = pending[0];
+                let resolved_def = template::resolve_resource_properties(
+                    resource_def,
+                    template_body,
+                    &parameters,
+                    &physical_ids,
+                )
+                .unwrap_or_else(|_| resource_def.clone());
+                let err = provisioner.create_resource(&resolved_def).unwrap_err();
+                // Rollback
+                for r in &resources {
+                    let _ = provisioner.delete_resource(r);
+                }
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationError",
+                    format!(
+                        "Failed to create resource {}: {err}",
+                        resource_def.logical_id
+                    ),
+                ));
             }
         }
 
@@ -432,16 +482,50 @@ impl CloudFormationService {
             .resources
             .retain(|r| new_logical_ids.contains(&r.logical_id));
 
+        // Build physical ID map from existing resources
+        let mut physical_ids: HashMap<String, String> = stack
+            .resources
+            .iter()
+            .map(|r| (r.logical_id.clone(), r.physical_id.clone()))
+            .collect();
+
         // Create new resources
+        let mut update_failed = false;
+        let mut update_error_msg = String::new();
         for resource_def in &parsed.resources {
             if !old_logical_ids.contains(&resource_def.logical_id) {
-                match provisioner.create_resource(resource_def) {
-                    Ok(stack_resource) => stack.resources.push(stack_resource),
+                let resolved_def = match template::resolve_resource_properties(
+                    resource_def,
+                    template_body,
+                    &new_parameters,
+                    &physical_ids,
+                ) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        update_failed = true;
+                        update_error_msg = format!(
+                            "Failed to resolve resource {}: {e}",
+                            resource_def.logical_id
+                        );
+                        continue;
+                    }
+                };
+                match provisioner.create_resource(&resolved_def) {
+                    Ok(stack_resource) => {
+                        physical_ids.insert(
+                            stack_resource.logical_id.clone(),
+                            stack_resource.physical_id.clone(),
+                        );
+                        stack.resources.push(stack_resource);
+                    }
                     Err(e) => {
                         tracing::warn!(
                             "Failed to create resource {} during update: {e}",
                             resource_def.logical_id
                         );
+                        update_failed = true;
+                        update_error_msg =
+                            format!("Failed to create resource {}: {e}", resource_def.logical_id);
                     }
                 }
             }
@@ -449,13 +533,25 @@ impl CloudFormationService {
 
         let stack_id = stack.stack_id.clone();
         stack.template = template_body.clone();
-        stack.status = "UPDATE_COMPLETE".to_string();
+        stack.status = if update_failed {
+            "UPDATE_FAILED".to_string()
+        } else {
+            "UPDATE_COMPLETE".to_string()
+        };
         stack.parameters = new_parameters;
         if !new_tags.is_empty() {
             stack.tags = new_tags;
         }
         stack.updated_at = Some(Utc::now());
         stack.description = parsed.description;
+
+        if update_failed {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ValidationError",
+                update_error_msg,
+            ));
+        }
 
         Ok(AwsResponse::xml(
             StatusCode::OK,
@@ -528,5 +624,155 @@ impl AwsService for CloudFormationService {
             "UpdateStack",
             "GetTemplate",
         ]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::CloudFormationState;
+    use http::HeaderMap;
+    use parking_lot::RwLock;
+    use std::sync::Arc;
+
+    fn make_service() -> CloudFormationService {
+        let cf_state = Arc::new(RwLock::new(CloudFormationState::new(
+            "123456789012",
+            "us-east-1",
+        )));
+        CloudFormationService::new(
+            cf_state,
+            Arc::new(RwLock::new(fakecloud_sqs::state::SqsState::new(
+                "123456789012",
+                "us-east-1",
+                "http://localhost:4566",
+            ))),
+            Arc::new(RwLock::new(fakecloud_sns::state::SnsState::new(
+                "123456789012",
+                "us-east-1",
+            ))),
+            Arc::new(RwLock::new(fakecloud_ssm::state::SsmState::new(
+                "123456789012",
+                "us-east-1",
+            ))),
+            Arc::new(RwLock::new(fakecloud_iam::state::IamState::new(
+                "123456789012",
+            ))),
+            Arc::new(RwLock::new(fakecloud_s3::state::S3State::new(
+                "123456789012",
+                "us-east-1",
+            ))),
+            Arc::new(RwLock::new(
+                fakecloud_eventbridge::state::EventBridgeState::new("123456789012", "us-east-1"),
+            )),
+            Arc::new(RwLock::new(fakecloud_dynamodb::state::DynamoDbState::new(
+                "123456789012",
+                "us-east-1",
+            ))),
+            Arc::new(RwLock::new(fakecloud_logs::state::LogsState::new(
+                "123456789012",
+                "us-east-1",
+            ))),
+        )
+    }
+
+    fn make_request(action: &str, params: HashMap<String, String>) -> AwsRequest {
+        AwsRequest {
+            service: "cloudformation".to_string(),
+            action: action.to_string(),
+            region: "us-east-1".to_string(),
+            account_id: "123456789012".to_string(),
+            request_id: "test-request-id".to_string(),
+            headers: HeaderMap::new(),
+            query_params: params,
+            body: bytes::Bytes::new(),
+            path_segments: vec![],
+            raw_path: "/".to_string(),
+            method: http::Method::POST,
+            is_query_protocol: true,
+            access_key_id: None,
+        }
+    }
+
+    #[test]
+    fn update_stack_sets_failed_status_on_resource_error() {
+        let svc = make_service();
+
+        // Create a stack with just a queue
+        let mut create_params = HashMap::new();
+        create_params.insert("StackName".to_string(), "test-stack".to_string());
+        create_params.insert(
+            "TemplateBody".to_string(),
+            r#"{"Resources":{"MyQueue":{"Type":"AWS::SQS::Queue","Properties":{"QueueName":"q1"}}}}"#.to_string(),
+        );
+        let req = make_request("CreateStack", create_params);
+        let result = svc.create_stack(&req);
+        assert!(result.is_ok());
+
+        // Update stack adding an SNS subscription with a non-existent topic
+        let mut update_params = HashMap::new();
+        update_params.insert("StackName".to_string(), "test-stack".to_string());
+        update_params.insert(
+            "TemplateBody".to_string(),
+            r#"{"Resources":{"MyQueue":{"Type":"AWS::SQS::Queue","Properties":{"QueueName":"q1"}},"BadSub":{"Type":"AWS::SNS::Subscription","Properties":{"TopicArn":"arn:aws:sns:us-east-1:123456789012:nope","Protocol":"sqs","Endpoint":"arn:aws:sqs:us-east-1:123456789012:q1"}}}}"#.to_string(),
+        );
+        let req = make_request("UpdateStack", update_params);
+        let result = svc.update_stack(&req);
+
+        // Should return an error
+        assert!(result.is_err());
+
+        // Stack status should be UPDATE_FAILED
+        let state = svc.state.read();
+        let stack = state.stacks.get("test-stack").unwrap();
+        assert_eq!(stack.status, "UPDATE_FAILED");
+    }
+
+    #[test]
+    fn create_stack_resolves_ref_to_physical_id() {
+        let svc = make_service();
+
+        // Template where subscription Refs the topic
+        let template = r#"{
+            "Resources": {
+                "MyTopic": {
+                    "Type": "AWS::SNS::Topic",
+                    "Properties": { "TopicName": "ref-test-topic" }
+                },
+                "MySub": {
+                    "Type": "AWS::SNS::Subscription",
+                    "Properties": {
+                        "TopicArn": { "Ref": "MyTopic" },
+                        "Protocol": "sqs",
+                        "Endpoint": "arn:aws:sqs:us-east-1:123456789012:some-queue"
+                    }
+                }
+            }
+        }"#;
+
+        let mut params = HashMap::new();
+        params.insert("StackName".to_string(), "ref-stack".to_string());
+        params.insert("TemplateBody".to_string(), template.to_string());
+        let req = make_request("CreateStack", params);
+        let result = svc.create_stack(&req);
+        assert!(result.is_ok(), "CreateStack failed: {:?}", result.err());
+
+        // Verify both resources were created
+        let state = svc.state.read();
+        let stack = state.stacks.get("ref-stack").unwrap();
+        assert_eq!(stack.resources.len(), 2);
+        assert_eq!(stack.status, "CREATE_COMPLETE");
+
+        // The subscription's physical ID should be an ARN (not just "MyTopic")
+        let sub = stack
+            .resources
+            .iter()
+            .find(|r| r.logical_id == "MySub")
+            .unwrap();
+        assert!(
+            sub.physical_id.contains("ref-test-topic"),
+            "Subscription physical ID should reference the topic ARN, got: {}",
+            sub.physical_id
+        );
     }
 }
