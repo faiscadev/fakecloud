@@ -2,6 +2,7 @@ mod helpers;
 
 use aws_sdk_s3::primitives::ByteStream;
 use helpers::TestServer;
+use std::time::Duration;
 
 #[tokio::test]
 async fn s3_create_list_delete_bucket() {
@@ -2051,5 +2052,303 @@ async fn s3_list_parts_invalid_argument() {
     assert!(
         body.contains("InvalidArgument"),
         "Expected InvalidArgument error for non-numeric part-number-marker, got: {body}"
+    );
+}
+
+#[tokio::test]
+async fn s3_access_logging_generates_logs() {
+    let server = TestServer::start().await;
+    let client = server.s3_client().await;
+
+    // Create source and log buckets
+    client
+        .create_bucket()
+        .bucket("source-bucket")
+        .send()
+        .await
+        .unwrap();
+    client
+        .create_bucket()
+        .bucket("log-bucket")
+        .send()
+        .await
+        .unwrap();
+
+    // Enable logging on source-bucket -> log-bucket with prefix "logs/"
+    let logging_config = r#"{
+        "LoggingEnabled": {
+            "TargetBucket": "log-bucket",
+            "TargetPrefix": "logs/"
+        }
+    }"#;
+    let result = server
+        .aws_cli(&[
+            "s3api",
+            "put-bucket-logging",
+            "--bucket",
+            "source-bucket",
+            "--bucket-logging-status",
+            logging_config,
+        ])
+        .await;
+    assert!(
+        result.success(),
+        "put-bucket-logging failed: {}",
+        result.stderr_text()
+    );
+
+    // Put an object in source-bucket to trigger logging
+    client
+        .put_object()
+        .bucket("source-bucket")
+        .key("hello.txt")
+        .body(ByteStream::from_static(b"hello world"))
+        .send()
+        .await
+        .unwrap();
+
+    // GET the object to trigger another log entry
+    client
+        .get_object()
+        .bucket("source-bucket")
+        .key("hello.txt")
+        .send()
+        .await
+        .unwrap();
+
+    // Small delay to ensure logs are written
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Check that log objects exist in log-bucket with prefix "logs/"
+    let log_objects = client
+        .list_objects_v2()
+        .bucket("log-bucket")
+        .prefix("logs/")
+        .send()
+        .await
+        .unwrap();
+
+    let contents = log_objects.contents();
+    assert!(
+        !contents.is_empty(),
+        "Expected access log objects in log-bucket/logs/, found none"
+    );
+
+    // Verify the log content contains expected fields
+    let first_log_key = contents[0].key().unwrap();
+    let log_obj = client
+        .get_object()
+        .bucket("log-bucket")
+        .key(first_log_key)
+        .send()
+        .await
+        .unwrap();
+    let log_body =
+        String::from_utf8(log_obj.body.collect().await.unwrap().into_bytes().to_vec()).unwrap();
+
+    assert!(
+        log_body.contains("source-bucket"),
+        "Log entry should contain source bucket name, got: {log_body}"
+    );
+    assert!(
+        log_body.contains("REST."),
+        "Log entry should contain REST operation, got: {log_body}"
+    );
+}
+
+#[tokio::test]
+async fn s3_inventory_generates_report() {
+    let server = TestServer::start().await;
+    let client = server.s3_client().await;
+
+    // Create source and destination buckets
+    client
+        .create_bucket()
+        .bucket("inv-source")
+        .send()
+        .await
+        .unwrap();
+    client
+        .create_bucket()
+        .bucket("inv-dest")
+        .send()
+        .await
+        .unwrap();
+
+    // Put some objects in the source bucket
+    for i in 0..3 {
+        client
+            .put_object()
+            .bucket("inv-source")
+            .key(format!("file-{i}.txt"))
+            .body(ByteStream::from_static(b"data"))
+            .send()
+            .await
+            .unwrap();
+    }
+
+    // Configure inventory
+    let inv_config = r#"<InventoryConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+        <Id>my-inventory</Id>
+        <IsEnabled>true</IsEnabled>
+        <Destination>
+            <S3BucketDestination>
+                <Bucket>arn:aws:s3:::inv-dest</Bucket>
+                <Format>CSV</Format>
+                <Prefix>inventory/</Prefix>
+            </S3BucketDestination>
+        </Destination>
+        <Schedule><Frequency>Daily</Frequency></Schedule>
+        <IncludedObjectVersions>Current</IncludedObjectVersions>
+    </InventoryConfiguration>"#;
+
+    // Use raw HTTP to put inventory config (CLI escaping is complex)
+    let http = reqwest::Client::new();
+    let url = format!("{}/inv-source?inventory&id=my-inventory", server.endpoint());
+    let resp = http
+        .put(&url)
+        .header("Authorization", "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20240101/us-east-1/s3/aws4_request, SignedHeaders=host, Signature=fake")
+        .body(inv_config)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "put-bucket-inventory failed");
+
+    // Check that inventory report was generated in dest bucket
+    let report_objects = client
+        .list_objects_v2()
+        .bucket("inv-dest")
+        .prefix("inventory/")
+        .send()
+        .await
+        .unwrap();
+
+    let contents = report_objects.contents();
+    assert!(
+        !contents.is_empty(),
+        "Expected inventory report in inv-dest/inventory/, found none"
+    );
+
+    // Read the report and verify CSV content
+    let report_key = contents[0].key().unwrap();
+    let report_obj = client
+        .get_object()
+        .bucket("inv-dest")
+        .key(report_key)
+        .send()
+        .await
+        .unwrap();
+    let report_body = String::from_utf8(
+        report_obj
+            .body
+            .collect()
+            .await
+            .unwrap()
+            .into_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+
+    // Verify CSV header
+    assert!(
+        report_body
+            .contains("\"Bucket\",\"Key\",\"Size\",\"LastModifiedDate\",\"ETag\",\"StorageClass\""),
+        "Report should contain CSV header, got: {report_body}"
+    );
+    // Verify each file is listed
+    assert!(
+        report_body.contains("file-0.txt"),
+        "Report should list file-0.txt"
+    );
+    assert!(
+        report_body.contains("file-1.txt"),
+        "Report should list file-1.txt"
+    );
+    assert!(
+        report_body.contains("file-2.txt"),
+        "Report should list file-2.txt"
+    );
+}
+
+#[tokio::test]
+async fn s3_website_serves_index() {
+    let server = TestServer::start().await;
+    let client = server.s3_client().await;
+
+    // Create bucket
+    client
+        .create_bucket()
+        .bucket("website-bucket")
+        .send()
+        .await
+        .unwrap();
+
+    // Configure website hosting
+    let website_config = r#"<WebsiteConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+        <IndexDocument><Suffix>index.html</Suffix></IndexDocument>
+        <ErrorDocument><Key>error.html</Key></ErrorDocument>
+    </WebsiteConfiguration>"#;
+
+    let http = reqwest::Client::new();
+    let url = format!("{}/website-bucket?website", server.endpoint());
+    let resp = http
+        .put(&url)
+        .header("Authorization", "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20240101/us-east-1/s3/aws4_request, SignedHeaders=host, Signature=fake")
+        .body(website_config)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "put-bucket-website failed");
+
+    // Put index.html
+    client
+        .put_object()
+        .bucket("website-bucket")
+        .key("index.html")
+        .content_type("text/html")
+        .body(ByteStream::from_static(b"<h1>Welcome</h1>"))
+        .send()
+        .await
+        .unwrap();
+
+    // Put error.html
+    client
+        .put_object()
+        .bucket("website-bucket")
+        .key("error.html")
+        .content_type("text/html")
+        .body(ByteStream::from_static(b"<h1>Not Found</h1>"))
+        .send()
+        .await
+        .unwrap();
+
+    // GET / should serve index.html
+    let url = format!("{}/website-bucket", server.endpoint());
+    let resp = http
+        .get(&url)
+        .header("Authorization", "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20240101/us-east-1/s3/aws4_request, SignedHeaders=host, Signature=fake")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "GET / should return 200");
+    let body = resp.text().await.unwrap();
+    assert!(
+        body.contains("<h1>Welcome</h1>"),
+        "GET / should serve index.html content, got: {body}"
+    );
+
+    // GET /nonexistent should serve error.html with 404
+    let url = format!("{}/website-bucket/nonexistent", server.endpoint());
+    let resp = http
+        .get(&url)
+        .header("Authorization", "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20240101/us-east-1/s3/aws4_request, SignedHeaders=host, Signature=fake")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404, "GET /nonexistent should return 404");
+    let body = resp.text().await.unwrap();
+    assert!(
+        body.contains("<h1>Not Found</h1>"),
+        "GET /nonexistent should serve error.html content, got: {body}"
     );
 }

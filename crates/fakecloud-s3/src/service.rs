@@ -14,6 +14,8 @@ use fakecloud_kms::state::SharedKmsState;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
 
+use crate::inventory;
+use crate::logging;
 use crate::state::{AclGrant, MultipartUpload, S3Bucket, S3Object, SharedS3State, UploadPart};
 
 pub struct S3Service {
@@ -340,6 +342,32 @@ impl AwsService for S3Service {
                     }
                 } else if req.query_params.get("list-type").map(|s| s.as_str()) == Some("2") {
                     self.list_objects_v2(&req, b)
+                } else if req.query_params.is_empty() {
+                    // If bucket has website config and no query params, serve index document
+                    let website_config = {
+                        let state = self.state.read();
+                        state
+                            .buckets
+                            .get(b)
+                            .and_then(|bkt| bkt.website_config.clone())
+                    };
+                    if let Some(ref config) = website_config {
+                        if let Some(index_doc) = extract_xml_value(config, "Suffix").or_else(|| {
+                            extract_xml_value(config, "IndexDocument").and_then(|inner| {
+                                let open = "<Suffix>";
+                                let close = "</Suffix>";
+                                let s = inner.find(open)? + open.len();
+                                let e = inner.find(close)?;
+                                Some(inner[s..e].trim().to_string())
+                            })
+                        }) {
+                            self.serve_website_object(&req, b, &index_doc, config)
+                        } else {
+                            self.list_objects_v1(&req, b)
+                        }
+                    } else {
+                        self.list_objects_v1(&req, b)
+                    }
                 } else {
                     self.list_objects_v1(&req, b)
                 }
@@ -373,7 +401,36 @@ impl AwsService for S3Service {
                 } else if req.query_params.contains_key("attributes") {
                     self.get_object_attributes(&req, b, k)
                 } else {
-                    self.get_object(&req, b, k)
+                    let result = self.get_object(&req, b, k);
+                    // If object not found and bucket has website config, serve error document
+                    let is_not_found = matches!(
+                        &result,
+                        Err(e) if e.code() == "NoSuchKey"
+                    );
+                    if is_not_found {
+                        let website_config = {
+                            let state = self.state.read();
+                            state
+                                .buckets
+                                .get(b)
+                                .and_then(|bkt| bkt.website_config.clone())
+                        };
+                        if let Some(ref config) = website_config {
+                            if let Some(error_key) = extract_xml_value(config, "ErrorDocument")
+                                .and_then(|inner| {
+                                    let open = "<Key>";
+                                    let close = "</Key>";
+                                    let s = inner.find(open)? + open.len();
+                                    let e = inner.find(close)?;
+                                    Some(inner[s..e].trim().to_string())
+                                })
+                                .or_else(|| extract_xml_value(config, "Key"))
+                            {
+                                return self.serve_website_error(&req, b, &error_key);
+                            }
+                        }
+                    }
+                    result
                 }
             }
             (&Method::DELETE, Some(b), Some(k)) => {
@@ -428,6 +485,25 @@ impl AwsService for S3Service {
                     }
                 }
             }
+        }
+
+        // Write S3 access log entry if the source bucket has logging enabled
+        if let Some(b_name) = bucket {
+            let status_code = match &result {
+                Ok(resp) => resp.status.as_u16(),
+                Err(e) => e.status().as_u16(),
+            };
+            let op = logging::operation_name(&req.method, key.as_deref());
+            logging::maybe_write_access_log(
+                &self.state,
+                b_name,
+                op,
+                key.as_deref(),
+                status_code,
+                &req.request_id,
+                req.method.as_str(),
+                &req.raw_path,
+            );
         }
 
         result
@@ -2179,12 +2255,16 @@ impl S3Service {
         let inv_id = extract_xml_value(&body_str, "Id")
             .or_else(|| req.query_params.get("id").cloned())
             .unwrap_or_default();
-        let mut state = self.state.write();
-        let b = state
-            .buckets
-            .get_mut(bucket)
-            .ok_or_else(|| no_such_bucket(bucket))?;
-        b.inventory_configs.insert(inv_id, body_str);
+        {
+            let mut state = self.state.write();
+            let b = state
+                .buckets
+                .get_mut(bucket)
+                .ok_or_else(|| no_such_bucket(bucket))?;
+            b.inventory_configs.insert(inv_id.clone(), body_str);
+        }
+        // Generate the inventory report immediately so tests can verify it
+        inventory::generate_inventory_report(&self.state, bucket, &inv_id);
         Ok(empty_response(StatusCode::OK))
     }
 
@@ -2900,6 +2980,49 @@ impl S3Service {
             body: response_body,
             headers,
         })
+    }
+
+    /// Serve a website object (index or error document) from the bucket.
+    fn serve_website_object(
+        &self,
+        req: &AwsRequest,
+        bucket: &str,
+        key: &str,
+        website_config: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let result = self.get_object(req, bucket, key);
+        if result.is_err() {
+            // If index doc doesn't exist either, try error document
+            if let Some(error_key) = extract_xml_value(website_config, "ErrorDocument")
+                .and_then(|inner| {
+                    let open = "<Key>";
+                    let close = "</Key>";
+                    let s = inner.find(open)? + open.len();
+                    let e = inner.find(close)?;
+                    Some(inner[s..e].trim().to_string())
+                })
+                .or_else(|| extract_xml_value(website_config, "Key"))
+            {
+                return self.serve_website_error(req, bucket, &error_key);
+            }
+        }
+        result
+    }
+
+    /// Serve the website error document with a 404 status.
+    fn serve_website_error(
+        &self,
+        req: &AwsRequest,
+        bucket: &str,
+        error_key: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        match self.get_object(req, bucket, error_key) {
+            Ok(mut resp) => {
+                resp.status = StatusCode::NOT_FOUND;
+                Ok(resp)
+            }
+            Err(e) => Err(e),
+        }
     }
 
     fn delete_object(
