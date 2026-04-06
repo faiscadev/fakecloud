@@ -74,6 +74,9 @@ pub struct DynamoTable {
     pub item_count: i64,
     pub size_bytes: i64,
     pub billing_mode: String, // PROVISIONED or PAY_PER_REQUEST
+    pub ttl_attribute: Option<String>,
+    pub ttl_enabled: bool,
+    pub resource_policy: Option<String>,
 }
 
 impl DynamoTable {

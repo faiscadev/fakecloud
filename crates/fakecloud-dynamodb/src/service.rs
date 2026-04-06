@@ -132,6 +132,9 @@ impl DynamoDbService {
             item_count: 0,
             size_bytes: 0,
             billing_mode: billing_mode.clone(),
+            ttl_attribute: None,
+            ttl_enabled: false,
+            resource_policy: None,
         };
 
         state.tables.insert(table_name, table);
@@ -896,6 +899,443 @@ impl DynamoDbService {
 
         Self::ok_json(json!({ "Tags": tags }))
     }
+
+    // ── Transactions ────────────────────────────────────────────────────
+
+    fn transact_get_items(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = Self::parse_body(req)?;
+        let transact_items = body["TransactItems"].as_array().ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ValidationException",
+                "TransactItems is required",
+            )
+        })?;
+
+        let state = self.state.read();
+        let mut responses: Vec<Value> = Vec::new();
+
+        for ti in transact_items {
+            let get = &ti["Get"];
+            let table_name = get["TableName"].as_str().ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationException",
+                    "TableName is required in Get",
+                )
+            })?;
+            let key: HashMap<String, AttributeValue> =
+                serde_json::from_value(get["Key"].clone()).unwrap_or_default();
+
+            let table = get_table(&state.tables, table_name)?;
+            match table.find_item_index(&key) {
+                Some(idx) => {
+                    responses.push(json!({ "Item": table.items[idx] }));
+                }
+                None => {
+                    responses.push(json!({}));
+                }
+            }
+        }
+
+        Self::ok_json(json!({ "Responses": responses }))
+    }
+
+    fn transact_write_items(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = Self::parse_body(req)?;
+        let transact_items = body["TransactItems"].as_array().ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ValidationException",
+                "TransactItems is required",
+            )
+        })?;
+
+        let mut state = self.state.write();
+
+        // First pass: validate all conditions
+        let mut cancellation_reasons: Vec<Value> = Vec::new();
+        let mut any_failed = false;
+
+        for ti in transact_items {
+            if let Some(put) = ti.get("Put") {
+                let table_name = put["TableName"].as_str().unwrap_or_default();
+                let item: HashMap<String, AttributeValue> =
+                    serde_json::from_value(put["Item"].clone()).unwrap_or_default();
+                let condition = put["ConditionExpression"].as_str();
+
+                if let Some(cond) = condition {
+                    let table = get_table(&state.tables, table_name)?;
+                    let expr_attr_names = parse_expression_attribute_names(put);
+                    let expr_attr_values = parse_expression_attribute_values(put);
+                    let key = extract_key(table, &item);
+                    let existing = table.find_item_index(&key).map(|i| &table.items[i]);
+                    if evaluate_condition(cond, existing, &expr_attr_names, &expr_attr_values)
+                        .is_err()
+                    {
+                        cancellation_reasons.push(json!({
+                            "Code": "ConditionalCheckFailed",
+                            "Message": "The conditional request failed"
+                        }));
+                        any_failed = true;
+                        continue;
+                    }
+                }
+                cancellation_reasons.push(json!({ "Code": "None" }));
+            } else if let Some(delete) = ti.get("Delete") {
+                let table_name = delete["TableName"].as_str().unwrap_or_default();
+                let key: HashMap<String, AttributeValue> =
+                    serde_json::from_value(delete["Key"].clone()).unwrap_or_default();
+                let condition = delete["ConditionExpression"].as_str();
+
+                if let Some(cond) = condition {
+                    let table = get_table(&state.tables, table_name)?;
+                    let expr_attr_names = parse_expression_attribute_names(delete);
+                    let expr_attr_values = parse_expression_attribute_values(delete);
+                    let existing = table.find_item_index(&key).map(|i| &table.items[i]);
+                    if evaluate_condition(cond, existing, &expr_attr_names, &expr_attr_values)
+                        .is_err()
+                    {
+                        cancellation_reasons.push(json!({
+                            "Code": "ConditionalCheckFailed",
+                            "Message": "The conditional request failed"
+                        }));
+                        any_failed = true;
+                        continue;
+                    }
+                }
+                cancellation_reasons.push(json!({ "Code": "None" }));
+            } else if let Some(update) = ti.get("Update") {
+                let table_name = update["TableName"].as_str().unwrap_or_default();
+                let key: HashMap<String, AttributeValue> =
+                    serde_json::from_value(update["Key"].clone()).unwrap_or_default();
+                let condition = update["ConditionExpression"].as_str();
+
+                if let Some(cond) = condition {
+                    let table = get_table(&state.tables, table_name)?;
+                    let expr_attr_names = parse_expression_attribute_names(update);
+                    let expr_attr_values = parse_expression_attribute_values(update);
+                    let existing = table.find_item_index(&key).map(|i| &table.items[i]);
+                    if evaluate_condition(cond, existing, &expr_attr_names, &expr_attr_values)
+                        .is_err()
+                    {
+                        cancellation_reasons.push(json!({
+                            "Code": "ConditionalCheckFailed",
+                            "Message": "The conditional request failed"
+                        }));
+                        any_failed = true;
+                        continue;
+                    }
+                }
+                cancellation_reasons.push(json!({ "Code": "None" }));
+            } else if let Some(check) = ti.get("ConditionCheck") {
+                let table_name = check["TableName"].as_str().unwrap_or_default();
+                let key: HashMap<String, AttributeValue> =
+                    serde_json::from_value(check["Key"].clone()).unwrap_or_default();
+                let cond = check["ConditionExpression"].as_str().unwrap_or_default();
+
+                let table = get_table(&state.tables, table_name)?;
+                let expr_attr_names = parse_expression_attribute_names(check);
+                let expr_attr_values = parse_expression_attribute_values(check);
+                let existing = table.find_item_index(&key).map(|i| &table.items[i]);
+                if evaluate_condition(cond, existing, &expr_attr_names, &expr_attr_values).is_err()
+                {
+                    cancellation_reasons.push(json!({
+                        "Code": "ConditionalCheckFailed",
+                        "Message": "The conditional request failed"
+                    }));
+                    any_failed = true;
+                    continue;
+                }
+                cancellation_reasons.push(json!({ "Code": "None" }));
+            } else {
+                cancellation_reasons.push(json!({ "Code": "None" }));
+            }
+        }
+
+        if any_failed {
+            let error_body = json!({
+                "__type": "TransactionCanceledException",
+                "message": "Transaction cancelled, please refer cancellation reasons for specific reasons [ConditionalCheckFailed]",
+                "CancellationReasons": cancellation_reasons
+            });
+            return Ok(AwsResponse::json(
+                StatusCode::BAD_REQUEST,
+                serde_json::to_vec(&error_body).unwrap(),
+            ));
+        }
+
+        // Second pass: apply all writes
+        for ti in transact_items {
+            if let Some(put) = ti.get("Put") {
+                let table_name = put["TableName"].as_str().unwrap_or_default();
+                let item: HashMap<String, AttributeValue> =
+                    serde_json::from_value(put["Item"].clone()).unwrap_or_default();
+                let table = get_table_mut(&mut state.tables, table_name)?;
+                let key = extract_key(table, &item);
+                if let Some(idx) = table.find_item_index(&key) {
+                    table.items[idx] = item;
+                } else {
+                    table.items.push(item);
+                }
+                table.recalculate_stats();
+            } else if let Some(delete) = ti.get("Delete") {
+                let table_name = delete["TableName"].as_str().unwrap_or_default();
+                let key: HashMap<String, AttributeValue> =
+                    serde_json::from_value(delete["Key"].clone()).unwrap_or_default();
+                let table = get_table_mut(&mut state.tables, table_name)?;
+                if let Some(idx) = table.find_item_index(&key) {
+                    table.items.remove(idx);
+                }
+                table.recalculate_stats();
+            } else if let Some(update) = ti.get("Update") {
+                let table_name = update["TableName"].as_str().unwrap_or_default();
+                let key: HashMap<String, AttributeValue> =
+                    serde_json::from_value(update["Key"].clone()).unwrap_or_default();
+                let update_expression = update["UpdateExpression"].as_str();
+                let expr_attr_names = parse_expression_attribute_names(update);
+                let expr_attr_values = parse_expression_attribute_values(update);
+
+                let table = get_table_mut(&mut state.tables, table_name)?;
+                let idx = match table.find_item_index(&key) {
+                    Some(i) => i,
+                    None => {
+                        let mut new_item = HashMap::new();
+                        for (k, v) in &key {
+                            new_item.insert(k.clone(), v.clone());
+                        }
+                        table.items.push(new_item);
+                        table.items.len() - 1
+                    }
+                };
+
+                if let Some(expr) = update_expression {
+                    apply_update_expression(
+                        &mut table.items[idx],
+                        expr,
+                        &expr_attr_names,
+                        &expr_attr_values,
+                    )?;
+                }
+                table.recalculate_stats();
+            }
+            // ConditionCheck: no write needed
+        }
+
+        Self::ok_json(json!({}))
+    }
+
+    fn execute_statement(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = Self::parse_body(req)?;
+        let statement = require_str(&body, "Statement")?;
+        let parameters = body["Parameters"].as_array().cloned().unwrap_or_default();
+
+        execute_partiql_statement(&self.state, statement, &parameters)
+    }
+
+    fn batch_execute_statement(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = Self::parse_body(req)?;
+        let statements = body["Statements"].as_array().ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ValidationException",
+                "Statements is required",
+            )
+        })?;
+
+        let mut responses: Vec<Value> = Vec::new();
+        for stmt_obj in statements {
+            let statement = stmt_obj["Statement"].as_str().unwrap_or_default();
+            let parameters = stmt_obj["Parameters"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+
+            match execute_partiql_statement(&self.state, statement, &parameters) {
+                Ok(resp) => {
+                    let resp_body: Value = serde_json::from_slice(&resp.body).unwrap_or_default();
+                    responses.push(resp_body);
+                }
+                Err(e) => {
+                    responses.push(json!({
+                        "Error": {
+                            "Code": "ValidationException",
+                            "Message": e.to_string()
+                        }
+                    }));
+                }
+            }
+        }
+
+        Self::ok_json(json!({ "Responses": responses }))
+    }
+
+    fn execute_transaction(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = Self::parse_body(req)?;
+        let transact_statements = body["TransactStatements"].as_array().ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ValidationException",
+                "TransactStatements is required",
+            )
+        })?;
+
+        // Collect all results; if any fail, return TransactionCanceledException
+        let mut results: Vec<Result<Value, String>> = Vec::new();
+        for stmt_obj in transact_statements {
+            let statement = stmt_obj["Statement"].as_str().unwrap_or_default();
+            let parameters = stmt_obj["Parameters"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+
+            match execute_partiql_statement(&self.state, statement, &parameters) {
+                Ok(resp) => {
+                    let resp_body: Value = serde_json::from_slice(&resp.body).unwrap_or_default();
+                    results.push(Ok(resp_body));
+                }
+                Err(e) => {
+                    results.push(Err(e.to_string()));
+                }
+            }
+        }
+
+        let any_failed = results.iter().any(|r| r.is_err());
+        if any_failed {
+            let reasons: Vec<Value> = results
+                .iter()
+                .map(|r| match r {
+                    Ok(_) => json!({ "Code": "None" }),
+                    Err(msg) => json!({
+                        "Code": "ValidationException",
+                        "Message": msg
+                    }),
+                })
+                .collect();
+            let error_body = json!({
+                "__type": "TransactionCanceledException",
+                "message": "Transaction cancelled due to validation errors",
+                "CancellationReasons": reasons
+            });
+            return Ok(AwsResponse::json(
+                StatusCode::BAD_REQUEST,
+                serde_json::to_vec(&error_body).unwrap(),
+            ));
+        }
+
+        let responses: Vec<Value> = results.into_iter().filter_map(|r| r.ok()).collect();
+        Self::ok_json(json!({ "Responses": responses }))
+    }
+
+    // ── TTL ─────────────────────────────────────────────────────────────
+
+    fn update_time_to_live(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = Self::parse_body(req)?;
+        let table_name = require_str(&body, "TableName")?;
+        let spec = &body["TimeToLiveSpecification"];
+        let attr_name = spec["AttributeName"].as_str().ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ValidationException",
+                "TimeToLiveSpecification.AttributeName is required",
+            )
+        })?;
+        let enabled = spec["Enabled"].as_bool().ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ValidationException",
+                "TimeToLiveSpecification.Enabled is required",
+            )
+        })?;
+
+        let mut state = self.state.write();
+        let table = get_table_mut(&mut state.tables, table_name)?;
+
+        if enabled {
+            table.ttl_attribute = Some(attr_name.to_string());
+            table.ttl_enabled = true;
+        } else {
+            table.ttl_enabled = false;
+        }
+
+        Self::ok_json(json!({
+            "TimeToLiveSpecification": {
+                "AttributeName": attr_name,
+                "Enabled": enabled
+            }
+        }))
+    }
+
+    fn describe_time_to_live(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = Self::parse_body(req)?;
+        let table_name = require_str(&body, "TableName")?;
+
+        let state = self.state.read();
+        let table = get_table(&state.tables, table_name)?;
+
+        let status = if table.ttl_enabled {
+            "ENABLED"
+        } else {
+            "DISABLED"
+        };
+
+        let mut desc = json!({
+            "TimeToLiveDescription": {
+                "TimeToLiveStatus": status
+            }
+        });
+
+        if let Some(ref attr) = table.ttl_attribute {
+            desc["TimeToLiveDescription"]["AttributeName"] = json!(attr);
+        }
+
+        Self::ok_json(desc)
+    }
+
+    // ── Resource Policies ───────────────────────────────────────────────
+
+    fn put_resource_policy(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = Self::parse_body(req)?;
+        let resource_arn = require_str(&body, "ResourceArn")?;
+        let policy = require_str(&body, "Policy")?;
+
+        let mut state = self.state.write();
+        let table = find_table_by_arn_mut(&mut state.tables, resource_arn)?;
+        table.resource_policy = Some(policy.to_string());
+
+        let revision_id = uuid::Uuid::new_v4().to_string();
+        Self::ok_json(json!({ "RevisionId": revision_id }))
+    }
+
+    fn get_resource_policy(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = Self::parse_body(req)?;
+        let resource_arn = require_str(&body, "ResourceArn")?;
+
+        let state = self.state.read();
+        let table = find_table_by_arn(&state.tables, resource_arn)?;
+
+        match &table.resource_policy {
+            Some(policy) => {
+                let revision_id = uuid::Uuid::new_v4().to_string();
+                Self::ok_json(json!({
+                    "Policy": policy,
+                    "RevisionId": revision_id
+                }))
+            }
+            None => Self::ok_json(json!({ "Policy": null })),
+        }
+    }
+
+    fn delete_resource_policy(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = Self::parse_body(req)?;
+        let resource_arn = require_str(&body, "ResourceArn")?;
+
+        let mut state = self.state.write();
+        let table = find_table_by_arn_mut(&mut state.tables, resource_arn)?;
+        table.resource_policy = None;
+
+        Self::ok_json(json!({}))
+    }
 }
 
 #[async_trait]
@@ -922,6 +1362,16 @@ impl AwsService for DynamoDbService {
             "TagResource" => self.tag_resource(&req),
             "UntagResource" => self.untag_resource(&req),
             "ListTagsOfResource" => self.list_tags_of_resource(&req),
+            "TransactGetItems" => self.transact_get_items(&req),
+            "TransactWriteItems" => self.transact_write_items(&req),
+            "ExecuteStatement" => self.execute_statement(&req),
+            "BatchExecuteStatement" => self.batch_execute_statement(&req),
+            "ExecuteTransaction" => self.execute_transaction(&req),
+            "UpdateTimeToLive" => self.update_time_to_live(&req),
+            "DescribeTimeToLive" => self.describe_time_to_live(&req),
+            "PutResourcePolicy" => self.put_resource_policy(&req),
+            "GetResourcePolicy" => self.get_resource_policy(&req),
+            "DeleteResourcePolicy" => self.delete_resource_policy(&req),
             _ => Err(AwsServiceError::action_not_implemented(
                 "dynamodb",
                 &req.action,
@@ -947,6 +1397,16 @@ impl AwsService for DynamoDbService {
             "TagResource",
             "UntagResource",
             "ListTagsOfResource",
+            "TransactGetItems",
+            "TransactWriteItems",
+            "ExecuteStatement",
+            "BatchExecuteStatement",
+            "ExecuteTransaction",
+            "UpdateTimeToLive",
+            "DescribeTimeToLive",
+            "PutResourcePolicy",
+            "GetResourcePolicy",
+            "DeleteResourcePolicy",
         ]
     }
 }
@@ -2262,6 +2722,384 @@ fn build_table_description_json(
     desc
 }
 
+fn execute_partiql_statement(
+    state: &SharedDynamoDbState,
+    statement: &str,
+    parameters: &[Value],
+) -> Result<AwsResponse, AwsServiceError> {
+    let trimmed = statement.trim();
+    let upper = trimmed.to_ascii_uppercase();
+
+    if upper.starts_with("SELECT") {
+        execute_partiql_select(state, trimmed, parameters)
+    } else if upper.starts_with("INSERT") {
+        execute_partiql_insert(state, trimmed, parameters)
+    } else if upper.starts_with("UPDATE") {
+        execute_partiql_update(state, trimmed, parameters)
+    } else if upper.starts_with("DELETE") {
+        execute_partiql_delete(state, trimmed, parameters)
+    } else {
+        Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "ValidationException",
+            format!("Unsupported PartiQL statement: {trimmed}"),
+        ))
+    }
+}
+
+/// Parse a simple `SELECT * FROM tablename WHERE pk = 'value'` or with parameters.
+fn execute_partiql_select(
+    state: &SharedDynamoDbState,
+    statement: &str,
+    parameters: &[Value],
+) -> Result<AwsResponse, AwsServiceError> {
+    // Pattern: SELECT * FROM "tablename" [WHERE col = 'val' | WHERE col = ?]
+    let upper = statement.to_ascii_uppercase();
+    let from_pos = upper.find("FROM").ok_or_else(|| {
+        AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "ValidationException",
+            "Invalid SELECT statement: missing FROM",
+        )
+    })?;
+
+    let after_from = statement[from_pos + 4..].trim();
+    let (table_name, rest) = parse_partiql_table_name(after_from);
+
+    let state = state.read();
+    let table = get_table(&state.tables, &table_name)?;
+
+    let rest_upper = rest.trim().to_ascii_uppercase();
+    if rest_upper.starts_with("WHERE") {
+        let where_clause = rest.trim()[5..].trim();
+        let matched = evaluate_partiql_where(table, where_clause, parameters)?;
+        let items: Vec<Value> = matched.iter().map(|item| json!(item)).collect();
+        DynamoDbService::ok_json(json!({ "Items": items }))
+    } else {
+        // No WHERE, return all items
+        let items: Vec<Value> = table.items.iter().map(|item| json!(item)).collect();
+        DynamoDbService::ok_json(json!({ "Items": items }))
+    }
+}
+
+fn execute_partiql_insert(
+    state: &SharedDynamoDbState,
+    statement: &str,
+    parameters: &[Value],
+) -> Result<AwsResponse, AwsServiceError> {
+    // Pattern: INSERT INTO "tablename" VALUE {'pk': 'val', 'attr': 'val'}
+    // or with parameters: INSERT INTO "tablename" VALUE {'pk': ?, 'attr': ?}
+    let upper = statement.to_ascii_uppercase();
+    let into_pos = upper.find("INTO").ok_or_else(|| {
+        AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "ValidationException",
+            "Invalid INSERT statement: missing INTO",
+        )
+    })?;
+
+    let after_into = statement[into_pos + 4..].trim();
+    let (table_name, rest) = parse_partiql_table_name(after_into);
+
+    let rest_upper = rest.trim().to_ascii_uppercase();
+    let value_pos = rest_upper.find("VALUE").ok_or_else(|| {
+        AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "ValidationException",
+            "Invalid INSERT statement: missing VALUE",
+        )
+    })?;
+
+    let value_str = rest.trim()[value_pos + 5..].trim();
+    let item = parse_partiql_value_object(value_str, parameters)?;
+
+    let mut state = state.write();
+    let table = get_table_mut(&mut state.tables, &table_name)?;
+    let key = extract_key(table, &item);
+    if table.find_item_index(&key).is_some() {
+        // DynamoDB PartiQL INSERT fails if item exists
+        return Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "DuplicateItemException",
+            "Duplicate primary key exists in table",
+        ));
+    } else {
+        table.items.push(item);
+    }
+    table.recalculate_stats();
+
+    DynamoDbService::ok_json(json!({}))
+}
+
+fn execute_partiql_update(
+    state: &SharedDynamoDbState,
+    statement: &str,
+    parameters: &[Value],
+) -> Result<AwsResponse, AwsServiceError> {
+    // Pattern: UPDATE "tablename" SET attr='val' WHERE pk='val'
+    // or: UPDATE "tablename" SET attr=? WHERE pk=?
+    let after_update = statement[6..].trim(); // skip "UPDATE"
+    let (table_name, rest) = parse_partiql_table_name(after_update);
+
+    let rest_upper = rest.trim().to_ascii_uppercase();
+    let set_pos = rest_upper.find("SET").ok_or_else(|| {
+        AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "ValidationException",
+            "Invalid UPDATE statement: missing SET",
+        )
+    })?;
+
+    let after_set = rest.trim()[set_pos + 3..].trim();
+
+    // Split on WHERE
+    let where_pos = after_set.to_ascii_uppercase().find("WHERE");
+    let (set_clause, where_clause) = if let Some(wp) = where_pos {
+        (&after_set[..wp], after_set[wp + 5..].trim())
+    } else {
+        (after_set, "")
+    };
+
+    let mut state = state.write();
+    let table = get_table_mut(&mut state.tables, &table_name)?;
+
+    let matched_indices = if !where_clause.is_empty() {
+        find_partiql_where_indices(table, where_clause, parameters)?
+    } else {
+        (0..table.items.len()).collect()
+    };
+
+    // Parse SET assignments: attr=value, attr2=value2
+    let param_offset = count_params_in_str(where_clause);
+    let assignments: Vec<&str> = set_clause.split(',').collect();
+    for idx in &matched_indices {
+        let mut local_offset = param_offset;
+        for assignment in &assignments {
+            let assignment = assignment.trim();
+            if let Some((attr, val_str)) = assignment.split_once('=') {
+                let attr = attr.trim().trim_matches('"');
+                let val_str = val_str.trim();
+                let value = parse_partiql_literal(val_str, parameters, &mut local_offset);
+                if let Some(v) = value {
+                    table.items[*idx].insert(attr.to_string(), v);
+                }
+            }
+        }
+    }
+    table.recalculate_stats();
+
+    DynamoDbService::ok_json(json!({}))
+}
+
+fn execute_partiql_delete(
+    state: &SharedDynamoDbState,
+    statement: &str,
+    parameters: &[Value],
+) -> Result<AwsResponse, AwsServiceError> {
+    // Pattern: DELETE FROM "tablename" WHERE pk='val'
+    let upper = statement.to_ascii_uppercase();
+    let from_pos = upper.find("FROM").ok_or_else(|| {
+        AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "ValidationException",
+            "Invalid DELETE statement: missing FROM",
+        )
+    })?;
+
+    let after_from = statement[from_pos + 4..].trim();
+    let (table_name, rest) = parse_partiql_table_name(after_from);
+
+    let rest_upper = rest.trim().to_ascii_uppercase();
+    if !rest_upper.starts_with("WHERE") {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "ValidationException",
+            "DELETE requires a WHERE clause",
+        ));
+    }
+    let where_clause = rest.trim()[5..].trim();
+
+    let mut state = state.write();
+    let table = get_table_mut(&mut state.tables, &table_name)?;
+
+    let mut indices = find_partiql_where_indices(table, where_clause, parameters)?;
+    // Remove from highest index first to avoid invalidating lower indices
+    indices.sort_unstable();
+    indices.reverse();
+    for idx in indices {
+        table.items.remove(idx);
+    }
+    table.recalculate_stats();
+
+    DynamoDbService::ok_json(json!({}))
+}
+
+/// Parse a table name that may be quoted with double quotes.
+/// Returns (table_name, rest_of_string).
+fn parse_partiql_table_name(s: &str) -> (String, &str) {
+    let s = s.trim();
+    if let Some(stripped) = s.strip_prefix('"') {
+        // Quoted name
+        if let Some(end) = stripped.find('"') {
+            let name = &stripped[..end];
+            let rest = &stripped[end + 1..];
+            (name.to_string(), rest)
+        } else {
+            let end = s.find(' ').unwrap_or(s.len());
+            (s[..end].trim_matches('"').to_string(), &s[end..])
+        }
+    } else {
+        let end = s.find(|c: char| c.is_whitespace()).unwrap_or(s.len());
+        (s[..end].to_string(), &s[end..])
+    }
+}
+
+/// Evaluate a simple WHERE clause: `col = 'value'` or `col = ?`
+/// Returns matching items.
+fn evaluate_partiql_where<'a>(
+    table: &'a DynamoTable,
+    where_clause: &str,
+    parameters: &[Value],
+) -> Result<Vec<&'a HashMap<String, AttributeValue>>, AwsServiceError> {
+    let indices = find_partiql_where_indices(table, where_clause, parameters)?;
+    Ok(indices.iter().map(|i| &table.items[*i]).collect())
+}
+
+fn find_partiql_where_indices(
+    table: &DynamoTable,
+    where_clause: &str,
+    parameters: &[Value],
+) -> Result<Vec<usize>, AwsServiceError> {
+    // Support: col = 'val' AND col2 = 'val2'  or  col = ? AND col2 = ?
+    let conditions = if where_clause.contains(" AND ") {
+        where_clause.split(" AND ").collect::<Vec<_>>()
+    } else {
+        where_clause.split(" and ").collect::<Vec<_>>()
+    };
+
+    let mut param_idx = 0usize;
+    let mut parsed_conditions: Vec<(String, Value)> = Vec::new();
+
+    for cond in &conditions {
+        let cond = cond.trim();
+        if let Some((left, right)) = cond.split_once('=') {
+            let attr = left.trim().trim_matches('"').to_string();
+            let val_str = right.trim();
+            let value = parse_partiql_literal(val_str, parameters, &mut param_idx);
+            if let Some(v) = value {
+                parsed_conditions.push((attr, v));
+            }
+        }
+    }
+
+    let mut indices = Vec::new();
+    for (i, item) in table.items.iter().enumerate() {
+        let all_match = parsed_conditions
+            .iter()
+            .all(|(attr, expected)| item.get(attr) == Some(expected));
+        if all_match {
+            indices.push(i);
+        }
+    }
+
+    Ok(indices)
+}
+
+/// Parse a PartiQL literal value. Supports:
+/// - 'string' -> {"S": "string"}
+/// - 123 -> {"N": "123"}
+/// - ? -> parameter from list
+fn parse_partiql_literal(s: &str, parameters: &[Value], param_idx: &mut usize) -> Option<Value> {
+    let s = s.trim();
+    if s == "?" {
+        let idx = *param_idx;
+        *param_idx += 1;
+        parameters.get(idx).cloned()
+    } else if s.starts_with('\'') && s.ends_with('\'') && s.len() >= 2 {
+        let inner = &s[1..s.len() - 1];
+        Some(json!({"S": inner}))
+    } else if let Ok(n) = s.parse::<f64>() {
+        let num_str = if n == n.trunc() {
+            format!("{}", n as i64)
+        } else {
+            format!("{n}")
+        };
+        Some(json!({"N": num_str}))
+    } else {
+        None
+    }
+}
+
+/// Parse a PartiQL VALUE object like `{'pk': 'val1', 'attr': 'val2'}` or with ? params.
+fn parse_partiql_value_object(
+    s: &str,
+    parameters: &[Value],
+) -> Result<HashMap<String, AttributeValue>, AwsServiceError> {
+    let s = s.trim();
+    let inner = s
+        .strip_prefix('{')
+        .and_then(|s| s.strip_suffix('}'))
+        .ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ValidationException",
+                "Invalid VALUE: expected object literal",
+            )
+        })?;
+
+    let mut item = HashMap::new();
+    let mut param_idx = 0usize;
+
+    // Simple comma-separated key:value parsing
+    for pair in split_partiql_pairs(inner) {
+        let pair = pair.trim();
+        if pair.is_empty() {
+            continue;
+        }
+        if let Some((key_part, val_part)) = pair.split_once(':') {
+            let key = key_part
+                .trim()
+                .trim_matches('\'')
+                .trim_matches('"')
+                .to_string();
+            if let Some(val) = parse_partiql_literal(val_part.trim(), parameters, &mut param_idx) {
+                item.insert(key, val);
+            }
+        }
+    }
+
+    Ok(item)
+}
+
+/// Split PartiQL object pairs on commas, respecting nested braces and quotes.
+fn split_partiql_pairs(s: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut depth = 0;
+    let mut in_quote = false;
+
+    for (i, c) in s.char_indices() {
+        match c {
+            '\'' if !in_quote => in_quote = true,
+            '\'' if in_quote => in_quote = false,
+            '{' if !in_quote => depth += 1,
+            '}' if !in_quote => depth -= 1,
+            ',' if !in_quote && depth == 0 => {
+                parts.push(&s[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(&s[start..]);
+    parts
+}
+
+/// Count ? parameters in a string.
+fn count_params_in_str(s: &str) -> usize {
+    s.chars().filter(|c| *c == '?').count()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2531,5 +3369,249 @@ mod tests {
         let resp = svc.get_item(&req).unwrap();
         let body: Value = serde_json::from_slice(&resp.body).unwrap();
         assert!(body.get("Item").is_none(), "item should be deleted");
+    }
+
+    #[test]
+    fn transact_get_items_returns_existing_and_missing() {
+        let svc = make_service();
+        create_test_table(&svc);
+
+        // Put one item
+        let req = make_request(
+            "PutItem",
+            json!({
+                "TableName": "test-table",
+                "Item": {
+                    "pk": { "S": "exists" },
+                    "val": { "S": "hello" }
+                }
+            }),
+        );
+        svc.put_item(&req).unwrap();
+
+        let req = make_request(
+            "TransactGetItems",
+            json!({
+                "TransactItems": [
+                    { "Get": { "TableName": "test-table", "Key": { "pk": { "S": "exists" } } } },
+                    { "Get": { "TableName": "test-table", "Key": { "pk": { "S": "missing" } } } }
+                ]
+            }),
+        );
+        let resp = svc.transact_get_items(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let responses = body["Responses"].as_array().unwrap();
+        assert_eq!(responses.len(), 2);
+        assert_eq!(responses[0]["Item"]["pk"]["S"].as_str().unwrap(), "exists");
+        assert!(responses[1].get("Item").is_none());
+    }
+
+    #[test]
+    fn transact_write_items_put_and_delete() {
+        let svc = make_service();
+        create_test_table(&svc);
+
+        // Put initial item
+        let req = make_request(
+            "PutItem",
+            json!({
+                "TableName": "test-table",
+                "Item": {
+                    "pk": { "S": "to-delete" },
+                    "val": { "S": "bye" }
+                }
+            }),
+        );
+        svc.put_item(&req).unwrap();
+
+        // TransactWrite: put new + delete existing
+        let req = make_request(
+            "TransactWriteItems",
+            json!({
+                "TransactItems": [
+                    {
+                        "Put": {
+                            "TableName": "test-table",
+                            "Item": {
+                                "pk": { "S": "new-item" },
+                                "val": { "S": "hi" }
+                            }
+                        }
+                    },
+                    {
+                        "Delete": {
+                            "TableName": "test-table",
+                            "Key": { "pk": { "S": "to-delete" } }
+                        }
+                    }
+                ]
+            }),
+        );
+        let resp = svc.transact_write_items(&req).unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+
+        // Verify new item exists
+        let req = make_request(
+            "GetItem",
+            json!({
+                "TableName": "test-table",
+                "Key": { "pk": { "S": "new-item" } }
+            }),
+        );
+        let resp = svc.get_item(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["Item"]["val"]["S"].as_str().unwrap(), "hi");
+
+        // Verify deleted item is gone
+        let req = make_request(
+            "GetItem",
+            json!({
+                "TableName": "test-table",
+                "Key": { "pk": { "S": "to-delete" } }
+            }),
+        );
+        let resp = svc.get_item(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert!(body.get("Item").is_none());
+    }
+
+    #[test]
+    fn transact_write_items_condition_check_failure() {
+        let svc = make_service();
+        create_test_table(&svc);
+
+        // TransactWrite with a ConditionCheck that fails (item doesn't exist)
+        let req = make_request(
+            "TransactWriteItems",
+            json!({
+                "TransactItems": [
+                    {
+                        "ConditionCheck": {
+                            "TableName": "test-table",
+                            "Key": { "pk": { "S": "nonexistent" } },
+                            "ConditionExpression": "attribute_exists(pk)"
+                        }
+                    }
+                ]
+            }),
+        );
+        let resp = svc.transact_write_items(&req).unwrap();
+        // Should be a 400 error response
+        assert_eq!(resp.status, StatusCode::BAD_REQUEST);
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(
+            body["__type"].as_str().unwrap(),
+            "TransactionCanceledException"
+        );
+        assert!(body["CancellationReasons"].as_array().is_some());
+    }
+
+    #[test]
+    fn update_and_describe_time_to_live() {
+        let svc = make_service();
+        create_test_table(&svc);
+
+        // Enable TTL
+        let req = make_request(
+            "UpdateTimeToLive",
+            json!({
+                "TableName": "test-table",
+                "TimeToLiveSpecification": {
+                    "AttributeName": "ttl",
+                    "Enabled": true
+                }
+            }),
+        );
+        let resp = svc.update_time_to_live(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(
+            body["TimeToLiveSpecification"]["AttributeName"]
+                .as_str()
+                .unwrap(),
+            "ttl"
+        );
+        assert!(body["TimeToLiveSpecification"]["Enabled"]
+            .as_bool()
+            .unwrap());
+
+        // Describe TTL
+        let req = make_request("DescribeTimeToLive", json!({ "TableName": "test-table" }));
+        let resp = svc.describe_time_to_live(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(
+            body["TimeToLiveDescription"]["TimeToLiveStatus"]
+                .as_str()
+                .unwrap(),
+            "ENABLED"
+        );
+        assert_eq!(
+            body["TimeToLiveDescription"]["AttributeName"]
+                .as_str()
+                .unwrap(),
+            "ttl"
+        );
+
+        // Disable TTL
+        let req = make_request(
+            "UpdateTimeToLive",
+            json!({
+                "TableName": "test-table",
+                "TimeToLiveSpecification": {
+                    "AttributeName": "ttl",
+                    "Enabled": false
+                }
+            }),
+        );
+        svc.update_time_to_live(&req).unwrap();
+
+        let req = make_request("DescribeTimeToLive", json!({ "TableName": "test-table" }));
+        let resp = svc.describe_time_to_live(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(
+            body["TimeToLiveDescription"]["TimeToLiveStatus"]
+                .as_str()
+                .unwrap(),
+            "DISABLED"
+        );
+    }
+
+    #[test]
+    fn resource_policy_lifecycle() {
+        let svc = make_service();
+        create_test_table(&svc);
+
+        let table_arn = {
+            let state = svc.state.read();
+            state.tables.get("test-table").unwrap().arn.clone()
+        };
+
+        // Put policy
+        let policy_doc = r#"{"Version":"2012-10-17","Statement":[]}"#;
+        let req = make_request(
+            "PutResourcePolicy",
+            json!({
+                "ResourceArn": table_arn,
+                "Policy": policy_doc
+            }),
+        );
+        let resp = svc.put_resource_policy(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert!(body["RevisionId"].as_str().is_some());
+
+        // Get policy
+        let req = make_request("GetResourcePolicy", json!({ "ResourceArn": table_arn }));
+        let resp = svc.get_resource_policy(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["Policy"].as_str().unwrap(), policy_doc);
+
+        // Delete policy
+        let req = make_request("DeleteResourcePolicy", json!({ "ResourceArn": table_arn }));
+        svc.delete_resource_policy(&req).unwrap();
+
+        // Get should return null now
+        let req = make_request("GetResourcePolicy", json!({ "ResourceArn": table_arn }));
+        let resp = svc.get_resource_policy(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert!(body["Policy"].is_null());
     }
 }

@@ -1,8 +1,9 @@
 mod helpers;
 
 use aws_sdk_dynamodb::types::{
-    AttributeDefinition, AttributeValue, BillingMode, DeleteRequest, KeySchemaElement, KeyType,
-    ProvisionedThroughput, PutRequest, ScalarAttributeType, Tag, WriteRequest,
+    AttributeDefinition, AttributeValue, BillingMode, Delete, DeleteRequest, Get, KeySchemaElement,
+    KeyType, ProvisionedThroughput, Put, PutRequest, ScalarAttributeType, Tag,
+    TimeToLiveSpecification, TransactGetItem, TransactWriteItem, WriteRequest,
 };
 use helpers::TestServer;
 use std::collections::HashMap;
@@ -805,4 +806,350 @@ async fn dynamodb_filter_with_parenthesized_and_or() {
         2,
         "should match 2 items: (red AND large) OR premium=yes"
     );
+}
+
+#[tokio::test]
+async fn dynamodb_transact_get_items() {
+    let server = TestServer::start().await;
+    let client = server.dynamodb_client().await;
+
+    client
+        .create_table()
+        .table_name("TransactGet")
+        .key_schema(
+            KeySchemaElement::builder()
+                .attribute_name("pk")
+                .key_type(KeyType::Hash)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            AttributeDefinition::builder()
+                .attribute_name("pk")
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .billing_mode(BillingMode::PayPerRequest)
+        .send()
+        .await
+        .unwrap();
+
+    // Put two items
+    client
+        .put_item()
+        .table_name("TransactGet")
+        .item("pk", AttributeValue::S("a".to_string()))
+        .item("val", AttributeValue::S("alpha".to_string()))
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .put_item()
+        .table_name("TransactGet")
+        .item("pk", AttributeValue::S("b".to_string()))
+        .item("val", AttributeValue::S("beta".to_string()))
+        .send()
+        .await
+        .unwrap();
+
+    // TransactGetItems for both + a missing one
+    let resp = client
+        .transact_get_items()
+        .transact_items(
+            TransactGetItem::builder()
+                .get(
+                    Get::builder()
+                        .table_name("TransactGet")
+                        .key("pk", AttributeValue::S("a".to_string()))
+                        .build()
+                        .unwrap(),
+                )
+                .build(),
+        )
+        .transact_items(
+            TransactGetItem::builder()
+                .get(
+                    Get::builder()
+                        .table_name("TransactGet")
+                        .key("pk", AttributeValue::S("b".to_string()))
+                        .build()
+                        .unwrap(),
+                )
+                .build(),
+        )
+        .transact_items(
+            TransactGetItem::builder()
+                .get(
+                    Get::builder()
+                        .table_name("TransactGet")
+                        .key("pk", AttributeValue::S("missing".to_string()))
+                        .build()
+                        .unwrap(),
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let responses = resp.responses();
+    assert_eq!(responses.len(), 3);
+    let first_item = responses[0].item().unwrap();
+    assert_eq!(first_item.get("val").unwrap().as_s().unwrap(), "alpha");
+    let second_item = responses[1].item().unwrap();
+    assert_eq!(second_item.get("val").unwrap().as_s().unwrap(), "beta");
+    // Third should be empty (missing item)
+    assert!(responses[2].item().is_none());
+}
+
+#[tokio::test]
+async fn dynamodb_transact_write_items() {
+    let server = TestServer::start().await;
+    let client = server.dynamodb_client().await;
+
+    client
+        .create_table()
+        .table_name("TransactWrite")
+        .key_schema(
+            KeySchemaElement::builder()
+                .attribute_name("pk")
+                .key_type(KeyType::Hash)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            AttributeDefinition::builder()
+                .attribute_name("pk")
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .billing_mode(BillingMode::PayPerRequest)
+        .send()
+        .await
+        .unwrap();
+
+    // Put an item to delete later
+    client
+        .put_item()
+        .table_name("TransactWrite")
+        .item("pk", AttributeValue::S("to-delete".to_string()))
+        .item("val", AttributeValue::S("bye".to_string()))
+        .send()
+        .await
+        .unwrap();
+
+    // TransactWriteItems: put new + delete existing
+    client
+        .transact_write_items()
+        .transact_items(
+            TransactWriteItem::builder()
+                .put(
+                    Put::builder()
+                        .table_name("TransactWrite")
+                        .item("pk", AttributeValue::S("new-item".to_string()))
+                        .item("val", AttributeValue::S("hello".to_string()))
+                        .build()
+                        .unwrap(),
+                )
+                .build(),
+        )
+        .transact_items(
+            TransactWriteItem::builder()
+                .delete(
+                    Delete::builder()
+                        .table_name("TransactWrite")
+                        .key("pk", AttributeValue::S("to-delete".to_string()))
+                        .build()
+                        .unwrap(),
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    // Verify new item exists
+    let resp = client
+        .get_item()
+        .table_name("TransactWrite")
+        .key("pk", AttributeValue::S("new-item".to_string()))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.item().unwrap().get("val").unwrap().as_s().unwrap(),
+        "hello"
+    );
+
+    // Verify deleted item is gone
+    let resp = client
+        .get_item()
+        .table_name("TransactWrite")
+        .key("pk", AttributeValue::S("to-delete".to_string()))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.item().is_none());
+}
+
+#[tokio::test]
+async fn dynamodb_ttl_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.dynamodb_client().await;
+
+    client
+        .create_table()
+        .table_name("TtlTable")
+        .key_schema(
+            KeySchemaElement::builder()
+                .attribute_name("pk")
+                .key_type(KeyType::Hash)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            AttributeDefinition::builder()
+                .attribute_name("pk")
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .billing_mode(BillingMode::PayPerRequest)
+        .send()
+        .await
+        .unwrap();
+
+    // Enable TTL
+    let resp = client
+        .update_time_to_live()
+        .table_name("TtlTable")
+        .time_to_live_specification(
+            TimeToLiveSpecification::builder()
+                .attribute_name("ttl")
+                .enabled(true)
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let spec = resp.time_to_live_specification().unwrap();
+    assert_eq!(spec.attribute_name(), "ttl");
+    assert!(spec.enabled());
+
+    // Describe TTL
+    let resp = client
+        .describe_time_to_live()
+        .table_name("TtlTable")
+        .send()
+        .await
+        .unwrap();
+
+    let desc = resp.time_to_live_description().unwrap();
+    assert_eq!(desc.time_to_live_status().unwrap().as_str(), "ENABLED");
+    assert_eq!(desc.attribute_name().unwrap(), "ttl");
+
+    // Disable TTL
+    client
+        .update_time_to_live()
+        .table_name("TtlTable")
+        .time_to_live_specification(
+            TimeToLiveSpecification::builder()
+                .attribute_name("ttl")
+                .enabled(false)
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .describe_time_to_live()
+        .table_name("TtlTable")
+        .send()
+        .await
+        .unwrap();
+
+    let desc = resp.time_to_live_description().unwrap();
+    assert_eq!(desc.time_to_live_status().unwrap().as_str(), "DISABLED");
+}
+
+#[tokio::test]
+async fn dynamodb_resource_policy_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.dynamodb_client().await;
+
+    client
+        .create_table()
+        .table_name("PolicyTable")
+        .key_schema(
+            KeySchemaElement::builder()
+                .attribute_name("pk")
+                .key_type(KeyType::Hash)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            AttributeDefinition::builder()
+                .attribute_name("pk")
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .billing_mode(BillingMode::PayPerRequest)
+        .send()
+        .await
+        .unwrap();
+
+    // Get the table ARN
+    let desc = client
+        .describe_table()
+        .table_name("PolicyTable")
+        .send()
+        .await
+        .unwrap();
+    let table_arn = desc.table().unwrap().table_arn().unwrap().to_string();
+
+    let policy_doc = r#"{"Version":"2012-10-17","Statement":[]}"#;
+
+    // Put resource policy
+    let resp = client
+        .put_resource_policy()
+        .resource_arn(&table_arn)
+        .policy(policy_doc)
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.revision_id().is_some());
+
+    // Get resource policy
+    let resp = client
+        .get_resource_policy()
+        .resource_arn(&table_arn)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.policy().unwrap(), policy_doc);
+
+    // Delete resource policy
+    client
+        .delete_resource_policy()
+        .resource_arn(&table_arn)
+        .send()
+        .await
+        .unwrap();
+
+    // Get should return no policy
+    let resp = client
+        .get_resource_policy()
+        .resource_arn(&table_arn)
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.policy().is_none());
 }

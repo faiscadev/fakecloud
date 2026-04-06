@@ -626,6 +626,9 @@ impl ResourceProvisioner {
             item_count: 0,
             size_bytes: 0,
             billing_mode,
+            ttl_attribute: None,
+            ttl_enabled: false,
+            resource_policy: None,
         };
 
         state.tables.insert(table_name.to_string(), table);
