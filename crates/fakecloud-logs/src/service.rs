@@ -3800,7 +3800,10 @@ mod tests {
         let config = &body["deliveryDestination"]["deliveryDestinationConfiguration"];
         // destinationResourceArn should be absent (not null) when not provided
         assert!(
-            !config.as_object().unwrap().contains_key("destinationResourceArn"),
+            !config
+                .as_object()
+                .unwrap()
+                .contains_key("destinationResourceArn"),
             "destinationResourceArn should be omitted when not set, not returned as null"
         );
     }
