@@ -739,3 +739,403 @@ async fn logs_query_definitions() {
         .await
         .unwrap();
 }
+
+// -- Account policies --
+
+#[test_action("logs", "PutAccountPolicy", checksum = "c90a216e")]
+#[test_action("logs", "DescribeAccountPolicies", checksum = "7dfa3538")]
+#[test_action("logs", "DeleteAccountPolicy", checksum = "fc4e2766")]
+#[tokio::test]
+async fn logs_account_policies() {
+    let server = TestServer::start().await;
+    let client = server.logs_client().await;
+
+    client
+        .put_account_policy()
+        .policy_name("conf-acct-policy")
+        .policy_type(aws_sdk_cloudwatchlogs::types::PolicyType::DataProtectionPolicy)
+        .policy_document("{\"Name\":\"conformance\"}")
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .describe_account_policies()
+        .policy_type(aws_sdk_cloudwatchlogs::types::PolicyType::DataProtectionPolicy)
+        .send()
+        .await
+        .unwrap();
+    assert!(!resp.account_policies().is_empty());
+
+    client
+        .delete_account_policy()
+        .policy_name("conf-acct-policy")
+        .policy_type(aws_sdk_cloudwatchlogs::types::PolicyType::DataProtectionPolicy)
+        .send()
+        .await
+        .unwrap();
+}
+
+// -- Data protection policy --
+
+#[test_action("logs", "PutDataProtectionPolicy", checksum = "84bc14b9")]
+#[test_action("logs", "GetDataProtectionPolicy", checksum = "941a9768")]
+#[test_action("logs", "DeleteDataProtectionPolicy", checksum = "acd3e2c8")]
+#[tokio::test]
+async fn logs_data_protection_policy() {
+    let server = TestServer::start().await;
+    let client = server.logs_client().await;
+
+    client
+        .create_log_group()
+        .log_group_name("/conf/dp")
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .put_data_protection_policy()
+        .log_group_identifier("/conf/dp")
+        .policy_document("{\"Name\":\"dp\"}")
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .get_data_protection_policy()
+        .log_group_identifier("/conf/dp")
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .delete_data_protection_policy()
+        .log_group_identifier("/conf/dp")
+        .send()
+        .await
+        .unwrap();
+}
+
+// -- Index policies --
+
+#[test_action("logs", "PutIndexPolicy", checksum = "717ed27c")]
+#[test_action("logs", "DescribeIndexPolicies", checksum = "051994f3")]
+#[test_action("logs", "DeleteIndexPolicy", checksum = "5d81a42e")]
+#[test_action("logs", "DescribeFieldIndexes", checksum = "815cc664")]
+#[tokio::test]
+async fn logs_index_policies() {
+    let server = TestServer::start().await;
+    let client = server.logs_client().await;
+
+    client
+        .create_log_group()
+        .log_group_name("/conf/idx")
+        .send()
+        .await
+        .unwrap();
+
+    let groups = client
+        .describe_log_groups()
+        .log_group_name_prefix("/conf/idx")
+        .send()
+        .await
+        .unwrap();
+    let arn = groups.log_groups()[0].arn().unwrap().to_string();
+
+    client
+        .put_index_policy()
+        .log_group_identifier(&arn)
+        .policy_document("{\"Fields\":[\"field1\"]}")
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .describe_index_policies()
+        .log_group_identifiers(&arn)
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .describe_field_indexes()
+        .log_group_identifiers(&arn)
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .delete_index_policy()
+        .log_group_identifier(&arn)
+        .send()
+        .await
+        .unwrap();
+}
+
+// -- Transformers --
+
+#[test_action("logs", "PutTransformer", checksum = "3a40be72")]
+#[test_action("logs", "GetTransformer", checksum = "a519f091")]
+#[test_action("logs", "DeleteTransformer", checksum = "c8d3b01f")]
+#[test_action("logs", "TestTransformer", checksum = "8f7e1aa2")]
+#[tokio::test]
+async fn logs_transformers() {
+    let server = TestServer::start().await;
+    let client = server.logs_client().await;
+
+    client
+        .create_log_group()
+        .log_group_name("/conf/tx")
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .put_transformer()
+        .log_group_identifier("/conf/tx")
+        .transformer_config(
+            aws_sdk_cloudwatchlogs::types::Processor::builder()
+                .add_keys(
+                    aws_sdk_cloudwatchlogs::types::AddKeys::builder()
+                        .entries(
+                            aws_sdk_cloudwatchlogs::types::AddKeyEntry::builder()
+                                .key("testKey")
+                                .value("testValue")
+                                .build()
+                                .unwrap(),
+                        )
+                        .build()
+                        .unwrap(),
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .get_transformer()
+        .log_group_identifier("/conf/tx")
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .test_transformer()
+        .transformer_config(
+            aws_sdk_cloudwatchlogs::types::Processor::builder()
+                .add_keys(
+                    aws_sdk_cloudwatchlogs::types::AddKeys::builder()
+                        .entries(
+                            aws_sdk_cloudwatchlogs::types::AddKeyEntry::builder()
+                                .key("k")
+                                .value("v")
+                                .build()
+                                .unwrap(),
+                        )
+                        .build()
+                        .unwrap(),
+                )
+                .build(),
+        )
+        .log_event_messages("hello")
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .delete_transformer()
+        .log_group_identifier("/conf/tx")
+        .send()
+        .await
+        .unwrap();
+}
+
+// -- Anomaly detectors --
+
+#[test_action("logs", "CreateLogAnomalyDetector", checksum = "dc124741")]
+#[test_action("logs", "GetLogAnomalyDetector", checksum = "290ad64c")]
+#[test_action("logs", "ListLogAnomalyDetectors", checksum = "be4ef5f5")]
+#[test_action("logs", "UpdateLogAnomalyDetector", checksum = "c91b4202")]
+#[test_action("logs", "DeleteLogAnomalyDetector", checksum = "4c49f211")]
+#[tokio::test]
+async fn logs_anomaly_detectors() {
+    let server = TestServer::start().await;
+    let client = server.logs_client().await;
+
+    client
+        .create_log_group()
+        .log_group_name("/conf/anomaly")
+        .send()
+        .await
+        .unwrap();
+
+    let groups = client
+        .describe_log_groups()
+        .log_group_name_prefix("/conf/anomaly")
+        .send()
+        .await
+        .unwrap();
+    let group_arn = groups.log_groups()[0].arn().unwrap().to_string();
+
+    let create = client
+        .create_log_anomaly_detector()
+        .log_group_arn_list(&group_arn)
+        .detector_name("conf-detector")
+        .send()
+        .await
+        .unwrap();
+    let detector_arn = create.anomaly_detector_arn().unwrap().to_string();
+
+    client
+        .get_log_anomaly_detector()
+        .anomaly_detector_arn(&detector_arn)
+        .send()
+        .await
+        .unwrap();
+
+    client.list_log_anomaly_detectors().send().await.unwrap();
+
+    client
+        .update_log_anomaly_detector()
+        .anomaly_detector_arn(&detector_arn)
+        .enabled(false)
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .delete_log_anomaly_detector()
+        .anomaly_detector_arn(&detector_arn)
+        .send()
+        .await
+        .unwrap();
+}
+
+// -- Misc operations --
+
+#[test_action("logs", "GetLogGroupFields", checksum = "239f32e1")]
+#[tokio::test]
+async fn logs_get_log_group_fields() {
+    let server = TestServer::start().await;
+    let client = server.logs_client().await;
+
+    client
+        .create_log_group()
+        .log_group_name("/conf/fields")
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .get_log_group_fields()
+        .log_group_name("/conf/fields")
+        .send()
+        .await
+        .unwrap();
+    assert!(!resp.log_group_fields().is_empty());
+}
+
+#[test_action("logs", "TestMetricFilter", checksum = "0b46bd90")]
+#[tokio::test]
+async fn logs_test_metric_filter() {
+    let server = TestServer::start().await;
+    let client = server.logs_client().await;
+
+    let resp = client
+        .test_metric_filter()
+        .filter_pattern("ERROR")
+        .log_event_messages("ERROR: oops")
+        .log_event_messages("INFO: ok")
+        .send()
+        .await
+        .unwrap();
+    assert!(!resp.matches().is_empty());
+}
+
+#[test_action("logs", "StopQuery", checksum = "efcdfd12")]
+#[tokio::test]
+async fn logs_stop_query() {
+    let server = TestServer::start().await;
+    let client = server.logs_client().await;
+
+    client
+        .create_log_group()
+        .log_group_name("/conf/stopq")
+        .send()
+        .await
+        .unwrap();
+
+    let start = client
+        .start_query()
+        .log_group_name("/conf/stopq")
+        .start_time(0)
+        .end_time(9999999999)
+        .query_string("fields @timestamp")
+        .send()
+        .await
+        .unwrap();
+    let query_id = start.query_id().unwrap().to_string();
+
+    client
+        .stop_query()
+        .query_id(&query_id)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("logs", "PutLogGroupDeletionProtection", checksum = "9e6e0d1a")]
+#[tokio::test]
+async fn logs_deletion_protection() {
+    let server = TestServer::start().await;
+    let client = server.logs_client().await;
+
+    client
+        .create_log_group()
+        .log_group_name("/conf/delprot")
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .put_log_group_deletion_protection()
+        .log_group_identifier("/conf/delprot")
+        .deletion_protection_enabled(true)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("logs", "GetLogRecord", checksum = "f45a109e")]
+#[tokio::test]
+async fn logs_get_log_record() {
+    let server = TestServer::start().await;
+    let client = server.logs_client().await;
+
+    let resp = client
+        .get_log_record()
+        .log_record_pointer("some-pointer")
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.log_record().is_some());
+}
+
+#[test_action("logs", "ListAnomalies", checksum = "1a886ba0")]
+#[test_action("logs", "UpdateAnomaly", checksum = "286a19fd")]
+#[tokio::test]
+async fn logs_anomalies_stub() {
+    let server = TestServer::start().await;
+    let client = server.logs_client().await;
+
+    let resp = client.list_anomalies().send().await.unwrap();
+    assert!(resp.anomalies().is_empty());
+
+    // UpdateAnomaly needs anomalyDetectorArn
+    let _ = client
+        .update_anomaly()
+        .anomaly_detector_arn("arn:aws:logs:us-east-1:123456789012:anomaly-detector:dummy")
+        .send()
+        .await;
+}

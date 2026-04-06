@@ -18,6 +18,10 @@ pub struct LogsState {
     pub delivery_sources: HashMap<String, DeliverySource>,
     pub deliveries: HashMap<String, Delivery>,
     pub query_definitions: HashMap<String, QueryDefinition>,
+    /// Account policies keyed by (policy_name, policy_type)
+    pub account_policies: HashMap<(String, String), AccountPolicy>,
+    /// Anomaly detectors keyed by detector ARN
+    pub anomaly_detectors: HashMap<String, AnomalyDetector>,
 }
 
 impl LogsState {
@@ -35,6 +39,8 @@ impl LogsState {
             delivery_sources: HashMap::new(),
             deliveries: HashMap::new(),
             query_definitions: HashMap::new(),
+            account_policies: HashMap::new(),
+            anomaly_detectors: HashMap::new(),
         }
     }
 
@@ -49,6 +55,8 @@ impl LogsState {
         self.delivery_sources.clear();
         self.deliveries.clear();
         self.query_definitions.clear();
+        self.account_policies.clear();
+        self.anomaly_detectors.clear();
     }
 }
 
@@ -62,6 +70,10 @@ pub struct LogGroup {
     pub log_streams: HashMap<String, LogStream>,
     pub stored_bytes: i64,
     pub subscription_filters: Vec<SubscriptionFilter>,
+    pub data_protection_policy: Option<DataProtectionPolicy>,
+    pub index_policies: Vec<IndexPolicy>,
+    pub transformer: Option<Transformer>,
+    pub deletion_protection: bool,
 }
 
 pub struct LogStream {
@@ -179,4 +191,43 @@ pub struct QueryDefinition {
     pub query_string: String,
     pub log_group_names: Vec<String>,
     pub last_modified: i64,
+}
+
+pub struct AccountPolicy {
+    pub policy_name: String,
+    pub policy_type: String,
+    pub policy_document: String,
+    pub scope: Option<String>,
+    pub selection_criteria: Option<String>,
+    pub account_id: String,
+    pub last_updated_time: i64,
+}
+
+pub struct DataProtectionPolicy {
+    pub policy_document: String,
+    pub last_updated_time: i64,
+}
+
+pub struct IndexPolicy {
+    pub policy_name: String,
+    pub policy_document: String,
+    pub last_updated_time: i64,
+}
+
+pub struct Transformer {
+    pub transformer_config: serde_json::Value,
+    pub creation_time: i64,
+    pub last_modified_time: i64,
+}
+
+pub struct AnomalyDetector {
+    pub detector_name: String,
+    pub arn: String,
+    pub log_group_arn_list: Vec<String>,
+    pub evaluation_frequency: Option<String>,
+    pub filter_pattern: Option<String>,
+    pub anomaly_visibility_time: Option<i64>,
+    pub creation_time: i64,
+    pub last_modified_time: i64,
+    pub enabled: bool,
 }

@@ -442,3 +442,225 @@ async fn logs_put_events_to_nonexistent_stream_fails() {
         .await;
     assert!(result.is_err());
 }
+
+#[tokio::test]
+async fn logs_account_policy_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.logs_client().await;
+
+    // Put account policy
+    client
+        .put_account_policy()
+        .policy_name("test-acct-policy")
+        .policy_type(aws_sdk_cloudwatchlogs::types::PolicyType::DataProtectionPolicy)
+        .policy_document("{\"Name\":\"test\"}")
+        .send()
+        .await
+        .unwrap();
+
+    // Describe
+    let resp = client
+        .describe_account_policies()
+        .policy_type(aws_sdk_cloudwatchlogs::types::PolicyType::DataProtectionPolicy)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.account_policies().len(), 1);
+    assert_eq!(
+        resp.account_policies()[0].policy_name().unwrap(),
+        "test-acct-policy"
+    );
+
+    // Delete
+    client
+        .delete_account_policy()
+        .policy_name("test-acct-policy")
+        .policy_type(aws_sdk_cloudwatchlogs::types::PolicyType::DataProtectionPolicy)
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .describe_account_policies()
+        .policy_type(aws_sdk_cloudwatchlogs::types::PolicyType::DataProtectionPolicy)
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.account_policies().is_empty());
+}
+
+#[tokio::test]
+async fn logs_data_protection_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.logs_client().await;
+
+    client
+        .create_log_group()
+        .log_group_name("/dp/test")
+        .send()
+        .await
+        .unwrap();
+
+    // Put data protection policy
+    client
+        .put_data_protection_policy()
+        .log_group_identifier("/dp/test")
+        .policy_document("{\"Name\":\"dp\"}")
+        .send()
+        .await
+        .unwrap();
+
+    // Get
+    let resp = client
+        .get_data_protection_policy()
+        .log_group_identifier("/dp/test")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.policy_document().unwrap(), "{\"Name\":\"dp\"}");
+
+    // Delete
+    client
+        .delete_data_protection_policy()
+        .log_group_identifier("/dp/test")
+        .send()
+        .await
+        .unwrap();
+
+    // Verify gone
+    let resp = client
+        .get_data_protection_policy()
+        .log_group_identifier("/dp/test")
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.policy_document().is_none());
+}
+
+#[tokio::test]
+async fn logs_transformer_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.logs_client().await;
+
+    client
+        .create_log_group()
+        .log_group_name("/tx/test")
+        .send()
+        .await
+        .unwrap();
+
+    // Put transformer
+    client
+        .put_transformer()
+        .log_group_identifier("/tx/test")
+        .transformer_config(
+            aws_sdk_cloudwatchlogs::types::Processor::builder()
+                .add_keys(
+                    aws_sdk_cloudwatchlogs::types::AddKeys::builder()
+                        .entries(
+                            aws_sdk_cloudwatchlogs::types::AddKeyEntry::builder()
+                                .key("testKey")
+                                .value("testValue")
+                                .build()
+                                .unwrap(),
+                        )
+                        .build()
+                        .unwrap(),
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    // Get transformer
+    let resp = client
+        .get_transformer()
+        .log_group_identifier("/tx/test")
+        .send()
+        .await
+        .unwrap();
+    assert!(!resp.transformer_config().is_empty());
+
+    // Delete transformer
+    client
+        .delete_transformer()
+        .log_group_identifier("/tx/test")
+        .send()
+        .await
+        .unwrap();
+
+    // Verify gone
+    let resp = client
+        .get_transformer()
+        .log_group_identifier("/tx/test")
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.transformer_config().is_empty());
+}
+
+#[tokio::test]
+async fn logs_anomaly_detector_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.logs_client().await;
+
+    client
+        .create_log_group()
+        .log_group_name("/anomaly/test")
+        .send()
+        .await
+        .unwrap();
+
+    // Get log group ARN
+    let groups = client
+        .describe_log_groups()
+        .log_group_name_prefix("/anomaly/test")
+        .send()
+        .await
+        .unwrap();
+    let group_arn = groups.log_groups()[0].arn().unwrap().to_string();
+
+    // Create anomaly detector
+    let resp = client
+        .create_log_anomaly_detector()
+        .log_group_arn_list(&group_arn)
+        .detector_name("test-detector")
+        .send()
+        .await
+        .unwrap();
+    let detector_arn = resp.anomaly_detector_arn().unwrap().to_string();
+
+    // Get anomaly detector
+    let resp = client
+        .get_log_anomaly_detector()
+        .anomaly_detector_arn(&detector_arn)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.detector_name().unwrap(), "test-detector");
+
+    // List anomaly detectors
+    let resp = client.list_log_anomaly_detectors().send().await.unwrap();
+    assert_eq!(resp.anomaly_detectors().len(), 1);
+
+    // Update
+    client
+        .update_log_anomaly_detector()
+        .anomaly_detector_arn(&detector_arn)
+        .enabled(false)
+        .send()
+        .await
+        .unwrap();
+
+    // Delete
+    client
+        .delete_log_anomaly_detector()
+        .anomaly_detector_arn(&detector_arn)
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client.list_log_anomaly_detectors().send().await.unwrap();
+    assert!(resp.anomaly_detectors().is_empty());
+}
