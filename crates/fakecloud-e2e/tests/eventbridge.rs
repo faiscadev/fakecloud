@@ -3,7 +3,7 @@ mod helpers;
 use aws_sdk_eventbridge::types::{
     ConnectionAuthorizationType, ConnectionState, CreateConnectionApiKeyAuthRequestParameters,
     CreateConnectionAuthRequestParameters, EndpointEventBus, FailoverConfig, Primary,
-    PutEventsRequestEntry, RoutingConfig, RuleState, Secondary, Target,
+    PutEventsRequestEntry, ReplayDestination, RoutingConfig, RuleState, Secondary, Target,
 };
 use aws_sdk_sqs::types::QueueAttributeName;
 use helpers::TestServer;
@@ -874,6 +874,148 @@ async fn eb_deauthorize_connection() {
         desc.connection_state().unwrap(),
         &ConnectionState::Deauthorizing
     );
+}
+
+// ---- Archive Replay Delivery E2E ----
+
+#[tokio::test]
+async fn eventbridge_archive_replay_delivers_events() {
+    let server = TestServer::start().await;
+    let eb = server.eventbridge_client().await;
+    let sqs = server.sqs_client().await;
+
+    // Create SQS queue for delivery
+    let queue = sqs
+        .create_queue()
+        .queue_name("replay-delivery-queue")
+        .send()
+        .await
+        .unwrap();
+    let queue_url = queue.queue_url().unwrap().to_string();
+    let attrs = sqs
+        .get_queue_attributes()
+        .queue_url(&queue_url)
+        .attribute_names(QueueAttributeName::QueueArn)
+        .send()
+        .await
+        .unwrap();
+    let queue_arn = attrs
+        .attributes()
+        .unwrap()
+        .get(&QueueAttributeName::QueueArn)
+        .unwrap()
+        .to_string();
+
+    // Create a rule matching "replay.app" source
+    eb.put_rule()
+        .name("replay-rule")
+        .event_pattern(r#"{"source": ["replay.app"]}"#)
+        .state(RuleState::Enabled)
+        .send()
+        .await
+        .unwrap();
+
+    // Add SQS target
+    eb.put_targets()
+        .rule("replay-rule")
+        .targets(
+            Target::builder()
+                .id("sqs-replay-target")
+                .arn(&queue_arn)
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    // Create an archive on the default bus
+    let create_resp = eb
+        .create_archive()
+        .archive_name("replay-test-archive")
+        .event_source_arn("arn:aws:events:us-east-1:123456789012:event-bus/default")
+        .send()
+        .await
+        .unwrap();
+    let archive_arn = create_resp.archive_arn().unwrap().to_string();
+
+    // Put events
+    let resp = eb
+        .put_events()
+        .entries(
+            PutEventsRequestEntry::builder()
+                .source("replay.app")
+                .detail_type("OrderCreated")
+                .detail(r#"{"orderId": "100"}"#)
+                .build(),
+        )
+        .entries(
+            PutEventsRequestEntry::builder()
+                .source("replay.app")
+                .detail_type("OrderShipped")
+                .detail(r#"{"orderId": "200"}"#)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.failed_entry_count(), 0);
+
+    // Drain the SQS messages from PutEvents delivery
+    let _ = sqs
+        .receive_message()
+        .queue_url(&queue_url)
+        .max_number_of_messages(10)
+        .send()
+        .await
+        .unwrap();
+    // Purge the queue
+    let _ = sqs.purge_queue().queue_url(&queue_url).send().await;
+
+    // Small delay for purge to take effect
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    // Start replay
+    let replay_resp = eb
+        .start_replay()
+        .replay_name("my-replay-test")
+        .event_source_arn(&archive_arn)
+        .destination(
+            ReplayDestination::builder()
+                .arn("arn:aws:events:us-east-1:123456789012:event-bus/default")
+                .build()
+                .unwrap(),
+        )
+        .event_start_time(aws_sdk_eventbridge::primitives::DateTime::from_secs(0))
+        .event_end_time(aws_sdk_eventbridge::primitives::DateTime::from_secs(
+            chrono::Utc::now().timestamp() + 3600,
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert!(replay_resp.replay_arn().is_some());
+
+    // Receive replayed messages
+    let msgs = sqs
+        .receive_message()
+        .queue_url(&queue_url)
+        .max_number_of_messages(10)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        msgs.messages().len(),
+        2,
+        "expected 2 replayed events in SQS"
+    );
+
+    // Verify the replayed events
+    for msg in msgs.messages() {
+        let body: serde_json::Value = serde_json::from_str(msg.body().unwrap()).unwrap();
+        assert_eq!(body["source"], "replay.app");
+        assert!(body["replay-name"].as_str().is_some());
+    }
 }
 
 // ---- UpdateEventBus E2E ----

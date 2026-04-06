@@ -243,6 +243,122 @@ async fn logs_filter_log_events() {
 }
 
 #[tokio::test]
+async fn logs_filter_log_events_applies_pattern() {
+    let server = TestServer::start().await;
+    let client = server.logs_client().await;
+
+    client
+        .create_log_group()
+        .log_group_name("/filter-pattern/e2e")
+        .send()
+        .await
+        .unwrap();
+    client
+        .create_log_stream()
+        .log_group_name("/filter-pattern/e2e")
+        .log_stream_name("stream-1")
+        .send()
+        .await
+        .unwrap();
+
+    let now = chrono::Utc::now().timestamp_millis();
+
+    client
+        .put_log_events()
+        .log_group_name("/filter-pattern/e2e")
+        .log_stream_name("stream-1")
+        .log_events(
+            InputLogEvent::builder()
+                .timestamp(now)
+                .message("ERROR: disk full")
+                .build()
+                .unwrap(),
+        )
+        .log_events(
+            InputLogEvent::builder()
+                .timestamp(now + 1000)
+                .message("INFO: request complete")
+                .build()
+                .unwrap(),
+        )
+        .log_events(
+            InputLogEvent::builder()
+                .timestamp(now + 2000)
+                .message("ERROR: connection timeout")
+                .build()
+                .unwrap(),
+        )
+        .log_events(
+            InputLogEvent::builder()
+                .timestamp(now + 3000)
+                .message(r#"{"level":"ERROR","msg":"json error"}"#)
+                .build()
+                .unwrap(),
+        )
+        .log_events(
+            InputLogEvent::builder()
+                .timestamp(now + 4000)
+                .message(r#"{"level":"INFO","msg":"json info"}"#)
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    // Test 1: Simple text pattern
+    let resp = client
+        .filter_log_events()
+        .log_group_name("/filter-pattern/e2e")
+        .filter_pattern("ERROR")
+        .send()
+        .await
+        .unwrap();
+    // 2 plain-text ERROR + 1 JSON ERROR in message text
+    assert_eq!(
+        resp.events().len(),
+        3,
+        "simple text 'ERROR' should match 3 events"
+    );
+
+    // Test 2: Multiple terms (AND)
+    let resp = client
+        .filter_log_events()
+        .log_group_name("/filter-pattern/e2e")
+        .filter_pattern("ERROR timeout")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.events().len(), 1, "AND terms should match 1 event");
+    assert!(resp.events()[0].message().unwrap().contains("timeout"));
+
+    // Test 3: Quoted exact phrase
+    let resp = client
+        .filter_log_events()
+        .log_group_name("/filter-pattern/e2e")
+        .filter_pattern("\"request complete\"")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.events().len(), 1, "quoted phrase should match 1 event");
+
+    // Test 4: JSON field pattern
+    let resp = client
+        .filter_log_events()
+        .log_group_name("/filter-pattern/e2e")
+        .filter_pattern("{ $.level = \"ERROR\" }")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.events().len(),
+        1,
+        "JSON pattern should match only JSON events with level=ERROR"
+    );
+    assert!(resp.events()[0].message().unwrap().contains("json error"));
+}
+
+#[tokio::test]
 async fn logs_retention_policy() {
     let server = TestServer::start().await;
     let client = server.logs_client().await;

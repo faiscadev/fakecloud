@@ -1,15 +1,8 @@
-use std::io::Write;
-use std::sync::Arc;
-
 use async_trait::async_trait;
-use base64::Engine;
 use chrono::Utc;
-use flate2::write::GzEncoder;
-use flate2::Compression;
 use http::StatusCode;
 use serde_json::{json, Value};
 
-use fakecloud_core::delivery::DeliveryBus;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 use fakecloud_core::validation::*;
 
@@ -22,12 +15,11 @@ use crate::state::{
 
 pub struct LogsService {
     state: SharedLogsState,
-    delivery: Arc<DeliveryBus>,
 }
 
 impl LogsService {
-    pub fn new(state: SharedLogsState, delivery: Arc<DeliveryBus>) -> Self {
-        Self { state, delivery }
+    pub fn new(state: SharedLogsState) -> Self {
+        Self { state }
     }
 }
 
@@ -892,53 +884,11 @@ impl LogsService {
         // Generate new sequence token
         stream.upload_sequence_token = generate_sequence_token();
 
-        let accepted_events: Vec<LogEvent> = new_events.clone();
         stream.events.append(&mut new_events);
         stream.events.sort_by_key(|e| e.timestamp);
 
-        // Collect subscription filter info and sequence token while we still hold the lock
-        let subscription_filters: Vec<(String, String, String)> = group
-            .subscription_filters
-            .iter()
-            .map(|f| {
-                (
-                    f.filter_name.clone(),
-                    f.filter_pattern.clone(),
-                    f.destination_arn.clone(),
-                )
-            })
-            .collect();
-        let log_group_name = group.name.clone();
-        let next_sequence_token = stream.upload_sequence_token.clone();
-
-        // Drop the write lock before doing cross-service delivery
-        drop(state);
-
-        // Deliver matching events to subscription filter destinations
-        for (filter_name, filter_pattern, destination_arn) in &subscription_filters {
-            let matching: Vec<&LogEvent> = accepted_events
-                .iter()
-                .filter(|e| matches_filter_pattern(filter_pattern, &e.message))
-                .collect();
-
-            if matching.is_empty() {
-                continue;
-            }
-
-            let payload =
-                build_subscription_payload(&log_group_name, stream_name, filter_name, &matching);
-
-            if destination_arn.contains(":sqs:") {
-                self.delivery.send_to_sqs(
-                    destination_arn,
-                    &payload,
-                    &std::collections::HashMap::new(),
-                );
-            }
-        }
-
         let mut response = json!({
-            "nextSequenceToken": next_sequence_token,
+            "nextSequenceToken": stream.upload_sequence_token,
         });
         if has_rejected {
             response["rejectedLogEventsInfo"] = rejected_info;
@@ -5647,49 +5597,210 @@ fn matches_filter_pattern(pattern: &str, message: &str) -> bool {
         return true;
     }
 
-    // JSON/metric filter patterns (start with { or [) - we don't parse these, match everything
-    if pattern.starts_with('{') || pattern.starts_with('[') {
+    // JSON/metric filter patterns: { $.field = "value" }
+    if pattern.starts_with('{') && pattern.ends_with('}') {
+        return matches_json_filter_pattern(pattern, message);
+    }
+
+    // Array-style metric filter patterns - match everything (not implemented)
+    if pattern.starts_with('[') {
         return true;
     }
 
-    // Quoted pattern: exact substring match
+    // Quoted pattern: exact substring match (handles escaped inner quotes)
     if pattern.starts_with('"') && pattern.ends_with('"') && pattern.len() >= 2 {
         let inner = &pattern[1..pattern.len() - 1];
-        return message.contains(inner);
+        // Unescape inner quotes: \"  ->  "
+        let unescaped = inner.replace("\\\"", "\"");
+        return message.contains(&unescaped);
     }
 
-    // Multiple words: all must be present
-    let words: Vec<&str> = pattern.split_whitespace().collect();
-    words.iter().all(|word| message.contains(word))
+    // Multiple words: all must be present (AND semantics)
+    let terms = parse_filter_terms(pattern);
+    terms.iter().all(|term| message.contains(term.as_str()))
 }
 
-/// Build the CloudWatch Logs subscription payload: a base64-encoded gzip JSON blob.
-///
-/// This matches the format that real AWS sends to subscription filter destinations.
-fn build_subscription_payload(
-    log_group: &str,
-    log_stream: &str,
-    filter_name: &str,
-    events: &[&LogEvent],
-) -> String {
-    let payload = json!({
-        "messageType": "DATA_MESSAGE",
-        "owner": "123456789012",
-        "logGroup": log_group,
-        "logStream": log_stream,
-        "subscriptionFilters": [filter_name],
-        "logEvents": events.iter().map(|e| json!({
-            "id": format!("{}", e.ingestion_time),
-            "timestamp": e.timestamp,
-            "message": e.message,
-        })).collect::<Vec<_>>(),
-    });
+/// Parse filter pattern terms, respecting quoted strings as single terms.
+fn parse_filter_terms(pattern: &str) -> Vec<String> {
+    let mut terms = Vec::new();
+    let mut chars = pattern.chars().peekable();
 
-    let json_bytes = serde_json::to_vec(&payload).unwrap();
-    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
-    encoder.write_all(&json_bytes).unwrap();
-    let compressed = encoder.finish().unwrap();
-    base64::engine::general_purpose::STANDARD.encode(&compressed)
+    while chars.peek().is_some() {
+        // Skip whitespace
+        while chars.peek().is_some_and(|c| c.is_whitespace()) {
+            chars.next();
+        }
+
+        if chars.peek().is_none() {
+            break;
+        }
+
+        if chars.peek() == Some(&'"') {
+            // Quoted term
+            chars.next(); // consume opening quote
+            let mut term = String::new();
+            loop {
+                match chars.next() {
+                    Some('\\') => {
+                        if let Some(c) = chars.next() {
+                            term.push(c);
+                        }
+                    }
+                    Some('"') => break,
+                    Some(c) => term.push(c),
+                    None => break,
+                }
+            }
+            terms.push(term);
+        } else {
+            // Unquoted term
+            let mut term = String::new();
+            while chars.peek().is_some_and(|c| !c.is_whitespace()) {
+                term.push(chars.next().unwrap());
+            }
+            if !term.is_empty() {
+                terms.push(term);
+            }
+        }
+    }
+
+    terms
+}
+
+/// Match a JSON filter pattern like `{ $.level = "ERROR" }` against a message.
+fn matches_json_filter_pattern(pattern: &str, message: &str) -> bool {
+    // Strip the outer braces
+    let inner = pattern
+        .strip_prefix('{')
+        .and_then(|s| s.strip_suffix('}'))
+        .unwrap_or("")
+        .trim();
+
+    if inner.is_empty() {
+        return true;
+    }
+
+    // Parse the message as JSON
+    let msg_json: serde_json::Value = match serde_json::from_str(message) {
+        Ok(v) => v,
+        Err(_) => return false, // Non-JSON message cannot match JSON filter
+    };
+
+    // Support: $.field = "value", $.field != "value", $.field = number,
+    //          $.field > number, $.field < number, $.field >= number, $.field <= number
+    // Also support && for multiple conditions
+    let conditions: Vec<&str> = inner.split("&&").collect();
+
+    for condition in conditions {
+        let condition = condition.trim();
+        if !matches_single_json_condition(condition, &msg_json) {
+            return false;
+        }
+    }
+
+    true
+}
+
+fn matches_single_json_condition(condition: &str, json: &serde_json::Value) -> bool {
+    // Try to parse: $.field op value
+    let condition = condition.trim();
+
+    // Find the operator
+    let ops = ["!=", ">=", "<=", "=", ">", "<"];
+    let mut found_op = None;
+    let mut op_pos = 0;
+    let mut op_len = 0;
+
+    for op in &ops {
+        if let Some(pos) = condition.find(op) {
+            // Make sure we're not inside a quoted string
+            let before = &condition[..pos];
+            let quote_count = before.chars().filter(|&c| c == '"').count();
+            if quote_count % 2 == 0 {
+                found_op = Some(*op);
+                op_pos = pos;
+                op_len = op.len();
+                break;
+            }
+        }
+    }
+
+    let (op, field_part, value_part) = match found_op {
+        Some(op) => (
+            op,
+            condition[..op_pos].trim(),
+            condition[op_pos + op_len..].trim(),
+        ),
+        None => {
+            // No operator: just check if the field exists
+            // Pattern like `{ $.field }` means field exists
+            if let Some(path) = condition.strip_prefix("$.") {
+                return resolve_json_path_simple(json, path).is_some();
+            }
+            return true;
+        }
+    };
+
+    // Extract JSON path from field_part (must start with $.)
+    let path = match field_part.strip_prefix("$.") {
+        Some(p) => p,
+        None => return true, // Don't understand this pattern, match everything
+    };
+
+    let actual_value = match resolve_json_path_simple(json, path) {
+        Some(v) => v,
+        None => return op == "!=", // field doesn't exist: only != matches
+    };
+
+    // Parse the expected value
+    let expected_str = if value_part.starts_with('"') && value_part.ends_with('"') {
+        // String comparison
+        let s = &value_part[1..value_part.len() - 1];
+        match op {
+            "=" => actual_value.as_str() == Some(s),
+            "!=" => actual_value.as_str() != Some(s),
+            _ => false,
+        }
+    } else if let Ok(expected_num) = value_part.parse::<f64>() {
+        // Numeric comparison
+        let actual_num = actual_value.as_f64();
+        match (op, actual_num) {
+            ("=", Some(n)) => (n - expected_num).abs() < f64::EPSILON,
+            ("!=", Some(n)) => (n - expected_num).abs() >= f64::EPSILON,
+            (">", Some(n)) => n > expected_num,
+            ("<", Some(n)) => n < expected_num,
+            (">=", Some(n)) => n >= expected_num,
+            ("<=", Some(n)) => n <= expected_num,
+            _ => false,
+        }
+    } else if value_part == "true" || value_part == "false" {
+        let expected_bool = value_part == "true";
+        match op {
+            "=" => actual_value.as_bool() == Some(expected_bool),
+            "!=" => actual_value.as_bool() != Some(expected_bool),
+            _ => false,
+        }
+    } else {
+        true // Unknown value format, match everything
+    };
+
+    expected_str
+}
+
+/// Resolve a simple dot-separated JSON path (e.g., "level" or "nested.field").
+fn resolve_json_path_simple<'a>(
+    json: &'a serde_json::Value,
+    path: &str,
+) -> Option<&'a serde_json::Value> {
+    let mut current = json;
+    for part in path.split('.') {
+        current = current.get(part)?;
+    }
+    if current.is_null() {
+        None
+    } else {
+        Some(current)
+    }
 }
 
 #[cfg(test)]
@@ -5706,8 +5817,7 @@ mod tests {
             "123456789012",
             "us-east-1",
         )));
-        let delivery = Arc::new(fakecloud_core::delivery::DeliveryBus::new());
-        LogsService::new(state, delivery)
+        LogsService::new(state)
     }
 
     fn make_request(action: &str, body: Value) -> AwsRequest {
@@ -6753,168 +6863,244 @@ mod tests {
             .is_empty());
     }
 
-    /// Mock SQS delivery that captures messages for testing.
-    struct MockSqsDelivery {
-        messages: parking_lot::Mutex<Vec<(String, String)>>,
-    }
+    // ---- FilterLogEvents pattern matching tests ----
 
-    impl MockSqsDelivery {
-        fn new() -> Self {
-            Self {
-                messages: parking_lot::Mutex::new(Vec::new()),
-            }
-        }
-
-        fn take_messages(&self) -> Vec<(String, String)> {
-            std::mem::take(&mut *self.messages.lock())
-        }
-    }
-
-    impl fakecloud_core::delivery::SqsDelivery for MockSqsDelivery {
-        fn deliver_to_queue(
-            &self,
-            queue_arn: &str,
-            message_body: &str,
-            _attributes: &HashMap<String, String>,
-        ) {
-            self.messages
-                .lock()
-                .push((queue_arn.to_string(), message_body.to_string()));
-        }
-    }
-
-    fn make_service_with_mock_sqs() -> (LogsService, Arc<MockSqsDelivery>) {
-        let state = Arc::new(parking_lot::RwLock::new(LogsState::new(
-            "123456789012",
-            "us-east-1",
-        )));
-        let mock = Arc::new(MockSqsDelivery::new());
-        let delivery =
-            Arc::new(fakecloud_core::delivery::DeliveryBus::new().with_sqs(mock.clone()));
-        (LogsService::new(state, delivery), mock)
+    #[test]
+    fn filter_pattern_empty_matches_everything() {
+        assert!(matches_filter_pattern("", "any message"));
+        assert!(matches_filter_pattern("  ", "any message"));
     }
 
     #[test]
-    fn subscription_filter_delivers_matching_events_to_sqs() {
-        let (svc, mock) = make_service_with_mock_sqs();
-        let group = "/test/sub";
-        let stream = "stream-1";
-        let queue_arn = "arn:aws:sqs:us-east-1:123456789012:my-queue";
+    fn filter_pattern_simple_text_matches() {
+        assert!(matches_filter_pattern("ERROR", "This is an ERROR message"));
+        assert!(!matches_filter_pattern("ERROR", "This is a warning"));
+    }
+
+    #[test]
+    fn filter_pattern_multiple_terms_and() {
+        assert!(matches_filter_pattern(
+            "ERROR Exception",
+            "ERROR: NullPointerException occurred"
+        ));
+        assert!(!matches_filter_pattern(
+            "ERROR Exception",
+            "ERROR: something broke"
+        ));
+        assert!(!matches_filter_pattern(
+            "ERROR Exception",
+            "Exception in thread"
+        ));
+    }
+
+    #[test]
+    fn filter_pattern_quoted_exact_phrase() {
+        assert!(matches_filter_pattern(
+            "\"error occurred\"",
+            "An error occurred in module X"
+        ));
+        assert!(!matches_filter_pattern(
+            "\"error occurred\"",
+            "An error has occurred in module X"
+        ));
+    }
+
+    #[test]
+    fn filter_pattern_json_field_equals_string() {
+        assert!(matches_filter_pattern(
+            "{ $.level = \"ERROR\" }",
+            r#"{"level":"ERROR","message":"boom"}"#
+        ));
+        assert!(!matches_filter_pattern(
+            "{ $.level = \"ERROR\" }",
+            r#"{"level":"INFO","message":"ok"}"#
+        ));
+    }
+
+    #[test]
+    fn filter_pattern_json_field_not_equals() {
+        assert!(matches_filter_pattern(
+            "{ $.level != \"INFO\" }",
+            r#"{"level":"ERROR","message":"boom"}"#
+        ));
+        assert!(!matches_filter_pattern(
+            "{ $.level != \"INFO\" }",
+            r#"{"level":"INFO","message":"ok"}"#
+        ));
+    }
+
+    #[test]
+    fn filter_pattern_json_numeric_comparison() {
+        assert!(matches_filter_pattern(
+            "{ $.status = 500 }",
+            r#"{"status":500,"msg":"error"}"#
+        ));
+        assert!(!matches_filter_pattern(
+            "{ $.status = 500 }",
+            r#"{"status":200,"msg":"ok"}"#
+        ));
+        assert!(matches_filter_pattern(
+            "{ $.latency > 100 }",
+            r#"{"latency":250}"#
+        ));
+        assert!(!matches_filter_pattern(
+            "{ $.latency > 100 }",
+            r#"{"latency":50}"#
+        ));
+    }
+
+    #[test]
+    fn filter_pattern_json_nested_field() {
+        assert!(matches_filter_pattern(
+            "{ $.request.method = \"POST\" }",
+            r#"{"request":{"method":"POST","path":"/api"}}"#
+        ));
+        assert!(!matches_filter_pattern(
+            "{ $.request.method = \"POST\" }",
+            r#"{"request":{"method":"GET","path":"/api"}}"#
+        ));
+    }
+
+    #[test]
+    fn filter_pattern_json_non_json_message_no_match() {
+        assert!(!matches_filter_pattern(
+            "{ $.level = \"ERROR\" }",
+            "This is a plain text message"
+        ));
+    }
+
+    #[test]
+    fn filter_log_events_applies_pattern() {
+        let svc = make_service();
 
         // Create log group and stream
-        create_group(&svc, group);
-        create_stream(&svc, group, stream);
-
-        // Put subscription filter targeting SQS
         let req = make_request(
-            "PutSubscriptionFilter",
+            "CreateLogGroup",
+            json!({ "logGroupName": "/filter-pattern/test" }),
+        );
+        svc.create_log_group(&req).unwrap();
+
+        let req = make_request(
+            "CreateLogStream",
             json!({
-                "logGroupName": group,
-                "filterName": "my-filter",
-                "filterPattern": "",
-                "destinationArn": queue_arn,
+                "logGroupName": "/filter-pattern/test",
+                "logStreamName": "stream-1"
             }),
         );
-        svc.put_subscription_filter(&req).unwrap();
+        svc.create_log_stream(&req).unwrap();
 
-        // Put log events
-        put_events(&svc, group, stream, &["hello world", "test message"]);
+        // Put events with mixed content
+        let now = chrono::Utc::now().timestamp_millis();
+        let req = make_request(
+            "PutLogEvents",
+            json!({
+                "logGroupName": "/filter-pattern/test",
+                "logStreamName": "stream-1",
+                "logEvents": [
+                    { "timestamp": now, "message": "ERROR: disk full" },
+                    { "timestamp": now + 1000, "message": "INFO: request complete" },
+                    { "timestamp": now + 2000, "message": "ERROR: connection timeout" },
+                    { "timestamp": now + 3000, "message": "WARN: high latency" }
+                ]
+            }),
+        );
+        svc.put_log_events(&req).unwrap();
 
-        // Verify delivery
-        let messages = mock.take_messages();
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].0, queue_arn);
-
-        // Decode the payload: base64 -> gzip -> JSON
-        let decoded = base64::engine::general_purpose::STANDARD
-            .decode(&messages[0].1)
-            .unwrap();
-        let mut decoder = flate2::read::GzDecoder::new(&decoded[..]);
-        let mut json_str = String::new();
-        std::io::Read::read_to_string(&mut decoder, &mut json_str).unwrap();
-        let payload: Value = serde_json::from_str(&json_str).unwrap();
-
-        assert_eq!(payload["messageType"], "DATA_MESSAGE");
-        assert_eq!(payload["logGroup"], group);
-        assert_eq!(payload["logStream"], stream);
-        assert_eq!(payload["subscriptionFilters"][0], "my-filter");
-        let events = payload["logEvents"].as_array().unwrap();
+        // Filter for ERROR
+        let req = make_request(
+            "FilterLogEvents",
+            json!({
+                "logGroupName": "/filter-pattern/test",
+                "filterPattern": "ERROR"
+            }),
+        );
+        let resp = svc.filter_log_events(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let events = body["events"].as_array().unwrap();
         assert_eq!(events.len(), 2);
-        assert_eq!(events[0]["message"], "hello world");
-        assert_eq!(events[1]["message"], "test message");
-    }
+        assert!(events[0]["message"].as_str().unwrap().contains("ERROR"));
+        assert!(events[1]["message"].as_str().unwrap().contains("ERROR"));
 
-    #[test]
-    fn subscription_filter_respects_pattern() {
-        let (svc, mock) = make_service_with_mock_sqs();
-        let group = "/test/pattern";
-        let stream = "stream-1";
-        let queue_arn = "arn:aws:sqs:us-east-1:123456789012:pattern-queue";
-
-        create_group(&svc, group);
-        create_stream(&svc, group, stream);
-
-        // Filter only matches "ERROR"
+        // Filter for multiple terms (AND)
         let req = make_request(
-            "PutSubscriptionFilter",
+            "FilterLogEvents",
             json!({
-                "logGroupName": group,
-                "filterName": "error-filter",
-                "filterPattern": "ERROR",
-                "destinationArn": queue_arn,
+                "logGroupName": "/filter-pattern/test",
+                "filterPattern": "ERROR timeout"
             }),
         );
-        svc.put_subscription_filter(&req).unwrap();
-
-        // Put events, only one matches
-        put_events(
-            &svc,
-            group,
-            stream,
-            &["INFO all good", "ERROR something broke"],
-        );
-
-        let messages = mock.take_messages();
-        assert_eq!(messages.len(), 1);
-
-        // Decode and verify only the matching event was sent
-        let decoded = base64::engine::general_purpose::STANDARD
-            .decode(&messages[0].1)
-            .unwrap();
-        let mut decoder = flate2::read::GzDecoder::new(&decoded[..]);
-        let mut json_str = String::new();
-        std::io::Read::read_to_string(&mut decoder, &mut json_str).unwrap();
-        let payload: Value = serde_json::from_str(&json_str).unwrap();
-
-        let events = payload["logEvents"].as_array().unwrap();
+        let resp = svc.filter_log_events(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let events = body["events"].as_array().unwrap();
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0]["message"], "ERROR something broke");
+        assert!(events[0]["message"].as_str().unwrap().contains("timeout"));
+
+        // Filter for quoted phrase
+        let req = make_request(
+            "FilterLogEvents",
+            json!({
+                "logGroupName": "/filter-pattern/test",
+                "filterPattern": "\"request complete\""
+            }),
+        );
+        let resp = svc.filter_log_events(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let events = body["events"].as_array().unwrap();
+        assert_eq!(events.len(), 1);
+        assert!(events[0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("request complete"));
     }
 
     #[test]
-    fn subscription_filter_no_delivery_when_no_match() {
-        let (svc, mock) = make_service_with_mock_sqs();
-        let group = "/test/nomatch";
-        let stream = "stream-1";
-        let queue_arn = "arn:aws:sqs:us-east-1:123456789012:nomatch-queue";
-
-        create_group(&svc, group);
-        create_stream(&svc, group, stream);
+    fn filter_log_events_json_pattern() {
+        let svc = make_service();
 
         let req = make_request(
-            "PutSubscriptionFilter",
+            "CreateLogGroup",
+            json!({ "logGroupName": "/json-filter/test" }),
+        );
+        svc.create_log_group(&req).unwrap();
+
+        let req = make_request(
+            "CreateLogStream",
             json!({
-                "logGroupName": group,
-                "filterName": "strict-filter",
-                "filterPattern": "CRITICAL",
-                "destinationArn": queue_arn,
+                "logGroupName": "/json-filter/test",
+                "logStreamName": "s1"
             }),
         );
-        svc.put_subscription_filter(&req).unwrap();
+        svc.create_log_stream(&req).unwrap();
 
-        put_events(&svc, group, stream, &["INFO all good", "WARN something"]);
+        let now = chrono::Utc::now().timestamp_millis();
+        let req = make_request(
+            "PutLogEvents",
+            json!({
+                "logGroupName": "/json-filter/test",
+                "logStreamName": "s1",
+                "logEvents": [
+                    { "timestamp": now, "message": r#"{"level":"ERROR","msg":"fail"}"# },
+                    { "timestamp": now + 1000, "message": r#"{"level":"INFO","msg":"ok"}"# },
+                    { "timestamp": now + 2000, "message": r#"{"level":"ERROR","msg":"crash"}"# },
+                    { "timestamp": now + 3000, "message": "not json at all" }
+                ]
+            }),
+        );
+        svc.put_log_events(&req).unwrap();
 
-        let messages = mock.take_messages();
-        assert!(messages.is_empty());
+        // Filter with JSON pattern
+        let req = make_request(
+            "FilterLogEvents",
+            json!({
+                "logGroupName": "/json-filter/test",
+                "filterPattern": "{ $.level = \"ERROR\" }"
+            }),
+        );
+        let resp = svc.filter_log_events(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let events = body["events"].as_array().unwrap();
+        assert_eq!(events.len(), 2);
+        assert!(events[0]["message"].as_str().unwrap().contains("ERROR"));
+        assert!(events[1]["message"].as_str().unwrap().contains("ERROR"));
     }
 }
