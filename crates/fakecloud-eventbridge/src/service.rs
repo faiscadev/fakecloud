@@ -1089,7 +1089,6 @@ impl EventBridgeService {
         let body = parse_body(req);
         validate_required("Entries", &body["Entries"])?;
         validate_optional_string_length("endpointId", body["EndpointId"].as_str(), 1, 50)?;
-        let endpoint_id = body["EndpointId"].as_str();
         let entries = body["Entries"]
             .as_array()
             .ok_or_else(|| missing("Entries"))?;
@@ -1401,13 +1400,10 @@ impl EventBridgeService {
             }
         }
 
-        let mut resp = json!({
+        let resp = json!({
             "FailedEntryCount": failed_count,
             "Entries": result_entries,
         });
-        if let Some(eid) = endpoint_id {
-            resp["EndpointId"] = json!(eid);
-        }
 
         Ok(json_resp(resp))
     }
@@ -3675,8 +3671,9 @@ mod tests {
     // -- PutEvents EndpointId tests --
 
     #[test]
-    fn put_events_returns_endpoint_id() {
+    fn put_events_never_includes_endpoint_id_in_response() {
         let svc = make_service();
+        // Even when EndpointId is provided in the request, it must not appear in the response
         let req = make_request(
             "PutEvents",
             json!({
@@ -3691,30 +3688,11 @@ mod tests {
         );
         let resp = svc.put_events(&req).unwrap();
         let body: Value = serde_json::from_slice(&resp.body).unwrap();
-        assert_eq!(body["EndpointId"].as_str().unwrap(), "my-endpoint.abc123");
-        assert_eq!(body["FailedEntryCount"], 0);
-    }
-
-    #[test]
-    fn put_events_omits_endpoint_id_when_not_provided() {
-        let svc = make_service();
-        let req = make_request(
-            "PutEvents",
-            json!({
-                "Entries": [{
-                    "Source": "my.source",
-                    "DetailType": "MyType",
-                    "Detail": "{}",
-                    "EventBusName": "default"
-                }]
-            }),
-        );
-        let resp = svc.put_events(&req).unwrap();
-        let body: Value = serde_json::from_slice(&resp.body).unwrap();
         assert!(
             !body.as_object().unwrap().contains_key("EndpointId"),
-            "EndpointId should be omitted when not provided"
+            "EndpointId should never be in the PutEvents response"
         );
+        assert_eq!(body["FailedEntryCount"], 0);
     }
 
     // -- ListArchives pagination tests --
