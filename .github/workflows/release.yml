@@ -121,9 +121,17 @@ jobs:
           publish fakecloud-eventbridge
           publish fakecloud-iam
           publish fakecloud-ssm
+          publish fakecloud-dynamodb
+          publish fakecloud-lambda
+          publish fakecloud-secretsmanager
+          publish fakecloud-logs
+          publish fakecloud-kms
           publish fakecloud-s3
 
-          # Layer 4: depends on all
+          # Layer 4: depends on layer 3 services
+          publish fakecloud-cloudformation
+
+          # Layer 5: depends on all
           echo "Publishing fakecloud..."
           cargo publish -p fakecloud
         env:
