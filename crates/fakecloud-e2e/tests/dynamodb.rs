@@ -1,9 +1,10 @@
 mod helpers;
 
 use aws_sdk_dynamodb::types::{
-    AttributeDefinition, AttributeValue, BillingMode, Delete, DeleteRequest, Get, KeySchemaElement,
-    KeyType, ProvisionedThroughput, Put, PutRequest, ScalarAttributeType, Tag,
-    TimeToLiveSpecification, TransactGetItem, TransactWriteItem, WriteRequest,
+    AttributeDefinition, AttributeValue, BillingMode, ContributorInsightsAction, Delete,
+    DeleteRequest, Get, KeySchemaElement, KeyType, PointInTimeRecoverySpecification,
+    ProvisionedThroughput, Put, PutRequest, ScalarAttributeType, Tag, TimeToLiveSpecification,
+    TransactGetItem, TransactWriteItem, WriteRequest,
 };
 use helpers::TestServer;
 use std::collections::HashMap;
@@ -1152,4 +1153,316 @@ async fn dynamodb_resource_policy_lifecycle() {
         .await
         .unwrap();
     assert!(resp.policy().is_none());
+}
+
+#[tokio::test]
+async fn dynamodb_describe_endpoints() {
+    let server = TestServer::start().await;
+    let client = server.dynamodb_client().await;
+
+    let resp = client.describe_endpoints().send().await.unwrap();
+    let endpoints = resp.endpoints();
+    assert!(!endpoints.is_empty());
+    assert_eq!(endpoints[0].cache_period_in_minutes(), 1440);
+}
+
+#[tokio::test]
+async fn dynamodb_describe_limits() {
+    let server = TestServer::start().await;
+    let client = server.dynamodb_client().await;
+
+    let resp = client.describe_limits().send().await.unwrap();
+    assert_eq!(resp.table_max_read_capacity_units().unwrap(), 40000);
+    assert_eq!(resp.table_max_write_capacity_units().unwrap(), 40000);
+}
+
+#[tokio::test]
+async fn dynamodb_backup_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.dynamodb_client().await;
+
+    client
+        .create_table()
+        .table_name("BackupTable")
+        .key_schema(
+            KeySchemaElement::builder()
+                .attribute_name("pk")
+                .key_type(KeyType::Hash)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            AttributeDefinition::builder()
+                .attribute_name("pk")
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .billing_mode(BillingMode::PayPerRequest)
+        .send()
+        .await
+        .unwrap();
+
+    // Create backup
+    let resp = client
+        .create_backup()
+        .table_name("BackupTable")
+        .backup_name("test-backup")
+        .send()
+        .await
+        .unwrap();
+    let backup_arn = resp.backup_details().unwrap().backup_arn().to_string();
+
+    // List backups
+    let resp = client.list_backups().send().await.unwrap();
+    assert!(!resp.backup_summaries().is_empty());
+
+    // Describe backup
+    let resp = client
+        .describe_backup()
+        .backup_arn(&backup_arn)
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.backup_description().is_some());
+
+    // Restore from backup
+    client
+        .restore_table_from_backup()
+        .target_table_name("RestoredFromBackup")
+        .backup_arn(&backup_arn)
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .describe_table()
+        .table_name("RestoredFromBackup")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.table().unwrap().table_status().unwrap().as_str(),
+        "ACTIVE"
+    );
+
+    // Delete backup
+    client
+        .delete_backup()
+        .backup_arn(&backup_arn)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn dynamodb_continuous_backups() {
+    let server = TestServer::start().await;
+    let client = server.dynamodb_client().await;
+
+    client
+        .create_table()
+        .table_name("PITRTable")
+        .key_schema(
+            KeySchemaElement::builder()
+                .attribute_name("pk")
+                .key_type(KeyType::Hash)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            AttributeDefinition::builder()
+                .attribute_name("pk")
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .billing_mode(BillingMode::PayPerRequest)
+        .send()
+        .await
+        .unwrap();
+
+    // Enable PITR
+    client
+        .update_continuous_backups()
+        .table_name("PITRTable")
+        .point_in_time_recovery_specification(
+            PointInTimeRecoverySpecification::builder()
+                .point_in_time_recovery_enabled(true)
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    // Describe
+    let resp = client
+        .describe_continuous_backups()
+        .table_name("PITRTable")
+        .send()
+        .await
+        .unwrap();
+    let desc = resp.continuous_backups_description().unwrap();
+    assert_eq!(desc.continuous_backups_status().as_str(), "ENABLED");
+}
+
+#[tokio::test]
+async fn dynamodb_restore_table_to_point_in_time() {
+    let server = TestServer::start().await;
+    let client = server.dynamodb_client().await;
+
+    client
+        .create_table()
+        .table_name("SourceTable")
+        .key_schema(
+            KeySchemaElement::builder()
+                .attribute_name("pk")
+                .key_type(KeyType::Hash)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            AttributeDefinition::builder()
+                .attribute_name("pk")
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .billing_mode(BillingMode::PayPerRequest)
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .restore_table_to_point_in_time()
+        .source_table_name("SourceTable")
+        .target_table_name("PITRRestored")
+        .use_latest_restorable_time(true)
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .describe_table()
+        .table_name("PITRRestored")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.table().unwrap().table_status().unwrap().as_str(),
+        "ACTIVE"
+    );
+}
+
+#[tokio::test]
+async fn dynamodb_contributor_insights() {
+    let server = TestServer::start().await;
+    let client = server.dynamodb_client().await;
+
+    client
+        .create_table()
+        .table_name("CITable")
+        .key_schema(
+            KeySchemaElement::builder()
+                .attribute_name("pk")
+                .key_type(KeyType::Hash)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            AttributeDefinition::builder()
+                .attribute_name("pk")
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .billing_mode(BillingMode::PayPerRequest)
+        .send()
+        .await
+        .unwrap();
+
+    // Enable
+    client
+        .update_contributor_insights()
+        .table_name("CITable")
+        .contributor_insights_action(ContributorInsightsAction::Enable)
+        .send()
+        .await
+        .unwrap();
+
+    // Describe
+    let resp = client
+        .describe_contributor_insights()
+        .table_name("CITable")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.contributor_insights_status().unwrap().as_str(),
+        "ENABLED"
+    );
+
+    // List
+    let resp = client.list_contributor_insights().send().await.unwrap();
+    assert!(!resp.contributor_insights_summaries().is_empty());
+}
+
+#[tokio::test]
+async fn dynamodb_kinesis_streaming_destination() {
+    let server = TestServer::start().await;
+    let client = server.dynamodb_client().await;
+
+    client
+        .create_table()
+        .table_name("KinesisTable")
+        .key_schema(
+            KeySchemaElement::builder()
+                .attribute_name("pk")
+                .key_type(KeyType::Hash)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            AttributeDefinition::builder()
+                .attribute_name("pk")
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .billing_mode(BillingMode::PayPerRequest)
+        .send()
+        .await
+        .unwrap();
+
+    let stream_arn = "arn:aws:kinesis:us-east-1:123456789012:stream/my-stream";
+
+    // Enable
+    let resp = client
+        .enable_kinesis_streaming_destination()
+        .table_name("KinesisTable")
+        .stream_arn(stream_arn)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.destination_status().unwrap().as_str(), "ACTIVE");
+
+    // Describe
+    let resp = client
+        .describe_kinesis_streaming_destination()
+        .table_name("KinesisTable")
+        .send()
+        .await
+        .unwrap();
+    assert!(!resp.kinesis_data_stream_destinations().is_empty());
+
+    // Disable
+    let resp = client
+        .disable_kinesis_streaming_destination()
+        .table_name("KinesisTable")
+        .stream_arn(stream_arn)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.destination_status().unwrap().as_str(), "DISABLED");
 }

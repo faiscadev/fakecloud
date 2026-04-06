@@ -77,6 +77,80 @@ pub struct DynamoTable {
     pub ttl_attribute: Option<String>,
     pub ttl_enabled: bool,
     pub resource_policy: Option<String>,
+    /// PITR enabled
+    pub pitr_enabled: bool,
+    /// Kinesis streaming destinations: stream_arn -> status
+    pub kinesis_destinations: Vec<KinesisDestination>,
+    /// Contributor insights status
+    pub contributor_insights_status: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct KinesisDestination {
+    pub stream_arn: String,
+    pub destination_status: String,
+    pub approximate_creation_date_time_precision: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct BackupDescription {
+    pub backup_arn: String,
+    pub backup_name: String,
+    pub table_name: String,
+    pub table_arn: String,
+    pub backup_status: String,
+    pub backup_type: String,
+    pub backup_creation_date: DateTime<Utc>,
+    pub key_schema: Vec<KeySchemaElement>,
+    pub attribute_definitions: Vec<AttributeDefinition>,
+    pub provisioned_throughput: ProvisionedThroughput,
+    pub billing_mode: String,
+    pub item_count: i64,
+    pub size_bytes: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct GlobalTableDescription {
+    pub global_table_name: String,
+    pub global_table_arn: String,
+    pub global_table_status: String,
+    pub creation_date: DateTime<Utc>,
+    pub replication_group: Vec<ReplicaDescription>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ReplicaDescription {
+    pub region_name: String,
+    pub replica_status: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExportDescription {
+    pub export_arn: String,
+    pub export_status: String,
+    pub table_arn: String,
+    pub s3_bucket: String,
+    pub s3_prefix: Option<String>,
+    pub export_format: String,
+    pub start_time: DateTime<Utc>,
+    pub end_time: DateTime<Utc>,
+    pub export_time: DateTime<Utc>,
+    pub item_count: i64,
+    pub billed_size_bytes: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct ImportDescription {
+    pub import_arn: String,
+    pub import_status: String,
+    pub table_arn: String,
+    pub table_name: String,
+    pub s3_bucket_source: String,
+    pub input_format: String,
+    pub start_time: DateTime<Utc>,
+    pub end_time: DateTime<Utc>,
+    pub processed_item_count: i64,
+    pub processed_size_bytes: i64,
 }
 
 impl DynamoTable {
@@ -179,6 +253,10 @@ pub struct DynamoDbState {
     pub account_id: String,
     pub region: String,
     pub tables: HashMap<String, DynamoTable>,
+    pub backups: HashMap<String, BackupDescription>,
+    pub global_tables: HashMap<String, GlobalTableDescription>,
+    pub exports: HashMap<String, ExportDescription>,
+    pub imports: HashMap<String, ImportDescription>,
 }
 
 impl DynamoDbState {
@@ -187,11 +265,19 @@ impl DynamoDbState {
             account_id: account_id.to_string(),
             region: region.to_string(),
             tables: HashMap::new(),
+            backups: HashMap::new(),
+            global_tables: HashMap::new(),
+            exports: HashMap::new(),
+            imports: HashMap::new(),
         }
     }
 
     pub fn reset(&mut self) {
         self.tables.clear();
+        self.backups.clear();
+        self.global_tables.clear();
+        self.exports.clear();
+        self.imports.clear();
     }
 }
 

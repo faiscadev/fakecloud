@@ -9,9 +9,10 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceErr
 use fakecloud_core::validation::*;
 
 use crate::state::{
-    attribute_type_and_value, AttributeDefinition, AttributeValue, DynamoTable,
-    GlobalSecondaryIndex, KeySchemaElement, LocalSecondaryIndex, Projection, ProvisionedThroughput,
-    SharedDynamoDbState,
+    attribute_type_and_value, AttributeDefinition, AttributeValue, BackupDescription, DynamoTable,
+    ExportDescription, GlobalSecondaryIndex, GlobalTableDescription, ImportDescription,
+    KeySchemaElement, KinesisDestination, LocalSecondaryIndex, Projection, ProvisionedThroughput,
+    ReplicaDescription, SharedDynamoDbState,
 };
 
 pub struct DynamoDbService {
@@ -135,6 +136,9 @@ impl DynamoDbService {
             ttl_attribute: None,
             ttl_enabled: false,
             resource_policy: None,
+            pitr_enabled: false,
+            kinesis_destinations: Vec::new(),
+            contributor_insights_status: "DISABLED".to_string(),
         };
 
         state.tables.insert(table_name, table);
@@ -1336,6 +1340,1150 @@ impl DynamoDbService {
 
         Self::ok_json(json!({}))
     }
+
+    // ── Stubs ──────────────────────────────────────────────────────────
+
+    fn describe_endpoints(&self, _req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        Self::ok_json(json!({
+            "Endpoints": [{
+                "Address": "dynamodb.us-east-1.amazonaws.com",
+                "CachePeriodInMinutes": 1440
+            }]
+        }))
+    }
+
+    fn describe_limits(&self, _req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        Self::ok_json(json!({
+            "AccountMaxReadCapacityUnits": 80000,
+            "AccountMaxWriteCapacityUnits": 80000,
+            "TableMaxReadCapacityUnits": 40000,
+            "TableMaxWriteCapacityUnits": 40000
+        }))
+    }
+
+    // ── Backups ────────────────────────────────────────────────────────
+
+    fn create_backup(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = Self::parse_body(req)?;
+        let table_name = require_str(&body, "TableName")?;
+        let backup_name = require_str(&body, "BackupName")?;
+
+        let mut state = self.state.write();
+        let table = get_table(&state.tables, table_name)?;
+
+        let backup_arn = format!(
+            "arn:aws:dynamodb:{}:{}:table/{}/backup/{}",
+            state.region,
+            state.account_id,
+            table_name,
+            Utc::now().format("%Y%m%d%H%M%S")
+        );
+        let now = Utc::now();
+
+        let backup = BackupDescription {
+            backup_arn: backup_arn.clone(),
+            backup_name: backup_name.to_string(),
+            table_name: table_name.to_string(),
+            table_arn: table.arn.clone(),
+            backup_status: "AVAILABLE".to_string(),
+            backup_type: "USER".to_string(),
+            backup_creation_date: now,
+            key_schema: table.key_schema.clone(),
+            attribute_definitions: table.attribute_definitions.clone(),
+            provisioned_throughput: table.provisioned_throughput.clone(),
+            billing_mode: table.billing_mode.clone(),
+            item_count: table.item_count,
+            size_bytes: table.size_bytes,
+        };
+
+        state.backups.insert(backup_arn.clone(), backup);
+
+        Self::ok_json(json!({
+            "BackupDetails": {
+                "BackupArn": backup_arn,
+                "BackupName": backup_name,
+                "BackupStatus": "AVAILABLE",
+                "BackupType": "USER",
+                "BackupCreationDateTime": now.timestamp() as f64,
+                "BackupSizeBytes": 0
+            }
+        }))
+    }
+
+    fn delete_backup(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = Self::parse_body(req)?;
+        let backup_arn = require_str(&body, "BackupArn")?;
+
+        let mut state = self.state.write();
+        let backup = state.backups.remove(backup_arn).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "BackupNotFoundException",
+                format!("Backup not found: {backup_arn}"),
+            )
+        })?;
+
+        Self::ok_json(json!({
+            "BackupDescription": {
+                "BackupDetails": {
+                    "BackupArn": backup.backup_arn,
+                    "BackupName": backup.backup_name,
+                    "BackupStatus": "DELETED",
+                    "BackupType": backup.backup_type,
+                    "BackupCreationDateTime": backup.backup_creation_date.timestamp() as f64,
+                    "BackupSizeBytes": backup.size_bytes
+                },
+                "SourceTableDetails": {
+                    "TableName": backup.table_name,
+                    "TableArn": backup.table_arn,
+                    "TableId": uuid::Uuid::new_v4().to_string(),
+                    "KeySchema": backup.key_schema.iter().map(|ks| json!({
+                        "AttributeName": ks.attribute_name,
+                        "KeyType": ks.key_type
+                    })).collect::<Vec<_>>(),
+                    "TableCreationDateTime": backup.backup_creation_date.timestamp() as f64,
+                    "ProvisionedThroughput": {
+                        "ReadCapacityUnits": backup.provisioned_throughput.read_capacity_units,
+                        "WriteCapacityUnits": backup.provisioned_throughput.write_capacity_units
+                    },
+                    "ItemCount": backup.item_count,
+                    "BillingMode": backup.billing_mode,
+                    "TableSizeBytes": backup.size_bytes
+                },
+                "SourceTableFeatureDetails": {}
+            }
+        }))
+    }
+
+    fn describe_backup(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = Self::parse_body(req)?;
+        let backup_arn = require_str(&body, "BackupArn")?;
+
+        let state = self.state.read();
+        let backup = state.backups.get(backup_arn).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "BackupNotFoundException",
+                format!("Backup not found: {backup_arn}"),
+            )
+        })?;
+
+        Self::ok_json(json!({
+            "BackupDescription": {
+                "BackupDetails": {
+                    "BackupArn": backup.backup_arn,
+                    "BackupName": backup.backup_name,
+                    "BackupStatus": backup.backup_status,
+                    "BackupType": backup.backup_type,
+                    "BackupCreationDateTime": backup.backup_creation_date.timestamp() as f64,
+                    "BackupSizeBytes": backup.size_bytes
+                },
+                "SourceTableDetails": {
+                    "TableName": backup.table_name,
+                    "TableArn": backup.table_arn,
+                    "TableId": uuid::Uuid::new_v4().to_string(),
+                    "KeySchema": backup.key_schema.iter().map(|ks| json!({
+                        "AttributeName": ks.attribute_name,
+                        "KeyType": ks.key_type
+                    })).collect::<Vec<_>>(),
+                    "TableCreationDateTime": backup.backup_creation_date.timestamp() as f64,
+                    "ProvisionedThroughput": {
+                        "ReadCapacityUnits": backup.provisioned_throughput.read_capacity_units,
+                        "WriteCapacityUnits": backup.provisioned_throughput.write_capacity_units
+                    },
+                    "ItemCount": backup.item_count,
+                    "BillingMode": backup.billing_mode,
+                    "TableSizeBytes": backup.size_bytes
+                },
+                "SourceTableFeatureDetails": {}
+            }
+        }))
+    }
+
+    fn list_backups(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = Self::parse_body(req)?;
+        let table_name = body["TableName"].as_str();
+
+        let state = self.state.read();
+        let summaries: Vec<Value> = state
+            .backups
+            .values()
+            .filter(|b| table_name.is_none() || table_name == Some(b.table_name.as_str()))
+            .map(|b| {
+                json!({
+                    "TableName": b.table_name,
+                    "TableArn": b.table_arn,
+                    "BackupArn": b.backup_arn,
+                    "BackupName": b.backup_name,
+                    "BackupCreationDateTime": b.backup_creation_date.timestamp() as f64,
+                    "BackupStatus": b.backup_status,
+                    "BackupType": b.backup_type,
+                    "BackupSizeBytes": b.size_bytes
+                })
+            })
+            .collect();
+
+        Self::ok_json(json!({
+            "BackupSummaries": summaries
+        }))
+    }
+
+    fn restore_table_from_backup(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = Self::parse_body(req)?;
+        let backup_arn = require_str(&body, "BackupArn")?;
+        let target_table_name = require_str(&body, "TargetTableName")?;
+
+        let mut state = self.state.write();
+        let backup = state.backups.get(backup_arn).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "BackupNotFoundException",
+                format!("Backup not found: {backup_arn}"),
+            )
+        })?;
+
+        if state.tables.contains_key(target_table_name) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "TableAlreadyExistsException",
+                format!("Table already exists: {target_table_name}"),
+            ));
+        }
+
+        let now = Utc::now();
+        let arn = format!(
+            "arn:aws:dynamodb:{}:{}:table/{}",
+            state.region, state.account_id, target_table_name
+        );
+
+        let table = DynamoTable {
+            name: target_table_name.to_string(),
+            arn: arn.clone(),
+            key_schema: backup.key_schema.clone(),
+            attribute_definitions: backup.attribute_definitions.clone(),
+            provisioned_throughput: backup.provisioned_throughput.clone(),
+            items: Vec::new(),
+            gsi: Vec::new(),
+            lsi: Vec::new(),
+            tags: HashMap::new(),
+            created_at: now,
+            status: "ACTIVE".to_string(),
+            item_count: 0,
+            size_bytes: 0,
+            billing_mode: backup.billing_mode.clone(),
+            ttl_attribute: None,
+            ttl_enabled: false,
+            resource_policy: None,
+            pitr_enabled: false,
+            kinesis_destinations: Vec::new(),
+            contributor_insights_status: "DISABLED".to_string(),
+        };
+
+        let desc = build_table_description(&table);
+        state.tables.insert(target_table_name.to_string(), table);
+
+        Self::ok_json(json!({
+            "TableDescription": desc
+        }))
+    }
+
+    fn restore_table_to_point_in_time(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = Self::parse_body(req)?;
+        let target_table_name = require_str(&body, "TargetTableName")?;
+        let source_table_name = body["SourceTableName"].as_str();
+        let source_table_arn = body["SourceTableArn"].as_str();
+
+        let mut state = self.state.write();
+
+        // Resolve source table
+        let source = if let Some(name) = source_table_name {
+            get_table(&state.tables, name)?.clone()
+        } else if let Some(arn) = source_table_arn {
+            find_table_by_arn(&state.tables, arn)?.clone()
+        } else {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ValidationException",
+                "SourceTableName or SourceTableArn is required",
+            ));
+        };
+
+        if state.tables.contains_key(target_table_name) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "TableAlreadyExistsException",
+                format!("Table already exists: {target_table_name}"),
+            ));
+        }
+
+        let now = Utc::now();
+        let arn = format!(
+            "arn:aws:dynamodb:{}:{}:table/{}",
+            state.region, state.account_id, target_table_name
+        );
+
+        let table = DynamoTable {
+            name: target_table_name.to_string(),
+            arn: arn.clone(),
+            key_schema: source.key_schema.clone(),
+            attribute_definitions: source.attribute_definitions.clone(),
+            provisioned_throughput: source.provisioned_throughput.clone(),
+            items: Vec::new(),
+            gsi: Vec::new(),
+            lsi: Vec::new(),
+            tags: HashMap::new(),
+            created_at: now,
+            status: "ACTIVE".to_string(),
+            item_count: 0,
+            size_bytes: 0,
+            billing_mode: source.billing_mode.clone(),
+            ttl_attribute: None,
+            ttl_enabled: false,
+            resource_policy: None,
+            pitr_enabled: false,
+            kinesis_destinations: Vec::new(),
+            contributor_insights_status: "DISABLED".to_string(),
+        };
+
+        let desc = build_table_description(&table);
+        state.tables.insert(target_table_name.to_string(), table);
+
+        Self::ok_json(json!({
+            "TableDescription": desc
+        }))
+    }
+
+    fn update_continuous_backups(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = Self::parse_body(req)?;
+        let table_name = require_str(&body, "TableName")?;
+
+        let pitr_spec = body["PointInTimeRecoverySpecification"]
+            .as_object()
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationException",
+                    "PointInTimeRecoverySpecification is required",
+                )
+            })?;
+        let enabled = pitr_spec
+            .get("PointInTimeRecoveryEnabled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        let mut state = self.state.write();
+        let table = get_table_mut(&mut state.tables, table_name)?;
+        table.pitr_enabled = enabled;
+
+        let status = if enabled { "ENABLED" } else { "DISABLED" };
+        Self::ok_json(json!({
+            "ContinuousBackupsDescription": {
+                "ContinuousBackupsStatus": status,
+                "PointInTimeRecoveryDescription": {
+                    "PointInTimeRecoveryStatus": status,
+                    "EarliestRestorableDateTime": Utc::now().timestamp() as f64,
+                    "LatestRestorableDateTime": Utc::now().timestamp() as f64
+                }
+            }
+        }))
+    }
+
+    fn describe_continuous_backups(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = Self::parse_body(req)?;
+        let table_name = require_str(&body, "TableName")?;
+
+        let state = self.state.read();
+        let table = get_table(&state.tables, table_name)?;
+
+        let status = if table.pitr_enabled {
+            "ENABLED"
+        } else {
+            "DISABLED"
+        };
+        Self::ok_json(json!({
+            "ContinuousBackupsDescription": {
+                "ContinuousBackupsStatus": status,
+                "PointInTimeRecoveryDescription": {
+                    "PointInTimeRecoveryStatus": status,
+                    "EarliestRestorableDateTime": Utc::now().timestamp() as f64,
+                    "LatestRestorableDateTime": Utc::now().timestamp() as f64
+                }
+            }
+        }))
+    }
+
+    // ── Global Tables ──────────────────────────────────────────────────
+
+    fn create_global_table(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = Self::parse_body(req)?;
+        let global_table_name = require_str(&body, "GlobalTableName")?;
+
+        let replication_group = body["ReplicationGroup"]
+            .as_array()
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationException",
+                    "ReplicationGroup is required",
+                )
+            })?
+            .iter()
+            .filter_map(|r| {
+                r["RegionName"].as_str().map(|rn| ReplicaDescription {
+                    region_name: rn.to_string(),
+                    replica_status: "ACTIVE".to_string(),
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let mut state = self.state.write();
+
+        if state.global_tables.contains_key(global_table_name) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "GlobalTableAlreadyExistsException",
+                format!("Global table already exists: {global_table_name}"),
+            ));
+        }
+
+        let arn = format!(
+            "arn:aws:dynamodb::{}:global-table/{}",
+            state.account_id, global_table_name
+        );
+        let now = Utc::now();
+
+        let gt = GlobalTableDescription {
+            global_table_name: global_table_name.to_string(),
+            global_table_arn: arn.clone(),
+            global_table_status: "ACTIVE".to_string(),
+            creation_date: now,
+            replication_group: replication_group.clone(),
+        };
+
+        state
+            .global_tables
+            .insert(global_table_name.to_string(), gt);
+
+        Self::ok_json(json!({
+            "GlobalTableDescription": {
+                "GlobalTableName": global_table_name,
+                "GlobalTableArn": arn,
+                "GlobalTableStatus": "ACTIVE",
+                "CreationDateTime": now.timestamp() as f64,
+                "ReplicationGroup": replication_group.iter().map(|r| json!({
+                    "RegionName": r.region_name,
+                    "ReplicaStatus": r.replica_status
+                })).collect::<Vec<_>>()
+            }
+        }))
+    }
+
+    fn describe_global_table(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = Self::parse_body(req)?;
+        let global_table_name = require_str(&body, "GlobalTableName")?;
+
+        let state = self.state.read();
+        let gt = state.global_tables.get(global_table_name).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "GlobalTableNotFoundException",
+                format!("Global table not found: {global_table_name}"),
+            )
+        })?;
+
+        Self::ok_json(json!({
+            "GlobalTableDescription": {
+                "GlobalTableName": gt.global_table_name,
+                "GlobalTableArn": gt.global_table_arn,
+                "GlobalTableStatus": gt.global_table_status,
+                "CreationDateTime": gt.creation_date.timestamp() as f64,
+                "ReplicationGroup": gt.replication_group.iter().map(|r| json!({
+                    "RegionName": r.region_name,
+                    "ReplicaStatus": r.replica_status
+                })).collect::<Vec<_>>()
+            }
+        }))
+    }
+
+    fn describe_global_table_settings(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = Self::parse_body(req)?;
+        let global_table_name = require_str(&body, "GlobalTableName")?;
+
+        let state = self.state.read();
+        let gt = state.global_tables.get(global_table_name).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "GlobalTableNotFoundException",
+                format!("Global table not found: {global_table_name}"),
+            )
+        })?;
+
+        let replica_settings: Vec<Value> = gt
+            .replication_group
+            .iter()
+            .map(|r| {
+                json!({
+                    "RegionName": r.region_name,
+                    "ReplicaStatus": r.replica_status,
+                    "ReplicaProvisionedReadCapacityUnits": 0,
+                    "ReplicaProvisionedWriteCapacityUnits": 0
+                })
+            })
+            .collect();
+
+        Self::ok_json(json!({
+            "GlobalTableName": gt.global_table_name,
+            "ReplicaSettings": replica_settings
+        }))
+    }
+
+    fn list_global_tables(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = Self::parse_body(req)?;
+        let limit = body["Limit"].as_i64().unwrap_or(100) as usize;
+
+        let state = self.state.read();
+        let tables: Vec<Value> = state
+            .global_tables
+            .values()
+            .take(limit)
+            .map(|gt| {
+                json!({
+                    "GlobalTableName": gt.global_table_name,
+                    "ReplicationGroup": gt.replication_group.iter().map(|r| json!({
+                        "RegionName": r.region_name
+                    })).collect::<Vec<_>>()
+                })
+            })
+            .collect();
+
+        Self::ok_json(json!({
+            "GlobalTables": tables
+        }))
+    }
+
+    fn update_global_table(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = Self::parse_body(req)?;
+        let global_table_name = require_str(&body, "GlobalTableName")?;
+
+        let mut state = self.state.write();
+        let gt = state
+            .global_tables
+            .get_mut(global_table_name)
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "GlobalTableNotFoundException",
+                    format!("Global table not found: {global_table_name}"),
+                )
+            })?;
+
+        if let Some(updates) = body["ReplicaUpdates"].as_array() {
+            for update in updates {
+                if let Some(create) = update["Create"].as_object() {
+                    if let Some(region) = create.get("RegionName").and_then(|v| v.as_str()) {
+                        gt.replication_group.push(ReplicaDescription {
+                            region_name: region.to_string(),
+                            replica_status: "ACTIVE".to_string(),
+                        });
+                    }
+                }
+                if let Some(delete) = update["Delete"].as_object() {
+                    if let Some(region) = delete.get("RegionName").and_then(|v| v.as_str()) {
+                        gt.replication_group.retain(|r| r.region_name != region);
+                    }
+                }
+            }
+        }
+
+        Self::ok_json(json!({
+            "GlobalTableDescription": {
+                "GlobalTableName": gt.global_table_name,
+                "GlobalTableArn": gt.global_table_arn,
+                "GlobalTableStatus": gt.global_table_status,
+                "CreationDateTime": gt.creation_date.timestamp() as f64,
+                "ReplicationGroup": gt.replication_group.iter().map(|r| json!({
+                    "RegionName": r.region_name,
+                    "ReplicaStatus": r.replica_status
+                })).collect::<Vec<_>>()
+            }
+        }))
+    }
+
+    fn update_global_table_settings(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = Self::parse_body(req)?;
+        let global_table_name = require_str(&body, "GlobalTableName")?;
+
+        let state = self.state.read();
+        let gt = state.global_tables.get(global_table_name).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "GlobalTableNotFoundException",
+                format!("Global table not found: {global_table_name}"),
+            )
+        })?;
+
+        let replica_settings: Vec<Value> = gt
+            .replication_group
+            .iter()
+            .map(|r| {
+                json!({
+                    "RegionName": r.region_name,
+                    "ReplicaStatus": r.replica_status,
+                    "ReplicaProvisionedReadCapacityUnits": 0,
+                    "ReplicaProvisionedWriteCapacityUnits": 0
+                })
+            })
+            .collect();
+
+        Self::ok_json(json!({
+            "GlobalTableName": gt.global_table_name,
+            "ReplicaSettings": replica_settings
+        }))
+    }
+
+    fn describe_table_replica_auto_scaling(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = Self::parse_body(req)?;
+        let table_name = require_str(&body, "TableName")?;
+
+        let state = self.state.read();
+        let table = get_table(&state.tables, table_name)?;
+
+        Self::ok_json(json!({
+            "TableAutoScalingDescription": {
+                "TableName": table.name,
+                "TableStatus": table.status,
+                "Replicas": []
+            }
+        }))
+    }
+
+    fn update_table_replica_auto_scaling(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = Self::parse_body(req)?;
+        let table_name = require_str(&body, "TableName")?;
+
+        let state = self.state.read();
+        let table = get_table(&state.tables, table_name)?;
+
+        Self::ok_json(json!({
+            "TableAutoScalingDescription": {
+                "TableName": table.name,
+                "TableStatus": table.status,
+                "Replicas": []
+            }
+        }))
+    }
+
+    // ── Kinesis Streaming ──────────────────────────────────────────────
+
+    fn enable_kinesis_streaming_destination(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = Self::parse_body(req)?;
+        let table_name = require_str(&body, "TableName")?;
+        let stream_arn = require_str(&body, "StreamArn")?;
+        let precision = body["EnableKinesisStreamingConfiguration"]
+            ["ApproximateCreationDateTimePrecision"]
+            .as_str()
+            .unwrap_or("MILLISECOND");
+
+        let mut state = self.state.write();
+        let table = get_table_mut(&mut state.tables, table_name)?;
+
+        table.kinesis_destinations.push(KinesisDestination {
+            stream_arn: stream_arn.to_string(),
+            destination_status: "ACTIVE".to_string(),
+            approximate_creation_date_time_precision: precision.to_string(),
+        });
+
+        Self::ok_json(json!({
+            "TableName": table_name,
+            "StreamArn": stream_arn,
+            "DestinationStatus": "ACTIVE",
+            "EnableKinesisStreamingConfiguration": {
+                "ApproximateCreationDateTimePrecision": precision
+            }
+        }))
+    }
+
+    fn disable_kinesis_streaming_destination(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = Self::parse_body(req)?;
+        let table_name = require_str(&body, "TableName")?;
+        let stream_arn = require_str(&body, "StreamArn")?;
+
+        let mut state = self.state.write();
+        let table = get_table_mut(&mut state.tables, table_name)?;
+
+        if let Some(dest) = table
+            .kinesis_destinations
+            .iter_mut()
+            .find(|d| d.stream_arn == stream_arn)
+        {
+            dest.destination_status = "DISABLED".to_string();
+        }
+
+        Self::ok_json(json!({
+            "TableName": table_name,
+            "StreamArn": stream_arn,
+            "DestinationStatus": "DISABLED"
+        }))
+    }
+
+    fn describe_kinesis_streaming_destination(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = Self::parse_body(req)?;
+        let table_name = require_str(&body, "TableName")?;
+
+        let state = self.state.read();
+        let table = get_table(&state.tables, table_name)?;
+
+        let destinations: Vec<Value> = table
+            .kinesis_destinations
+            .iter()
+            .map(|d| {
+                json!({
+                    "StreamArn": d.stream_arn,
+                    "DestinationStatus": d.destination_status,
+                    "ApproximateCreationDateTimePrecision": d.approximate_creation_date_time_precision
+                })
+            })
+            .collect();
+
+        Self::ok_json(json!({
+            "TableName": table_name,
+            "KinesisDataStreamDestinations": destinations
+        }))
+    }
+
+    fn update_kinesis_streaming_destination(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = Self::parse_body(req)?;
+        let table_name = require_str(&body, "TableName")?;
+        let stream_arn = require_str(&body, "StreamArn")?;
+        let precision = body["UpdateKinesisStreamingConfiguration"]
+            ["ApproximateCreationDateTimePrecision"]
+            .as_str()
+            .unwrap_or("MILLISECOND");
+
+        let mut state = self.state.write();
+        let table = get_table_mut(&mut state.tables, table_name)?;
+
+        if let Some(dest) = table
+            .kinesis_destinations
+            .iter_mut()
+            .find(|d| d.stream_arn == stream_arn)
+        {
+            dest.approximate_creation_date_time_precision = precision.to_string();
+        }
+
+        Self::ok_json(json!({
+            "TableName": table_name,
+            "StreamArn": stream_arn,
+            "DestinationStatus": "ACTIVE",
+            "UpdateKinesisStreamingConfiguration": {
+                "ApproximateCreationDateTimePrecision": precision
+            }
+        }))
+    }
+
+    // ── Contributor Insights ───────────────────────────────────────────
+
+    fn describe_contributor_insights(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = Self::parse_body(req)?;
+        let table_name = require_str(&body, "TableName")?;
+        let index_name = body["IndexName"].as_str();
+
+        let state = self.state.read();
+        let table = get_table(&state.tables, table_name)?;
+
+        let mut result = json!({
+            "TableName": table_name,
+            "ContributorInsightsStatus": table.contributor_insights_status,
+            "ContributorInsightsRuleList": []
+        });
+        if let Some(idx) = index_name {
+            result["IndexName"] = json!(idx);
+        }
+
+        Self::ok_json(result)
+    }
+
+    fn update_contributor_insights(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = Self::parse_body(req)?;
+        let table_name = require_str(&body, "TableName")?;
+        let action = require_str(&body, "ContributorInsightsAction")?;
+        let index_name = body["IndexName"].as_str();
+
+        let mut state = self.state.write();
+        let table = get_table_mut(&mut state.tables, table_name)?;
+
+        let status = match action {
+            "ENABLE" => "ENABLED",
+            "DISABLE" => "DISABLED",
+            _ => {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationException",
+                    format!("Invalid ContributorInsightsAction: {action}"),
+                ))
+            }
+        };
+        table.contributor_insights_status = status.to_string();
+
+        let mut result = json!({
+            "TableName": table_name,
+            "ContributorInsightsStatus": status
+        });
+        if let Some(idx) = index_name {
+            result["IndexName"] = json!(idx);
+        }
+
+        Self::ok_json(result)
+    }
+
+    fn list_contributor_insights(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = Self::parse_body(req)?;
+        let table_name = body["TableName"].as_str();
+
+        let state = self.state.read();
+        let summaries: Vec<Value> = state
+            .tables
+            .values()
+            .filter(|t| table_name.is_none() || table_name == Some(t.name.as_str()))
+            .map(|t| {
+                json!({
+                    "TableName": t.name,
+                    "ContributorInsightsStatus": t.contributor_insights_status
+                })
+            })
+            .collect();
+
+        Self::ok_json(json!({
+            "ContributorInsightsSummaries": summaries
+        }))
+    }
+
+    // ── Import/Export ──────────────────────────────────────────────────
+
+    fn export_table_to_point_in_time(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = Self::parse_body(req)?;
+        let table_arn = require_str(&body, "TableArn")?;
+        let s3_bucket = require_str(&body, "S3Bucket")?;
+        let s3_prefix = body["S3Prefix"].as_str();
+        let export_format = body["ExportFormat"].as_str().unwrap_or("DYNAMODB_JSON");
+
+        let state = self.state.read();
+        // Verify table exists
+        find_table_by_arn(&state.tables, table_arn)?;
+
+        let now = Utc::now();
+        let export_arn = format!(
+            "arn:aws:dynamodb:{}:{}:table/{}/export/{}",
+            state.region,
+            state.account_id,
+            table_arn.rsplit('/').next().unwrap_or("unknown"),
+            uuid::Uuid::new_v4()
+        );
+
+        let export = ExportDescription {
+            export_arn: export_arn.clone(),
+            export_status: "COMPLETED".to_string(),
+            table_arn: table_arn.to_string(),
+            s3_bucket: s3_bucket.to_string(),
+            s3_prefix: s3_prefix.map(|s| s.to_string()),
+            export_format: export_format.to_string(),
+            start_time: now,
+            end_time: now,
+            export_time: now,
+            item_count: 0,
+            billed_size_bytes: 0,
+        };
+
+        drop(state);
+        let mut state = self.state.write();
+        state.exports.insert(export_arn.clone(), export);
+
+        Self::ok_json(json!({
+            "ExportDescription": {
+                "ExportArn": export_arn,
+                "ExportStatus": "COMPLETED",
+                "TableArn": table_arn,
+                "S3Bucket": s3_bucket,
+                "S3Prefix": s3_prefix,
+                "ExportFormat": export_format,
+                "StartTime": now.timestamp() as f64,
+                "EndTime": now.timestamp() as f64,
+                "ExportTime": now.timestamp() as f64,
+                "ItemCount": 0,
+                "BilledSizeBytes": 0
+            }
+        }))
+    }
+
+    fn describe_export(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = Self::parse_body(req)?;
+        let export_arn = require_str(&body, "ExportArn")?;
+
+        let state = self.state.read();
+        let export = state.exports.get(export_arn).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ExportNotFoundException",
+                format!("Export not found: {export_arn}"),
+            )
+        })?;
+
+        Self::ok_json(json!({
+            "ExportDescription": {
+                "ExportArn": export.export_arn,
+                "ExportStatus": export.export_status,
+                "TableArn": export.table_arn,
+                "S3Bucket": export.s3_bucket,
+                "S3Prefix": export.s3_prefix,
+                "ExportFormat": export.export_format,
+                "StartTime": export.start_time.timestamp() as f64,
+                "EndTime": export.end_time.timestamp() as f64,
+                "ExportTime": export.export_time.timestamp() as f64,
+                "ItemCount": export.item_count,
+                "BilledSizeBytes": export.billed_size_bytes
+            }
+        }))
+    }
+
+    fn list_exports(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = Self::parse_body(req)?;
+        let table_arn = body["TableArn"].as_str();
+
+        let state = self.state.read();
+        let summaries: Vec<Value> = state
+            .exports
+            .values()
+            .filter(|e| table_arn.is_none() || table_arn == Some(e.table_arn.as_str()))
+            .map(|e| {
+                json!({
+                    "ExportArn": e.export_arn,
+                    "ExportStatus": e.export_status,
+                    "TableArn": e.table_arn
+                })
+            })
+            .collect();
+
+        Self::ok_json(json!({
+            "ExportSummaries": summaries
+        }))
+    }
+
+    fn import_table(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = Self::parse_body(req)?;
+        let input_format = require_str(&body, "InputFormat")?;
+        let s3_source = body["S3BucketSource"].as_object().ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ValidationException",
+                "S3BucketSource is required",
+            )
+        })?;
+        let s3_bucket = s3_source
+            .get("S3Bucket")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        let table_params = body["TableCreationParameters"].as_object().ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ValidationException",
+                "TableCreationParameters is required",
+            )
+        })?;
+        let table_name = table_params
+            .get("TableName")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationException",
+                    "TableCreationParameters.TableName is required",
+                )
+            })?;
+
+        let key_schema = parse_key_schema(table_params.get("KeySchema").unwrap_or(&Value::Null))?;
+        let attribute_definitions = parse_attribute_definitions(
+            table_params
+                .get("AttributeDefinitions")
+                .unwrap_or(&Value::Null),
+        )?;
+
+        let mut state = self.state.write();
+
+        if state.tables.contains_key(table_name) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceInUseException",
+                format!("Table already exists: {table_name}"),
+            ));
+        }
+
+        let now = Utc::now();
+        let table_arn = format!(
+            "arn:aws:dynamodb:{}:{}:table/{}",
+            state.region, state.account_id, table_name
+        );
+        let import_arn = format!(
+            "arn:aws:dynamodb:{}:{}:table/{}/import/{}",
+            state.region,
+            state.account_id,
+            table_name,
+            uuid::Uuid::new_v4()
+        );
+
+        let table = DynamoTable {
+            name: table_name.to_string(),
+            arn: table_arn.clone(),
+            key_schema,
+            attribute_definitions,
+            provisioned_throughput: ProvisionedThroughput {
+                read_capacity_units: 0,
+                write_capacity_units: 0,
+            },
+            items: Vec::new(),
+            gsi: Vec::new(),
+            lsi: Vec::new(),
+            tags: HashMap::new(),
+            created_at: now,
+            status: "ACTIVE".to_string(),
+            item_count: 0,
+            size_bytes: 0,
+            billing_mode: "PAY_PER_REQUEST".to_string(),
+            ttl_attribute: None,
+            ttl_enabled: false,
+            resource_policy: None,
+            pitr_enabled: false,
+            kinesis_destinations: Vec::new(),
+            contributor_insights_status: "DISABLED".to_string(),
+        };
+        state.tables.insert(table_name.to_string(), table);
+
+        let import_desc = ImportDescription {
+            import_arn: import_arn.clone(),
+            import_status: "COMPLETED".to_string(),
+            table_arn: table_arn.clone(),
+            table_name: table_name.to_string(),
+            s3_bucket_source: s3_bucket.to_string(),
+            input_format: input_format.to_string(),
+            start_time: now,
+            end_time: now,
+            processed_item_count: 0,
+            processed_size_bytes: 0,
+        };
+        state.imports.insert(import_arn.clone(), import_desc);
+
+        Self::ok_json(json!({
+            "ImportTableDescription": {
+                "ImportArn": import_arn,
+                "ImportStatus": "COMPLETED",
+                "TableArn": table_arn,
+                "TableId": uuid::Uuid::new_v4().to_string(),
+                "S3BucketSource": {
+                    "S3Bucket": s3_bucket
+                },
+                "InputFormat": input_format,
+                "TableCreationParameters": {
+                    "TableName": table_name
+                },
+                "StartTime": now.timestamp() as f64,
+                "EndTime": now.timestamp() as f64,
+                "ProcessedItemCount": 0,
+                "ProcessedSizeBytes": 0
+            }
+        }))
+    }
+
+    fn describe_import(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = Self::parse_body(req)?;
+        let import_arn = require_str(&body, "ImportArn")?;
+
+        let state = self.state.read();
+        let import = state.imports.get(import_arn).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ImportNotFoundException",
+                format!("Import not found: {import_arn}"),
+            )
+        })?;
+
+        Self::ok_json(json!({
+            "ImportTableDescription": {
+                "ImportArn": import.import_arn,
+                "ImportStatus": import.import_status,
+                "TableArn": import.table_arn,
+                "S3BucketSource": {
+                    "S3Bucket": import.s3_bucket_source
+                },
+                "InputFormat": import.input_format,
+                "StartTime": import.start_time.timestamp() as f64,
+                "EndTime": import.end_time.timestamp() as f64,
+                "ProcessedItemCount": import.processed_item_count,
+                "ProcessedSizeBytes": import.processed_size_bytes
+            }
+        }))
+    }
+
+    fn list_imports(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = Self::parse_body(req)?;
+        let table_arn = body["TableArn"].as_str();
+
+        let state = self.state.read();
+        let summaries: Vec<Value> = state
+            .imports
+            .values()
+            .filter(|i| table_arn.is_none() || table_arn == Some(i.table_arn.as_str()))
+            .map(|i| {
+                json!({
+                    "ImportArn": i.import_arn,
+                    "ImportStatus": i.import_status,
+                    "TableArn": i.table_arn
+                })
+            })
+            .collect();
+
+        Self::ok_json(json!({
+            "ImportSummaryList": summaries
+        }))
+    }
 }
 
 #[async_trait]
@@ -1372,6 +2520,47 @@ impl AwsService for DynamoDbService {
             "PutResourcePolicy" => self.put_resource_policy(&req),
             "GetResourcePolicy" => self.get_resource_policy(&req),
             "DeleteResourcePolicy" => self.delete_resource_policy(&req),
+            // Stubs
+            "DescribeEndpoints" => self.describe_endpoints(&req),
+            "DescribeLimits" => self.describe_limits(&req),
+            // Backups
+            "CreateBackup" => self.create_backup(&req),
+            "DeleteBackup" => self.delete_backup(&req),
+            "DescribeBackup" => self.describe_backup(&req),
+            "ListBackups" => self.list_backups(&req),
+            "RestoreTableFromBackup" => self.restore_table_from_backup(&req),
+            "RestoreTableToPointInTime" => self.restore_table_to_point_in_time(&req),
+            "UpdateContinuousBackups" => self.update_continuous_backups(&req),
+            "DescribeContinuousBackups" => self.describe_continuous_backups(&req),
+            // Global tables
+            "CreateGlobalTable" => self.create_global_table(&req),
+            "DescribeGlobalTable" => self.describe_global_table(&req),
+            "DescribeGlobalTableSettings" => self.describe_global_table_settings(&req),
+            "ListGlobalTables" => self.list_global_tables(&req),
+            "UpdateGlobalTable" => self.update_global_table(&req),
+            "UpdateGlobalTableSettings" => self.update_global_table_settings(&req),
+            "DescribeTableReplicaAutoScaling" => self.describe_table_replica_auto_scaling(&req),
+            "UpdateTableReplicaAutoScaling" => self.update_table_replica_auto_scaling(&req),
+            // Kinesis streaming
+            "EnableKinesisStreamingDestination" => self.enable_kinesis_streaming_destination(&req),
+            "DisableKinesisStreamingDestination" => {
+                self.disable_kinesis_streaming_destination(&req)
+            }
+            "DescribeKinesisStreamingDestination" => {
+                self.describe_kinesis_streaming_destination(&req)
+            }
+            "UpdateKinesisStreamingDestination" => self.update_kinesis_streaming_destination(&req),
+            // Contributor insights
+            "DescribeContributorInsights" => self.describe_contributor_insights(&req),
+            "UpdateContributorInsights" => self.update_contributor_insights(&req),
+            "ListContributorInsights" => self.list_contributor_insights(&req),
+            // Import/Export
+            "ExportTableToPointInTime" => self.export_table_to_point_in_time(&req),
+            "DescribeExport" => self.describe_export(&req),
+            "ListExports" => self.list_exports(&req),
+            "ImportTable" => self.import_table(&req),
+            "DescribeImport" => self.describe_import(&req),
+            "ListImports" => self.list_imports(&req),
             _ => Err(AwsServiceError::action_not_implemented(
                 "dynamodb",
                 &req.action,
@@ -1407,6 +2596,37 @@ impl AwsService for DynamoDbService {
             "PutResourcePolicy",
             "GetResourcePolicy",
             "DeleteResourcePolicy",
+            "DescribeEndpoints",
+            "DescribeLimits",
+            "CreateBackup",
+            "DeleteBackup",
+            "DescribeBackup",
+            "ListBackups",
+            "RestoreTableFromBackup",
+            "RestoreTableToPointInTime",
+            "UpdateContinuousBackups",
+            "DescribeContinuousBackups",
+            "CreateGlobalTable",
+            "DescribeGlobalTable",
+            "DescribeGlobalTableSettings",
+            "ListGlobalTables",
+            "UpdateGlobalTable",
+            "UpdateGlobalTableSettings",
+            "DescribeTableReplicaAutoScaling",
+            "UpdateTableReplicaAutoScaling",
+            "EnableKinesisStreamingDestination",
+            "DisableKinesisStreamingDestination",
+            "DescribeKinesisStreamingDestination",
+            "UpdateKinesisStreamingDestination",
+            "DescribeContributorInsights",
+            "UpdateContributorInsights",
+            "ListContributorInsights",
+            "ExportTableToPointInTime",
+            "DescribeExport",
+            "ListExports",
+            "ImportTable",
+            "DescribeImport",
+            "ListImports",
         ]
     }
 }
@@ -2722,6 +3942,22 @@ fn build_table_description_json(
     desc
 }
 
+fn build_table_description(table: &DynamoTable) -> Value {
+    build_table_description_json(
+        &table.arn,
+        &table.key_schema,
+        &table.attribute_definitions,
+        &table.provisioned_throughput,
+        &table.gsi,
+        &table.lsi,
+        &table.billing_mode,
+        table.created_at,
+        table.item_count,
+        table.size_bytes,
+        &table.status,
+    )
+}
+
 fn execute_partiql_statement(
     state: &SharedDynamoDbState,
     statement: &str,
@@ -3623,5 +4859,423 @@ mod tests {
         let resp = svc.get_resource_policy(&req).unwrap();
         let body: Value = serde_json::from_slice(&resp.body).unwrap();
         assert!(body["Policy"].is_null());
+    }
+
+    #[test]
+    fn describe_endpoints() {
+        let svc = make_service();
+        let req = make_request("DescribeEndpoints", json!({}));
+        let resp = svc.describe_endpoints(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["Endpoints"][0]["CachePeriodInMinutes"], 1440);
+    }
+
+    #[test]
+    fn describe_limits() {
+        let svc = make_service();
+        let req = make_request("DescribeLimits", json!({}));
+        let resp = svc.describe_limits(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["TableMaxReadCapacityUnits"], 40000);
+    }
+
+    #[test]
+    fn backup_lifecycle() {
+        let svc = make_service();
+        create_test_table(&svc);
+
+        // Create backup
+        let req = make_request(
+            "CreateBackup",
+            json!({ "TableName": "test-table", "BackupName": "my-backup" }),
+        );
+        let resp = svc.create_backup(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let backup_arn = body["BackupDetails"]["BackupArn"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(body["BackupDetails"]["BackupStatus"], "AVAILABLE");
+
+        // Describe backup
+        let req = make_request("DescribeBackup", json!({ "BackupArn": backup_arn }));
+        let resp = svc.describe_backup(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(
+            body["BackupDescription"]["BackupDetails"]["BackupName"],
+            "my-backup"
+        );
+
+        // List backups
+        let req = make_request("ListBackups", json!({}));
+        let resp = svc.list_backups(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["BackupSummaries"].as_array().unwrap().len(), 1);
+
+        // Restore from backup
+        let req = make_request(
+            "RestoreTableFromBackup",
+            json!({ "BackupArn": backup_arn, "TargetTableName": "restored-table" }),
+        );
+        svc.restore_table_from_backup(&req).unwrap();
+
+        // Verify restored table exists
+        let req = make_request("DescribeTable", json!({ "TableName": "restored-table" }));
+        let resp = svc.describe_table(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["Table"]["TableStatus"], "ACTIVE");
+
+        // Delete backup
+        let req = make_request("DeleteBackup", json!({ "BackupArn": backup_arn }));
+        svc.delete_backup(&req).unwrap();
+
+        // List should be empty
+        let req = make_request("ListBackups", json!({}));
+        let resp = svc.list_backups(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["BackupSummaries"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn continuous_backups() {
+        let svc = make_service();
+        create_test_table(&svc);
+
+        // Initially disabled
+        let req = make_request(
+            "DescribeContinuousBackups",
+            json!({ "TableName": "test-table" }),
+        );
+        let resp = svc.describe_continuous_backups(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(
+            body["ContinuousBackupsDescription"]["PointInTimeRecoveryDescription"]
+                ["PointInTimeRecoveryStatus"],
+            "DISABLED"
+        );
+
+        // Enable
+        let req = make_request(
+            "UpdateContinuousBackups",
+            json!({
+                "TableName": "test-table",
+                "PointInTimeRecoverySpecification": {
+                    "PointInTimeRecoveryEnabled": true
+                }
+            }),
+        );
+        svc.update_continuous_backups(&req).unwrap();
+
+        // Verify
+        let req = make_request(
+            "DescribeContinuousBackups",
+            json!({ "TableName": "test-table" }),
+        );
+        let resp = svc.describe_continuous_backups(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(
+            body["ContinuousBackupsDescription"]["PointInTimeRecoveryDescription"]
+                ["PointInTimeRecoveryStatus"],
+            "ENABLED"
+        );
+    }
+
+    #[test]
+    fn restore_table_to_point_in_time() {
+        let svc = make_service();
+        create_test_table(&svc);
+
+        let req = make_request(
+            "RestoreTableToPointInTime",
+            json!({
+                "SourceTableName": "test-table",
+                "TargetTableName": "pitr-restored"
+            }),
+        );
+        svc.restore_table_to_point_in_time(&req).unwrap();
+
+        let req = make_request("DescribeTable", json!({ "TableName": "pitr-restored" }));
+        let resp = svc.describe_table(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["Table"]["TableStatus"], "ACTIVE");
+    }
+
+    #[test]
+    fn global_table_lifecycle() {
+        let svc = make_service();
+
+        // Create global table
+        let req = make_request(
+            "CreateGlobalTable",
+            json!({
+                "GlobalTableName": "my-global",
+                "ReplicationGroup": [
+                    { "RegionName": "us-east-1" },
+                    { "RegionName": "eu-west-1" }
+                ]
+            }),
+        );
+        let resp = svc.create_global_table(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(
+            body["GlobalTableDescription"]["GlobalTableStatus"],
+            "ACTIVE"
+        );
+
+        // Describe
+        let req = make_request(
+            "DescribeGlobalTable",
+            json!({ "GlobalTableName": "my-global" }),
+        );
+        let resp = svc.describe_global_table(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(
+            body["GlobalTableDescription"]["ReplicationGroup"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+
+        // List
+        let req = make_request("ListGlobalTables", json!({}));
+        let resp = svc.list_global_tables(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["GlobalTables"].as_array().unwrap().len(), 1);
+
+        // Update - add a region
+        let req = make_request(
+            "UpdateGlobalTable",
+            json!({
+                "GlobalTableName": "my-global",
+                "ReplicaUpdates": [
+                    { "Create": { "RegionName": "ap-southeast-1" } }
+                ]
+            }),
+        );
+        let resp = svc.update_global_table(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(
+            body["GlobalTableDescription"]["ReplicationGroup"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
+
+        // Describe settings
+        let req = make_request(
+            "DescribeGlobalTableSettings",
+            json!({ "GlobalTableName": "my-global" }),
+        );
+        let resp = svc.describe_global_table_settings(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["ReplicaSettings"].as_array().unwrap().len(), 3);
+
+        // Update settings (no-op, just verify no error)
+        let req = make_request(
+            "UpdateGlobalTableSettings",
+            json!({ "GlobalTableName": "my-global" }),
+        );
+        svc.update_global_table_settings(&req).unwrap();
+    }
+
+    #[test]
+    fn table_replica_auto_scaling() {
+        let svc = make_service();
+        create_test_table(&svc);
+
+        let req = make_request(
+            "DescribeTableReplicaAutoScaling",
+            json!({ "TableName": "test-table" }),
+        );
+        let resp = svc.describe_table_replica_auto_scaling(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(
+            body["TableAutoScalingDescription"]["TableName"],
+            "test-table"
+        );
+
+        let req = make_request(
+            "UpdateTableReplicaAutoScaling",
+            json!({ "TableName": "test-table" }),
+        );
+        svc.update_table_replica_auto_scaling(&req).unwrap();
+    }
+
+    #[test]
+    fn kinesis_streaming_lifecycle() {
+        let svc = make_service();
+        create_test_table(&svc);
+
+        // Enable
+        let req = make_request(
+            "EnableKinesisStreamingDestination",
+            json!({
+                "TableName": "test-table",
+                "StreamArn": "arn:aws:kinesis:us-east-1:123456789012:stream/my-stream"
+            }),
+        );
+        let resp = svc.enable_kinesis_streaming_destination(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["DestinationStatus"], "ACTIVE");
+
+        // Describe
+        let req = make_request(
+            "DescribeKinesisStreamingDestination",
+            json!({ "TableName": "test-table" }),
+        );
+        let resp = svc.describe_kinesis_streaming_destination(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(
+            body["KinesisDataStreamDestinations"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+
+        // Update
+        let req = make_request(
+            "UpdateKinesisStreamingDestination",
+            json!({
+                "TableName": "test-table",
+                "StreamArn": "arn:aws:kinesis:us-east-1:123456789012:stream/my-stream",
+                "UpdateKinesisStreamingConfiguration": {
+                    "ApproximateCreationDateTimePrecision": "MICROSECOND"
+                }
+            }),
+        );
+        svc.update_kinesis_streaming_destination(&req).unwrap();
+
+        // Disable
+        let req = make_request(
+            "DisableKinesisStreamingDestination",
+            json!({
+                "TableName": "test-table",
+                "StreamArn": "arn:aws:kinesis:us-east-1:123456789012:stream/my-stream"
+            }),
+        );
+        let resp = svc.disable_kinesis_streaming_destination(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["DestinationStatus"], "DISABLED");
+    }
+
+    #[test]
+    fn contributor_insights_lifecycle() {
+        let svc = make_service();
+        create_test_table(&svc);
+
+        // Initially disabled
+        let req = make_request(
+            "DescribeContributorInsights",
+            json!({ "TableName": "test-table" }),
+        );
+        let resp = svc.describe_contributor_insights(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["ContributorInsightsStatus"], "DISABLED");
+
+        // Enable
+        let req = make_request(
+            "UpdateContributorInsights",
+            json!({
+                "TableName": "test-table",
+                "ContributorInsightsAction": "ENABLE"
+            }),
+        );
+        let resp = svc.update_contributor_insights(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["ContributorInsightsStatus"], "ENABLED");
+
+        // List
+        let req = make_request("ListContributorInsights", json!({}));
+        let resp = svc.list_contributor_insights(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(
+            body["ContributorInsightsSummaries"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn export_lifecycle() {
+        let svc = make_service();
+        create_test_table(&svc);
+
+        let table_arn = "arn:aws:dynamodb:us-east-1:123456789012:table/test-table".to_string();
+
+        // Export
+        let req = make_request(
+            "ExportTableToPointInTime",
+            json!({
+                "TableArn": table_arn,
+                "S3Bucket": "my-bucket"
+            }),
+        );
+        let resp = svc.export_table_to_point_in_time(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let export_arn = body["ExportDescription"]["ExportArn"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(body["ExportDescription"]["ExportStatus"], "COMPLETED");
+
+        // Describe
+        let req = make_request("DescribeExport", json!({ "ExportArn": export_arn }));
+        let resp = svc.describe_export(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["ExportDescription"]["S3Bucket"], "my-bucket");
+
+        // List
+        let req = make_request("ListExports", json!({}));
+        let resp = svc.list_exports(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["ExportSummaries"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn import_lifecycle() {
+        let svc = make_service();
+
+        let req = make_request(
+            "ImportTable",
+            json!({
+                "InputFormat": "DYNAMODB_JSON",
+                "S3BucketSource": { "S3Bucket": "import-bucket" },
+                "TableCreationParameters": {
+                    "TableName": "imported-table",
+                    "KeySchema": [{ "AttributeName": "pk", "KeyType": "HASH" }],
+                    "AttributeDefinitions": [{ "AttributeName": "pk", "AttributeType": "S" }]
+                }
+            }),
+        );
+        let resp = svc.import_table(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let import_arn = body["ImportTableDescription"]["ImportArn"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(body["ImportTableDescription"]["ImportStatus"], "COMPLETED");
+
+        // Describe import
+        let req = make_request("DescribeImport", json!({ "ImportArn": import_arn }));
+        let resp = svc.describe_import(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["ImportTableDescription"]["ImportStatus"], "COMPLETED");
+
+        // List imports
+        let req = make_request("ListImports", json!({}));
+        let resp = svc.list_imports(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["ImportSummaryList"].as_array().unwrap().len(), 1);
+
+        // Verify the table was created
+        let req = make_request("DescribeTable", json!({ "TableName": "imported-table" }));
+        let resp = svc.describe_table(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["Table"]["TableStatus"], "ACTIVE");
     }
 }
