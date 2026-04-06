@@ -216,6 +216,7 @@ impl DynamoDbService {
             3,
             255,
         )?;
+        validate_optional_range_i64("limit", body["Limit"].as_i64(), 1, 100)?;
 
         let limit = body["Limit"].as_i64().unwrap_or(100) as usize;
         let exclusive_start = body["ExclusiveStartTableName"]
@@ -381,6 +382,11 @@ impl DynamoDbService {
             "returnItemCollectionMetrics",
             &body["ReturnItemCollectionMetrics"],
             &["SIZE", "NONE"],
+        )?;
+        validate_optional_enum_value(
+            "returnValuesOnConditionCheckFailure",
+            &body["ReturnValuesOnConditionCheckFailure"],
+            &["ALL_OLD", "NONE"],
         )?;
 
         let table_name = require_str(&body, "TableName")?;

@@ -686,6 +686,9 @@ impl SecretsManagerService {
     fn list_secrets(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
         validate_optional_string_length("nextToken", body["NextToken"].as_str(), 1, 4096)?;
+        validate_optional_range_i64("maxResults", body["MaxResults"].as_i64(), 1, 100)?;
+        validate_optional_enum("sortBy", body["SortBy"].as_str(), &["name", "created-date"])?;
+        validate_optional_enum("sortOrder", body["SortOrder"].as_str(), &["asc", "desc"])?;
         let max_results = body["MaxResults"].as_i64().unwrap_or(100) as usize;
         let next_token = body["NextToken"].as_str();
         let filters = body["Filters"].as_array();
@@ -937,6 +940,7 @@ impl SecretsManagerService {
         let exclude_punctuation = body["ExcludePunctuation"].as_bool().unwrap_or(false);
         let include_space = body["IncludeSpace"].as_bool().unwrap_or(false);
         let require_each = body["RequireEachIncludedType"].as_bool().unwrap_or(true);
+        validate_optional_string_length("excludeCharacters", body["ExcludeCharacters"].as_str(), 0, 4096)?;
         let exclude_chars = body["ExcludeCharacters"].as_str().unwrap_or("").to_string();
 
         let lowercase = "abcdefghijklmnopqrstuvwxyz";

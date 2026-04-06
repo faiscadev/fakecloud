@@ -300,6 +300,20 @@ impl KmsService {
             64,
         )?;
 
+        validate_optional_string_length("description", body["Description"].as_str(), 0, 8192)?;
+        validate_optional_enum(
+            "keyUsage",
+            body["KeyUsage"].as_str(),
+            &["SIGN_VERIFY", "ENCRYPT_DECRYPT", "GENERATE_VERIFY_MAC", "KEY_AGREEMENT"],
+        )?;
+        validate_optional_enum(
+            "origin",
+            body["Origin"].as_str(),
+            &["AWS_KMS", "EXTERNAL", "AWS_CLOUDHSM", "EXTERNAL_KEY_STORE"],
+        )?;
+        validate_optional_string_length("policy", body["Policy"].as_str(), 1, 131072)?;
+        validate_optional_string_length("xksKeyId", body["XksKeyId"].as_str(), 1, 64)?;
+
         let custom_key_store_id = body["CustomKeyStoreId"].as_str().map(|s| s.to_string());
         let description = body["Description"].as_str().unwrap_or("").to_string();
         let key_usage = body["KeyUsage"]
@@ -446,6 +460,7 @@ impl KmsService {
         let body = body_json(req);
 
         validate_optional_range_i64("limit", body["Limit"].as_i64(), 1, 1000)?;
+        validate_optional_string_length("marker", body["Marker"].as_str(), 1, 320)?;
 
         let limit = body["Limit"].as_u64().unwrap_or(1000) as usize;
         let marker = body["Marker"].as_str();
@@ -880,15 +895,7 @@ impl KmsService {
 
         let num_bytes = body["NumberOfBytes"].as_u64().unwrap_or(32) as usize;
 
-        if num_bytes > 1024 {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "ValidationException",
-                format!(
-                    "1 validation error detected: Value '{num_bytes}' at 'numberOfBytes' failed to satisfy constraint: Member must have value less than or equal to 1024"
-                ),
-            ));
-        }
+        validate_range_i64("numberOfBytes", num_bytes as i64, 1, 1024)?;
 
         let random_bytes = rand_bytes(num_bytes);
         let b64 = base64::engine::general_purpose::STANDARD.encode(&random_bytes);
@@ -1092,6 +1099,9 @@ impl KmsService {
 
     fn list_aliases(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = body_json(req);
+
+        validate_optional_range_i64("limit", body["Limit"].as_i64(), 1, 100)?;
+        validate_optional_string_length("marker", body["Marker"].as_str(), 1, 320)?;
 
         if !body["KeyId"].is_null() && !body["KeyId"].is_string() {
             return Err(AwsServiceError::aws_error(
@@ -1796,7 +1806,9 @@ impl KmsService {
                 "RetiringPrincipal must be a string",
             )
         })?;
+        validate_string_length("retiringPrincipal", retiring_principal, 1, 256)?;
         validate_optional_range_i64("limit", body["Limit"].as_i64(), 1, 1000)?;
+        validate_optional_string_length("marker", body["Marker"].as_str(), 1, 320)?;
 
         let limit = body["Limit"].as_u64().unwrap_or(1000) as usize;
         let marker = body["Marker"].as_str();

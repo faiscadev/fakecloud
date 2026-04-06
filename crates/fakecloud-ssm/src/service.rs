@@ -1100,6 +1100,7 @@ impl SsmService {
 
     fn describe_parameters(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = parse_body(req);
+        validate_optional_range_i64("MaxResults", body["MaxResults"].as_i64(), 1, 50)?;
         let param_filters = body["ParameterFilters"].as_array().cloned();
         let old_filters = body["Filters"].as_array().cloned();
         let max_results = body["MaxResults"].as_i64().unwrap_or(10) as usize;
@@ -1362,6 +1363,7 @@ impl SsmService {
 
     fn remove_tags_from_resource(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = parse_body(req);
+        validate_required("ResourceType", &body["ResourceType"])?;
         let resource_type = body["ResourceType"].as_str().unwrap_or("Parameter");
         let resource_id = body["ResourceId"]
             .as_str()
@@ -2170,6 +2172,7 @@ impl SsmService {
 
     fn list_documents(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = parse_body(req);
+        validate_optional_range_i64("MaxResults", body["MaxResults"].as_i64(), 1, 50)?;
         let max_results = body["MaxResults"].as_i64().unwrap_or(10) as usize;
         let next_token_offset: usize = body["NextToken"]
             .as_str()
@@ -3675,6 +3678,17 @@ impl SsmService {
         let patch_group = body["PatchGroup"]
             .as_str()
             .ok_or_else(|| missing("PatchGroup"))?;
+        validate_string_length("PatchGroup", patch_group, 1, 256)?;
+        validate_optional_enum(
+            "OperatingSystem",
+            body["OperatingSystem"].as_str(),
+            &[
+                "WINDOWS", "AMAZON_LINUX", "AMAZON_LINUX_2", "AMAZON_LINUX_2022",
+                "AMAZON_LINUX_2023", "UBUNTU", "REDHAT_ENTERPRISE_LINUX", "SUSE",
+                "CENTOS", "ORACLE_LINUX", "DEBIAN", "MACOS", "RASPBIAN",
+                "ROCKY_LINUX", "ALMA_LINUX",
+            ],
+        )?;
         let operating_system = body["OperatingSystem"].as_str().unwrap_or("WINDOWS");
 
         let state = self.state.read();
