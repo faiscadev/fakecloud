@@ -2741,6 +2741,10 @@ impl S3Service {
         let bucket_name = bucket.to_string();
         let obj_key = key.to_string();
         let region = state.region.clone();
+
+        // Replicate object if replication is configured on the source bucket
+        replicate_object(&mut state, bucket, key);
+
         drop(state);
 
         // Deliver S3 event notifications
@@ -3853,6 +3857,10 @@ impl S3Service {
         let copy_bucket = dest_bucket.to_string();
         let copy_key = dest_key.to_string();
         let region = state.region.clone();
+
+        // Replicate object if replication is configured on the destination bucket
+        replicate_object(&mut state, dest_bucket, dest_key);
+
         drop(state);
 
         let body = format!(
@@ -6424,6 +6432,123 @@ fn normalize_replication_xml(xml: &str) -> String {
     result
 }
 
+/// Parsed replication rule extracted from the replication config XML.
+struct ReplicationRule {
+    status: String,
+    prefix: String,
+    dest_bucket: String,
+}
+
+/// Parse replication configuration XML and extract rules.
+fn parse_replication_rules(xml: &str) -> Vec<ReplicationRule> {
+    let mut rules = Vec::new();
+    let mut remaining = xml;
+    while let Some(rule_start) = remaining.find("<Rule>") {
+        let after = &remaining[rule_start + 6..];
+        if let Some(rule_end) = after.find("</Rule>") {
+            let rule_body = &after[..rule_end];
+
+            // Extract the rule-level Status. Skip Status tags inside nested
+            // elements like DeleteMarkerReplication by finding the last occurrence.
+            let status = {
+                let mut found = None;
+                let mut search = rule_body;
+                while let Some(pos) = search.find("<Status>") {
+                    if let Some(val) = extract_xml_value(&search[pos..], "Status") {
+                        found = Some(val);
+                    }
+                    search = &search[pos + 8..];
+                }
+                found.unwrap_or_else(|| "Enabled".to_string())
+            };
+
+            // Extract prefix from Filter > Prefix or top-level Prefix
+            let prefix = rule_body
+                .find("<Filter>")
+                .and_then(|fs| rule_body.find("</Filter>").map(|fe| &rule_body[fs..fe + 9]))
+                .and_then(|filter| extract_xml_value(filter, "Prefix"))
+                .or_else(|| extract_xml_value(rule_body, "Prefix"))
+                .unwrap_or_default();
+
+            // Extract destination bucket ARN and convert to bucket name
+            let dest_bucket = rule_body
+                .find("<Destination>")
+                .and_then(|ds| {
+                    rule_body
+                        .find("</Destination>")
+                        .map(|de| &rule_body[ds..de + 14])
+                })
+                .and_then(|dest| extract_xml_value(dest, "Bucket"))
+                .map(|arn| {
+                    // ARN format: arn:aws:s3:::bucket-name
+                    arn.rsplit(":::").next().unwrap_or(&arn).to_string()
+                })
+                .unwrap_or_default();
+
+            if !dest_bucket.is_empty() {
+                rules.push(ReplicationRule {
+                    status,
+                    prefix,
+                    dest_bucket,
+                });
+            }
+
+            remaining = &after[rule_end + 7..];
+        } else {
+            break;
+        }
+    }
+    rules
+}
+
+/// Replicate an object to destination buckets based on replication configuration.
+/// Called after storing an object in a bucket that has replication enabled.
+fn replicate_object(state: &mut crate::state::S3State, source_bucket: &str, key: &str) {
+    let replication_config = match state.buckets.get(source_bucket) {
+        Some(b) => match &b.replication_config {
+            Some(config) => config.clone(),
+            None => return,
+        },
+        None => return,
+    };
+
+    let rules = parse_replication_rules(&replication_config);
+    let src_obj = match state
+        .buckets
+        .get(source_bucket)
+        .and_then(|b| b.objects.get(key))
+    {
+        Some(obj) => obj.clone(),
+        None => return,
+    };
+
+    for rule in &rules {
+        if rule.status != "Enabled" {
+            continue;
+        }
+        if !key.starts_with(&rule.prefix) {
+            continue;
+        }
+        if let Some(dest_bucket) = state.buckets.get_mut(&rule.dest_bucket) {
+            let mut replica = src_obj.clone();
+            replica.storage_class = "STANDARD".to_string();
+            // Use a new version ID if destination has versioning enabled
+            if dest_bucket.versioning.as_deref() == Some("Enabled") {
+                let vid = uuid::Uuid::new_v4().to_string();
+                replica.version_id = Some(vid);
+                dest_bucket
+                    .object_versions
+                    .entry(key.to_string())
+                    .or_default()
+                    .push(replica.clone());
+            } else {
+                replica.version_id = None;
+            }
+            dest_bucket.objects.insert(key.to_string(), replica);
+        }
+    }
+}
+
 /// Build an S3 event notification JSON payload.
 fn build_s3_event_notification(
     event_name: &str,
@@ -6883,5 +7008,108 @@ mod tests {
             result2.is_ok(),
             "versionId=null should match version_id=None"
         );
+    }
+
+    #[test]
+    fn test_parse_replication_rules() {
+        let xml = r#"<ReplicationConfiguration>
+            <Role>arn:aws:iam::role/replication</Role>
+            <Rule>
+                <Status>Enabled</Status>
+                <Filter><Prefix>logs/</Prefix></Filter>
+                <Destination><Bucket>arn:aws:s3:::dest-bucket</Bucket></Destination>
+            </Rule>
+            <Rule>
+                <Status>Disabled</Status>
+                <Filter><Prefix></Prefix></Filter>
+                <Destination><Bucket>arn:aws:s3:::other-bucket</Bucket></Destination>
+            </Rule>
+        </ReplicationConfiguration>"#;
+
+        let rules = parse_replication_rules(xml);
+        assert_eq!(rules.len(), 2);
+        assert_eq!(rules[0].status, "Enabled");
+        assert_eq!(rules[0].prefix, "logs/");
+        assert_eq!(rules[0].dest_bucket, "dest-bucket");
+        assert_eq!(rules[1].status, "Disabled");
+        assert_eq!(rules[1].prefix, "");
+        assert_eq!(rules[1].dest_bucket, "other-bucket");
+    }
+
+    #[test]
+    fn test_parse_normalized_replication_rules() {
+        // First, normalize the XML like the server does
+        let input_xml = r#"<ReplicationConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Role>arn:aws:iam::123456789012:role/replication-role</Role><Rule><ID>replicate-all</ID><Status>Enabled</Status><Filter><Prefix></Prefix></Filter><Destination><Bucket>arn:aws:s3:::repl-dest</Bucket></Destination></Rule></ReplicationConfiguration>"#;
+        let normalized = normalize_replication_xml(input_xml);
+        eprintln!("Normalized XML: {normalized}");
+        let rules = parse_replication_rules(&normalized);
+        assert_eq!(rules.len(), 1, "Expected 1 rule, got {}", rules.len());
+        assert_eq!(rules[0].status, "Enabled");
+        assert_eq!(rules[0].dest_bucket, "repl-dest");
+    }
+
+    #[test]
+    fn test_replicate_object() {
+        use crate::state::{S3Bucket, S3State};
+
+        let mut state = S3State::new("123456789012", "us-east-1");
+
+        // Create source and destination buckets
+        let mut src = S3Bucket::new("source", "us-east-1", "owner");
+        src.versioning = Some("Enabled".to_string());
+        src.replication_config = Some(
+            "<ReplicationConfiguration>\
+             <Rule><Status>Enabled</Status>\
+             <Filter><Prefix></Prefix></Filter>\
+             <Destination><Bucket>arn:aws:s3:::destination</Bucket></Destination>\
+             </Rule></ReplicationConfiguration>"
+                .to_string(),
+        );
+        let obj = S3Object {
+            key: "test-key".to_string(),
+            data: Bytes::from_static(b"hello"),
+            content_type: "text/plain".to_string(),
+            etag: "abc".to_string(),
+            size: 5,
+            last_modified: Utc::now(),
+            metadata: Default::default(),
+            storage_class: "STANDARD".to_string(),
+            tags: Default::default(),
+            acl_grants: Vec::new(),
+            acl_owner_id: None,
+            parts_count: None,
+            part_sizes: None,
+            sse_algorithm: None,
+            sse_kms_key_id: None,
+            bucket_key_enabled: None,
+            version_id: Some("v1".to_string()),
+            is_delete_marker: false,
+            content_encoding: None,
+            website_redirect_location: None,
+            restore_ongoing: None,
+            restore_expiry: None,
+            checksum_algorithm: None,
+            checksum_value: None,
+            lock_mode: None,
+            lock_retain_until: None,
+            lock_legal_hold: None,
+        };
+        src.objects.insert("test-key".to_string(), obj);
+        state.buckets.insert("source".to_string(), src);
+
+        let dest = S3Bucket::new("destination", "us-east-1", "owner");
+        state.buckets.insert("destination".to_string(), dest);
+
+        replicate_object(&mut state, "source", "test-key");
+
+        // Object should now exist in destination
+        let dest_obj = state
+            .buckets
+            .get("destination")
+            .unwrap()
+            .objects
+            .get("test-key");
+        assert!(dest_obj.is_some());
+        assert_eq!(dest_obj.unwrap().data, Bytes::from_static(b"hello"));
     }
 }
