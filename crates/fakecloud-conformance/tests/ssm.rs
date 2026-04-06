@@ -1663,7 +1663,7 @@ async fn ssm_get_deployable_patch_snapshot() {
 #[test_action("ssm", "DeleteResourceDataSync", checksum = "6d74a15c")]
 #[tokio::test]
 async fn ssm_resource_data_sync() {
-    use aws_sdk_ssm::types::{ResourceDataSyncS3Destination, ResourceDataSyncSource};
+    use aws_sdk_ssm::types::ResourceDataSyncSource;
 
     let server = TestServer::start().await;
     let client = server.ssm_client().await;
