@@ -796,3 +796,109 @@ async fn s3_kms_encryption() {
         "expected KMS key ID on auto-encrypted object"
     );
 }
+
+/// CloudWatch Logs subscription filter -> SQS: verify that log events
+/// matching a subscription filter are delivered to the SQS queue.
+#[tokio::test]
+async fn logs_subscription_filter_delivers_to_sqs() {
+    use aws_sdk_cloudwatchlogs::types::InputLogEvent;
+    use base64::Engine;
+    use std::io::Read;
+
+    let server = TestServer::start().await;
+    let logs = server.logs_client().await;
+    let sqs = server.sqs_client().await;
+
+    // Create SQS queue
+    let queue = sqs
+        .create_queue()
+        .queue_name("logs-sub-queue")
+        .send()
+        .await
+        .unwrap();
+    let queue_url = queue.queue_url().unwrap().to_string();
+    let queue_arn = get_queue_arn(&sqs, &queue_url).await;
+
+    // Create log group and stream
+    let group_name = "/test/subscription";
+    let stream_name = "app-stream";
+
+    logs.create_log_group()
+        .log_group_name(group_name)
+        .send()
+        .await
+        .unwrap();
+
+    logs.create_log_stream()
+        .log_group_name(group_name)
+        .log_stream_name(stream_name)
+        .send()
+        .await
+        .unwrap();
+
+    // Put subscription filter targeting the SQS queue
+    logs.put_subscription_filter()
+        .log_group_name(group_name)
+        .filter_name("all-events")
+        .filter_pattern("")
+        .destination_arn(&queue_arn)
+        .send()
+        .await
+        .unwrap();
+
+    // Put log events
+    let now = chrono::Utc::now().timestamp_millis();
+    logs.put_log_events()
+        .log_group_name(group_name)
+        .log_stream_name(stream_name)
+        .log_events(
+            InputLogEvent::builder()
+                .timestamp(now)
+                .message("hello from subscription test")
+                .build()
+                .unwrap(),
+        )
+        .log_events(
+            InputLogEvent::builder()
+                .timestamp(now + 1)
+                .message("second event")
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    // Receive message from SQS
+    let recv = sqs
+        .receive_message()
+        .queue_url(&queue_url)
+        .max_number_of_messages(10)
+        .wait_time_seconds(1)
+        .send()
+        .await
+        .unwrap();
+
+    let messages = recv.messages().to_vec();
+    assert_eq!(messages.len(), 1, "expected exactly one SQS message");
+
+    // Decode the payload: base64 -> gzip -> JSON
+    let body = messages[0].body().unwrap();
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(body)
+        .unwrap();
+    let mut decoder = flate2::read::GzDecoder::new(&decoded[..]);
+    let mut json_str = String::new();
+    decoder.read_to_string(&mut json_str).unwrap();
+    let payload: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+
+    assert_eq!(payload["messageType"], "DATA_MESSAGE");
+    assert_eq!(payload["logGroup"], group_name);
+    assert_eq!(payload["logStream"], stream_name);
+    assert_eq!(payload["subscriptionFilters"][0], "all-events");
+
+    let log_events = payload["logEvents"].as_array().unwrap();
+    assert_eq!(log_events.len(), 2);
+    assert_eq!(log_events[0]["message"], "hello from subscription test");
+    assert_eq!(log_events[1]["message"], "second event");
+}
