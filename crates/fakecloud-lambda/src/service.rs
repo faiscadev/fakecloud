@@ -296,44 +296,40 @@ impl LambdaService {
             })?
         };
 
-        // Try Docker execution if runtime is available and function has code
-        if let Some(ref runtime) = self.runtime {
-            if func.code_zip.is_some() {
-                match runtime.invoke(&func, payload).await {
-                    Ok(response_bytes) => {
-                        let mut resp = AwsResponse::json(StatusCode::OK, response_bytes);
-                        resp.headers.insert(
-                            http::header::HeaderName::from_static("x-amz-executed-version"),
-                            http::header::HeaderValue::from_static("$LATEST"),
-                        );
-                        return Ok(resp);
-                    }
-                    Err(e) => {
-                        tracing::error!(function = %function_name, error = %e, "Lambda invocation failed");
-                        return Err(AwsServiceError::aws_error(
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            "ServiceException",
-                            format!("Lambda execution failed: {e}"),
-                        ));
-                    }
-                }
-            }
-        } else if func.code_zip.is_some() {
-            // Function has code but no container runtime available
-            return Err(AwsServiceError::aws_error(
+        let runtime = self.runtime.as_ref().ok_or_else(|| {
+            AwsServiceError::aws_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "ServiceException",
                 "Docker/Podman is required for Lambda execution but is not available",
+            )
+        })?;
+
+        if func.code_zip.is_none() {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterValueException",
+                "Function has no deployment package",
             ));
         }
 
-        // No code ZIP — return empty response
-        let mut resp = AwsResponse::json(StatusCode::OK, "{}");
-        resp.headers.insert(
-            http::header::HeaderName::from_static("x-amz-executed-version"),
-            http::header::HeaderValue::from_static("$LATEST"),
-        );
-        Ok(resp)
+        match runtime.invoke(&func, payload).await {
+            Ok(response_bytes) => {
+                let mut resp = AwsResponse::json(StatusCode::OK, response_bytes);
+                resp.headers.insert(
+                    http::header::HeaderName::from_static("x-amz-executed-version"),
+                    http::header::HeaderValue::from_static("$LATEST"),
+                );
+                Ok(resp)
+            }
+            Err(e) => {
+                tracing::error!(function = %function_name, error = %e, "Lambda invocation failed");
+                Err(AwsServiceError::aws_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "ServiceException",
+                    format!("Lambda execution failed: {e}"),
+                ))
+            }
+        }
     }
 
     fn publish_version(&self, function_name: &str) -> Result<AwsResponse, AwsServiceError> {
@@ -673,7 +669,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_invoke() {
+    async fn test_invoke_without_runtime_returns_error() {
         let state = make_state();
         let svc = LambdaService::new(state);
 
@@ -697,8 +693,22 @@ mod tests {
             "/2015-03-31/functions/invoke-me/invocations",
             r#"{"key": "value"}"#,
         );
-        let resp = svc.handle(req).await.unwrap();
-        assert_eq!(resp.status, StatusCode::OK);
+        let resp = svc.handle(req).await;
+        assert!(resp.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_invoke_nonexistent_function() {
+        let state = make_state();
+        let svc = LambdaService::new(state);
+
+        let req = make_request(
+            Method::POST,
+            "/2015-03-31/functions/does-not-exist/invocations",
+            "{}",
+        );
+        let resp = svc.handle(req).await;
+        assert!(resp.is_err());
     }
 
     #[tokio::test]

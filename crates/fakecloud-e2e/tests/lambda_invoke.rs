@@ -515,16 +515,12 @@ async fn test_invoke_no_code() {
         .await
         .unwrap();
 
-    // Invoke should return stub {}
-    let resp = client
+    // Invoke should fail — function has no deployment package
+    let result = client
         .invoke()
         .function_name("no-code-func")
         .payload(Blob::new(b"{}".to_vec()))
         .send()
-        .await
-        .unwrap();
-
-    let body = resp.payload().unwrap().as_ref().to_vec();
-    let result: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(result, serde_json::json!({}));
+        .await;
+    assert!(result.is_err());
 }
