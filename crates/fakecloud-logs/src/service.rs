@@ -156,6 +156,16 @@ fn body_json(req: &AwsRequest) -> Value {
     serde_json::from_slice(&req.body).unwrap_or(Value::Null)
 }
 
+/// Build a delivery destination configuration JSON object, ensuring
+/// `destinationResourceArn` is always present as a string (Smithy requirement).
+fn dd_config_json(config: &std::collections::HashMap<String, String>) -> Value {
+    let mut m: serde_json::Map<String, Value> =
+        config.iter().map(|(k, v)| (k.clone(), json!(v))).collect();
+    m.entry("destinationResourceArn".to_string())
+        .or_insert_with(|| json!(""));
+    Value::Object(m)
+}
+
 fn generate_sequence_token() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let nanos = SystemTime::now()
@@ -2584,10 +2594,12 @@ impl LogsService {
         state.delivery_destinations.insert(name.clone(), dd);
 
         // Build the configuration object for the response, preserving existing fields
-        // and omitting destinationResourceArn when not set (Smithy shape requires string, not null)
+        // and always including destinationResourceArn (Smithy shape requires string, not null)
         let config_resp = {
-            let c: serde_json::Map<String, Value> =
+            let mut c: serde_json::Map<String, Value> =
                 config.iter().map(|(k, v)| (k.clone(), json!(v))).collect();
+            c.entry("destinationResourceArn".to_string())
+                .or_insert_with(|| json!(""));
             Value::Object(c)
         };
 
@@ -2635,7 +2647,7 @@ impl LogsService {
         let mut obj = json!({
             "name": dd.name,
             "arn": dd.arn,
-            "deliveryDestinationConfiguration": dd.delivery_destination_configuration,
+            "deliveryDestinationConfiguration": dd_config_json(&dd.delivery_destination_configuration),
         });
         if let Some(ref fmt) = dd.output_format {
             obj["outputFormat"] = json!(fmt);
@@ -2663,7 +2675,7 @@ impl LogsService {
                 let mut obj = json!({
                     "name": dd.name,
                     "arn": dd.arn,
-                    "deliveryDestinationConfiguration": dd.delivery_destination_configuration,
+                    "deliveryDestinationConfiguration": dd_config_json(&dd.delivery_destination_configuration),
                 });
                 if let Some(ref fmt) = dd.output_format {
                     obj["outputFormat"] = json!(fmt);
@@ -3389,7 +3401,7 @@ impl LogsService {
             1,
             256,
         )?;
-        validate_optional_string_length("clientToken", body["clientToken"].as_str(), 1, 128)?;
+        validate_optional_string_length("clientToken", body["clientToken"].as_str(), 36, 128)?;
         validate_optional_enum_value(
             "queryLanguage",
             &body["queryLanguage"],
@@ -3871,7 +3883,7 @@ mod tests {
     // ---- extract_log_group_from_arn ----
 
     #[test]
-    fn put_delivery_destination_omits_null_destination_resource_arn() {
+    fn put_delivery_destination_includes_empty_destination_resource_arn() {
         let svc = make_service();
         let req = make_request(
             "PutDeliveryDestination",
@@ -3883,13 +3895,11 @@ mod tests {
         let resp = svc.put_delivery_destination(&req).unwrap();
         let body: Value = serde_json::from_slice(&resp.body).unwrap();
         let config = &body["deliveryDestination"]["deliveryDestinationConfiguration"];
-        // destinationResourceArn should be absent (not null) when not provided
-        assert!(
-            !config
-                .as_object()
-                .unwrap()
-                .contains_key("destinationResourceArn"),
-            "destinationResourceArn should be omitted when not set, not returned as null"
+        // destinationResourceArn should always be present as a string (Smithy requirement)
+        assert_eq!(
+            config["destinationResourceArn"].as_str().unwrap(),
+            "",
+            "destinationResourceArn should be an empty string when not set"
         );
     }
 
