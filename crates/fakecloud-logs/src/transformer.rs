@@ -399,6 +399,16 @@ fn parse_csv_fields(input: &str, delimiter: char) -> Vec<String> {
         }
     }
 
+    // Handle trailing delimiter producing an empty final field
+    if !input.is_empty() && input.ends_with(delimiter) {
+        fields.push(String::new());
+    }
+
+    // Handle empty input producing a single empty field
+    if fields.is_empty() {
+        fields.push(String::new());
+    }
+
     fields
 }
 
@@ -756,5 +766,23 @@ mod tests {
         let config = json!("invalid");
         let result = apply_transformer(&config, "hello");
         assert_eq!(result["message"], "hello");
+    }
+
+    #[test]
+    fn test_csv_trailing_empty_column() {
+        let fields = parse_csv_fields("a,b,", ',');
+        assert_eq!(fields, vec!["a", "b", ""]);
+    }
+
+    #[test]
+    fn test_csv_empty_input() {
+        let fields = parse_csv_fields("", ',');
+        assert_eq!(fields, vec![""]);
+    }
+
+    #[test]
+    fn test_csv_quoted_with_embedded_delimiter() {
+        let fields = parse_csv_fields(r#""hello, world",bar"#, ',');
+        assert_eq!(fields, vec!["hello, world", "bar"]);
     }
 }

@@ -540,11 +540,12 @@ fn paginated_tags_response(
     tags: &[Tag],
     req: &AwsRequest,
 ) -> Result<String, AwsServiceError> {
-    let max_items: usize = parse_optional_i64_param(
+    let max_items_i64 = parse_optional_i64_param(
         "maxItems",
         req.query_params.get("MaxItems").map(|s| s.as_str()),
-    )?
-    .unwrap_or(100) as usize;
+    )?;
+    validate_optional_range_i64("maxItems", max_items_i64, 1, 1000)?;
+    let max_items: usize = max_items_i64.unwrap_or(100) as usize;
     let offset: usize = req
         .query_params
         .get("Marker")
@@ -6050,11 +6051,12 @@ impl IamService {
     fn list_virtual_mfa_devices(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let state = self.state.read();
         let assignment_status = req.query_params.get("AssignmentStatus").cloned();
-        let max_items: Option<usize> = parse_optional_i64_param(
+        let max_items_i64 = parse_optional_i64_param(
             "maxItems",
             req.query_params.get("MaxItems").map(|s| s.as_str()),
-        )?
-        .map(|v| v as usize);
+        )?;
+        validate_optional_range_i64("maxItems", max_items_i64, 1, 1000)?;
+        let max_items: Option<usize> = max_items_i64.map(|v| v as usize);
         let marker: Option<usize> = req
             .query_params
             .get("Marker")
