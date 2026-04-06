@@ -319,6 +319,16 @@ impl LogsService {
         validate_string_length("logGroupName", name, 1, 512)?;
 
         let mut state = self.state.write();
+        // Check deletion protection
+        if let Some(group) = state.log_groups.get(name) {
+            if group.deletion_protected {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "OperationAbortedException",
+                    format!("Log group {name} has deletion protection enabled"),
+                ));
+            }
+        }
         if state.log_groups.remove(name).is_none() {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
