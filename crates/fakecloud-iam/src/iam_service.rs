@@ -879,6 +879,27 @@ impl IamService {
     }
 
     fn list_users(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        validate_optional_string_length(
+            "pathPrefix",
+            req.query_params.get("PathPrefix").map(|s| s.as_str()),
+            1,
+            512,
+        )?;
+        validate_optional_string_length(
+            "marker",
+            req.query_params.get("Marker").map(|s| s.as_str()),
+            1,
+            320,
+        )?;
+        validate_optional_range_i64(
+            "maxItems",
+            req.query_params
+                .get("MaxItems")
+                .and_then(|v| v.parse::<i64>().ok()),
+            1,
+            1000,
+        )?;
+
         let state = self.state.read();
         let path_prefix = req.query_params.get("PathPrefix").cloned();
         let mut users: Vec<IamUser> = state.users.values().cloned().collect();
@@ -1158,6 +1179,12 @@ impl IamService {
 
     fn list_access_keys(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         validate_optional_string_length(
+            "userName",
+            req.query_params.get("UserName").map(|s| s.as_str()),
+            1,
+            128,
+        )?;
+        validate_optional_string_length(
             "marker",
             req.query_params.get("Marker").map(|s| s.as_str()),
             1,
@@ -1418,6 +1445,20 @@ impl IamService {
             req.query_params.get("Marker").map(|s| s.as_str()),
             1,
             320,
+        )?;
+        validate_optional_string_length(
+            "pathPrefix",
+            req.query_params.get("PathPrefix").map(|s| s.as_str()),
+            1,
+            512,
+        )?;
+        validate_optional_range_i64(
+            "maxItems",
+            req.query_params
+                .get("MaxItems")
+                .and_then(|v| v.parse::<i64>().ok()),
+            1,
+            1000,
         )?;
         let state = self.state.read();
         let path_prefix = req.query_params.get("PathPrefix").cloned();
@@ -1836,6 +1877,39 @@ impl IamService {
     }
 
     fn list_policies(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        validate_optional_string_length(
+            "pathPrefix",
+            req.query_params.get("PathPrefix").map(|s| s.as_str()),
+            1,
+            512,
+        )?;
+        validate_optional_string_length(
+            "marker",
+            req.query_params.get("Marker").map(|s| s.as_str()),
+            1,
+            320,
+        )?;
+        validate_optional_range_i64(
+            "maxItems",
+            req.query_params
+                .get("MaxItems")
+                .and_then(|v| v.parse::<i64>().ok()),
+            1,
+            1000,
+        )?;
+        validate_optional_enum(
+            "scope",
+            req.query_params.get("Scope").map(|s| s.as_str()),
+            &["All", "AWS", "Local"],
+        )?;
+        validate_optional_enum(
+            "policyUsageFilter",
+            req.query_params
+                .get("PolicyUsageFilter")
+                .map(|s| s.as_str()),
+            &["PermissionsPolicy", "PermissionsBoundary"],
+        )?;
+
         let state = self.state.read();
         let path_prefix = req.query_params.get("PathPrefix").cloned();
         let scope = req.query_params.get("Scope").cloned();

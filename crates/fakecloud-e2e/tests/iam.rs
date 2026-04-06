@@ -839,6 +839,53 @@ async fn iam_tag_user() {
     assert!(tags.tags().is_empty());
 }
 
+// ---- Input Validation Tests ----
+
+#[tokio::test]
+async fn iam_list_policies_validates_max_items() {
+    let server = TestServer::start().await;
+    let output = server
+        .aws_cli(&["iam", "list-policies", "--max-items", "0"])
+        .await;
+    assert!(
+        !output.success(),
+        "MaxItems=0 should fail validation but got success"
+    );
+}
+
+#[tokio::test]
+async fn iam_list_users_validates_path_prefix() {
+    let server = TestServer::start().await;
+    let output = server
+        .aws_cli(&["iam", "list-users", "--path-prefix", ""])
+        .await;
+    assert!(
+        !output.success(),
+        "Empty PathPrefix should fail validation but got success"
+    );
+}
+
+#[tokio::test]
+async fn sts_assume_role_validates_external_id() {
+    let server = TestServer::start().await;
+    let output = server
+        .aws_cli(&[
+            "sts",
+            "assume-role",
+            "--role-arn",
+            "arn:aws:iam::123456789012:role/test-role",
+            "--role-session-name",
+            "test-session",
+            "--external-id",
+            "x",
+        ])
+        .await;
+    assert!(
+        !output.success(),
+        "1-char ExternalId should fail validation but got success"
+    );
+}
+
 /// Regression: ListVirtualMFADevices should only return virtual MFA devices,
 /// excluding hardware MFA devices created via EnableMFADevice with a non-virtual serial.
 #[tokio::test]
