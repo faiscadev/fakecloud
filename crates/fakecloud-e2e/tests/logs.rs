@@ -2,6 +2,7 @@ mod helpers;
 
 use aws_sdk_cloudwatchlogs::types::InputLogEvent;
 use helpers::TestServer;
+use serde_json::Value;
 
 #[tokio::test]
 async fn logs_create_describe_delete_log_group() {
@@ -991,4 +992,371 @@ async fn logs_misc_stubs() {
         .send()
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn logs_query_filters_events() {
+    let server = TestServer::start().await;
+    let client = server.logs_client().await;
+
+    client
+        .create_log_group()
+        .log_group_name("/query/e2e")
+        .send()
+        .await
+        .unwrap();
+    client
+        .create_log_stream()
+        .log_group_name("/query/e2e")
+        .log_stream_name("stream-1")
+        .send()
+        .await
+        .unwrap();
+
+    let now = chrono::Utc::now().timestamp_millis();
+    client
+        .put_log_events()
+        .log_group_name("/query/e2e")
+        .log_stream_name("stream-1")
+        .log_events(
+            InputLogEvent::builder()
+                .timestamp(now)
+                .message("ERROR: disk full")
+                .build()
+                .unwrap(),
+        )
+        .log_events(
+            InputLogEvent::builder()
+                .timestamp(now + 1000)
+                .message("INFO: request complete")
+                .build()
+                .unwrap(),
+        )
+        .log_events(
+            InputLogEvent::builder()
+                .timestamp(now + 2000)
+                .message("ERROR: connection timeout")
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    // Start a query with filter
+    let start_secs = (now / 1000) - 1;
+    let end_secs = (now / 1000) + 10;
+    let resp = client
+        .start_query()
+        .log_group_name("/query/e2e")
+        .start_time(start_secs)
+        .end_time(end_secs)
+        .query_string("filter @message like /ERROR/ | limit 10")
+        .send()
+        .await
+        .unwrap();
+    let query_id = resp.query_id().unwrap().to_string();
+
+    // Get results
+    let resp = client
+        .get_query_results()
+        .query_id(&query_id)
+        .send()
+        .await
+        .unwrap();
+
+    let results = resp.results();
+    assert_eq!(results.len(), 2, "Should return only ERROR events");
+
+    // Verify all returned events contain ERROR
+    for row in results {
+        let msg: &str = row
+            .iter()
+            .find(|f| f.field() == Some("@message"))
+            .and_then(|f| f.value())
+            .unwrap();
+        assert!(msg.contains("ERROR"), "Expected ERROR in message: {msg}");
+    }
+}
+
+#[tokio::test]
+async fn logs_query_sort_and_limit() {
+    let server = TestServer::start().await;
+    let client = server.logs_client().await;
+
+    client
+        .create_log_group()
+        .log_group_name("/query-sort/e2e")
+        .send()
+        .await
+        .unwrap();
+    client
+        .create_log_stream()
+        .log_group_name("/query-sort/e2e")
+        .log_stream_name("stream-1")
+        .send()
+        .await
+        .unwrap();
+
+    let now = chrono::Utc::now().timestamp_millis();
+    client
+        .put_log_events()
+        .log_group_name("/query-sort/e2e")
+        .log_stream_name("stream-1")
+        .log_events(
+            InputLogEvent::builder()
+                .timestamp(now)
+                .message("first")
+                .build()
+                .unwrap(),
+        )
+        .log_events(
+            InputLogEvent::builder()
+                .timestamp(now + 1000)
+                .message("second")
+                .build()
+                .unwrap(),
+        )
+        .log_events(
+            InputLogEvent::builder()
+                .timestamp(now + 2000)
+                .message("third")
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let start_secs = (now / 1000) - 1;
+    let end_secs = (now / 1000) + 10;
+    let resp = client
+        .start_query()
+        .log_group_name("/query-sort/e2e")
+        .start_time(start_secs)
+        .end_time(end_secs)
+        .query_string("sort @timestamp desc | limit 2")
+        .send()
+        .await
+        .unwrap();
+    let query_id = resp.query_id().unwrap().to_string();
+
+    let resp = client
+        .get_query_results()
+        .query_id(&query_id)
+        .send()
+        .await
+        .unwrap();
+
+    let results = resp.results();
+    assert_eq!(results.len(), 2, "Should be limited to 2 results");
+
+    // First result should be "third" (desc sort)
+    let first_msg: &str = results[0]
+        .iter()
+        .find(|f| f.field() == Some("@message"))
+        .and_then(|f| f.value())
+        .unwrap();
+    assert_eq!(first_msg, "third");
+}
+
+#[tokio::test]
+async fn logs_export_task_writes_to_storage() {
+    let server = TestServer::start().await;
+    let client = server.logs_client().await;
+
+    client
+        .create_log_group()
+        .log_group_name("/export/e2e")
+        .send()
+        .await
+        .unwrap();
+    client
+        .create_log_stream()
+        .log_group_name("/export/e2e")
+        .log_stream_name("stream-1")
+        .send()
+        .await
+        .unwrap();
+
+    let now = chrono::Utc::now().timestamp_millis();
+    client
+        .put_log_events()
+        .log_group_name("/export/e2e")
+        .log_stream_name("stream-1")
+        .log_events(
+            InputLogEvent::builder()
+                .timestamp(now)
+                .message("export event A")
+                .build()
+                .unwrap(),
+        )
+        .log_events(
+            InputLogEvent::builder()
+                .timestamp(now + 1000)
+                .message("export event B")
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    // Create export task
+    let resp = client
+        .create_export_task()
+        .log_group_name("/export/e2e")
+        .from(now - 1000)
+        .to(now + 10000)
+        .destination("e2e-export-bucket")
+        .destination_prefix("logs")
+        .send()
+        .await
+        .unwrap();
+    let task_id = resp.task_id().unwrap().to_string();
+
+    // Verify task completed
+    let resp = client
+        .describe_export_tasks()
+        .task_id(&task_id)
+        .send()
+        .await
+        .unwrap();
+    let task = &resp.export_tasks()[0];
+    assert_eq!(task.status().unwrap().code().unwrap().as_str(), "COMPLETED");
+
+    // Verify exported data via internal GetExportedData action (raw HTTP)
+    let http_client = reqwest::Client::new();
+    let resp = http_client
+        .post(server.endpoint())
+        .header("Content-Type", "application/x-amz-json-1.1")
+        .header("X-Amz-Target", "Logs_20140328.GetExportedData")
+        .header(
+            "Authorization",
+            "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20240101/us-east-1/logs/aws4_request, SignedHeaders=host, Signature=dummy",
+        )
+        .body(r#"{"keyPrefix": "e2e-export-bucket/logs"}"#)
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    let entries = body["entries"].as_array().unwrap();
+    assert!(!entries.is_empty(), "Should have exported data");
+    let data = entries[0]["data"].as_str().unwrap();
+    assert!(data.contains("export event A"));
+    assert!(data.contains("export event B"));
+}
+
+#[tokio::test]
+async fn logs_delivery_pipeline_forwards_events() {
+    let server = TestServer::start().await;
+    let client = server.logs_client().await;
+
+    // Create log group and stream
+    client
+        .create_log_group()
+        .log_group_name("/delivery/e2e")
+        .send()
+        .await
+        .unwrap();
+    client
+        .create_log_stream()
+        .log_group_name("/delivery/e2e")
+        .log_stream_name("stream-1")
+        .send()
+        .await
+        .unwrap();
+
+    // Get log group ARN
+    let groups = client
+        .describe_log_groups()
+        .log_group_name_prefix("/delivery/e2e")
+        .send()
+        .await
+        .unwrap();
+    let group_arn = groups.log_groups()[0].arn().unwrap().to_string();
+
+    // Set up delivery source
+    client
+        .put_delivery_source()
+        .name("e2e-source")
+        .resource_arn(&group_arn)
+        .log_type("APPLICATION_LOGS")
+        .send()
+        .await
+        .unwrap();
+
+    // Set up delivery destination (S3 bucket)
+    let dest_resp = client
+        .put_delivery_destination()
+        .name("e2e-dest")
+        .delivery_destination_configuration(
+            aws_sdk_cloudwatchlogs::types::DeliveryDestinationConfiguration::builder()
+                .destination_resource_arn("arn:aws:s3:::e2e-delivery-bucket")
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let dest_arn = dest_resp
+        .delivery_destination()
+        .unwrap()
+        .arn()
+        .unwrap()
+        .to_string();
+
+    // Create delivery
+    client
+        .create_delivery()
+        .delivery_source_name("e2e-source")
+        .delivery_destination_arn(&dest_arn)
+        .send()
+        .await
+        .unwrap();
+
+    // Put log events — should be forwarded via delivery pipeline
+    let now = chrono::Utc::now().timestamp_millis();
+    client
+        .put_log_events()
+        .log_group_name("/delivery/e2e")
+        .log_stream_name("stream-1")
+        .log_events(
+            InputLogEvent::builder()
+                .timestamp(now)
+                .message("delivered msg 1")
+                .build()
+                .unwrap(),
+        )
+        .log_events(
+            InputLogEvent::builder()
+                .timestamp(now + 1000)
+                .message("delivered msg 2")
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    // Verify delivery data via internal API
+    let http_client = reqwest::Client::new();
+    let resp = http_client
+        .post(server.endpoint())
+        .header("Content-Type", "application/x-amz-json-1.1")
+        .header("X-Amz-Target", "Logs_20140328.GetExportedData")
+        .header(
+            "Authorization",
+            "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20240101/us-east-1/logs/aws4_request, SignedHeaders=host, Signature=dummy",
+        )
+        .body(r#"{"keyPrefix": "e2e-delivery-bucket/delivery"}"#)
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    let entries = body["entries"].as_array().unwrap();
+    assert!(!entries.is_empty(), "Should have delivery data");
+    let data = entries[0]["data"].as_str().unwrap();
+    assert!(data.contains("delivered msg 1"));
+    assert!(data.contains("delivered msg 2"));
 }
