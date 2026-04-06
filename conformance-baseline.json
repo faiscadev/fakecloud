@@ -6,9 +6,17 @@
       "passed": 5303,
       "total": 5303
     },
-    "events": {
-      "passed": 2078,
-      "total": 2108
+    "logs": {
+      "passed": 3663,
+      "total": 3911
+    },
+    "secretsmanager": {
+      "passed": 852,
+      "total": 852
+    },
+    "cloudformation": {
+      "passed": 3420,
+      "total": 3420
     },
     "kms": {
       "passed": 2190,
@@ -22,37 +30,29 @@
       "passed": 5962,
       "total": 5962
     },
-    "logs": {
-      "passed": 3663,
-      "total": 3911
-    },
-    "sts": {
-      "passed": 436,
-      "total": 438
-    },
-    "secretsmanager": {
-      "passed": 852,
-      "total": 852
+    "s3": {
+      "passed": 3620,
+      "total": 3620
     },
     "sns": {
       "passed": 1027,
       "total": 1027
     },
-    "lambda": {
-      "passed": 3347,
-      "total": 3347
+    "sts": {
+      "passed": 436,
+      "total": 438
+    },
+    "events": {
+      "passed": 2078,
+      "total": 2108
     },
     "sqs": {
       "passed": 549,
       "total": 549
     },
-    "s3": {
-      "passed": 3620,
-      "total": 3620
-    },
-    "cloudformation": {
-      "passed": 3420,
-      "total": 3420
+    "lambda": {
+      "passed": 3347,
+      "total": 3347
     }
   }
 }
