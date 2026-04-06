@@ -55,6 +55,24 @@ enum CliCommand {
     },
     /// Run Level 2 audit: check handwritten test coverage
     Audit,
+    /// Check conformance results against baseline (fails if coverage drops)
+    Check {
+        /// Path to conformance-baseline.json
+        #[arg(long, default_value = "conformance-baseline.json")]
+        baseline: PathBuf,
+        /// Connect to an already-running fakecloud at this endpoint
+        #[arg(long)]
+        endpoint: Option<String>,
+    },
+    /// Update the baseline file with current conformance results
+    UpdateBaseline {
+        /// Path to conformance-baseline.json
+        #[arg(long, default_value = "conformance-baseline.json")]
+        baseline: PathBuf,
+        /// Connect to an already-running fakecloud at this endpoint
+        #[arg(long)]
+        endpoint: Option<String>,
+    },
 }
 
 fn main() {
@@ -76,6 +94,10 @@ fn main() {
             if !pass {
                 std::process::exit(1);
             }
+        }
+        CliCommand::Check { baseline, endpoint } => cmd_check(&cli.models_dir, &baseline, endpoint),
+        CliCommand::UpdateBaseline { baseline, endpoint } => {
+            cmd_update_baseline(&cli.models_dir, &baseline, endpoint)
         }
     }
 }
@@ -134,19 +156,17 @@ fn cmd_checksums(models_dir: &std::path::Path) {
     }
 }
 
-fn cmd_run(
+/// Run probes and return the report data.
+fn run_probes(
     models_dir: &std::path::Path,
     services_filter: Option<String>,
-    format: &str,
     endpoint: Option<String>,
-) {
+) -> report::ConformanceReport {
     let models = load_models(models_dir);
 
     let filter: Option<Vec<String>> =
         services_filter.map(|s| s.split(',').map(|s| s.trim().to_string()).collect());
 
-    // Start fakecloud or connect to existing.
-    // _server holds a ChildGuard that kills the process on drop.
     let (endpoint, _server) = if let Some(ep) = endpoint {
         (ep, None)
     } else {
@@ -244,8 +264,16 @@ fn cmd_run(
         all_results.insert(service_name.clone(), service_results);
     }
 
-    let report_data = report::build_report(all_results, &total_ops_per_service);
+    report::build_report(all_results, &total_ops_per_service)
+}
 
+fn cmd_run(
+    models_dir: &std::path::Path,
+    services_filter: Option<String>,
+    format: &str,
+    endpoint: Option<String>,
+) {
+    let report_data = run_probes(models_dir, services_filter, endpoint);
     match format {
         "json" => report::print_json_report(&report_data),
         _ => report::print_text_report(&report_data),
@@ -316,4 +344,127 @@ fn find_binary() -> String {
         debug_path, release_path
     );
     std::process::exit(1);
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct Baseline {
+    variants_passed: usize,
+    total_variants: usize,
+    per_service: HashMap<String, ServiceBaseline>,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct ServiceBaseline {
+    passed: usize,
+    total: usize,
+}
+
+fn cmd_check(
+    models_dir: &std::path::Path,
+    baseline_path: &std::path::Path,
+    endpoint: Option<String>,
+) {
+    let baseline_content = std::fs::read_to_string(baseline_path).unwrap_or_else(|e| {
+        eprintln!("Failed to read baseline {}: {}", baseline_path.display(), e);
+        std::process::exit(1);
+    });
+    let baseline: Baseline = serde_json::from_str(&baseline_content).unwrap_or_else(|e| {
+        eprintln!("Failed to parse baseline: {}", e);
+        std::process::exit(1);
+    });
+
+    let report_data = run_probes(models_dir, None, endpoint);
+
+    report::print_text_report(&report_data);
+
+    // Check per-service ratchet
+    let mut regressions = Vec::new();
+
+    for svc in &report_data.services {
+        let current_passed: usize = svc.operations.iter().map(|o| o.passed).sum();
+
+        if let Some(svc_baseline) = baseline.per_service.get(&svc.service_name) {
+            if current_passed < svc_baseline.passed {
+                regressions.push(format!(
+                    "{}: {} → {} variants passing (was {}, lost {})",
+                    svc.service_name,
+                    svc_baseline.passed,
+                    current_passed,
+                    svc_baseline.passed,
+                    svc_baseline.passed - current_passed,
+                ));
+            }
+        }
+    }
+
+    // Check overall ratchet
+    let current_total_passed = report_data.summary.variants_passed;
+    if current_total_passed < baseline.variants_passed {
+        regressions.push(format!(
+            "overall: {} → {} variants passing (lost {})",
+            baseline.variants_passed,
+            current_total_passed,
+            baseline.variants_passed - current_total_passed,
+        ));
+    }
+
+    if regressions.is_empty() {
+        println!("\nConformance check PASSED (no regressions)");
+        println!(
+            "  baseline: {}/{} ({:.1}%)",
+            baseline.variants_passed,
+            baseline.total_variants,
+            baseline.variants_passed as f64 / baseline.total_variants as f64 * 100.0,
+        );
+        println!(
+            "  current:  {}/{} ({:.1}%)",
+            report_data.summary.variants_passed,
+            report_data.summary.total_variants,
+            report_data.summary.variants_passed as f64 / report_data.summary.total_variants as f64
+                * 100.0,
+        );
+    } else {
+        eprintln!("\nConformance check FAILED — coverage dropped:");
+        for r in &regressions {
+            eprintln!("  {}", r);
+        }
+        eprintln!("\nTo update the baseline after intentional changes:");
+        eprintln!("  cargo run -p fakecloud-conformance -- update-baseline");
+        std::process::exit(1);
+    }
+}
+
+fn cmd_update_baseline(
+    models_dir: &std::path::Path,
+    baseline_path: &std::path::Path,
+    endpoint: Option<String>,
+) {
+    let report_data = run_probes(models_dir, None, endpoint);
+
+    let mut per_service = HashMap::new();
+    for svc in &report_data.services {
+        let passed: usize = svc.operations.iter().map(|o| o.passed).sum();
+        let total: usize = svc.operations.iter().map(|o| o.total_variants).sum();
+        per_service.insert(svc.service_name.clone(), ServiceBaseline { passed, total });
+    }
+
+    let baseline = Baseline {
+        variants_passed: report_data.summary.variants_passed,
+        total_variants: report_data.summary.total_variants,
+        per_service,
+    };
+
+    let json = serde_json::to_string_pretty(&baseline).unwrap();
+    std::fs::write(baseline_path, format!("{}\n", json)).unwrap_or_else(|e| {
+        eprintln!("Failed to write baseline: {}", e);
+        std::process::exit(1);
+    });
+
+    println!("Baseline updated: {}", baseline_path.display());
+    println!(
+        "  {}/{} variants passing ({:.1}%)",
+        baseline.variants_passed,
+        baseline.total_variants,
+        baseline.variants_passed as f64 / baseline.total_variants as f64 * 100.0,
+    );
 }

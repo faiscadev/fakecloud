@@ -26,33 +26,23 @@ jobs:
       - name: Build conformance tool
         run: cargo build -p fakecloud-conformance
 
-      - name: Run conformance probes
-        run: |
-          cargo run -p fakecloud-conformance -- run --format text 2>&1 | tee conformance-report.txt
-          cargo run -p fakecloud-conformance -- run --format json > conformance-report.json
+      - name: Check conformance (fails if coverage drops)
+        run: cargo run -p fakecloud-conformance -- check 2>&1 | tee conformance-report.txt
+
+      - name: Generate JSON report
+        if: always()
+        run: cargo run -p fakecloud-conformance -- run --format json > conformance-report.json 2>/dev/null || true
 
       - name: Post summary
         if: always()
         run: |
           echo '## Conformance Report' >> $GITHUB_STEP_SUMMARY
           echo '' >> $GITHUB_STEP_SUMMARY
-          echo '| Service | Handled | Passing | Variants |' >> $GITHUB_STEP_SUMMARY
-          echo '|---------|---------|---------|----------|' >> $GITHUB_STEP_SUMMARY
           if [ -f conformance-report.txt ]; then
-          grep -E "^[a-z].*operations handled" conformance-report.txt | while read -r line; do
-            svc=$(echo "$line" | cut -d: -f1)
-            handled=$(echo "$line" | grep -oP '\d+/\d+ operations handled' | head -1)
-            passing=$(echo "$line" | grep -oP '\d+/\d+ fully passing' | head -1)
-            echo "| $svc | $handled | $passing | |" >> $GITHUB_STEP_SUMMARY
-          done
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            grep -E "^(Conformance|  |Operations|Variants)" conformance-report.txt >> $GITHUB_STEP_SUMMARY || true
+            echo '```' >> $GITHUB_STEP_SUMMARY
           fi
-          echo '' >> $GITHUB_STEP_SUMMARY
-          echo '**Summary**' >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          if [ -f conformance-report.txt ]; then
-          grep -E "^(Operations|Variants):" conformance-report.txt >> $GITHUB_STEP_SUMMARY
-          fi
-          echo '```' >> $GITHUB_STEP_SUMMARY
 
       - name: Upload report
         if: always()
