@@ -33,7 +33,7 @@ alternatives have emerged since then. Here's how they compare:
 | Language | Rust | Python | Java (Quarkus Native) | Python |
 | Auth required | No | Yes (account + token) | No | No |
 | Commercial use | Free | Paid plans only | Free | Free |
-| AWS services | 10 | 80+ | 25 | 38 |
+| AWS services | 12 | 80+ | 25 | 38 |
 | Cross-service delivery | Yes | Yes | Yes | Yes |
 | Scheduled rules fire | Yes | Yes | -- | -- |
 
@@ -396,7 +396,7 @@ curl http://localhost:4566/_fakecloud/health
 {
   "status": "ok",
   "version": "0.1.0",
-  "services": ["cloudformation", "sqs", "sns", "events", "iam", "sts", "ssm", "lambda", "secretsmanager", "logs", "kms", "s3"]
+  "services": ["cloudformation", "dynamodb", "sqs", "sns", "events", "iam", "sts", "ssm", "lambda", "secretsmanager", "logs", "kms", "s3"]
 }
 ```
 
@@ -425,9 +425,7 @@ FakeCloud is organized as a Cargo workspace:
 
 Protocol handling:
 - **Query protocol** (SQS, SNS, IAM, STS, CloudFormation): form-encoded body, `Action` parameter, XML responses
-- **JSON protocol** (SSM, EventBridge, DynamoDB, CloudWatch Logs, KMS): JSON body, `X-Amz-Target` header, JSON responses
-- **REST protocol** (S3): HTTP method + path-based routing, XML responses
-- **JSON protocol** (SSM, EventBridge, Secrets Manager, CloudWatch Logs, KMS): JSON body, `X-Amz-Target` header, JSON responses
+- **JSON protocol** (SSM, EventBridge, DynamoDB, Secrets Manager, CloudWatch Logs, KMS): JSON body, `X-Amz-Target` header, JSON responses
 - **REST protocol** (S3, Lambda): HTTP method + path-based routing, XML/JSON responses
 - SigV4 signatures are parsed for service routing but never validated
 
@@ -435,7 +433,7 @@ Protocol handling:
 
 ```sh
 cargo test --workspace              # unit tests
-cargo build && cargo test -p fakecloud-e2e  # E2E tests (156 tests)
+cargo build && cargo test -p fakecloud-e2e  # E2E tests (213 tests)
 cargo clippy --workspace -- -D warnings     # lint
 cargo fmt --check                           # format check
 ```
@@ -458,7 +456,7 @@ Contributions are welcome. FakeCloud is still in early development (Phase 1).
 
 ### Planned services (Phase 2)
 
-DynamoDB.
+EC2, RDS, ECS, Elastic Load Balancing, CloudWatch Metrics, Route 53, API Gateway, Step Functions.
 
 ## License
 

@@ -1,6 +1,5 @@
 """
-FakeCloud demo: S3 + SQS + SNS + SSM + DynamoDB using boto3.
-FakeCloud demo: S3 + SQS + SNS + SSM + Lambda + Secrets Manager using boto3.
+FakeCloud demo: S3 + SQS + SNS + SSM using boto3.
 
 Prerequisites:
     pip install boto3
@@ -29,17 +28,10 @@ s3 = session.client("s3", endpoint_url=ENDPOINT)
 sqs = session.client("sqs", endpoint_url=ENDPOINT)
 sns = session.client("sns", endpoint_url=ENDPOINT)
 ssm = session.client("ssm", endpoint_url=ENDPOINT)
-dynamodb = session.client("dynamodb", endpoint_url=ENDPOINT)
 
 
 def main():
-    print("=== FakeCloud Demo: S3 + SQS + SNS + SSM + DynamoDB ===\n")
-lam = session.client("lambda", endpoint_url=ENDPOINT)
-sm = session.client("secretsmanager", endpoint_url=ENDPOINT)
-
-
-def main():
-    print("=== FakeCloud Demo: S3 + SQS + SNS + SSM + Lambda + Secrets Manager ===\n")
+    print("=== FakeCloud Demo: S3 + SQS + SNS + SSM ===\n")
 
     # --- S3 ---
     print("[S3] Creating bucket and uploading objects...")
@@ -61,7 +53,7 @@ def main():
     print("  bucket cleaned up")
 
     # --- SSM Parameter Store ---
-    print("[SSM] Storing application config...")
+    print("\n[SSM] Storing application config...")
     ssm.put_parameter(Name="/app/db-host", Value="localhost", Type="String")
     ssm.put_parameter(Name="/app/db-port", Value="5432", Type="String")
     ssm.put_parameter(
@@ -168,81 +160,6 @@ def main():
     s3.delete_bucket(Bucket="events-bucket")
     sqs.delete_queue(QueueUrl=events_url)
     print("  notification pipeline cleaned up")
-
-    # --- DynamoDB ---
-    print("\n[DynamoDB] Creating table and working with items...")
-    dynamodb.create_table(
-        TableName="demo-orders",
-        KeySchema=[
-            {"AttributeName": "userId", "KeyType": "HASH"},
-            {"AttributeName": "orderId", "KeyType": "RANGE"},
-        ],
-        AttributeDefinitions=[
-            {"AttributeName": "userId", "AttributeType": "S"},
-            {"AttributeName": "orderId", "AttributeType": "S"},
-        ],
-        BillingMode="PAY_PER_REQUEST",
-    )
-
-    dynamodb.put_item(
-        TableName="demo-orders",
-        Item={
-            "userId": {"S": "user1"},
-            "orderId": {"S": "order-001"},
-            "total": {"N": "29.99"},
-            "status": {"S": "shipped"},
-        },
-    )
-    dynamodb.put_item(
-        TableName="demo-orders",
-        Item={
-            "userId": {"S": "user1"},
-            "orderId": {"S": "order-002"},
-            "total": {"N": "59.99"},
-            "status": {"S": "pending"},
-        },
-    )
-
-    result = dynamodb.query(
-        TableName="demo-orders",
-        KeyConditionExpression="userId = :uid",
-        ExpressionAttributeValues={":uid": {"S": "user1"}},
-    )
-    for item in result["Items"]:
-        print(f"  {item['orderId']['S']}: ${item['total']['N']} ({item['status']['S']})")
-
-    dynamodb.delete_table(TableName="demo-orders")
-    print("  table cleaned up")
-    # --- Lambda ---
-    print("\n[Lambda] Creating and invoking a function...")
-    lam.create_function(
-        FunctionName="hello-world",
-        Runtime="python3.12",
-        Role=f"arn:aws:iam::{ACCOUNT_ID}:role/lambda-role",
-        Handler="index.handler",
-        Code={"ZipFile": b"fake-code"},
-    )
-    resp = lam.invoke(FunctionName="hello-world", Payload=b'{"key": "value"}')
-    print(f"  invoke status: {resp['StatusCode']}")
-    funcs = lam.list_functions()
-    print(f"  functions: {[f['FunctionName'] for f in funcs['Functions']]}")
-    lam.delete_function(FunctionName="hello-world")
-    print("  function cleaned up")
-
-    # --- Secrets Manager ---
-    print("\n[Secrets Manager] Storing and retrieving secrets...")
-    sm.create_secret(Name="app/api-key", SecretString="sk-abc123")
-    resp = sm.get_secret_value(SecretId="app/api-key")
-    print(f"  secret value: {resp['SecretString']}")
-
-    sm.put_secret_value(SecretId="app/api-key", SecretString="sk-xyz789")
-    resp = sm.get_secret_value(SecretId="app/api-key")
-    print(f"  updated value: {resp['SecretString']}")
-
-    secrets = sm.list_secrets()
-    print(f"  secrets: {[s['Name'] for s in secrets['SecretList']]}")
-    sm.delete_secret(SecretId="app/api-key", ForceDeleteWithoutRecovery=True)
-    print("  secret cleaned up")
 
     # --- Cleanup ---
     print("\n[Cleanup] Deleting resources...")
