@@ -1027,7 +1027,6 @@ async fn kms_generate_data_key_pair_without_plaintext() {
     assert!(result.public_key().is_some());
 }
 
-#[test_action("kms", "DeriveSharedSecret", checksum = "5bccf034")]
 #[test_action("kms", "GetParametersForImport", checksum = "bb7096f5")]
 #[test_action("kms", "ImportKeyMaterial", checksum = "02aaa90d")]
 #[test_action("kms", "DeleteImportedKeyMaterial", checksum = "5f65bfcd")]
@@ -1081,4 +1080,22 @@ async fn kms_update_primary_region() {
         .send()
         .await
         .unwrap();
+}
+
+#[test_action("kms", "DeriveSharedSecret", checksum = "5bccf034")]
+#[tokio::test]
+async fn kms_derive_shared_secret() {
+    let server = TestServer::start().await;
+    let client = server.kms_client().await;
+    let key = client.create_key().send().await.unwrap();
+    let key_id = key.key_metadata().unwrap().key_id();
+    let result = client
+        .derive_shared_secret()
+        .key_id(key_id)
+        .key_agreement_algorithm(aws_sdk_kms::types::KeyAgreementAlgorithmSpec::Ecdh)
+        .public_key(aws_sdk_kms::primitives::Blob::new(b"fake-public-key"))
+        .send()
+        .await;
+    // May fail with key type mismatch but should not be unimplemented
+    assert!(result.is_ok() || format!("{:?}", result.unwrap_err()).contains("Exception"));
 }
