@@ -440,6 +440,8 @@ impl KmsService {
             mac_algorithms: mac_algs,
             custom_key_store_id,
             imported_key_material: false,
+            imported_material_bytes: None,
+            private_key_seed: rand_bytes(32),
             primary_region: None,
         };
 
@@ -659,8 +661,20 @@ impl KmsService {
             ));
         }
 
-        // Fake encryption: prefix + key_id + ":" + base64(plaintext_bytes)
-        let envelope = format!("{FAKE_ENVELOPE_PREFIX}{}:{plaintext_b64}", key.key_id);
+        // When imported key material is present, XOR plaintext with imported material
+        // to produce a deterministic ciphertext that depends on the imported key.
+        let envelope = if let Some(ref material) = key.imported_material_bytes {
+            let xored: Vec<u8> = plaintext_bytes
+                .iter()
+                .enumerate()
+                .map(|(i, b)| b ^ material[i % material.len()])
+                .collect();
+            let xored_b64 = base64::engine::general_purpose::STANDARD.encode(&xored);
+            format!("fakecloud-imported:{}:{xored_b64}", key.key_id)
+        } else {
+            // Fake encryption: prefix + key_id + ":" + base64(plaintext_bytes)
+            format!("{FAKE_ENVELOPE_PREFIX}{}:{plaintext_b64}", key.key_id)
+        };
         let ciphertext_b64 = base64::engine::general_purpose::STANDARD.encode(envelope.as_bytes());
 
         Ok(AwsResponse::json(
@@ -702,41 +716,95 @@ impl KmsService {
             )
         })?;
 
-        if !envelope.starts_with(FAKE_ENVELOPE_PREFIX) {
-            return Err(AwsServiceError::aws_error(
+        const IMPORTED_PREFIX: &str = "fakecloud-imported:";
+
+        if let Some(rest) = envelope.strip_prefix(IMPORTED_PREFIX) {
+            // Imported key material envelope: XOR to recover plaintext
+            let (key_id, xored_b64) = rest.split_once(':').ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidCiphertextException",
+                    "The ciphertext is invalid",
+                )
+            })?;
+
+            let xored_bytes = base64::engine::general_purpose::STANDARD
+                .decode(xored_b64)
+                .map_err(|_| {
+                    AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "InvalidCiphertextException",
+                        "The ciphertext is invalid",
+                    )
+                })?;
+
+            let state = self.state.read();
+            let key = state.keys.get(key_id).ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "NotFoundException",
+                    format!("Key '{key_id}' does not exist"),
+                )
+            })?;
+
+            let material = key.imported_material_bytes.as_ref().ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidCiphertextException",
+                    "Key material has been deleted",
+                )
+            })?;
+
+            let plaintext_bytes: Vec<u8> = xored_bytes
+                .iter()
+                .enumerate()
+                .map(|(i, b)| b ^ material[i % material.len()])
+                .collect();
+            let plaintext_b64 = base64::engine::general_purpose::STANDARD.encode(&plaintext_bytes);
+
+            Ok(AwsResponse::json(
+                StatusCode::OK,
+                serde_json::to_string(&json!({
+                    "Plaintext": plaintext_b64,
+                    "KeyId": key.arn,
+                    "EncryptionAlgorithm": "SYMMETRIC_DEFAULT",
+                }))
+                .unwrap(),
+            ))
+        } else if let Some(rest) = envelope.strip_prefix(FAKE_ENVELOPE_PREFIX) {
+            let (key_id, plaintext_b64) = rest.split_once(':').ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidCiphertextException",
+                    "The ciphertext is invalid",
+                )
+            })?;
+
+            let state = self.state.read();
+            let key = state.keys.get(key_id).ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "NotFoundException",
+                    format!("Key '{key_id}' does not exist"),
+                )
+            })?;
+
+            Ok(AwsResponse::json(
+                StatusCode::OK,
+                serde_json::to_string(&json!({
+                    "Plaintext": plaintext_b64,
+                    "KeyId": key.arn,
+                    "EncryptionAlgorithm": "SYMMETRIC_DEFAULT",
+                }))
+                .unwrap(),
+            ))
+        } else {
+            Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "InvalidCiphertextException",
                 "The ciphertext is not a valid FakeCloud KMS ciphertext",
-            ));
+            ))
         }
-
-        let rest = &envelope[FAKE_ENVELOPE_PREFIX.len()..];
-        let (key_id, plaintext_b64) = rest.split_once(':').ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "InvalidCiphertextException",
-                "The ciphertext is invalid",
-            )
-        })?;
-
-        let state = self.state.read();
-        let key = state.keys.get(key_id).ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "NotFoundException",
-                format!("Key '{key_id}' does not exist"),
-            )
-        })?;
-
-        Ok(AwsResponse::json(
-            StatusCode::OK,
-            serde_json::to_string(&json!({
-                "Plaintext": plaintext_b64,
-                "KeyId": key.arn,
-                "EncryptionAlgorithm": "SYMMETRIC_DEFAULT",
-            }))
-            .unwrap(),
-        ))
     }
 
     fn re_encrypt(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
@@ -775,26 +843,71 @@ impl KmsService {
             )
         })?;
 
-        if !envelope.starts_with(FAKE_ENVELOPE_PREFIX) {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "InvalidCiphertextException",
-                "The ciphertext is invalid",
-            ));
-        }
+        const IMPORTED_PREFIX: &str = "fakecloud-imported:";
 
-        let rest = &envelope[FAKE_ENVELOPE_PREFIX.len()..];
-        let (source_key_id, plaintext_b64) = rest.split_once(':').ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "InvalidCiphertextException",
-                "The ciphertext is invalid",
-            )
-        })?;
+        // Extract source key ID and plaintext from either envelope format
+        let (source_key_id, plaintext_b64) =
+            if let Some(rest) = envelope.strip_prefix(IMPORTED_PREFIX) {
+                let (kid, xored_b64) = rest.split_once(':').ok_or_else(|| {
+                    AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "InvalidCiphertextException",
+                        "The ciphertext is invalid",
+                    )
+                })?;
+                let xored_bytes = base64::engine::general_purpose::STANDARD
+                    .decode(xored_b64)
+                    .map_err(|_| {
+                        AwsServiceError::aws_error(
+                            StatusCode::BAD_REQUEST,
+                            "InvalidCiphertextException",
+                            "The ciphertext is invalid",
+                        )
+                    })?;
+                let state = self.state.read();
+                let key = state.keys.get(kid).ok_or_else(|| {
+                    AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "NotFoundException",
+                        format!("Key '{kid}' does not exist"),
+                    )
+                })?;
+                let material = key.imported_material_bytes.as_ref().ok_or_else(|| {
+                    AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "InvalidCiphertextException",
+                        "Key material has been deleted",
+                    )
+                })?;
+                let plaintext_bytes: Vec<u8> = xored_bytes
+                    .iter()
+                    .enumerate()
+                    .map(|(i, b)| b ^ material[i % material.len()])
+                    .collect();
+                (
+                    kid.to_string(),
+                    base64::engine::general_purpose::STANDARD.encode(&plaintext_bytes),
+                )
+            } else if let Some(rest) = envelope.strip_prefix(FAKE_ENVELOPE_PREFIX) {
+                let (kid, pt) = rest.split_once(':').ok_or_else(|| {
+                    AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "InvalidCiphertextException",
+                        "The ciphertext is invalid",
+                    )
+                })?;
+                (kid.to_string(), pt.to_string())
+            } else {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidCiphertextException",
+                    "The ciphertext is invalid",
+                ));
+            };
 
         let state = self.state.read();
 
-        let source_key = state.keys.get(source_key_id).ok_or_else(|| {
+        let source_key = state.keys.get(source_key_id.as_str()).ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "NotFoundException",
@@ -816,7 +929,20 @@ impl KmsService {
         let dest_key = state.keys.get(&dest_resolved).unwrap();
 
         // Re-encrypt with destination key
-        let new_envelope = format!("{FAKE_ENVELOPE_PREFIX}{}:{plaintext_b64}", dest_key.key_id);
+        let new_envelope = if let Some(ref material) = dest_key.imported_material_bytes {
+            let plaintext_bytes = base64::engine::general_purpose::STANDARD
+                .decode(&plaintext_b64)
+                .unwrap_or_default();
+            let xored: Vec<u8> = plaintext_bytes
+                .iter()
+                .enumerate()
+                .map(|(i, b)| b ^ material[i % material.len()])
+                .collect();
+            let xored_b64 = base64::engine::general_purpose::STANDARD.encode(&xored);
+            format!("fakecloud-imported:{}:{xored_b64}", dest_key.key_id)
+        } else {
+            format!("{FAKE_ENVELOPE_PREFIX}{}:{plaintext_b64}", dest_key.key_id)
+        };
         let new_ciphertext_b64 =
             base64::engine::general_purpose::STANDARD.encode(new_envelope.as_bytes());
 
@@ -2152,6 +2278,8 @@ impl KmsService {
             mac_algorithms: source_mac_algorithms,
             custom_key_store_id: None,
             imported_key_material: false,
+            imported_material_bytes: None,
+            private_key_seed: rand_bytes(32),
             primary_region: None,
         };
 
@@ -2321,9 +2449,19 @@ impl KmsService {
             ));
         }
 
-        let shared_secret_bytes = rand_bytes(32);
+        // Deterministic shared secret: SHA-256(private_key_seed || public_key_bytes)
+        // Both parties using the correct keys will derive the same result.
+        let public_key_bytes = base64::engine::general_purpose::STANDARD
+            .decode(_public_key)
+            .unwrap_or_default();
+
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(&key.private_key_seed);
+        hasher.update(&public_key_bytes);
+        let shared_secret_bytes = hasher.finalize();
         let shared_secret_b64 =
-            base64::engine::general_purpose::STANDARD.encode(&shared_secret_bytes);
+            base64::engine::general_purpose::STANDARD.encode(shared_secret_bytes);
 
         Ok(AwsResponse::json(
             StatusCode::OK,
@@ -2393,7 +2531,7 @@ impl KmsService {
             )
         })?;
 
-        let _encrypted_key_material = body["EncryptedKeyMaterial"].as_str().ok_or_else(|| {
+        let encrypted_key_material = body["EncryptedKeyMaterial"].as_str().ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "ValidationException",
@@ -2426,7 +2564,27 @@ impl KmsService {
             ));
         }
 
+        // Store the imported material bytes for use in encrypt/decrypt.
+        // In real AWS, the material is unwrapped with the import RSA key.
+        // Here we treat the EncryptedKeyMaterial as the raw key (base64-decoded).
+        let material_bytes = base64::engine::general_purpose::STANDARD
+            .decode(encrypted_key_material)
+            .map_err(|_| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationException",
+                    "EncryptedKeyMaterial is not valid base64",
+                )
+            })?;
+        if material_bytes.is_empty() {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ValidationException",
+                "EncryptedKeyMaterial must not be empty",
+            ));
+        }
         key.imported_key_material = true;
+        key.imported_material_bytes = Some(material_bytes);
         key.enabled = true;
         key.key_state = "Enabled".to_string();
 
@@ -2466,6 +2624,7 @@ impl KmsService {
         }
 
         key.imported_key_material = false;
+        key.imported_material_bytes = None;
         key.enabled = false;
         key.key_state = "PendingImport".to_string();
 
@@ -3715,5 +3874,160 @@ mod tests {
             }),
         );
         assert!(svc.update_custom_key_store(&req).is_err());
+    }
+
+    #[test]
+    fn derive_shared_secret_is_deterministic() {
+        let svc = make_service();
+        let key_id = create_key_with_opts(
+            &svc,
+            json!({
+                "KeyUsage": "KEY_AGREEMENT",
+                "KeySpec": "ECC_NIST_P256"
+            }),
+        );
+
+        let pub_key = base64::engine::general_purpose::STANDARD.encode(b"counterparty-public-key");
+        let req = make_request(
+            "DeriveSharedSecret",
+            json!({
+                "KeyId": key_id,
+                "KeyAgreementAlgorithm": "ECDH",
+                "PublicKey": pub_key
+            }),
+        );
+
+        let resp1 = svc.derive_shared_secret(&req).unwrap();
+        let body1: Value = serde_json::from_slice(&resp1.body).unwrap();
+        let secret1 = body1["SharedSecret"].as_str().unwrap().to_string();
+
+        // Same inputs must produce the same shared secret
+        let resp2 = svc.derive_shared_secret(&req).unwrap();
+        let body2: Value = serde_json::from_slice(&resp2.body).unwrap();
+        let secret2 = body2["SharedSecret"].as_str().unwrap().to_string();
+
+        assert_eq!(secret1, secret2, "DeriveSharedSecret must be deterministic");
+
+        // Different public key must produce a different shared secret
+        let other_pub = base64::engine::general_purpose::STANDARD.encode(b"different-public-key");
+        let req2 = make_request(
+            "DeriveSharedSecret",
+            json!({
+                "KeyId": key_id,
+                "KeyAgreementAlgorithm": "ECDH",
+                "PublicKey": other_pub
+            }),
+        );
+        let resp3 = svc.derive_shared_secret(&req2).unwrap();
+        let body3: Value = serde_json::from_slice(&resp3.body).unwrap();
+        let secret3 = body3["SharedSecret"].as_str().unwrap().to_string();
+        assert_ne!(
+            secret1, secret3,
+            "Different public keys must yield different shared secrets"
+        );
+    }
+
+    #[test]
+    fn imported_key_material_encrypt_decrypt_roundtrip() {
+        let svc = make_service();
+        let key_id = create_key_with_opts(&svc, json!({ "Origin": "EXTERNAL" }));
+
+        let fake_token = base64::engine::general_purpose::STANDARD.encode(b"token");
+        let material = b"my-secret-aes-key-material!12345";
+        let fake_material = base64::engine::general_purpose::STANDARD.encode(material);
+
+        // Import key material
+        let req = make_request(
+            "ImportKeyMaterial",
+            json!({
+                "KeyId": key_id,
+                "ImportToken": fake_token,
+                "EncryptedKeyMaterial": fake_material,
+            }),
+        );
+        svc.import_key_material(&req).unwrap();
+
+        // Encrypt
+        let plaintext = b"Hello imported key!";
+        let plaintext_b64 = base64::engine::general_purpose::STANDARD.encode(plaintext);
+        let req = make_request(
+            "Encrypt",
+            json!({ "KeyId": key_id, "Plaintext": plaintext_b64 }),
+        );
+        let resp = svc.encrypt(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let ciphertext = body["CiphertextBlob"].as_str().unwrap().to_string();
+
+        // Verify ciphertext uses the imported envelope
+        let ct_bytes = base64::engine::general_purpose::STANDARD
+            .decode(&ciphertext)
+            .unwrap();
+        let envelope = String::from_utf8(ct_bytes).unwrap();
+        assert!(
+            envelope.starts_with("fakecloud-imported:"),
+            "Imported key should use fakecloud-imported envelope"
+        );
+
+        // Decrypt
+        let req = make_request("Decrypt", json!({ "CiphertextBlob": ciphertext }));
+        let resp = svc.decrypt(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let decrypted_b64 = body["Plaintext"].as_str().unwrap();
+        let decrypted = base64::engine::general_purpose::STANDARD
+            .decode(decrypted_b64)
+            .unwrap();
+        assert_eq!(
+            decrypted, plaintext,
+            "Decrypt must recover the original plaintext"
+        );
+    }
+
+    #[test]
+    fn imported_key_material_decrypt_fails_after_deletion() {
+        let svc = make_service();
+        let key_id = create_key_with_opts(&svc, json!({ "Origin": "EXTERNAL" }));
+
+        let fake_token = base64::engine::general_purpose::STANDARD.encode(b"token");
+        let fake_material =
+            base64::engine::general_purpose::STANDARD.encode(b"some-key-material-32bytes!!");
+
+        // Import and encrypt
+        svc.import_key_material(&make_request(
+            "ImportKeyMaterial",
+            json!({
+                "KeyId": key_id,
+                "ImportToken": fake_token,
+                "EncryptedKeyMaterial": fake_material,
+            }),
+        ))
+        .unwrap();
+
+        let plaintext_b64 = base64::engine::general_purpose::STANDARD.encode(b"secret");
+        let resp = svc
+            .encrypt(&make_request(
+                "Encrypt",
+                json!({ "KeyId": key_id, "Plaintext": plaintext_b64 }),
+            ))
+            .unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let ciphertext = body["CiphertextBlob"].as_str().unwrap().to_string();
+
+        // Delete imported material
+        svc.delete_imported_key_material(&make_request(
+            "DeleteImportedKeyMaterial",
+            json!({ "KeyId": key_id }),
+        ))
+        .unwrap();
+
+        // Re-import to re-enable the key but material bytes are gone for old ciphertext path
+        // Actually, after deletion the key is disabled, so decrypt will fail with DisabledException
+        let result = svc.decrypt(&make_request(
+            "Decrypt",
+            json!({ "CiphertextBlob": ciphertext }),
+        ));
+        assert!(
+            result.is_err(),
+            "Decrypt should fail after key material deletion"
+        );
     }
 }

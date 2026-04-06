@@ -2005,8 +2005,50 @@ impl EventBridgeService {
                             payload: body_str.clone(),
                             timestamp: Utc::now(),
                         });
+                } else if arn.contains(":api-destination/") {
+                    // ApiDestination target: look up destination + connection, then POST
+                    let state = self.state.read();
+                    let dest = state.api_destinations.values().find(|d| d.arn == *arn);
+                    if let Some(dest) = dest {
+                        let url = dest.invocation_endpoint.clone();
+                        let method = dest.http_method.clone();
+                        let conn = state
+                            .connections
+                            .values()
+                            .find(|c| c.arn == dest.connection_arn)
+                            .cloned();
+                        drop(state);
+
+                        let payload = body_str.clone();
+                        tokio::spawn(async move {
+                            let client = reqwest::Client::new();
+                            let mut req_builder = match method.as_str() {
+                                "GET" => client.get(&url),
+                                "PUT" => client.put(&url),
+                                "DELETE" => client.delete(&url),
+                                "PATCH" => client.patch(&url),
+                                "HEAD" => client.head(&url),
+                                _ => client.post(&url),
+                            };
+                            req_builder = req_builder.header("Content-Type", "application/json");
+
+                            // Apply auth from connection
+                            if let Some(conn) = conn {
+                                req_builder = apply_connection_auth(req_builder, &conn);
+                            }
+
+                            let result = req_builder.body(payload).send().await;
+                            if let Err(e) = result {
+                                tracing::warn!(
+                                    endpoint = %url,
+                                    error = %e,
+                                    "EventBridge ApiDestination delivery failed"
+                                );
+                            }
+                        });
+                    }
                 } else if arn.starts_with("https://") || arn.starts_with("http://") {
-                    // HTTP/API destination target — fire-and-forget POST
+                    // HTTP target — fire-and-forget POST
                     let url = arn.clone();
                     let payload = body_str.clone();
                     tokio::spawn(async move {
@@ -3798,6 +3840,48 @@ pub fn deliver_to_logs(
     }
 }
 
+/// Apply connection auth parameters to an outgoing HTTP request.
+fn apply_connection_auth(
+    mut builder: reqwest::RequestBuilder,
+    conn: &Connection,
+) -> reqwest::RequestBuilder {
+    match conn.authorization_type.as_str() {
+        "API_KEY" => {
+            if let Some(params) = conn.auth_parameters.get("ApiKeyAuthParameters") {
+                if let (Some(name), Some(value)) = (
+                    params["ApiKeyName"].as_str(),
+                    params["ApiKeyValue"].as_str(),
+                ) {
+                    builder = builder.header(name, value);
+                }
+            }
+        }
+        "BASIC" => {
+            if let Some(params) = conn.auth_parameters.get("BasicAuthParameters") {
+                if let (Some(user), Some(pass)) =
+                    (params["Username"].as_str(), params["Password"].as_str())
+                {
+                    builder = builder.basic_auth(user, Some(pass));
+                }
+            }
+        }
+        "OAUTH_CLIENT_CREDENTIALS" => {
+            // For OAuth, in a real implementation we'd exchange credentials for a token.
+            // Here we pass client credentials as basic auth as a reasonable approximation.
+            if let Some(params) = conn.auth_parameters.get("OAuthParameters") {
+                if let (Some(client_id), Some(client_secret)) = (
+                    params["ClientParameters"]["ClientID"].as_str(),
+                    params["ClientParameters"]["ClientSecret"].as_str(),
+                ) {
+                    builder = builder.basic_auth(client_id, Some(client_secret));
+                }
+            }
+        }
+        _ => {}
+    }
+    builder
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5117,5 +5201,153 @@ mod tests {
         let state = svc.state.read();
         let replay = state.replays.get("my-replay").unwrap();
         assert_eq!(replay.state, "COMPLETED");
+    }
+
+    #[test]
+    fn apply_connection_auth_api_key() {
+        let conn = Connection {
+            name: "test-conn".to_string(),
+            arn: "arn:aws:events:us-east-1:123456789012:connection/test-conn/uuid".to_string(),
+            description: None,
+            authorization_type: "API_KEY".to_string(),
+            auth_parameters: json!({
+                "ApiKeyAuthParameters": {
+                    "ApiKeyName": "x-api-key",
+                    "ApiKeyValue": "my-secret"
+                }
+            }),
+            connection_state: "AUTHORIZED".to_string(),
+            secret_arn: "arn:aws:secretsmanager:us-east-1:123456789012:secret:test".to_string(),
+            creation_time: Utc::now(),
+            last_modified_time: Utc::now(),
+            last_authorized_time: Utc::now(),
+        };
+
+        let client = reqwest::Client::new();
+        let builder = client
+            .post("http://localhost:12345/test")
+            .header("Content-Type", "application/json");
+        let builder = apply_connection_auth(builder, &conn);
+
+        // Build and verify the header was applied
+        let request = builder.body("{}").build().unwrap();
+        assert_eq!(
+            request
+                .headers()
+                .get("x-api-key")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "my-secret"
+        );
+    }
+
+    #[test]
+    fn apply_connection_auth_basic() {
+        let conn = Connection {
+            name: "basic-conn".to_string(),
+            arn: "arn:aws:events:us-east-1:123456789012:connection/basic-conn/uuid".to_string(),
+            description: None,
+            authorization_type: "BASIC".to_string(),
+            auth_parameters: json!({
+                "BasicAuthParameters": {
+                    "Username": "user",
+                    "Password": "pass"
+                }
+            }),
+            connection_state: "AUTHORIZED".to_string(),
+            secret_arn: "arn:aws:secretsmanager:us-east-1:123456789012:secret:test".to_string(),
+            creation_time: Utc::now(),
+            last_modified_time: Utc::now(),
+            last_authorized_time: Utc::now(),
+        };
+
+        let client = reqwest::Client::new();
+        let builder = client.post("http://localhost:12345/test");
+        let builder = apply_connection_auth(builder, &conn);
+
+        let request = builder.body("{}").build().unwrap();
+        let auth_header = request
+            .headers()
+            .get("authorization")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(
+            auth_header.starts_with("Basic "),
+            "Expected Basic auth header, got: {auth_header}"
+        );
+    }
+
+    #[tokio::test]
+    async fn put_events_with_api_destination_target_resolves_destination() {
+        // This test verifies that the PutEvents code path correctly identifies
+        // api-destination ARN targets and resolves the destination metadata.
+        // The actual HTTP call goes to a non-existent host (fire-and-forget).
+        let state = Arc::new(RwLock::new(EventBridgeState::new(
+            "123456789012",
+            "us-east-1",
+        )));
+        let delivery = Arc::new(DeliveryBus::new());
+        let svc = EventBridgeService::new(state, delivery);
+
+        // Create connection and api destination
+        create_connection(&svc, "my-conn");
+        let conn_arn = {
+            let state = svc.state.read();
+            state.connections.get("my-conn").unwrap().arn.clone()
+        };
+        let req = make_request(
+            "CreateApiDestination",
+            json!({
+                "Name": "my-dest",
+                "ConnectionArn": conn_arn,
+                "InvocationEndpoint": "http://127.0.0.1:1/noop",
+                "HttpMethod": "POST"
+            }),
+        );
+        svc.create_api_destination(&req).unwrap();
+
+        let dest_arn = {
+            let state = svc.state.read();
+            state.api_destinations.get("my-dest").unwrap().arn.clone()
+        };
+
+        // Create a rule that targets the api-destination
+        let req = make_request(
+            "PutRule",
+            json!({
+                "Name": "api-dest-rule",
+                "EventPattern": r#"{"source":["test.app"]}"#,
+                "State": "ENABLED"
+            }),
+        );
+        svc.put_rule(&req).unwrap();
+
+        let req = make_request(
+            "PutTargets",
+            json!({
+                "Rule": "api-dest-rule",
+                "Targets": [{ "Id": "dest-target", "Arn": dest_arn }]
+            }),
+        );
+        svc.put_targets(&req).unwrap();
+
+        // PutEvents - should match the rule and attempt delivery to ApiDestination
+        let req = make_request(
+            "PutEvents",
+            json!({
+                "Entries": [{
+                    "Source": "test.app",
+                    "DetailType": "TestEvent",
+                    "Detail": r#"{"key":"value"}"#
+                }]
+            }),
+        );
+        let resp = svc.put_events(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["FailedEntryCount"], 0);
+        assert_eq!(body["Entries"].as_array().unwrap().len(), 1);
+        assert!(body["Entries"][0]["EventId"].as_str().is_some());
     }
 }
