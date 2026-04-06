@@ -402,6 +402,11 @@ impl DynamoDbService {
 
         let return_values = body["ReturnValues"].as_str().unwrap_or("NONE");
 
+        let return_consumed = body["ReturnConsumedCapacity"].as_str().unwrap_or("NONE");
+        let return_icm = body["ReturnItemCollectionMetrics"]
+            .as_str()
+            .unwrap_or("NONE");
+
         let mut result = json!({});
 
         if let Some(idx) = existing_idx {
@@ -410,6 +415,17 @@ impl DynamoDbService {
             }
             table.items.remove(idx);
             table.recalculate_stats();
+        }
+
+        if return_consumed == "TOTAL" || return_consumed == "INDEXES" {
+            result["ConsumedCapacity"] = json!({
+                "TableName": table_name,
+                "CapacityUnits": 1.0,
+            });
+        }
+
+        if return_icm == "SIZE" {
+            result["ItemCollectionMetrics"] = json!({});
         }
 
         Self::ok_json(result)
@@ -655,6 +671,8 @@ impl DynamoDbService {
             &["INDEXES", "TOTAL", "NONE"],
         )?;
 
+        let return_consumed = body["ReturnConsumedCapacity"].as_str().unwrap_or("NONE");
+
         let request_items = body["RequestItems"]
             .as_object()
             .ok_or_else(|| {
@@ -668,6 +686,7 @@ impl DynamoDbService {
 
         let state = self.state.read();
         let mut responses: HashMap<String, Vec<Value>> = HashMap::new();
+        let mut consumed_capacity: Vec<Value> = Vec::new();
 
         for (table_name, params) in &request_items {
             let table = get_table(&state.tables, table_name)?;
@@ -688,12 +707,25 @@ impl DynamoDbService {
                 }
             }
             responses.insert(table_name.clone(), items);
+
+            if return_consumed == "TOTAL" || return_consumed == "INDEXES" {
+                consumed_capacity.push(json!({
+                    "TableName": table_name,
+                    "CapacityUnits": 1.0,
+                }));
+            }
         }
 
-        Self::ok_json(json!({
+        let mut result = json!({
             "Responses": responses,
             "UnprocessedKeys": {},
-        }))
+        });
+
+        if return_consumed == "TOTAL" || return_consumed == "INDEXES" {
+            result["ConsumedCapacity"] = json!(consumed_capacity);
+        }
+
+        Self::ok_json(result)
     }
 
     fn batch_write_item(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
@@ -710,6 +742,11 @@ impl DynamoDbService {
             &["SIZE", "NONE"],
         )?;
 
+        let return_consumed = body["ReturnConsumedCapacity"].as_str().unwrap_or("NONE");
+        let return_icm = body["ReturnItemCollectionMetrics"]
+            .as_str()
+            .unwrap_or("NONE");
+
         let request_items = body["RequestItems"]
             .as_object()
             .ok_or_else(|| {
@@ -722,6 +759,8 @@ impl DynamoDbService {
             .clone();
 
         let mut state = self.state.write();
+        let mut consumed_capacity: Vec<Value> = Vec::new();
+        let mut item_collection_metrics: HashMap<String, Vec<Value>> = HashMap::new();
 
         for (table_name, requests) in &request_items {
             let table = state.tables.get_mut(table_name.as_str()).ok_or_else(|| {
@@ -760,11 +799,32 @@ impl DynamoDbService {
             }
 
             table.recalculate_stats();
+
+            if return_consumed == "TOTAL" || return_consumed == "INDEXES" {
+                consumed_capacity.push(json!({
+                    "TableName": table_name,
+                    "CapacityUnits": 1.0,
+                }));
+            }
+
+            if return_icm == "SIZE" {
+                item_collection_metrics.insert(table_name.clone(), vec![]);
+            }
         }
 
-        Self::ok_json(json!({
+        let mut result = json!({
             "UnprocessedItems": {},
-        }))
+        });
+
+        if return_consumed == "TOTAL" || return_consumed == "INDEXES" {
+            result["ConsumedCapacity"] = json!(consumed_capacity);
+        }
+
+        if return_icm == "SIZE" {
+            result["ItemCollectionMetrics"] = json!(item_collection_metrics);
+        }
+
+        Self::ok_json(result)
     }
 
     // ── Tags ────────────────────────────────────────────────────────────

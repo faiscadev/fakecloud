@@ -300,6 +300,7 @@ impl KmsService {
             64,
         )?;
 
+        let custom_key_store_id = body["CustomKeyStoreId"].as_str().map(|s| s.to_string());
         let description = body["Description"].as_str().unwrap_or("").to_string();
         let key_usage = body["KeyUsage"]
             .as_str()
@@ -390,6 +391,7 @@ impl KmsService {
             signing_algorithms: signing_algs,
             encryption_algorithms: encryption_algs,
             mac_algorithms: mac_algs,
+            custom_key_store_id,
         };
 
         let metadata = key_metadata_json(&key, &state.account_id);
@@ -445,8 +447,11 @@ impl KmsService {
 
         validate_optional_range_i64("limit", body["Limit"].as_i64(), 1, 1000)?;
 
+        let limit = body["Limit"].as_u64().unwrap_or(1000) as usize;
+        let marker = body["Marker"].as_str();
+
         let state = self.state.read();
-        let keys: Vec<Value> = state
+        let all_keys: Vec<Value> = state
             .keys
             .values()
             .map(|k| {
@@ -457,13 +462,32 @@ impl KmsService {
             })
             .collect();
 
+        let start = if let Some(m) = marker {
+            all_keys
+                .iter()
+                .position(|k| k["KeyId"].as_str() == Some(m))
+                .unwrap_or(0)
+        } else {
+            0
+        };
+
+        let page = &all_keys[start..all_keys.len().min(start + limit)];
+        let truncated = start + limit < all_keys.len();
+
+        let mut result = json!({
+            "Keys": page,
+            "Truncated": truncated,
+        });
+
+        if truncated {
+            if let Some(last) = page.last() {
+                result["NextMarker"] = last["KeyId"].clone();
+            }
+        }
+
         Ok(AwsResponse::json(
             StatusCode::OK,
-            serde_json::to_string(&json!({
-                "Keys": keys,
-                "Truncated": false,
-            }))
-            .unwrap(),
+            serde_json::to_string(&result).unwrap(),
         ))
     }
 
@@ -844,6 +868,8 @@ impl KmsService {
     fn generate_random(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = body_json(req);
 
+        // CustomKeyStoreId is accepted for API compatibility but has no effect on
+        // random number generation in this emulator.
         validate_optional_string_length(
             "customKeyStoreId",
             body["CustomKeyStoreId"].as_str(),
@@ -1771,8 +1797,11 @@ impl KmsService {
         })?;
         validate_optional_range_i64("limit", body["Limit"].as_i64(), 1, 1000)?;
 
+        let limit = body["Limit"].as_u64().unwrap_or(1000) as usize;
+        let marker = body["Marker"].as_str();
+
         let state = self.state.read();
-        let grants: Vec<Value> = state
+        let all_grants: Vec<Value> = state
             .grants
             .iter()
             .filter(|g| {
@@ -1783,13 +1812,32 @@ impl KmsService {
             .map(grant_to_json)
             .collect();
 
+        let start = if let Some(m) = marker {
+            all_grants
+                .iter()
+                .position(|g| g["GrantId"].as_str() == Some(m))
+                .unwrap_or(0)
+        } else {
+            0
+        };
+
+        let page = &all_grants[start..all_grants.len().min(start + limit)];
+        let truncated = start + limit < all_grants.len();
+
+        let mut result = json!({
+            "Grants": page,
+            "Truncated": truncated,
+        });
+
+        if truncated {
+            if let Some(last) = page.last() {
+                result["NextMarker"] = last["GrantId"].clone();
+            }
+        }
+
         Ok(AwsResponse::json(
             StatusCode::OK,
-            serde_json::to_string(&json!({
-                "Grants": grants,
-                "Truncated": false,
-            }))
-            .unwrap(),
+            serde_json::to_string(&result).unwrap(),
         ))
     }
 
@@ -2053,6 +2101,7 @@ impl KmsService {
             signing_algorithms: source_signing_algorithms,
             encryption_algorithms: source_encryption_algorithms,
             mac_algorithms: source_mac_algorithms,
+            custom_key_store_id: None,
         };
 
         let replica_storage_key = format!("{}:{}", replica_region, source_key_id);
@@ -2097,6 +2146,9 @@ fn key_metadata_json(key: &KmsKey, account_id: &str) -> Value {
     }
     if let Some(dd) = key.deletion_date {
         meta["DeletionDate"] = json!(dd);
+    }
+    if let Some(ref cks_id) = key.custom_key_store_id {
+        meta["CustomKeyStoreId"] = json!(cks_id);
     }
 
     if key.multi_region {

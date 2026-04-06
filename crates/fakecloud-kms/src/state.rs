@@ -51,6 +51,7 @@ pub struct KmsKey {
     pub signing_algorithms: Option<Vec<String>>,
     pub encryption_algorithms: Option<Vec<String>>,
     pub mac_algorithms: Option<Vec<String>>,
+    pub custom_key_store_id: Option<String>,
 }
 
 pub struct KmsAlias {

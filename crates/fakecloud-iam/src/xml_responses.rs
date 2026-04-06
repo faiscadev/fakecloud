@@ -217,6 +217,8 @@ pub fn create_access_key_response(key: &IamAccessKey, request_id: &str) -> Strin
 pub fn list_access_keys_response(
     keys: &[IamAccessKey],
     user_name: &str,
+    is_truncated: bool,
+    marker: Option<&str>,
     request_id: &str,
 ) -> String {
     let members: String = keys
@@ -238,12 +240,18 @@ pub fn list_access_keys_response(
         .collect::<Vec<_>>()
         .join("\n");
 
+    let marker_section = if let Some(m) = marker {
+        format!("\n    <Marker>{}</Marker>", xml_escape(m))
+    } else {
+        String::new()
+    };
+
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <ListAccessKeysResponse xmlns="https://iam.amazonaws.com/doc/2010-05-08/">
   <ListAccessKeysResult>
     <UserName>{user_name}</UserName>
-    <IsTruncated>false</IsTruncated>
+    <IsTruncated>{is_truncated}</IsTruncated>{marker_section}
     <AccessKeyMetadata>
 {members}
     </AccessKeyMetadata>
@@ -579,6 +587,7 @@ impl StsCredentials {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn assume_role_response(
     role_arn: &str,
     role_session_name: &str,
@@ -586,6 +595,7 @@ pub fn assume_role_response(
     account_id: &str,
     partition: &str,
     creds: &StsCredentials,
+    expiration: &str,
     request_id: &str,
 ) -> String {
     // Extract role name from ARN
@@ -603,7 +613,7 @@ pub fn assume_role_response(
       <AccessKeyId>{access_key_id}</AccessKeyId>
       <SecretAccessKey>{secret_access_key}</SecretAccessKey>
       <SessionToken>{session_token}</SessionToken>
-      <Expiration>2099-12-31T23:59:59Z</Expiration>
+      <Expiration>{expiration}</Expiration>
     </Credentials>
     <AssumedRoleUser>
       <AssumedRoleId>{role_id}:{session}</AssumedRoleId>
@@ -623,6 +633,7 @@ pub fn assume_role_response(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn assume_role_with_web_identity_response(
     role_arn: &str,
     role_session_name: &str,
@@ -630,6 +641,7 @@ pub fn assume_role_with_web_identity_response(
     partition: &str,
     creds: &StsCredentials,
     assumed_role_id: &str,
+    expiration: &str,
     request_id: &str,
 ) -> String {
     let role_name = role_arn.rsplit('/').next().unwrap_or("unknown");
@@ -646,7 +658,7 @@ pub fn assume_role_with_web_identity_response(
       <AccessKeyId>{access_key_id}</AccessKeyId>
       <SecretAccessKey>{secret_access_key}</SecretAccessKey>
       <SessionToken>{session_token}</SessionToken>
-      <Expiration>2099-12-31T23:59:59Z</Expiration>
+      <Expiration>{expiration}</Expiration>
     </Credentials>
     <AssumedRoleUser>
       <AssumedRoleId>{assumed_role_id}:{session}</AssumedRoleId>
@@ -667,6 +679,7 @@ pub fn assume_role_with_web_identity_response(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn assume_role_with_saml_response(
     role_arn: &str,
     role_session_name: &str,
@@ -674,6 +687,7 @@ pub fn assume_role_with_saml_response(
     partition: &str,
     creds: &StsCredentials,
     assumed_role_id: &str,
+    expiration: &str,
     request_id: &str,
 ) -> String {
     let role_name = role_arn.rsplit('/').next().unwrap_or("unknown");
@@ -690,7 +704,7 @@ pub fn assume_role_with_saml_response(
       <AccessKeyId>{access_key_id}</AccessKeyId>
       <SecretAccessKey>{secret_access_key}</SecretAccessKey>
       <SessionToken>{session_token}</SessionToken>
-      <Expiration>2099-12-31T23:59:59Z</Expiration>
+      <Expiration>{expiration}</Expiration>
     </Credentials>
     <AssumedRoleUser>
       <AssumedRoleId>{assumed_role_id}:{session}</AssumedRoleId>
@@ -711,7 +725,7 @@ pub fn assume_role_with_saml_response(
     )
 }
 
-pub fn get_session_token_response(request_id: &str) -> String {
+pub fn get_session_token_response(expiration: &str, request_id: &str) -> String {
     // AWS docs example credentials (deterministic for local testing)
     let access_key_id = "FSIAIOSFODNN7EXAMPLE";
     let secret_access_key = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYzEXAMPLEKEY";
@@ -725,7 +739,7 @@ pub fn get_session_token_response(request_id: &str) -> String {
       <AccessKeyId>{access_key_id}</AccessKeyId>
       <SecretAccessKey>{secret_access_key}</SecretAccessKey>
       <SessionToken>{session_token}</SessionToken>
-      <Expiration>2099-12-31T23:59:59Z</Expiration>
+      <Expiration>{expiration}</Expiration>
     </Credentials>
   </GetSessionTokenResult>
   <ResponseMetadata>
@@ -743,6 +757,8 @@ pub fn get_federation_token_response(
     name: &str,
     account_id: &str,
     partition: &str,
+    expiration: &str,
+    policy: Option<&str>,
     request_id: &str,
 ) -> String {
     // AWS docs example credentials (deterministic for local testing)
@@ -757,6 +773,15 @@ pub fn get_federation_token_response(
     );
     let federated_user_id = format!("{}:{}", account_id, name);
 
+    let policy_section = if let Some(p) = policy {
+        format!(
+            "\n    <PackedPolicySize>6</PackedPolicySize>\n    <Policy>{}</Policy>",
+            xml_escape(p)
+        )
+    } else {
+        String::new()
+    };
+
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <GetFederationTokenResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">
@@ -765,12 +790,12 @@ pub fn get_federation_token_response(
       <AccessKeyId>{access_key_id}</AccessKeyId>
       <SecretAccessKey>{secret_access_key}</SecretAccessKey>
       <SessionToken>{session_token}</SessionToken>
-      <Expiration>2099-12-31T23:59:59Z</Expiration>
+      <Expiration>{expiration}</Expiration>
     </Credentials>
     <FederatedUser>
       <FederatedUserId>{federated_user_id}</FederatedUserId>
       <Arn>{federated_user_arn}</Arn>
-    </FederatedUser>
+    </FederatedUser>{policy_section}
   </GetFederationTokenResult>
   <ResponseMetadata>
     <RequestId>{request_id}</RequestId>

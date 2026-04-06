@@ -1492,6 +1492,7 @@ name = "fakecloud-logs"
 version = "0.1.1"
 dependencies = [
  "async-trait",
+ "bytes",
  "chrono",
  "fakecloud-core",
  "http 1.4.0",

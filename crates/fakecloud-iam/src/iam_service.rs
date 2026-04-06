@@ -1168,13 +1168,51 @@ impl IamService {
             .get("UserName")
             .cloned()
             .unwrap_or_else(|| resolve_calling_user(&self.state.read(), &req.account_id));
+        let marker = req.query_params.get("Marker").cloned();
+        let max_items: usize = req
+            .query_params
+            .get("MaxItems")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(100);
+
         let state = self.state.read();
-        let keys = state
+        let mut keys = state
             .access_keys
             .get(&user_name)
             .cloned()
             .unwrap_or_default();
-        let xml = xml_responses::list_access_keys_response(&keys, &user_name, &req.request_id);
+        keys.sort_by(|a, b| a.access_key_id.cmp(&b.access_key_id));
+
+        // Apply marker-based pagination (start after the marker item)
+        let start_idx = if let Some(ref m) = marker {
+            keys.iter()
+                .position(|k| k.access_key_id == *m)
+                .map(|pos| pos + 1)
+                .unwrap_or(0)
+        } else {
+            0
+        };
+
+        let page = &keys[start_idx..];
+        let is_truncated = page.len() > max_items;
+        let page = if is_truncated {
+            &page[..max_items]
+        } else {
+            page
+        };
+        let next_marker = if is_truncated {
+            page.last().map(|k| k.access_key_id.clone())
+        } else {
+            None
+        };
+
+        let xml = xml_responses::list_access_keys_response(
+            page,
+            &user_name,
+            is_truncated,
+            next_marker.as_deref(),
+            &req.request_id,
+        );
         Ok(AwsResponse::xml(StatusCode::OK, xml))
     }
 

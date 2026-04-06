@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use chrono::Utc;
 use http::StatusCode;
 
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
@@ -6,6 +7,36 @@ use fakecloud_core::validation::*;
 
 use crate::state::{CredentialIdentity, SharedIamState};
 use crate::xml_responses::{self, StsCredentials};
+
+/// Default duration for AssumeRole and similar operations (1 hour).
+const DEFAULT_ASSUME_ROLE_DURATION: i64 = 3600;
+
+/// Default duration for GetSessionToken (12 hours).
+const DEFAULT_SESSION_TOKEN_DURATION: i64 = 43200;
+
+/// Default duration for GetFederationToken (12 hours).
+const DEFAULT_FEDERATION_TOKEN_DURATION: i64 = 43200;
+
+/// Compute an ISO 8601 expiration timestamp from an optional DurationSeconds parameter.
+fn compute_expiration(req: &AwsRequest, default_duration: i64) -> Result<String, AwsServiceError> {
+    let duration = if let Some(ds) = req.query_params.get("DurationSeconds") {
+        ds.parse::<i64>().map_err(|_| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ValidationError",
+                format!(
+                    "Value '{}' at 'durationSeconds' failed to satisfy constraint: \
+                     Member must be a valid integer",
+                    ds
+                ),
+            )
+        })?
+    } else {
+        default_duration
+    };
+    let expiration = Utc::now() + chrono::Duration::seconds(duration);
+    Ok(expiration.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+}
 
 pub struct StsService {
     state: SharedIamState,
@@ -140,7 +171,7 @@ impl StsService {
         })?;
         validate_string_length("roleSessionName", role_session_name, 2, 64)?;
 
-        // Validate optional DurationSeconds
+        // Validate optional DurationSeconds (used below for expiration)
         if let Some(ds) = req.query_params.get("DurationSeconds") {
             let v = ds.parse::<i64>().map_err(|_| {
                 AwsServiceError::aws_error(
@@ -156,21 +187,30 @@ impl StsService {
             validate_range_i64("durationSeconds", v, 900, 43200)?;
         }
 
-        // Validate optional SerialNumber
+        // Validate and accept optional MFA SerialNumber
         validate_optional_string_length(
             "serialNumber",
             req.query_params.get("SerialNumber").map(|s| s.as_str()),
             9,
             256,
         )?;
+        let serial_number = req.query_params.get("SerialNumber").cloned();
 
-        // Validate optional TokenCode
+        // Validate and accept optional MFA TokenCode
         validate_optional_string_length(
             "tokenCode",
             req.query_params.get("TokenCode").map(|s| s.as_str()),
             6,
             6,
         )?;
+        let token_code = req.query_params.get("TokenCode").cloned();
+
+        // Compute expiration from DurationSeconds (default 3600s)
+        let expiration = compute_expiration(req, DEFAULT_ASSUME_ROLE_DURATION)?;
+
+        // Accept MFA parameters without verification (emulator behavior)
+        let _mfa_serial = serial_number;
+        let _mfa_token = token_code;
 
         let partition = partition_for_region(&req.region);
         let creds = StsCredentials::generate();
@@ -212,6 +252,7 @@ impl StsService {
             &account_id,
             partition,
             &creds,
+            &expiration,
             &req.request_id,
         );
         Ok(AwsResponse::xml(StatusCode::OK, xml))
@@ -240,16 +281,17 @@ impl StsService {
         validate_string_length("roleSessionName", role_session_name, 2, 64)?;
 
         // WebIdentityToken is required
-        let _web_identity_token = req.query_params.get("WebIdentityToken").ok_or_else(|| {
+        let web_identity_token = req.query_params.get("WebIdentityToken").ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "MissingParameter",
                 "The request must contain the parameter WebIdentityToken",
             )
         })?;
-        validate_string_length("webIdentityToken", _web_identity_token, 4, 20000)?;
+        validate_string_length("webIdentityToken", web_identity_token, 4, 20000)?;
+        let _web_identity_token = web_identity_token.clone();
 
-        // Validate optional DurationSeconds
+        // Validate optional DurationSeconds (used below for expiration)
         if let Some(ds) = req.query_params.get("DurationSeconds") {
             let v = ds.parse::<i64>().map_err(|_| {
                 AwsServiceError::aws_error(
@@ -264,6 +306,9 @@ impl StsService {
             })?;
             validate_range_i64("durationSeconds", v, 900, 43200)?;
         }
+
+        // Compute expiration from DurationSeconds (default 3600s)
+        let expiration = compute_expiration(req, DEFAULT_ASSUME_ROLE_DURATION)?;
 
         let partition = partition_for_region(&req.region);
         let creds = StsCredentials::generate();
@@ -296,6 +341,7 @@ impl StsService {
             partition,
             &creds,
             &role_id,
+            &expiration,
             &req.request_id,
         );
         Ok(AwsResponse::xml(StatusCode::OK, xml))
@@ -312,14 +358,15 @@ impl StsService {
         validate_string_length("roleArn", role_arn, 20, 2048)?;
 
         // PrincipalArn is required
-        let _principal_arn = req.query_params.get("PrincipalArn").ok_or_else(|| {
+        let principal_arn = req.query_params.get("PrincipalArn").ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "MissingParameter",
                 "The request must contain the parameter PrincipalArn",
             )
         })?;
-        validate_string_length("principalArn", _principal_arn, 20, 2048)?;
+        validate_string_length("principalArn", principal_arn, 20, 2048)?;
+        let _principal_arn = principal_arn.clone();
 
         // SAMLAssertion is required but we just need to extract session name from it
         let saml_assertion = req.query_params.get("SAMLAssertion").ok_or_else(|| {
@@ -331,7 +378,7 @@ impl StsService {
         })?;
         validate_string_length("sAMLAssertion", saml_assertion, 4, 100000)?;
 
-        // Validate optional DurationSeconds
+        // Validate optional DurationSeconds (used below for expiration)
         if let Some(ds) = req.query_params.get("DurationSeconds") {
             let v = ds.parse::<i64>().map_err(|_| {
                 AwsServiceError::aws_error(
@@ -346,6 +393,9 @@ impl StsService {
             })?;
             validate_range_i64("durationSeconds", v, 900, 43200)?;
         }
+
+        // Compute expiration from DurationSeconds (default 3600s)
+        let expiration = compute_expiration(req, DEFAULT_ASSUME_ROLE_DURATION)?;
 
         // Decode the SAML assertion to extract the RoleSessionName
         let role_session_name =
@@ -382,13 +432,14 @@ impl StsService {
             partition,
             &creds,
             &role_id,
+            &expiration,
             &req.request_id,
         );
         Ok(AwsResponse::xml(StatusCode::OK, xml))
     }
 
     fn get_session_token(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        // Validate optional DurationSeconds
+        // Validate optional DurationSeconds (used below for expiration)
         if let Some(ds) = req.query_params.get("DurationSeconds") {
             let v = ds.parse::<i64>().map_err(|_| {
                 AwsServiceError::aws_error(
@@ -404,23 +455,28 @@ impl StsService {
             validate_range_i64("durationSeconds", v, 900, 129600)?;
         }
 
-        // Validate optional SerialNumber
+        // Validate and accept optional MFA SerialNumber (no verification in emulator)
         validate_optional_string_length(
             "serialNumber",
             req.query_params.get("SerialNumber").map(|s| s.as_str()),
             9,
             256,
         )?;
+        let _serial_number = req.query_params.get("SerialNumber").cloned();
 
-        // Validate optional TokenCode
+        // Validate and accept optional MFA TokenCode (no verification in emulator)
         validate_optional_string_length(
             "tokenCode",
             req.query_params.get("TokenCode").map(|s| s.as_str()),
             6,
             6,
         )?;
+        let _token_code = req.query_params.get("TokenCode").cloned();
 
-        let xml = xml_responses::get_session_token_response(&req.request_id);
+        // Compute expiration from DurationSeconds (default 43200s / 12 hours)
+        let expiration = compute_expiration(req, DEFAULT_SESSION_TOKEN_DURATION)?;
+
+        let xml = xml_responses::get_session_token_response(&expiration, &req.request_id);
         Ok(AwsResponse::xml(StatusCode::OK, xml))
     }
 
@@ -434,7 +490,7 @@ impl StsService {
         })?;
         validate_string_length("name", name, 2, 32)?;
 
-        // Validate optional DurationSeconds
+        // Validate optional DurationSeconds (used below for expiration)
         if let Some(ds) = req.query_params.get("DurationSeconds") {
             let v = ds.parse::<i64>().map_err(|_| {
                 AwsServiceError::aws_error(
@@ -450,13 +506,17 @@ impl StsService {
             validate_range_i64("durationSeconds", v, 900, 129600)?;
         }
 
-        // Validate policy length if provided
+        // Validate and store optional policy
         validate_optional_string_length(
             "policy",
             req.query_params.get("Policy").map(|s| s.as_str()),
             1,
             2048,
         )?;
+        let policy = req.query_params.get("Policy").cloned();
+
+        // Compute expiration from DurationSeconds (default 43200s / 12 hours)
+        let expiration = compute_expiration(req, DEFAULT_FEDERATION_TOKEN_DURATION)?;
 
         let partition = partition_for_region(&req.region);
         let state = self.state.read();
@@ -464,6 +524,8 @@ impl StsService {
             name,
             &state.account_id,
             partition,
+            &expiration,
+            policy.as_deref(),
             &req.request_id,
         );
         Ok(AwsResponse::xml(StatusCode::OK, xml))
@@ -614,5 +676,88 @@ mod tests {
         let id = xml_responses::generate_role_id();
         assert_eq!(id.len(), 21);
         assert!(id.starts_with("AROA"));
+    }
+
+    fn make_test_request(params: std::collections::HashMap<String, String>) -> AwsRequest {
+        AwsRequest {
+            service: "sts".into(),
+            action: "Test".into(),
+            region: "us-east-1".into(),
+            account_id: "123456789012".into(),
+            request_id: "test".into(),
+            headers: http::HeaderMap::new(),
+            query_params: params,
+            body: Default::default(),
+            path_segments: vec![],
+            raw_path: "/".into(),
+            method: http::Method::POST,
+            is_query_protocol: true,
+            access_key_id: None,
+        }
+    }
+
+    fn parse_expiration(s: &str) -> chrono::DateTime<Utc> {
+        chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%SZ")
+            .expect("valid timestamp")
+            .and_utc()
+    }
+
+    #[test]
+    fn test_compute_expiration_with_duration() {
+        use std::collections::HashMap;
+
+        let mut params = HashMap::new();
+        params.insert("DurationSeconds".to_string(), "1800".to_string());
+        let req = make_test_request(params);
+
+        let now = Utc::now();
+        let exp_str = compute_expiration(&req, 3600).unwrap();
+        let exp_utc = parse_expiration(&exp_str);
+
+        // Should be ~1800s from now (using provided DurationSeconds, not default)
+        let diff = (exp_utc - now).num_seconds();
+        assert!(
+            (1798..=1802).contains(&diff),
+            "expected ~1800s duration, got {diff}s"
+        );
+    }
+
+    #[test]
+    fn test_compute_expiration_default() {
+        use std::collections::HashMap;
+
+        let req = make_test_request(HashMap::new());
+
+        let now = Utc::now();
+        let exp_str = compute_expiration(&req, 43200).unwrap();
+        let exp_utc = parse_expiration(&exp_str);
+
+        // Should be ~43200s (12 hours) from now using default
+        let diff = (exp_utc - now).num_seconds();
+        assert!(
+            (43198..=43202).contains(&diff),
+            "expected ~43200s duration, got {diff}s"
+        );
+    }
+
+    #[test]
+    fn test_compute_expiration_uses_provided_not_default() {
+        use std::collections::HashMap;
+
+        let mut params = HashMap::new();
+        params.insert("DurationSeconds".to_string(), "900".to_string());
+        let req = make_test_request(params);
+
+        let before = Utc::now();
+        let exp_str = compute_expiration(&req, 43200).unwrap();
+        let exp_utc = parse_expiration(&exp_str);
+
+        // Should use 900s, not the default 43200s
+        let expected = before + chrono::Duration::seconds(900);
+        let diff = (exp_utc - expected).num_seconds().abs();
+        assert!(
+            diff <= 2,
+            "expected ~900s duration, got diff={diff}s from expected"
+        );
     }
 }

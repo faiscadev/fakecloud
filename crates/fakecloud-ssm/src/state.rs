@@ -78,6 +78,8 @@ pub struct SsmCommand {
     pub service_role_arn: Option<String>,
     pub notification_config: Option<serde_json::Value>,
     pub targets: Vec<serde_json::Value>,
+    pub document_hash: Option<String>,
+    pub document_hash_type: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -123,6 +125,7 @@ pub struct MaintenanceWindow {
     pub schedule_offset: Option<i64>,
     pub start_date: Option<String>,
     pub end_date: Option<String>,
+    pub client_token: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -140,6 +143,8 @@ pub struct PatchBaseline {
     pub global_filters: Option<serde_json::Value>,
     pub sources: Vec<serde_json::Value>,
     pub approved_patches_enable_non_security: bool,
+    pub available_security_updates_compliance_status: Option<String>,
+    pub client_token: Option<String>,
 }
 
 #[derive(Debug, Clone)]

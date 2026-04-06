@@ -135,7 +135,9 @@ pub struct QueryInfo {
 
 pub struct ExportTask {
     pub task_id: String,
+    pub task_name: Option<String>,
     pub log_group_name: String,
+    pub log_stream_name_prefix: Option<String>,
     pub from_time: i64,
     pub to_time: i64,
     pub destination: String,

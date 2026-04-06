@@ -1483,6 +1483,13 @@ impl SecretsManagerService {
             )
         })?;
         validate_string_length("resourcePolicy", policy_str, 1, 20480)?;
+
+        // If SecretId is provided, verify the secret exists
+        if let Some(secret_id) = body["SecretId"].as_str() {
+            let state = self.state.read();
+            self.find_secret_key(&state, secret_id)?;
+        }
+
         let response = json!({
             "PolicyValidationPassed": true,
             "ValidationErrors": [],
