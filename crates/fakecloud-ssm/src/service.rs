@@ -7,6 +7,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
+use fakecloud_core::validation::*;
 
 use crate::state::{
     MaintenanceWindow, MaintenanceWindowTarget, MaintenanceWindowTask, PatchBaseline, PatchGroup,
@@ -2385,6 +2386,37 @@ impl SsmService {
             .as_str()
             .ok_or_else(|| missing("DocumentName"))?
             .to_string();
+
+        // Validate optional fields
+        validate_optional_string_length("DocumentHash", body["DocumentHash"].as_str(), 0, 256)?;
+        validate_optional_enum(
+            "DocumentHashType",
+            body["DocumentHashType"].as_str(),
+            &["Sha256", "Sha1"],
+        )?;
+        validate_optional_range_i64(
+            "TimeoutSeconds",
+            body["TimeoutSeconds"].as_i64(),
+            30,
+            2592000,
+        )?;
+        validate_optional_string_length("Comment", body["Comment"].as_str(), 0, 100)?;
+        validate_optional_string_length("OutputS3Region", body["OutputS3Region"].as_str(), 3, 20)?;
+        validate_optional_string_length(
+            "OutputS3BucketName",
+            body["OutputS3BucketName"].as_str(),
+            3,
+            63,
+        )?;
+        validate_optional_string_length(
+            "OutputS3KeyPrefix",
+            body["OutputS3KeyPrefix"].as_str(),
+            0,
+            500,
+        )?;
+        validate_optional_string_length("MaxConcurrency", body["MaxConcurrency"].as_str(), 1, 7)?;
+        validate_optional_string_length("MaxErrors", body["MaxErrors"].as_str(), 1, 7)?;
+
         let instance_ids: Vec<String> = body["InstanceIds"]
             .as_array()
             .map(|arr| {
@@ -2454,34 +2486,46 @@ impl SsmService {
         state.commands.push(cmd);
 
         let expires = now + chrono::Duration::seconds(timeout.unwrap_or(3600));
-        let cmd_json = json!({
-            "Command": {
-                "CommandId": command_id,
-                "DocumentName": document_name,
-                "InstanceIds": effective_instance_ids,
-                "Targets": targets,
-                "Parameters": parameters,
-                "Status": "Success",
-                "StatusDetails": "Details placeholder",
-                "RequestedDateTime": now.timestamp_millis() as f64 / 1000.0,
-                "ExpiresAfter": expires.timestamp_millis() as f64 / 1000.0,
-                "Comment": comment,
-                "OutputS3Region": output_s3_region,
-                "OutputS3BucketName": output_s3_bucket,
-                "OutputS3KeyPrefix": output_s3_prefix,
-                "ServiceRoleArn": service_role,
-                "TimeoutSeconds": timeout,
-                "MaxConcurrency": max_concurrency.unwrap_or_default(),
-                "MaxErrors": max_errors.unwrap_or_default(),
-                "DeliveryTimedOutCount": 0,
-            }
+        let mut cmd_obj = json!({
+            "CommandId": command_id,
+            "DocumentName": document_name,
+            "InstanceIds": effective_instance_ids,
+            "Targets": targets,
+            "Parameters": parameters,
+            "Status": "Success",
+            "StatusDetails": "Details placeholder",
+            "RequestedDateTime": now.timestamp_millis() as f64 / 1000.0,
+            "ExpiresAfter": expires.timestamp_millis() as f64 / 1000.0,
+            "MaxConcurrency": max_concurrency.unwrap_or_default(),
+            "MaxErrors": max_errors.unwrap_or_default(),
+            "DeliveryTimedOutCount": 0,
         });
+        if let Some(ref c) = comment {
+            cmd_obj["Comment"] = json!(c);
+        }
+        if let Some(ref r) = output_s3_region {
+            cmd_obj["OutputS3Region"] = json!(r);
+        }
+        if let Some(ref b) = output_s3_bucket {
+            cmd_obj["OutputS3BucketName"] = json!(b);
+        }
+        if let Some(ref p) = output_s3_prefix {
+            cmd_obj["OutputS3KeyPrefix"] = json!(p);
+        }
+        if let Some(ref s) = service_role {
+            cmd_obj["ServiceRoleArn"] = json!(s);
+        }
+        if let Some(t) = timeout {
+            cmd_obj["TimeoutSeconds"] = json!(t);
+        }
 
-        Ok(json_resp(cmd_json))
+        Ok(json_resp(json!({ "Command": cmd_obj })))
     }
 
     fn list_commands(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = parse_body(req);
+        validate_optional_string_length("CommandId", body["CommandId"].as_str(), 36, 36)?;
+        validate_optional_range_i64("MaxResults", body["MaxResults"].as_i64(), 1, 50)?;
         let command_id = body["CommandId"].as_str();
         let instance_id = body["InstanceId"].as_str();
 
@@ -2543,10 +2587,12 @@ impl SsmService {
         let command_id = body["CommandId"]
             .as_str()
             .ok_or_else(|| missing("CommandId"))?;
+        validate_string_length("CommandId", command_id, 36, 36)?;
         let instance_id = body["InstanceId"]
             .as_str()
             .ok_or_else(|| missing("InstanceId"))?;
         let plugin_name = body["PluginName"].as_str();
+        validate_optional_string_length("PluginName", plugin_name, 4, 500)?;
 
         let state = self.state.read();
         let cmd = state
@@ -2598,6 +2644,8 @@ impl SsmService {
 
     fn list_command_invocations(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = parse_body(req);
+        validate_optional_string_length("CommandId", body["CommandId"].as_str(), 36, 36)?;
+        validate_optional_range_i64("MaxResults", body["MaxResults"].as_i64(), 1, 50)?;
         let command_id = body["CommandId"].as_str();
 
         let state = self.state.read();
@@ -2634,6 +2682,7 @@ impl SsmService {
         let command_id = body["CommandId"]
             .as_str()
             .ok_or_else(|| missing("CommandId"))?;
+        validate_string_length("CommandId", command_id, 36, 36)?;
 
         let mut state = self.state.write();
         if let Some(cmd) = state
@@ -2655,19 +2704,30 @@ impl SsmService {
             .as_str()
             .ok_or_else(|| missing("Name"))?
             .to_string();
+        validate_string_length("Name", &name, 3, 128)?;
         let schedule = body["Schedule"]
             .as_str()
             .ok_or_else(|| missing("Schedule"))?
             .to_string();
+        validate_string_length("Schedule", &schedule, 1, 256)?;
         let duration = body["Duration"]
             .as_i64()
             .ok_or_else(|| missing("Duration"))?;
+        validate_range_i64("Duration", duration, 1, 24)?;
         let cutoff = body["Cutoff"].as_i64().ok_or_else(|| missing("Cutoff"))?;
+        validate_range_i64("Cutoff", cutoff, 0, 23)?;
+        validate_required(
+            "AllowUnassociatedTargets",
+            &body["AllowUnassociatedTargets"],
+        )?;
         let allow_unassociated_targets =
             body["AllowUnassociatedTargets"].as_bool().unwrap_or(false);
+        validate_optional_string_length("Description", body["Description"].as_str(), 1, 128)?;
+        validate_optional_string_length("ClientToken", body["ClientToken"].as_str(), 1, 64)?;
         let description = body["Description"].as_str().map(|s| s.to_string());
         let schedule_timezone = body["ScheduleTimezone"].as_str().map(|s| s.to_string());
         let schedule_offset = body["ScheduleOffset"].as_i64();
+        validate_optional_range_i64("ScheduleOffset", schedule_offset, 1, 6)?;
         let start_date = body["StartDate"].as_str().map(|s| s.to_string());
         let end_date = body["EndDate"].as_str().map(|s| s.to_string());
 
@@ -2715,6 +2775,7 @@ impl SsmService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = parse_body(req);
+        validate_optional_range_i64("MaxResults", body["MaxResults"].as_i64(), 10, 100)?;
         let filters = body["Filters"].as_array();
 
         let state = self.state.read();
@@ -2754,7 +2815,6 @@ impl SsmService {
                     "Schedule": mw.schedule,
                     "Duration": mw.duration,
                     "Cutoff": mw.cutoff,
-                    "AllowUnassociatedTargets": mw.allow_unassociated_targets,
                     "Enabled": mw.enabled,
                 });
                 if let Some(ref desc) = mw.description {
@@ -2824,6 +2884,7 @@ impl SsmService {
         let window_id = body["WindowId"]
             .as_str()
             .ok_or_else(|| missing("WindowId"))?;
+        validate_string_length("WindowId", window_id, 20, 20)?;
 
         let mut state = self.state.write();
         if state.maintenance_windows.remove(window_id).is_none() {
@@ -2838,6 +2899,13 @@ impl SsmService {
         let window_id = body["WindowId"]
             .as_str()
             .ok_or_else(|| missing("WindowId"))?;
+        validate_string_length("WindowId", window_id, 20, 20)?;
+        validate_optional_string_length("Name", body["Name"].as_str(), 3, 128)?;
+        validate_optional_string_length("Description", body["Description"].as_str(), 1, 128)?;
+        validate_optional_string_length("Schedule", body["Schedule"].as_str(), 1, 256)?;
+        validate_optional_range_i64("ScheduleOffset", body["ScheduleOffset"].as_i64(), 1, 6)?;
+        validate_optional_range_i64("Duration", body["Duration"].as_i64(), 1, 24)?;
+        validate_optional_range_i64("Cutoff", body["Cutoff"].as_i64(), 0, 23)?;
 
         let mut state = self.state.write();
         let mw = state
@@ -3133,10 +3201,56 @@ impl SsmService {
             .as_str()
             .ok_or_else(|| missing("Name"))?
             .to_string();
+        validate_string_length("Name", &name, 3, 128)?;
+        validate_optional_enum(
+            "OperatingSystem",
+            body["OperatingSystem"].as_str(),
+            &[
+                "WINDOWS",
+                "AMAZON_LINUX",
+                "AMAZON_LINUX_2",
+                "AMAZON_LINUX_2022",
+                "UBUNTU",
+                "REDHAT_ENTERPRISE_LINUX",
+                "SUSE",
+                "CENTOS",
+                "ORACLE_LINUX",
+                "DEBIAN",
+                "MACOS",
+                "RASPBIAN",
+                "ROCKY_LINUX",
+                "ALMA_LINUX",
+                "AMAZON_LINUX_2023",
+            ],
+        )?;
         let operating_system = body["OperatingSystem"]
             .as_str()
             .unwrap_or("WINDOWS")
             .to_string();
+        validate_optional_string_length("Description", body["Description"].as_str(), 1, 1024)?;
+        validate_optional_enum(
+            "ApprovedPatchesComplianceLevel",
+            body["ApprovedPatchesComplianceLevel"].as_str(),
+            &[
+                "CRITICAL",
+                "HIGH",
+                "MEDIUM",
+                "LOW",
+                "INFORMATIONAL",
+                "UNSPECIFIED",
+            ],
+        )?;
+        validate_optional_enum(
+            "RejectedPatchesAction",
+            body["RejectedPatchesAction"].as_str(),
+            &["ALLOW_AS_DEPENDENCY", "BLOCK"],
+        )?;
+        validate_optional_enum(
+            "AvailableSecurityUpdatesComplianceStatus",
+            body["AvailableSecurityUpdatesComplianceStatus"].as_str(),
+            &["COMPLIANT", "NON_COMPLIANT"],
+        )?;
+        validate_optional_string_length("ClientToken", body["ClientToken"].as_str(), 1, 64)?;
         let description = body["Description"].as_str().map(|s| s.to_string());
         let approval_rules = body.get("ApprovalRules").cloned();
         let approved_patches: Vec<String> = body["ApprovedPatches"]
@@ -3213,6 +3327,7 @@ impl SsmService {
         let baseline_id = body["BaselineId"]
             .as_str()
             .ok_or_else(|| missing("BaselineId"))?;
+        validate_string_length("BaselineId", baseline_id, 20, 128)?;
 
         let mut state = self.state.write();
         state.patch_baselines.remove(baseline_id);
@@ -3226,6 +3341,7 @@ impl SsmService {
 
     fn describe_patch_baselines(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = parse_body(req);
+        validate_optional_range_i64("MaxResults", body["MaxResults"].as_i64(), 1, 100)?;
         let filters = body["Filters"].as_array();
 
         let state = self.state.read();
@@ -3285,6 +3401,7 @@ impl SsmService {
         let baseline_id = body["BaselineId"]
             .as_str()
             .ok_or_else(|| missing("BaselineId"))?;
+        validate_string_length("BaselineId", baseline_id, 20, 128)?;
 
         let state = self.state.read();
         let pb = state.patch_baselines.get(baseline_id).ok_or_else(|| {
@@ -3332,10 +3449,12 @@ impl SsmService {
             .as_str()
             .ok_or_else(|| missing("BaselineId"))?
             .to_string();
+        validate_string_length("BaselineId", &baseline_id, 20, 128)?;
         let patch_group = body["PatchGroup"]
             .as_str()
             .ok_or_else(|| missing("PatchGroup"))?
             .to_string();
+        validate_string_length("PatchGroup", &patch_group, 1, 256)?;
 
         let mut state = self.state.write();
 
@@ -3387,9 +3506,11 @@ impl SsmService {
         let baseline_id = body["BaselineId"]
             .as_str()
             .ok_or_else(|| missing("BaselineId"))?;
+        validate_string_length("BaselineId", baseline_id, 20, 128)?;
         let patch_group = body["PatchGroup"]
             .as_str()
             .ok_or_else(|| missing("PatchGroup"))?;
+        validate_string_length("PatchGroup", patch_group, 1, 256)?;
 
         let mut state = self.state.write();
 
@@ -3462,6 +3583,7 @@ impl SsmService {
 
     fn describe_patch_groups(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = parse_body(req);
+        validate_optional_range_i64("MaxResults", body["MaxResults"].as_i64(), 1, 100)?;
         let filters = body["Filters"].as_array();
 
         let state = self.state.read();

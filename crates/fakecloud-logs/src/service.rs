@@ -4,6 +4,7 @@ use http::StatusCode;
 use serde_json::{json, Value};
 
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
+use fakecloud_core::validation::*;
 
 use crate::state::{
     Delivery, DeliveryDestination, DeliverySource, Destination, ExportTask, LogEvent, LogGroup,
@@ -191,14 +192,8 @@ impl LogsService {
             })?
             .to_string();
 
-        // Validate name length
-        if name.len() > 512 {
-            return Err(validation_error(
-                "logGroupName",
-                &name,
-                "Member must have length less than or equal to 512",
-            ));
-        }
+        validate_string_length("logGroupName", &name, 1, 512)?;
+        validate_optional_string_length("kmsKeyId", body["kmsKeyId"].as_str(), 0, 256)?;
 
         let mut state = self.state.write();
         if state.log_groups.contains_key(&name) {
@@ -254,6 +249,8 @@ impl LogsService {
             )
         })?;
 
+        validate_string_length("logGroupName", name, 1, 512)?;
+
         let mut state = self.state.write();
         if state.log_groups.remove(name).is_none() {
             return Err(AwsServiceError::aws_error(
@@ -271,6 +268,19 @@ impl LogsService {
         let prefix = body["logGroupNamePrefix"].as_str().unwrap_or("");
         let limit = body["limit"].as_i64().unwrap_or(50) as usize;
         let next_token = body["nextToken"].as_str();
+
+        validate_optional_string_length(
+            "logGroupNamePrefix",
+            body["logGroupNamePrefix"].as_str(),
+            1,
+            512,
+        )?;
+        validate_optional_string_length(
+            "logGroupNamePattern",
+            body["logGroupNamePattern"].as_str(),
+            0,
+            512,
+        )?;
 
         // Validate limit
         if limit > 50 {
@@ -360,6 +370,9 @@ impl LogsService {
             })?
             .to_string();
 
+        validate_string_length("logGroupName", group_name, 1, 512)?;
+        validate_string_length("logStreamName", &stream_name, 1, 512)?;
+
         let mut state = self.state.write();
         let region = state.region.clone();
         let account_id = state.account_id.clone();
@@ -419,6 +432,9 @@ impl LogsService {
             )
         })?;
 
+        validate_string_length("logGroupName", group_name, 1, 512)?;
+        validate_string_length("logStreamName", stream_name, 1, 512)?;
+
         let mut state = self.state.write();
         let group = state.log_groups.get_mut(group_name).ok_or_else(|| {
             AwsServiceError::aws_error(
@@ -475,6 +491,20 @@ impl LogsService {
         let limit = body["limit"].as_i64().unwrap_or(50) as usize;
         let order_by = body["orderBy"].as_str().unwrap_or("LogStreamName");
         let next_token = body["nextToken"].as_str();
+
+        validate_optional_string_length("logGroupName", body["logGroupName"].as_str(), 1, 512)?;
+        validate_optional_string_length(
+            "logGroupIdentifier",
+            body["logGroupIdentifier"].as_str(),
+            1,
+            2048,
+        )?;
+        validate_optional_string_length(
+            "logStreamNamePrefix",
+            body["logStreamNamePrefix"].as_str(),
+            1,
+            512,
+        )?;
 
         // Validate limit
         if limit > 50 {
@@ -590,6 +620,9 @@ impl LogsService {
                 "logStreamName is required",
             )
         })?;
+
+        validate_string_length("logGroupName", group_name, 1, 512)?;
+        validate_string_length("logStreamName", stream_name, 1, 512)?;
 
         let log_events = body["logEvents"].as_array().ok_or_else(|| {
             AwsServiceError::aws_error(
@@ -749,6 +782,16 @@ impl LogsService {
                 "logStreamName is required",
             )
         })?;
+
+        validate_optional_string_length("logGroupName", body["logGroupName"].as_str(), 1, 512)?;
+        validate_optional_string_length(
+            "logGroupIdentifier",
+            body["logGroupIdentifier"].as_str(),
+            1,
+            2048,
+        )?;
+        validate_string_length("logStreamName", stream_name, 1, 512)?;
+
         let start_time = body["startTime"].as_i64();
         let end_time = body["endTime"].as_i64();
         let limit = body["limit"].as_i64().unwrap_or(10000) as usize;
@@ -921,6 +964,21 @@ impl LogsService {
             .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
             .unwrap_or_default();
 
+        validate_string_length("logGroupName", group_name, 1, 512)?;
+        validate_optional_string_length(
+            "logGroupIdentifier",
+            body["logGroupIdentifier"].as_str(),
+            1,
+            2048,
+        )?;
+        validate_optional_string_length(
+            "logStreamNamePrefix",
+            body["logStreamNamePrefix"].as_str(),
+            1,
+            512,
+        )?;
+        validate_optional_string_length("filterPattern", Some(filter_pattern), 0, 1024)?;
+
         // Validate limit
         if limit > 10000 {
             return Err(validation_error(
@@ -1045,6 +1103,9 @@ impl LogsService {
                 "logGroupName is required",
             )
         })?;
+
+        validate_string_length("logGroupName", name, 1, 512)?;
+
         let tags = body["tags"].as_object().ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
@@ -1080,6 +1141,9 @@ impl LogsService {
                 "logGroupName is required",
             )
         })?;
+
+        validate_string_length("logGroupName", name, 1, 512)?;
+
         let keys = body["tags"].as_array().ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
@@ -1116,6 +1180,8 @@ impl LogsService {
             )
         })?;
 
+        validate_string_length("logGroupName", name, 1, 512)?;
+
         let state = self.state.read();
         let group = state.log_groups.get(name).ok_or_else(|| {
             AwsServiceError::aws_error(
@@ -1142,6 +1208,9 @@ impl LogsService {
                 "resourceArn is required",
             )
         })?;
+
+        validate_string_length("resourceArn", arn, 1, 1011)?;
+
         let tags = body["tags"].as_object().ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
@@ -1193,6 +1262,9 @@ impl LogsService {
                 "resourceArn is required",
             )
         })?;
+
+        validate_string_length("resourceArn", arn, 1, 1011)?;
+
         let tag_keys = body["tagKeys"].as_array().ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
@@ -1245,6 +1317,8 @@ impl LogsService {
             )
         })?;
 
+        validate_string_length("resourceArn", arn, 1, 1011)?;
+
         let state = self.state.read();
 
         // Try log group
@@ -1285,6 +1359,9 @@ impl LogsService {
                 "logGroupName is required",
             )
         })?;
+
+        validate_string_length("logGroupName", name, 1, 512)?;
+
         let days = body["retentionInDays"].as_i64().ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
@@ -1316,6 +1393,8 @@ impl LogsService {
                 "logGroupName is required",
             )
         })?;
+
+        validate_string_length("logGroupName", name, 1, 512)?;
 
         let mut state = self.state.write();
         let group = state.log_groups.get_mut(name).ok_or_else(|| {
@@ -1368,6 +1447,10 @@ impl LogsService {
             .as_str()
             .unwrap_or("ByLogStream")
             .to_string();
+
+        validate_string_length("logGroupName", log_group_name, 1, 512)?;
+        validate_string_length("filterName", &filter_name, 1, 512)?;
+        validate_optional_string_length("filterPattern", Some(&filter_pattern), 0, 1024)?;
 
         let mut state = self.state.write();
         let group = state.log_groups.get_mut(log_group_name).ok_or_else(|| {
@@ -1427,6 +1510,14 @@ impl LogsService {
             )
         })?;
 
+        validate_string_length("logGroupName", log_group_name, 1, 512)?;
+        validate_optional_string_length(
+            "filterNamePrefix",
+            body["filterNamePrefix"].as_str(),
+            1,
+            512,
+        )?;
+
         let state = self.state.read();
         let group = state.log_groups.get(log_group_name).ok_or_else(|| {
             AwsServiceError::aws_error(
@@ -1477,6 +1568,9 @@ impl LogsService {
                 "filterName is required",
             )
         })?;
+
+        validate_string_length("logGroupName", log_group_name, 1, 512)?;
+        validate_string_length("filterName", filter_name, 1, 512)?;
 
         let mut state = self.state.write();
         let group = state.log_groups.get_mut(log_group_name).ok_or_else(|| {
@@ -1530,23 +1624,9 @@ impl LogsService {
             })?
             .to_string();
 
-        // Validate filter name length
-        if filter_name.len() > 512 {
-            return Err(validation_error(
-                "filterName",
-                &filter_name,
-                "Minimum length of 1. Maximum length of 512.",
-            ));
-        }
-
-        // Validate filter pattern length
-        if filter_pattern.len() > 1024 {
-            return Err(validation_error(
-                "filterPattern",
-                &filter_pattern,
-                "Minimum length of 0. Maximum length of 1024.",
-            ));
-        }
+        validate_string_length("filterName", &filter_name, 1, 512)?;
+        validate_string_length("logGroupName", &log_group_name, 1, 512)?;
+        validate_optional_string_length("filterPattern", Some(&filter_pattern), 0, 1024)?;
 
         let transformations_json = body["metricTransformations"].as_array().ok_or_else(|| {
             AwsServiceError::aws_error(
@@ -1607,43 +1687,10 @@ impl LogsService {
         let metric_name = body["metricName"].as_str();
         let metric_namespace = body["metricNamespace"].as_str();
 
-        // Validate lengths
-        if let Some(prefix) = filter_name_prefix {
-            if prefix.len() > 512 {
-                return Err(validation_error(
-                    "filterNamePrefix",
-                    prefix,
-                    "Minimum length of 1. Maximum length of 512.",
-                ));
-            }
-        }
-        if let Some(name) = log_group_name {
-            if name.len() > 512 {
-                return Err(validation_error(
-                    "logGroupName",
-                    name,
-                    "Minimum length of 1. Maximum length of 512.",
-                ));
-            }
-        }
-        if let Some(name) = metric_name {
-            if name.len() > 255 {
-                return Err(validation_error(
-                    "metricName",
-                    name,
-                    "Maximum length of 255.",
-                ));
-            }
-        }
-        if let Some(ns) = metric_namespace {
-            if ns.len() > 255 {
-                return Err(validation_error(
-                    "metricNamespace",
-                    ns,
-                    "Maximum length of 255.",
-                ));
-            }
-        }
+        validate_optional_string_length("filterNamePrefix", filter_name_prefix, 1, 512)?;
+        validate_optional_string_length("logGroupName", log_group_name, 1, 512)?;
+        validate_optional_string_length("metricName", metric_name, 0, 255)?;
+        validate_optional_string_length("metricNamespace", metric_namespace, 0, 255)?;
 
         let state = self.state.read();
         let filters: Vec<Value> = state
@@ -1726,37 +1773,8 @@ impl LogsService {
             )
         })?;
 
-        // Validate filter name
-        if filter_name.len() > 512 {
-            return Err(validation_error(
-                "filterName",
-                filter_name,
-                "Minimum length of 1. Maximum length of 512.",
-            ));
-        }
-        if filter_name.contains(':') {
-            return Err(validation_error(
-                "filterName",
-                filter_name,
-                "Must match pattern",
-            ));
-        }
-
-        // Validate log group name
-        if log_group_name.len() > 512 {
-            return Err(validation_error(
-                "logGroupName",
-                log_group_name,
-                "Minimum length of 1. Maximum length of 512.",
-            ));
-        }
-        if log_group_name.contains('!') {
-            return Err(validation_error(
-                "logGroupName",
-                log_group_name,
-                "Must match pattern",
-            ));
-        }
+        validate_string_length("filterName", filter_name, 1, 512)?;
+        validate_string_length("logGroupName", log_group_name, 1, 512)?;
 
         let mut state = self.state.write();
         let idx = state
@@ -1917,6 +1935,8 @@ impl LogsService {
             })?
             .to_string();
 
+        validate_string_length("destinationName", &destination_name, 1, 512)?;
+
         let tags: std::collections::HashMap<String, String> = body["tags"]
             .as_object()
             .map(|m| {
@@ -1951,16 +1971,13 @@ impl LogsService {
 
         state.destinations.insert(destination_name.clone(), dest);
 
-        let mut dest_json = json!({
+        let dest_json = json!({
             "destinationName": destination_name,
             "targetArn": target_arn,
             "roleArn": role_arn,
             "arn": arn,
             "creationTime": now,
         });
-        if !tags.is_empty() {
-            dest_json["tags"] = json!(tags);
-        }
 
         Ok(AwsResponse::json(
             StatusCode::OK,
@@ -2008,6 +2025,8 @@ impl LogsService {
             )
         })?;
 
+        validate_string_length("destinationName", name, 1, 512)?;
+
         let mut state = self.state.write();
         if state.destinations.remove(name).is_none() {
             return Err(AwsServiceError::aws_error(
@@ -2029,6 +2048,9 @@ impl LogsService {
                 "destinationName is required",
             )
         })?;
+
+        validate_string_length("destinationName", name, 1, 512)?;
+
         let policy = body["accessPolicy"].as_str().ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
@@ -2065,6 +2087,9 @@ impl LogsService {
         let start_time = body["startTime"].as_i64().unwrap_or(0);
         let end_time = body["endTime"].as_i64().unwrap_or(0);
         let query_string = body["queryString"].as_str().unwrap_or("").to_string();
+
+        validate_string_length("logGroupName", log_group_name, 1, 512)?;
+        validate_optional_string_length("queryString", Some(&query_string), 0, 10000)?;
 
         let mut state = self.state.write();
 
@@ -2108,6 +2133,8 @@ impl LogsService {
                 "queryId is required",
             )
         })?;
+
+        validate_string_length("queryId", query_id, 1, 256)?;
 
         let state = self.state.read();
         let query = state.queries.get(query_id).ok_or_else(|| {
@@ -2161,6 +2188,8 @@ impl LogsService {
         let body = body_json(req);
         let log_group_name = body["logGroupName"].as_str();
         let status_filter = body["status"].as_str();
+
+        validate_optional_string_length("logGroupName", log_group_name, 1, 512)?;
 
         let state = self.state.read();
         let queries: Vec<Value> = state
@@ -2227,6 +2256,16 @@ impl LogsService {
             .unwrap_or("exportedlogs")
             .to_string();
 
+        validate_string_length("logGroupName", &log_group_name, 1, 512)?;
+        validate_optional_string_length("taskName", body["taskName"].as_str(), 1, 512)?;
+        validate_optional_string_length(
+            "logStreamNamePrefix",
+            body["logStreamNamePrefix"].as_str(),
+            1,
+            512,
+        )?;
+        validate_string_length("destination", &destination, 1, 512)?;
+
         let state = self.state.read();
         if !state.log_groups.contains_key(&log_group_name) {
             return Err(AwsServiceError::aws_error(
@@ -2268,6 +2307,8 @@ impl LogsService {
     fn describe_export_tasks(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = body_json(req);
         let task_id_filter = body["taskId"].as_str();
+
+        validate_optional_string_length("taskId", task_id_filter, 1, 512)?;
 
         let state = self.state.read();
 
@@ -2324,6 +2365,8 @@ impl LogsService {
             )
         })?;
 
+        validate_string_length("taskId", task_id, 1, 512)?;
+
         let mut state = self.state.write();
         let task = state
             .export_tasks
@@ -2357,6 +2400,9 @@ impl LogsService {
                 )
             })?
             .to_string();
+
+        validate_string_length("name", &name, 1, 60)?;
+
         let output_format = body["outputFormat"].as_str().map(|s| s.to_string());
 
         // Validate output format
@@ -2428,11 +2474,18 @@ impl LogsService {
 
         state.delivery_destinations.insert(name.clone(), dd);
 
+        // Build the configuration object for the response, ensuring destinationResourceArn is included
+        let config_resp = if config.contains_key("destinationResourceArn") {
+            json!(config)
+        } else {
+            json!({ "destinationResourceArn": Value::Null })
+        };
+
         let mut resp = json!({
             "deliveryDestination": {
                 "name": name,
                 "arn": arn,
-                "deliveryDestinationConfiguration": config,
+                "deliveryDestinationConfiguration": config_resp,
             }
         });
         if let Some(ref fmt) = output_format {
@@ -2457,6 +2510,8 @@ impl LogsService {
                 "name is required",
             )
         })?;
+
+        validate_string_length("name", name, 1, 60)?;
 
         let state = self.state.read();
         let dd = state.delivery_destinations.get(name).ok_or_else(|| {
@@ -2522,6 +2577,8 @@ impl LogsService {
             )
         })?;
 
+        validate_string_length("name", name, 1, 60)?;
+
         let mut state = self.state.write();
         if state.delivery_destinations.remove(name).is_none() {
             return Err(AwsServiceError::aws_error(
@@ -2557,6 +2614,9 @@ impl LogsService {
             })?
             .to_string();
 
+        validate_string_length("deliveryDestinationName", name, 1, 60)?;
+        validate_string_length("deliveryDestinationPolicy", &policy, 1, 51200)?;
+
         let mut state = self.state.write();
         let dd = state.delivery_destinations.get_mut(name).ok_or_else(|| {
             AwsServiceError::aws_error(
@@ -2591,6 +2651,8 @@ impl LogsService {
                 "deliveryDestinationName is required",
             )
         })?;
+
+        validate_string_length("deliveryDestinationName", name, 1, 60)?;
 
         let state = self.state.read();
         let dd = state.delivery_destinations.get(name).ok_or_else(|| {
@@ -2630,6 +2692,8 @@ impl LogsService {
                 "deliveryDestinationName is required",
             )
         })?;
+
+        validate_string_length("deliveryDestinationName", name, 1, 60)?;
 
         let mut state = self.state.write();
         let dd = state.delivery_destinations.get_mut(name).ok_or_else(|| {
@@ -2679,6 +2743,9 @@ impl LogsService {
                 )
             })?
             .to_string();
+
+        validate_string_length("name", &name, 1, 60)?;
+        validate_string_length("logType", &log_type, 1, 255)?;
 
         let tags: std::collections::HashMap<String, String> = body["tags"]
             .as_object()
@@ -2784,6 +2851,8 @@ impl LogsService {
             )
         })?;
 
+        validate_string_length("name", name, 1, 60)?;
+
         let state = self.state.read();
         let ds = state.delivery_sources.get(name).ok_or_else(|| {
             AwsServiceError::aws_error(
@@ -2841,6 +2910,8 @@ impl LogsService {
                 "name is required",
             )
         })?;
+
+        validate_string_length("name", name, 1, 60)?;
 
         let mut state = self.state.write();
         if state.delivery_sources.remove(name).is_none() {

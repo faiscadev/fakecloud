@@ -8,6 +8,7 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
+use fakecloud_core::validation::*;
 
 use crate::state::{KeyRotation, KmsAlias, KmsGrant, KmsKey, SharedKmsState};
 
@@ -291,6 +292,14 @@ impl KmsService {
 
     fn create_key(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = body_json(req);
+
+        validate_optional_string_length(
+            "customKeyStoreId",
+            body["CustomKeyStoreId"].as_str(),
+            1,
+            64,
+        )?;
+
         let description = body["Description"].as_str().unwrap_or("").to_string();
         let key_usage = body["KeyUsage"]
             .as_str()
@@ -431,7 +440,11 @@ impl KmsService {
         ))
     }
 
-    fn list_keys(&self, _req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+    fn list_keys(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = body_json(req);
+
+        validate_optional_range_i64("limit", body["Limit"].as_i64(), 1, 1000)?;
+
         let state = self.state.read();
         let keys: Vec<Value> = state
             .keys
@@ -830,6 +843,14 @@ impl KmsService {
 
     fn generate_random(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = body_json(req);
+
+        validate_optional_string_length(
+            "customKeyStoreId",
+            body["CustomKeyStoreId"].as_str(),
+            1,
+            64,
+        )?;
+
         let num_bytes = body["NumberOfBytes"].as_u64().unwrap_or(32) as usize;
 
         if num_bytes > 1024 {
@@ -1044,6 +1065,9 @@ impl KmsService {
 
     fn list_aliases(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = body_json(req);
+
+        validate_optional_string_length("keyId", body["KeyId"].as_str(), 1, 2048)?;
+
         let key_id_filter = body["KeyId"].as_str();
 
         let state = self.state.read();
@@ -1729,6 +1753,10 @@ impl KmsService {
 
     fn list_retirable_grants(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = body_json(req);
+
+        validate_required("RetiringPrincipal", &body["RetiringPrincipal"])?;
+        validate_optional_range_i64("limit", body["Limit"].as_i64(), 1, 1000)?;
+
         let retiring_principal = body["RetiringPrincipal"].as_str().unwrap_or("");
 
         let state = self.state.read();

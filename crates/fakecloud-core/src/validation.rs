@@ -49,11 +49,7 @@ pub fn validate_range_i64(
 }
 
 /// Validate a string is one of the allowed enum values.
-pub fn validate_enum(
-    field: &str,
-    value: &str,
-    allowed: &[&str],
-) -> Result<(), AwsServiceError> {
+pub fn validate_enum(field: &str, value: &str, allowed: &[&str]) -> Result<(), AwsServiceError> {
     if !allowed.contains(&value) {
         return Err(AwsServiceError::aws_error(
             StatusCode::BAD_REQUEST,
@@ -71,10 +67,7 @@ pub fn validate_enum(
 }
 
 /// Validate that a required field is present (not null/missing).
-pub fn validate_required(
-    field: &str,
-    value: &serde_json::Value,
-) -> Result<(), AwsServiceError> {
+pub fn validate_required(field: &str, value: &serde_json::Value) -> Result<(), AwsServiceError> {
     if value.is_null() {
         return Err(AwsServiceError::aws_error(
             StatusCode::BAD_REQUEST,

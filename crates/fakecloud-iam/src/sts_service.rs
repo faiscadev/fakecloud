@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use http::StatusCode;
 
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
+use fakecloud_core::validation::*;
 
 use crate::state::{CredentialIdentity, SharedIamState};
 use crate::xml_responses::{self, StsCredentials};
@@ -64,12 +65,6 @@ fn partition_for_region(region: &str) -> &str {
         "aws"
     }
 }
-
-/// Maximum length for RoleSessionName.
-const MAX_ROLE_SESSION_NAME_LENGTH: usize = 64;
-
-/// Maximum length for federation token policy.
-const MAX_FEDERATION_TOKEN_POLICY_LENGTH: usize = 2048;
 
 /// Extract the caller's access key from the SigV4 Authorization header.
 fn extract_access_key(req: &AwsRequest) -> Option<String> {
@@ -134,6 +129,7 @@ impl StsService {
                 "The request must contain the parameter RoleArn",
             )
         })?;
+        validate_string_length("roleArn", role_arn, 20, 2048)?;
 
         let role_session_name = req.query_params.get("RoleSessionName").ok_or_else(|| {
             AwsServiceError::aws_error(
@@ -142,20 +138,30 @@ impl StsService {
                 "The request must contain the parameter RoleSessionName",
             )
         })?;
+        validate_string_length("roleSessionName", role_session_name, 2, 64)?;
 
-        // Validate RoleSessionName length
-        if role_session_name.len() > MAX_ROLE_SESSION_NAME_LENGTH {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "ValidationError",
-                format!(
-                    "1 validation error detected: Value '{}' at 'roleSessionName' \
-                     failed to satisfy constraint: Member must have length less than \
-                     or equal to {}",
-                    role_session_name, MAX_ROLE_SESSION_NAME_LENGTH
-                ),
-            ));
+        // Validate optional DurationSeconds
+        if let Some(ds) = req.query_params.get("DurationSeconds") {
+            if let Ok(v) = ds.parse::<i64>() {
+                validate_range_i64("durationSeconds", v, 900, 43200)?;
+            }
         }
+
+        // Validate optional SerialNumber
+        validate_optional_string_length(
+            "serialNumber",
+            req.query_params.get("SerialNumber").map(|s| s.as_str()),
+            9,
+            256,
+        )?;
+
+        // Validate optional TokenCode
+        validate_optional_string_length(
+            "tokenCode",
+            req.query_params.get("TokenCode").map(|s| s.as_str()),
+            6,
+            6,
+        )?;
 
         let partition = partition_for_region(&req.region);
         let creds = StsCredentials::generate();
@@ -213,6 +219,7 @@ impl StsService {
                 "The request must contain the parameter RoleArn",
             )
         })?;
+        validate_string_length("roleArn", role_arn, 20, 2048)?;
 
         let role_session_name = req.query_params.get("RoleSessionName").ok_or_else(|| {
             AwsServiceError::aws_error(
@@ -221,6 +228,24 @@ impl StsService {
                 "The request must contain the parameter RoleSessionName",
             )
         })?;
+        validate_string_length("roleSessionName", role_session_name, 2, 64)?;
+
+        // WebIdentityToken is required
+        let _web_identity_token = req.query_params.get("WebIdentityToken").ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "MissingParameter",
+                "The request must contain the parameter WebIdentityToken",
+            )
+        })?;
+        validate_string_length("webIdentityToken", _web_identity_token, 4, 20000)?;
+
+        // Validate optional DurationSeconds
+        if let Some(ds) = req.query_params.get("DurationSeconds") {
+            if let Ok(v) = ds.parse::<i64>() {
+                validate_range_i64("durationSeconds", v, 900, 43200)?;
+            }
+        }
 
         let partition = partition_for_region(&req.region);
         let creds = StsCredentials::generate();
@@ -266,6 +291,17 @@ impl StsService {
                 "The request must contain the parameter RoleArn",
             )
         })?;
+        validate_string_length("roleArn", role_arn, 20, 2048)?;
+
+        // PrincipalArn is required
+        let _principal_arn = req.query_params.get("PrincipalArn").ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "MissingParameter",
+                "The request must contain the parameter PrincipalArn",
+            )
+        })?;
+        validate_string_length("principalArn", _principal_arn, 20, 2048)?;
 
         // SAMLAssertion is required but we just need to extract session name from it
         let saml_assertion = req.query_params.get("SAMLAssertion").ok_or_else(|| {
@@ -275,6 +311,14 @@ impl StsService {
                 "The request must contain the parameter SAMLAssertion",
             )
         })?;
+        validate_string_length("sAMLAssertion", saml_assertion, 4, 100000)?;
+
+        // Validate optional DurationSeconds
+        if let Some(ds) = req.query_params.get("DurationSeconds") {
+            if let Ok(v) = ds.parse::<i64>() {
+                validate_range_i64("durationSeconds", v, 900, 43200)?;
+            }
+        }
 
         // Decode the SAML assertion to extract the RoleSessionName
         let role_session_name =
@@ -317,6 +361,29 @@ impl StsService {
     }
 
     fn get_session_token(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        // Validate optional DurationSeconds
+        if let Some(ds) = req.query_params.get("DurationSeconds") {
+            if let Ok(v) = ds.parse::<i64>() {
+                validate_range_i64("durationSeconds", v, 900, 129600)?;
+            }
+        }
+
+        // Validate optional SerialNumber
+        validate_optional_string_length(
+            "serialNumber",
+            req.query_params.get("SerialNumber").map(|s| s.as_str()),
+            9,
+            256,
+        )?;
+
+        // Validate optional TokenCode
+        validate_optional_string_length(
+            "tokenCode",
+            req.query_params.get("TokenCode").map(|s| s.as_str()),
+            6,
+            6,
+        )?;
+
         let xml = xml_responses::get_session_token_response(&req.request_id);
         Ok(AwsResponse::xml(StatusCode::OK, xml))
     }
@@ -329,22 +396,22 @@ impl StsService {
                 "The request must contain the parameter Name",
             )
         })?;
+        validate_string_length("name", name, 2, 32)?;
 
-        // Validate policy length if provided
-        if let Some(policy) = req.query_params.get("Policy") {
-            if policy.len() > MAX_FEDERATION_TOKEN_POLICY_LENGTH {
-                return Err(AwsServiceError::aws_error(
-                    StatusCode::BAD_REQUEST,
-                    "ValidationError",
-                    format!(
-                        "1 validation error detected: Value at 'policy' failed to \
-                         satisfy constraint: Member must have length less than or \
-                         equal to {}",
-                        MAX_FEDERATION_TOKEN_POLICY_LENGTH
-                    ),
-                ));
+        // Validate optional DurationSeconds
+        if let Some(ds) = req.query_params.get("DurationSeconds") {
+            if let Ok(v) = ds.parse::<i64>() {
+                validate_range_i64("durationSeconds", v, 900, 129600)?;
             }
         }
+
+        // Validate policy length if provided
+        validate_optional_string_length(
+            "policy",
+            req.query_params.get("Policy").map(|s| s.as_str()),
+            1,
+            2048,
+        )?;
 
         let partition = partition_for_region(&req.region);
         let state = self.state.read();
@@ -365,6 +432,7 @@ impl StsService {
                 "The request must contain the parameter AccessKeyId",
             )
         })?;
+        validate_string_length("accessKeyId", access_key_id, 16, 128)?;
 
         // Try to resolve account from known access keys, fall back to default
         let state = self.state.read();

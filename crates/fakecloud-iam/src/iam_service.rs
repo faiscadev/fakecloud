@@ -3,6 +3,7 @@ use chrono::Utc;
 use http::StatusCode;
 
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
+use fakecloud_core::validation::*;
 
 use crate::policy_validation::validate_policy_document;
 use crate::state::{
@@ -713,6 +714,7 @@ impl IamService {
 
     fn create_user(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let user_name = required_param(&req.query_params, "UserName")?;
+        validate_string_length("userName", &user_name, 1, 64)?;
         let path = req
             .query_params
             .get("Path")
@@ -756,6 +758,12 @@ impl IamService {
     }
 
     fn get_user(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        validate_optional_string_length(
+            "userName",
+            req.query_params.get("UserName").map(|s| s.as_str()),
+            1,
+            128,
+        )?;
         let state = self.state.read();
 
         // If no UserName specified, return current/default user
@@ -790,6 +798,7 @@ impl IamService {
 
     fn delete_user(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let user_name = required_param(&req.query_params, "UserName")?;
+        validate_string_length("userName", &user_name, 1, 128)?;
         let mut state = self.state.write();
 
         if !state.users.contains_key(&user_name) {
@@ -879,6 +888,7 @@ impl IamService {
 
     fn update_user(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let user_name = required_param(&req.query_params, "UserName")?;
+        validate_string_length("userName", &user_name, 1, 128)?;
         let new_path = req.query_params.get("NewPath").cloned();
         let new_user_name = req.query_params.get("NewUserName").cloned();
 
@@ -954,6 +964,7 @@ impl IamService {
 
     fn tag_user(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let user_name = required_param(&req.query_params, "UserName")?;
+        validate_string_length("userName", &user_name, 1, 128)?;
         let new_tags = parse_tags(&req.query_params);
         let mut state = self.state.write();
 
@@ -979,6 +990,7 @@ impl IamService {
 
     fn untag_user(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let user_name = required_param(&req.query_params, "UserName")?;
+        validate_string_length("userName", &user_name, 1, 128)?;
         let tag_keys = parse_tag_keys(&req.query_params);
         let mut state = self.state.write();
 
@@ -998,6 +1010,7 @@ impl IamService {
 
     fn list_user_tags(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let user_name = required_param(&req.query_params, "UserName")?;
+        validate_string_length("userName", &user_name, 1, 128)?;
         let state = self.state.read();
 
         let user = state.users.get(&user_name).ok_or_else(|| {
@@ -1032,6 +1045,12 @@ impl IamService {
 
 impl IamService {
     fn create_access_key(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        validate_optional_string_length(
+            "userName",
+            req.query_params.get("UserName").map(|s| s.as_str()),
+            1,
+            128,
+        )?;
         let mut state = self.state.write();
 
         // UserName is optional; if not specified, infer from the caller's access key
@@ -1097,12 +1116,19 @@ impl IamService {
     }
 
     fn delete_access_key(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        validate_optional_string_length(
+            "userName",
+            req.query_params.get("UserName").map(|s| s.as_str()),
+            1,
+            128,
+        )?;
         let user_name = req
             .query_params
             .get("UserName")
             .cloned()
             .unwrap_or_else(|| resolve_calling_user(&self.state.read(), &req.account_id));
         let access_key_id = required_param(&req.query_params, "AccessKeyId")?;
+        validate_string_length("accessKeyId", &access_key_id, 16, 128)?;
         let mut state = self.state.write();
 
         if let Some(keys) = state.access_keys.get_mut(&user_name) {
@@ -1128,6 +1154,12 @@ impl IamService {
     }
 
     fn list_access_keys(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        validate_optional_string_length(
+            "marker",
+            req.query_params.get("Marker").map(|s| s.as_str()),
+            1,
+            320,
+        )?;
         let user_name = req
             .query_params
             .get("UserName")
@@ -1181,6 +1213,7 @@ impl IamService {
 impl IamService {
     fn create_role(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let role_name = required_param(&req.query_params, "RoleName")?;
+        validate_string_length("roleName", &role_name, 1, 64)?;
         let assume_role_policy = required_param(&req.query_params, "AssumeRolePolicyDocument")?;
         let path = req
             .query_params
@@ -1250,6 +1283,7 @@ impl IamService {
 
     fn get_role(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let role_name = required_param(&req.query_params, "RoleName")?;
+        validate_string_length("roleName", &role_name, 1, 64)?;
         let state = self.state.read();
 
         let role = state.roles.get(&role_name).ok_or_else(|| {
@@ -1266,6 +1300,7 @@ impl IamService {
 
     fn delete_role(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let role_name = required_param(&req.query_params, "RoleName")?;
+        validate_string_length("roleName", &role_name, 1, 64)?;
         let mut state = self.state.write();
 
         if !state.roles.contains_key(&role_name) {
@@ -1329,6 +1364,12 @@ impl IamService {
     }
 
     fn list_roles(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        validate_optional_string_length(
+            "marker",
+            req.query_params.get("Marker").map(|s| s.as_str()),
+            1,
+            320,
+        )?;
         let state = self.state.read();
         let path_prefix = req.query_params.get("PathPrefix").cloned();
         let max_items: usize = req
@@ -1379,6 +1420,7 @@ impl IamService {
 
     fn update_role(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let role_name = required_param(&req.query_params, "RoleName")?;
+        validate_string_length("roleName", &role_name, 1, 64)?;
         let mut state = self.state.write();
 
         let role = state.roles.get_mut(&role_name).ok_or_else(|| {
@@ -1409,6 +1451,7 @@ impl IamService {
 
     fn update_role_description(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let role_name = required_param(&req.query_params, "RoleName")?;
+        validate_string_length("roleName", &role_name, 1, 64)?;
         let mut state = self.state.write();
 
         let role = state.roles.get_mut(&role_name).ok_or_else(|| {
@@ -1432,6 +1475,7 @@ impl IamService {
 
     fn update_assume_role_policy(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let role_name = required_param(&req.query_params, "RoleName")?;
+        validate_string_length("roleName", &role_name, 1, 64)?;
         let policy_document = required_param(&req.query_params, "PolicyDocument")?;
 
         // Validate policy document is valid JSON
@@ -1500,6 +1544,7 @@ impl IamService {
 
     fn tag_role(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let role_name = required_param(&req.query_params, "RoleName")?;
+        validate_string_length("roleName", &role_name, 1, 64)?;
         let new_tags = parse_tags(&req.query_params);
         let mut state = self.state.write();
 
@@ -1533,6 +1578,7 @@ impl IamService {
 
     fn untag_role(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let role_name = required_param(&req.query_params, "RoleName")?;
+        validate_string_length("roleName", &role_name, 1, 64)?;
         let tag_keys = parse_tag_keys(&req.query_params);
         validate_untag_keys(&tag_keys)?;
         let mut state = self.state.write();
@@ -1553,6 +1599,7 @@ impl IamService {
 
     fn list_role_tags(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let role_name = required_param(&req.query_params, "RoleName")?;
+        validate_string_length("roleName", &role_name, 1, 64)?;
         let state = self.state.read();
 
         let role = state.roles.get(&role_name).ok_or_else(|| {
@@ -1572,6 +1619,7 @@ impl IamService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let role_name = required_param(&req.query_params, "RoleName")?;
+        validate_string_length("roleName", &role_name, 1, 64)?;
         let boundary = required_param(&req.query_params, "PermissionsBoundary")?;
 
         // Validate boundary ARN format
@@ -1602,6 +1650,7 @@ impl IamService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let role_name = required_param(&req.query_params, "RoleName")?;
+        validate_string_length("roleName", &role_name, 1, 64)?;
         let mut state = self.state.write();
 
         let role = state.roles.get_mut(&role_name).ok_or_else(|| {
@@ -1623,6 +1672,7 @@ impl IamService {
 impl IamService {
     fn create_policy(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let policy_name = required_param(&req.query_params, "PolicyName")?;
+        validate_string_length("policyName", &policy_name, 1, 128)?;
         let policy_document = required_param(&req.query_params, "PolicyDocument")?;
         let path = req
             .query_params
@@ -2636,6 +2686,7 @@ impl IamService {
 impl IamService {
     fn create_group(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let group_name = required_param(&req.query_params, "GroupName")?;
+        validate_string_length("groupName", &group_name, 1, 128)?;
         let path = req
             .query_params
             .get("Path")
@@ -2698,6 +2749,7 @@ impl IamService {
 
     fn get_group(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let group_name = required_param(&req.query_params, "GroupName")?;
+        validate_string_length("groupName", &group_name, 1, 128)?;
         let state = self.state.read();
 
         let group = state.groups.get(&group_name).ok_or_else(|| {
@@ -2754,6 +2806,7 @@ impl IamService {
 
     fn delete_group(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let group_name = required_param(&req.query_params, "GroupName")?;
+        validate_string_length("groupName", &group_name, 1, 128)?;
         let mut state = self.state.write();
 
         if state.groups.remove(&group_name).is_none() {
@@ -3203,6 +3256,7 @@ impl IamService {
 impl IamService {
     fn create_instance_profile(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let name = required_param(&req.query_params, "InstanceProfileName")?;
+        validate_string_length("instanceProfileName", &name, 1, 128)?;
         let path = req
             .query_params
             .get("Path")
@@ -3243,6 +3297,7 @@ impl IamService {
 
     fn get_instance_profile(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let name = required_param(&req.query_params, "InstanceProfileName")?;
+        validate_string_length("instanceProfileName", &name, 1, 128)?;
         let state = self.state.read();
 
         let ip = state.instance_profiles.get(&name).ok_or_else(|| {
@@ -3259,6 +3314,7 @@ impl IamService {
 
     fn delete_instance_profile(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let name = required_param(&req.query_params, "InstanceProfileName")?;
+        validate_string_length("instanceProfileName", &name, 1, 128)?;
         let mut state = self.state.write();
 
         let ip = state.instance_profiles.get(&name).ok_or_else(|| {

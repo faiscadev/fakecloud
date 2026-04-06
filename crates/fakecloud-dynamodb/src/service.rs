@@ -6,6 +6,7 @@ use http::StatusCode;
 use serde_json::{json, Value};
 
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
+use fakecloud_core::validation::*;
 
 use crate::state::{
     attribute_type_and_value, AttributeDefinition, AttributeValue, DynamoTable,
@@ -208,6 +209,14 @@ impl DynamoDbService {
 
     fn list_tables(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = Self::parse_body(req)?;
+
+        validate_optional_string_length(
+            "exclusiveStartTableName",
+            body["ExclusiveStartTableName"].as_str(),
+            3,
+            255,
+        )?;
+
         let limit = body["Limit"].as_i64().unwrap_or(100) as usize;
         let exclusive_start = body["ExclusiveStartTableName"]
             .as_str()
@@ -352,6 +361,28 @@ impl DynamoDbService {
 
     fn delete_item(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = Self::parse_body(req)?;
+
+        validate_optional_enum(
+            "conditionalOperator",
+            body["ConditionalOperator"].as_str(),
+            &["AND", "OR"],
+        )?;
+        validate_optional_enum(
+            "returnConsumedCapacity",
+            body["ReturnConsumedCapacity"].as_str(),
+            &["INDEXES", "TOTAL", "NONE"],
+        )?;
+        validate_optional_enum(
+            "returnValues",
+            body["ReturnValues"].as_str(),
+            &["NONE", "ALL_OLD", "UPDATED_OLD", "ALL_NEW", "UPDATED_NEW"],
+        )?;
+        validate_optional_enum(
+            "returnItemCollectionMetrics",
+            body["ReturnItemCollectionMetrics"].as_str(),
+            &["SIZE", "NONE"],
+        )?;
+
         let table_name = require_str(&body, "TableName")?;
         let key = require_object(&body, "Key")?;
 
@@ -617,6 +648,13 @@ impl DynamoDbService {
 
     fn batch_get_item(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = Self::parse_body(req)?;
+
+        validate_optional_enum(
+            "returnConsumedCapacity",
+            body["ReturnConsumedCapacity"].as_str(),
+            &["INDEXES", "TOTAL", "NONE"],
+        )?;
+
         let request_items = body["RequestItems"]
             .as_object()
             .ok_or_else(|| {
@@ -660,6 +698,18 @@ impl DynamoDbService {
 
     fn batch_write_item(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = Self::parse_body(req)?;
+
+        validate_optional_enum(
+            "returnConsumedCapacity",
+            body["ReturnConsumedCapacity"].as_str(),
+            &["INDEXES", "TOTAL", "NONE"],
+        )?;
+        validate_optional_enum(
+            "returnItemCollectionMetrics",
+            body["ReturnItemCollectionMetrics"].as_str(),
+            &["SIZE", "NONE"],
+        )?;
+
         let request_items = body["RequestItems"]
             .as_object()
             .ok_or_else(|| {
