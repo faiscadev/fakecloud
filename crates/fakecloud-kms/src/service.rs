@@ -2631,6 +2631,14 @@ impl KmsService {
 
     fn describe_custom_key_stores(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = body_json(req);
+        validate_optional_string_length(
+            "customKeyStoreName",
+            body["CustomKeyStoreName"].as_str(),
+            1,
+            256,
+        )?;
+        validate_optional_range_i64("limit", body["Limit"].as_i64(), 1, 1000)?;
+        validate_optional_string_length("marker", body["Marker"].as_str(), 1, 1024)?;
 
         let filter_id = body["CustomKeyStoreId"].as_str();
         let filter_name = body["CustomKeyStoreName"].as_str();

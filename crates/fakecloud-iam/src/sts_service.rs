@@ -592,6 +592,7 @@ impl StsService {
                 "The request must contain the parameter EncodedMessage",
             )
         })?;
+        validate_string_length("encodedMessage", _encoded_message, 1, 10240)?;
 
         let decoded_message =
             r#"{"allowed":true,"explicitDeny":false,"matchedStatements":{"items":[]}}"#;

@@ -1163,7 +1163,13 @@ impl EventBridgeService {
 
     fn list_partner_event_sources(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = parse_body(req);
-        let name_prefix = body["NamePrefix"].as_str();
+        validate_required("NamePrefix", &body["NamePrefix"])?;
+        let name_prefix_str = body["NamePrefix"]
+            .as_str()
+            .ok_or_else(|| missing("NamePrefix"))?;
+        validate_string_length("namePrefix", name_prefix_str, 1, 256)?;
+        validate_optional_string_length("nextToken", body["NextToken"].as_str(), 1, 2048)?;
+        validate_optional_range_i64("limit", body["Limit"].as_i64(), 1, 100)?;
         let limit = body["Limit"].as_i64().unwrap_or(100) as usize;
         let offset: usize = body["NextToken"]
             .as_str()
@@ -1174,17 +1180,13 @@ impl EventBridgeService {
         let filtered: Vec<Value> = state
             .partner_event_sources
             .values()
-            .filter(|ps| match name_prefix {
-                Some(prefix) => ps.name.starts_with(prefix),
-                None => true,
-            })
+            .filter(|ps| ps.name.starts_with(name_prefix_str))
             .skip(offset)
             .take(limit + 1)
             .map(|ps| {
                 json!({
                     "Arn": ps.arn,
                     "Name": ps.name,
-                    "CreationTime": ps.creation_time.timestamp() as f64,
                 })
             })
             .collect();
@@ -1208,6 +1210,9 @@ impl EventBridgeService {
         let event_source_name = body["EventSourceName"]
             .as_str()
             .ok_or_else(|| missing("EventSourceName"))?;
+        validate_string_length("eventSourceName", event_source_name, 1, 256)?;
+        validate_optional_string_length("nextToken", body["NextToken"].as_str(), 1, 2048)?;
+        validate_optional_range_i64("limit", body["Limit"].as_i64(), 1, 100)?;
 
         let state = self.state.read();
         let accounts: Vec<Value> = state
@@ -1292,6 +1297,9 @@ impl EventBridgeService {
 
     fn list_event_sources(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = parse_body(req);
+        validate_optional_string_length("namePrefix", body["NamePrefix"].as_str(), 1, 256)?;
+        validate_optional_string_length("nextToken", body["NextToken"].as_str(), 1, 2048)?;
+        validate_optional_range_i64("limit", body["Limit"].as_i64(), 1, 100)?;
         let name_prefix = body["NamePrefix"].as_str();
         let limit = body["Limit"].as_i64().unwrap_or(100) as usize;
         let offset: usize = body["NextToken"]
@@ -1412,6 +1420,13 @@ impl EventBridgeService {
 
     fn update_event_bus(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = parse_body(req);
+        validate_optional_string_length("description", body["Description"].as_str(), 0, 512)?;
+        validate_optional_string_length(
+            "kmsKeyIdentifier",
+            body["KmsKeyIdentifier"].as_str(),
+            0,
+            2048,
+        )?;
         let name = body["Name"].as_str().unwrap_or("default");
 
         let mut state = self.state.write();
@@ -1574,6 +1589,10 @@ impl EventBridgeService {
 
     fn list_endpoints(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = parse_body(req);
+        validate_optional_string_length("namePrefix", body["NamePrefix"].as_str(), 1, 64)?;
+        validate_optional_string_length("homeRegion", body["HomeRegion"].as_str(), 9, 20)?;
+        validate_optional_string_length("nextToken", body["NextToken"].as_str(), 1, 2048)?;
+        validate_optional_range_i64("maxResults", body["MaxResults"].as_i64(), 1, 100)?;
         let name_prefix = body["NamePrefix"].as_str();
         let limit = body["MaxResults"].as_i64().unwrap_or(100) as usize;
         let offset: usize = body["NextToken"]
@@ -4643,7 +4662,10 @@ mod tests {
         assert_eq!(body["Name"], "partner/test");
 
         // List
-        let req = make_request("ListPartnerEventSources", json!({}));
+        let req = make_request(
+            "ListPartnerEventSources",
+            json!({ "NamePrefix": "partner/" }),
+        );
         let resp = svc.list_partner_event_sources(&req).unwrap();
         let body: Value = serde_json::from_slice(&resp.body).unwrap();
         assert_eq!(body["PartnerEventSources"].as_array().unwrap().len(), 1);
