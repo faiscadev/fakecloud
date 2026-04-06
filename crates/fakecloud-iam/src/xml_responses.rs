@@ -810,6 +810,22 @@ pub fn get_federation_token_response(
     )
 }
 
+pub fn decode_authorization_message_response(decoded_message: &str, request_id: &str) -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<DecodeAuthorizationMessageResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">
+  <DecodeAuthorizationMessageResult>
+    <DecodedMessage>{decoded_message}</DecodedMessage>
+  </DecodeAuthorizationMessageResult>
+  <ResponseMetadata>
+    <RequestId>{request_id}</RequestId>
+  </ResponseMetadata>
+</DecodeAuthorizationMessageResponse>"#,
+        decoded_message = xml_escape(decoded_message),
+        request_id = request_id,
+    )
+}
+
 pub fn get_access_key_info_response(account_id: &str, request_id: &str) -> String {
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>

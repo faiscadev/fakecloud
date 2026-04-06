@@ -337,6 +337,28 @@ async fn sts_get_caller_identity_cli() {
     assert_eq!(json["Account"], "123456789012");
 }
 
+#[tokio::test]
+async fn sts_decode_authorization_message() {
+    let server = TestServer::start().await;
+    let client = server.sts_client().await;
+
+    let resp = client
+        .decode_authorization_message()
+        .encoded_message("some-encoded-authorization-message")
+        .send()
+        .await
+        .unwrap();
+    let decoded = resp.decoded_message().unwrap();
+    assert!(
+        decoded.contains("allowed"),
+        "decoded message should contain 'allowed', got: {decoded}"
+    );
+    assert!(
+        decoded.contains("matchedStatements"),
+        "decoded message should contain 'matchedStatements', got: {decoded}"
+    );
+}
+
 // ---- IAM Group Tests ----
 
 #[tokio::test]
