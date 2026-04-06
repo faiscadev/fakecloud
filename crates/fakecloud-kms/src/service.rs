@@ -466,6 +466,7 @@ impl KmsService {
             all_keys
                 .iter()
                 .position(|k| k["KeyId"].as_str() == Some(m))
+                .map(|pos| pos + 1)
                 .unwrap_or(0)
         } else {
             0
@@ -1816,6 +1817,7 @@ impl KmsService {
             all_grants
                 .iter()
                 .position(|g| g["GrantId"].as_str() == Some(m))
+                .map(|pos| pos + 1)
                 .unwrap_or(0)
         } else {
             0

@@ -1169,6 +1169,14 @@ impl IamService {
             .cloned()
             .unwrap_or_else(|| resolve_calling_user(&self.state.read(), &req.account_id));
         let marker = req.query_params.get("Marker").cloned();
+        validate_optional_range_i64(
+            "maxItems",
+            req.query_params
+                .get("MaxItems")
+                .and_then(|v| v.parse::<i64>().ok()),
+            1,
+            1000,
+        )?;
         let max_items: usize = req
             .query_params
             .get("MaxItems")

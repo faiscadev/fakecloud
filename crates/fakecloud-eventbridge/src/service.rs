@@ -310,10 +310,16 @@ impl EventBridgeService {
         validate_optional_range_i64("limit", body["Limit"].as_i64(), 1, 100)?;
         let name_prefix = body["NamePrefix"].as_str();
         let limit = body["Limit"].as_i64().unwrap_or(100) as usize;
-        let offset: usize = body["NextToken"]
-            .as_str()
-            .and_then(|t| t.parse().ok())
-            .unwrap_or(0);
+        let offset: usize = match body["NextToken"].as_str() {
+            Some(t) => t.parse().map_err(|_| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidNextTokenException",
+                    format!("Invalid NextToken value: '{t}'"),
+                )
+            })?,
+            None => 0,
+        };
 
         let state = self.state.read();
         let filtered: Vec<Value> = state
