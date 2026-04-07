@@ -132,6 +132,7 @@ fn parse_amz_target(target: &str) -> Option<DetectedRequest> {
         "Logs_20140328" => "logs",
         s if s.starts_with("secretsmanager") => "secretsmanager",
         s if s.starts_with("TrentService") => "kms",
+        s if s.starts_with("AWSCognitoIdentityProviderService") => "cognito-idp",
         _ => return None,
     };
 

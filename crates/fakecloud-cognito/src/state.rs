@@ -1,0 +1,261 @@
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use chrono::{DateTime, Utc};
+use parking_lot::RwLock;
+use serde::{Deserialize, Serialize};
+
+pub type SharedCognitoState = Arc<RwLock<CognitoState>>;
+
+pub struct CognitoState {
+    pub account_id: String,
+    pub region: String,
+    pub user_pools: HashMap<String, UserPool>,
+    pub user_pool_clients: HashMap<String, UserPoolClient>,
+    /// pool_id -> (username -> User)
+    pub users: HashMap<String, HashMap<String, User>>,
+}
+
+impl CognitoState {
+    pub fn new(account_id: &str, region: &str) -> Self {
+        Self {
+            account_id: account_id.to_string(),
+            region: region.to_string(),
+            user_pools: HashMap::new(),
+            user_pool_clients: HashMap::new(),
+            users: HashMap::new(),
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.user_pools.clear();
+        self.user_pool_clients.clear();
+        self.users.clear();
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct UserPool {
+    pub id: String,
+    pub name: String,
+    pub arn: String,
+    pub status: String,
+    pub creation_date: DateTime<Utc>,
+    pub last_modified_date: DateTime<Utc>,
+    pub policies: PoolPolicies,
+    pub auto_verified_attributes: Vec<String>,
+    pub username_attributes: Option<Vec<String>>,
+    pub alias_attributes: Option<Vec<String>>,
+    pub schema_attributes: Vec<SchemaAttribute>,
+    pub lambda_config: Option<serde_json::Value>,
+    pub mfa_configuration: String,
+    pub email_configuration: Option<EmailConfiguration>,
+    pub sms_configuration: Option<SmsConfiguration>,
+    pub admin_create_user_config: Option<AdminCreateUserConfig>,
+    pub user_pool_tags: HashMap<String, String>,
+    pub account_recovery_setting: Option<AccountRecoverySetting>,
+    pub deletion_protection: Option<String>,
+    pub estimated_number_of_users: i64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PoolPolicies {
+    pub password_policy: PasswordPolicy,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PasswordPolicy {
+    pub minimum_length: i64,
+    pub require_uppercase: bool,
+    pub require_lowercase: bool,
+    pub require_numbers: bool,
+    pub require_symbols: bool,
+    pub temporary_password_validity_days: i64,
+}
+
+impl Default for PasswordPolicy {
+    fn default() -> Self {
+        Self {
+            minimum_length: 8,
+            require_uppercase: true,
+            require_lowercase: true,
+            require_numbers: true,
+            require_symbols: true,
+            temporary_password_validity_days: 7,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SchemaAttribute {
+    pub name: String,
+    pub attribute_data_type: String,
+    pub developer_only_attribute: bool,
+    pub mutable: bool,
+    pub required: bool,
+    pub string_attribute_constraints: Option<StringAttributeConstraints>,
+    pub number_attribute_constraints: Option<NumberAttributeConstraints>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StringAttributeConstraints {
+    pub min_length: Option<String>,
+    pub max_length: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NumberAttributeConstraints {
+    pub min_value: Option<String>,
+    pub max_value: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct EmailConfiguration {
+    pub source_arn: Option<String>,
+    pub reply_to_email_address: Option<String>,
+    pub email_sending_account: Option<String>,
+    pub from_email_address: Option<String>,
+    pub configuration_set: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SmsConfiguration {
+    pub sns_caller_arn: Option<String>,
+    pub external_id: Option<String>,
+    pub sns_region: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AdminCreateUserConfig {
+    pub allow_admin_create_user_only: Option<bool>,
+    pub invite_message_template: Option<InviteMessageTemplate>,
+    pub unused_account_validity_days: Option<i64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct InviteMessageTemplate {
+    pub email_message: Option<String>,
+    pub email_subject: Option<String>,
+    pub sms_message: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AccountRecoverySetting {
+    pub recovery_mechanisms: Vec<RecoveryOption>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RecoveryOption {
+    pub name: String,
+    pub priority: i64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct UserPoolClient {
+    pub client_id: String,
+    pub client_name: String,
+    pub user_pool_id: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct User {
+    pub username: String,
+    pub attributes: Vec<UserAttribute>,
+    pub enabled: bool,
+    pub user_status: String,
+    pub user_create_date: DateTime<Utc>,
+    pub user_last_modified_date: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct UserAttribute {
+    pub name: String,
+    pub value: String,
+}
+
+/// Generate default schema attributes that AWS adds to every user pool.
+pub fn default_schema_attributes() -> Vec<SchemaAttribute> {
+    let string_attrs = vec![
+        ("sub", false, false, true, Some("1"), Some("2048")),
+        ("name", false, true, false, Some("0"), Some("2048")),
+        ("given_name", false, true, false, Some("0"), Some("2048")),
+        ("family_name", false, true, false, Some("0"), Some("2048")),
+        ("middle_name", false, true, false, Some("0"), Some("2048")),
+        ("nickname", false, true, false, Some("0"), Some("2048")),
+        (
+            "preferred_username",
+            false,
+            true,
+            false,
+            Some("0"),
+            Some("2048"),
+        ),
+        ("profile", false, true, false, Some("0"), Some("2048")),
+        ("picture", false, true, false, Some("0"), Some("2048")),
+        ("website", false, true, false, Some("0"), Some("2048")),
+        ("email", false, true, false, Some("0"), Some("2048")),
+        ("gender", false, true, false, Some("0"), Some("2048")),
+        ("birthdate", false, true, false, Some("10"), Some("10")),
+        ("zoneinfo", false, true, false, Some("0"), Some("2048")),
+        ("locale", false, true, false, Some("0"), Some("2048")),
+        ("phone_number", false, true, false, Some("0"), Some("2048")),
+        ("address", false, true, false, Some("0"), Some("2048")),
+        ("updated_at", false, true, false, None, None),
+    ];
+
+    let mut attrs: Vec<SchemaAttribute> = string_attrs
+        .into_iter()
+        .map(
+            |(name, developer_only, mutable, required, min_len, max_len)| {
+                let constraints = if min_len.is_some() || max_len.is_some() {
+                    Some(StringAttributeConstraints {
+                        min_length: min_len.map(|s| s.to_string()),
+                        max_length: max_len.map(|s| s.to_string()),
+                    })
+                } else {
+                    None
+                };
+
+                let attribute_data_type = if name == "updated_at" {
+                    "Number".to_string()
+                } else {
+                    "String".to_string()
+                };
+
+                let number_constraints = if name == "updated_at" {
+                    Some(NumberAttributeConstraints {
+                        min_value: Some("0".to_string()),
+                        max_value: None,
+                    })
+                } else {
+                    None
+                };
+
+                SchemaAttribute {
+                    name: name.to_string(),
+                    attribute_data_type,
+                    developer_only_attribute: developer_only,
+                    mutable,
+                    required,
+                    string_attribute_constraints: constraints,
+                    number_attribute_constraints: number_constraints,
+                }
+            },
+        )
+        .collect();
+
+    // email_verified and phone_number_verified are Boolean attributes
+    for name in &["email_verified", "phone_number_verified"] {
+        attrs.push(SchemaAttribute {
+            name: name.to_string(),
+            attribute_data_type: "Boolean".to_string(),
+            developer_only_attribute: false,
+            mutable: true,
+            required: false,
+            string_attribute_constraints: None,
+            number_attribute_constraints: None,
+        });
+    }
+
+    attrs
+}

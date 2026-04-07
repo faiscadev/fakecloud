@@ -15,6 +15,7 @@ mod sqs_lambda_poller;
 use sqs_lambda_poller::SqsLambdaPoller;
 
 use fakecloud_cloudformation::service::CloudFormationService;
+use fakecloud_cognito::service::CognitoService;
 use fakecloud_dynamodb::service::DynamoDbService;
 use fakecloud_eventbridge::service::EventBridgeService;
 use fakecloud_iam::iam_service::IamService;
@@ -132,6 +133,9 @@ async fn main() {
     let ses_state = Arc::new(parking_lot::RwLock::new(
         fakecloud_ses::state::SesState::new(&cli.account_id, &cli.region),
     ));
+    let cognito_state = Arc::new(parking_lot::RwLock::new(
+        fakecloud_cognito::state::CognitoState::new(&cli.account_id, &cli.region),
+    ));
 
     // Cross-service delivery bus
     // Step 1: SQS delivery (SNS and EventBridge can push messages into SQS queues)
@@ -203,6 +207,7 @@ async fn main() {
         kms: kms_state.clone(),
         cloudformation: cloudformation_state.clone(),
         ses: ses_state.clone(),
+        cognito: cognito_state.clone(),
         container_runtime: container_runtime.clone(),
     };
 
@@ -296,6 +301,7 @@ async fn main() {
     registry.register(Arc::new(
         SesV2Service::new(ses_state).with_delivery(ses_delivery_ctx),
     ));
+    registry.register(Arc::new(CognitoService::new(cognito_state.clone())));
 
     // Spawn background tasks
     let lifecycle_processor = fakecloud_s3::lifecycle::LifecycleProcessor::new(s3_state);
@@ -480,6 +486,7 @@ struct ResetState {
     kms: fakecloud_kms::state::SharedKmsState,
     cloudformation: fakecloud_cloudformation::state::SharedCloudFormationState,
     ses: fakecloud_ses::state::SharedSesState,
+    cognito: fakecloud_cognito::state::SharedCognitoState,
     container_runtime: Option<Arc<fakecloud_lambda::runtime::ContainerRuntime>>,
 }
 
@@ -520,6 +527,7 @@ impl ResetState {
         self.kms.write().reset();
         self.cloudformation.write().reset();
         self.ses.write().reset();
+        self.cognito.write().reset();
         tracing::info!("state reset via reset API");
         axum::Json(serde_json::json!({"status": "ok"}))
     }
