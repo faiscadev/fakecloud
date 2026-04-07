@@ -31,9 +31,11 @@ proprietary image that requires an account and auth token.
 | License | AGPL-3.0 | Proprietary |
 | Auth required | No | Yes (account + token) |
 | Commercial use | Free | Paid plans only |
+| Docker required | No (standalone binary) | Yes |
 | Startup time | ~500ms | ~3s |
 | Idle memory | ~10 MiB | ~150 MiB |
-| Binary size | ~19 MB | ~1 GB image |
+| Install size | ~19 MB binary | ~1 GB Docker image |
+| Conformance testing | 34,000+ Smithy model variants | None public |
 | AWS services | 14 | 80+ |
 
 ## Quick Start
