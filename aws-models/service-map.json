@@ -50,5 +50,9 @@
   "cloudformation": {
     "repo_dir": "cloudformation",
     "service_name": "cloudformation"
+  },
+  "sesv2": {
+    "repo_dir": "sesv2",
+    "service_name": "ses"
   }
 }
