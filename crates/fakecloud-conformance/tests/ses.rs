@@ -349,11 +349,11 @@ async fn ses_send_bulk_email() {
 
 // -- Contact List CRUD --
 
-#[test_action("ses", "CreateContactList", checksum = "00000000")]
-#[test_action("ses", "GetContactList", checksum = "00000000")]
-#[test_action("ses", "ListContactLists", checksum = "00000000")]
-#[test_action("ses", "UpdateContactList", checksum = "00000000")]
-#[test_action("ses", "DeleteContactList", checksum = "00000000")]
+#[test_action("ses", "CreateContactList", checksum = "7f6cc2fa")]
+#[test_action("ses", "GetContactList", checksum = "7e2e0316")]
+#[test_action("ses", "ListContactLists", checksum = "cdc01160")]
+#[test_action("ses", "UpdateContactList", checksum = "8e3bd6e3")]
+#[test_action("ses", "DeleteContactList", checksum = "328a2af5")]
 #[tokio::test]
 async fn ses_contact_list_lifecycle() {
     let server = TestServer::start().await;
@@ -424,11 +424,11 @@ async fn ses_contact_list_lifecycle() {
 
 // -- Contact CRUD --
 
-#[test_action("ses", "CreateContact", checksum = "00000000")]
-#[test_action("ses", "GetContact", checksum = "00000000")]
-#[test_action("ses", "ListContacts", checksum = "00000000")]
-#[test_action("ses", "UpdateContact", checksum = "00000000")]
-#[test_action("ses", "DeleteContact", checksum = "00000000")]
+#[test_action("ses", "CreateContact", checksum = "6919c110")]
+#[test_action("ses", "GetContact", checksum = "606051bc")]
+#[test_action("ses", "ListContacts", checksum = "0762c146")]
+#[test_action("ses", "UpdateContact", checksum = "4846a375")]
+#[test_action("ses", "DeleteContact", checksum = "ff3abfb5")]
 #[tokio::test]
 async fn ses_contact_lifecycle() {
     let server = TestServer::start().await;
