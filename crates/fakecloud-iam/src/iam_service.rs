@@ -417,12 +417,7 @@ fn title_case_service(s: &str) -> String {
         .collect::<String>()
 }
 
-fn xml_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-}
+use fakecloud_aws::xml::xml_escape;
 
 fn url_encode(s: &str) -> String {
     use std::fmt::Write;

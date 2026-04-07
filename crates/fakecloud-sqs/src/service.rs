@@ -174,13 +174,7 @@ fn json_response(body: Value) -> AwsResponse {
     AwsResponse::json(StatusCode::OK, serde_json::to_string(&body).unwrap())
 }
 
-fn xml_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&apos;")
-}
+use fakecloud_aws::xml::xml_escape;
 
 fn xml_wrap(action: &str, inner: &str, request_id: &str) -> String {
     format!(

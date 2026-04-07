@@ -1,11 +1,6 @@
 use crate::state::{Stack, StackResource};
 
-fn xml_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-}
+use fakecloud_aws::xml::xml_escape;
 
 pub fn create_stack_response(stack_id: &str, request_id: &str) -> String {
     format!(
