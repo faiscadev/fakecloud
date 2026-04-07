@@ -2268,3 +2268,232 @@ async fn s3_replication_prefix_filter() {
         "Non-matching object should not be replicated"
     );
 }
+
+/// CompleteMultipartUpload returns InvalidPart when a specified part was never uploaded.
+#[tokio::test]
+async fn s3_complete_multipart_invalid_part() {
+    let server = TestServer::start().await;
+    let client = server.s3_client().await;
+
+    client
+        .create_bucket()
+        .bucket("mpu-invalid-part")
+        .send()
+        .await
+        .unwrap();
+
+    let create = client
+        .create_multipart_upload()
+        .bucket("mpu-invalid-part")
+        .key("test.bin")
+        .send()
+        .await
+        .unwrap();
+    let upload_id = create.upload_id().unwrap().to_string();
+
+    // Upload only part 1
+    let part1 = client
+        .upload_part()
+        .bucket("mpu-invalid-part")
+        .key("test.bin")
+        .upload_id(&upload_id)
+        .part_number(1)
+        .body(ByteStream::from_static(b"data"))
+        .send()
+        .await
+        .unwrap();
+    let etag1 = part1.e_tag().unwrap().to_string();
+
+    // Complete referencing part 1 (exists) and part 2 (never uploaded)
+    use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart};
+    let completed = CompletedMultipartUpload::builder()
+        .parts(
+            CompletedPart::builder()
+                .part_number(1)
+                .e_tag(&etag1)
+                .build(),
+        )
+        .parts(
+            CompletedPart::builder()
+                .part_number(2)
+                .e_tag("\"fake-etag\"")
+                .build(),
+        )
+        .build();
+
+    let result = client
+        .complete_multipart_upload()
+        .bucket("mpu-invalid-part")
+        .key("test.bin")
+        .upload_id(&upload_id)
+        .multipart_upload(completed)
+        .send()
+        .await;
+    assert!(result.is_err(), "Expected InvalidPart error");
+    let err_str = format!("{:?}", result.unwrap_err());
+    assert!(
+        err_str.contains("InvalidPart"),
+        "Error should mention InvalidPart, got: {err_str}"
+    );
+}
+
+/// CompleteMultipartUpload returns InvalidPartOrder when parts aren't in ascending order.
+#[tokio::test]
+async fn s3_complete_multipart_invalid_part_order() {
+    let server = TestServer::start().await;
+    let client = server.s3_client().await;
+
+    client
+        .create_bucket()
+        .bucket("mpu-order")
+        .send()
+        .await
+        .unwrap();
+
+    let create = client
+        .create_multipart_upload()
+        .bucket("mpu-order")
+        .key("test.bin")
+        .send()
+        .await
+        .unwrap();
+    let upload_id = create.upload_id().unwrap().to_string();
+
+    // Upload parts 1 and 2
+    let part1 = client
+        .upload_part()
+        .bucket("mpu-order")
+        .key("test.bin")
+        .upload_id(&upload_id)
+        .part_number(1)
+        .body(ByteStream::from_static(b"part1"))
+        .send()
+        .await
+        .unwrap();
+    let etag1 = part1.e_tag().unwrap().to_string();
+
+    let part2 = client
+        .upload_part()
+        .bucket("mpu-order")
+        .key("test.bin")
+        .upload_id(&upload_id)
+        .part_number(2)
+        .body(ByteStream::from_static(b"part2"))
+        .send()
+        .await
+        .unwrap();
+    let etag2 = part2.e_tag().unwrap().to_string();
+
+    // Complete with parts in descending order (2 then 1)
+    use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart};
+    let completed = CompletedMultipartUpload::builder()
+        .parts(
+            CompletedPart::builder()
+                .part_number(2)
+                .e_tag(&etag2)
+                .build(),
+        )
+        .parts(
+            CompletedPart::builder()
+                .part_number(1)
+                .e_tag(&etag1)
+                .build(),
+        )
+        .build();
+
+    let result = client
+        .complete_multipart_upload()
+        .bucket("mpu-order")
+        .key("test.bin")
+        .upload_id(&upload_id)
+        .multipart_upload(completed)
+        .send()
+        .await;
+    assert!(result.is_err(), "Expected InvalidPartOrder error");
+    let err_str = format!("{:?}", result.unwrap_err());
+    assert!(
+        err_str.contains("InvalidPartOrder"),
+        "Error should mention InvalidPartOrder, got: {err_str}"
+    );
+}
+
+/// CompleteMultipartUpload returns EntityTooSmall when a non-last part is under 5MB.
+#[tokio::test]
+async fn s3_complete_multipart_entity_too_small() {
+    let server = TestServer::start().await;
+    let client = server.s3_client().await;
+
+    client
+        .create_bucket()
+        .bucket("mpu-small")
+        .send()
+        .await
+        .unwrap();
+
+    let create = client
+        .create_multipart_upload()
+        .bucket("mpu-small")
+        .key("test.bin")
+        .send()
+        .await
+        .unwrap();
+    let upload_id = create.upload_id().unwrap().to_string();
+
+    // Upload part 1 with only 100 bytes (under 5MB minimum)
+    let part1 = client
+        .upload_part()
+        .bucket("mpu-small")
+        .key("test.bin")
+        .upload_id(&upload_id)
+        .part_number(1)
+        .body(ByteStream::from(vec![b'X'; 100]))
+        .send()
+        .await
+        .unwrap();
+    let etag1 = part1.e_tag().unwrap().to_string();
+
+    // Upload part 2
+    let part2 = client
+        .upload_part()
+        .bucket("mpu-small")
+        .key("test.bin")
+        .upload_id(&upload_id)
+        .part_number(2)
+        .body(ByteStream::from_static(b"last-part"))
+        .send()
+        .await
+        .unwrap();
+    let etag2 = part2.e_tag().unwrap().to_string();
+
+    // Complete — should fail because part 1 is under 5MB
+    use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart};
+    let completed = CompletedMultipartUpload::builder()
+        .parts(
+            CompletedPart::builder()
+                .part_number(1)
+                .e_tag(&etag1)
+                .build(),
+        )
+        .parts(
+            CompletedPart::builder()
+                .part_number(2)
+                .e_tag(&etag2)
+                .build(),
+        )
+        .build();
+
+    let result = client
+        .complete_multipart_upload()
+        .bucket("mpu-small")
+        .key("test.bin")
+        .upload_id(&upload_id)
+        .multipart_upload(completed)
+        .send()
+        .await;
+    assert!(result.is_err(), "Expected EntityTooSmall error");
+    let err_str = format!("{:?}", result.unwrap_err());
+    assert!(
+        err_str.contains("EntityTooSmall"),
+        "Error should mention EntityTooSmall, got: {err_str}"
+    );
+}
