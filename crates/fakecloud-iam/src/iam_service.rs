@@ -7088,4 +7088,935 @@ mod tests {
             String::from_utf8(resp.body.to_vec()).unwrap()
         }
     }
+
+    // ---- Policy Version Tests ----
+
+    #[test]
+    fn create_and_get_policy_version() {
+        let svc = make_service();
+        let policy_doc = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:GetObject","Resource":"*"}]}"#;
+        let req = make_request(
+            "CreatePolicy",
+            vec![("PolicyName", "test-pol"), ("PolicyDocument", policy_doc)],
+        );
+        let resp = svc.create_policy(&req).unwrap();
+        let body = String::from_utf8_lossy(&resp.body);
+        // Extract policy ARN
+        let arn_start = body.find("<Arn>").unwrap() + 5;
+        let arn_end = body.find("</Arn>").unwrap();
+        let policy_arn = &body[arn_start..arn_end];
+
+        // Create v2
+        let new_doc = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:GetObject","s3:PutObject"],"Resource":"*"}]}"#;
+        let req = make_request(
+            "CreatePolicyVersion",
+            vec![
+                ("PolicyArn", policy_arn),
+                ("PolicyDocument", new_doc),
+                ("SetAsDefault", "true"),
+            ],
+        );
+        let resp = svc.create_policy_version(&req).unwrap();
+        let body = String::from_utf8_lossy(&resp.body);
+        assert!(body.contains("<VersionId>v2</VersionId>"));
+        assert!(body.contains("<IsDefaultVersion>true</IsDefaultVersion>"));
+
+        // Get v2
+        let req = make_request(
+            "GetPolicyVersion",
+            vec![("PolicyArn", policy_arn), ("VersionId", "v2")],
+        );
+        let resp = svc.get_policy_version(&req).unwrap();
+        let body = String::from_utf8_lossy(&resp.body);
+        assert!(body.contains("<VersionId>v2</VersionId>"));
+        assert!(body.contains("<IsDefaultVersion>true</IsDefaultVersion>"));
+    }
+
+    #[test]
+    fn list_policy_versions() {
+        let svc = make_service();
+        let policy_doc = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:*","Resource":"*"}]}"#;
+        let req = make_request(
+            "CreatePolicy",
+            vec![("PolicyName", "ver-pol"), ("PolicyDocument", policy_doc)],
+        );
+        let resp = svc.create_policy(&req).unwrap();
+        let body = String::from_utf8_lossy(&resp.body);
+        let arn_start = body.find("<Arn>").unwrap() + 5;
+        let arn_end = body.find("</Arn>").unwrap();
+        let policy_arn = &body[arn_start..arn_end];
+
+        // Create v2
+        let req = make_request(
+            "CreatePolicyVersion",
+            vec![("PolicyArn", policy_arn), ("PolicyDocument", policy_doc)],
+        );
+        svc.create_policy_version(&req).unwrap();
+
+        let req = make_request("ListPolicyVersions", vec![("PolicyArn", policy_arn)]);
+        let resp = svc.list_policy_versions(&req).unwrap();
+        let body = String::from_utf8_lossy(&resp.body);
+        // Should have v1 and v2
+        assert!(body.contains("<VersionId>v1</VersionId>"));
+        assert!(body.contains("<VersionId>v2</VersionId>"));
+    }
+
+    #[test]
+    fn delete_default_policy_version_fails() {
+        let svc = make_service();
+        let policy_doc = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:*","Resource":"*"}]}"#;
+        let req = make_request(
+            "CreatePolicy",
+            vec![("PolicyName", "def-pol"), ("PolicyDocument", policy_doc)],
+        );
+        let resp = svc.create_policy(&req).unwrap();
+        let body = String::from_utf8_lossy(&resp.body);
+        let arn_start = body.find("<Arn>").unwrap() + 5;
+        let arn_end = body.find("</Arn>").unwrap();
+        let policy_arn = &body[arn_start..arn_end];
+
+        // v1 is the default; deleting it should fail
+        let req = make_request(
+            "DeletePolicyVersion",
+            vec![("PolicyArn", policy_arn), ("VersionId", "v1")],
+        );
+        let result = svc.delete_policy_version(&req);
+        assert!(result.is_err(), "deleting default version should fail");
+    }
+
+    #[test]
+    fn set_default_policy_version() {
+        let svc = make_service();
+        let policy_doc = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:*","Resource":"*"}]}"#;
+        let req = make_request(
+            "CreatePolicy",
+            vec![("PolicyName", "sd-pol"), ("PolicyDocument", policy_doc)],
+        );
+        let resp = svc.create_policy(&req).unwrap();
+        let body = String::from_utf8_lossy(&resp.body);
+        let arn_start = body.find("<Arn>").unwrap() + 5;
+        let arn_end = body.find("</Arn>").unwrap();
+        let policy_arn = &body[arn_start..arn_end];
+
+        // Create v2
+        let req = make_request(
+            "CreatePolicyVersion",
+            vec![("PolicyArn", policy_arn), ("PolicyDocument", policy_doc)],
+        );
+        svc.create_policy_version(&req).unwrap();
+
+        // Set v2 as default
+        let req = make_request(
+            "SetDefaultPolicyVersion",
+            vec![("PolicyArn", policy_arn), ("VersionId", "v2")],
+        );
+        svc.set_default_policy_version(&req).unwrap();
+
+        // Verify v2 is now default
+        let req = make_request(
+            "GetPolicyVersion",
+            vec![("PolicyArn", policy_arn), ("VersionId", "v2")],
+        );
+        let resp = svc.get_policy_version(&req).unwrap();
+        let body = String::from_utf8_lossy(&resp.body);
+        assert!(body.contains("<IsDefaultVersion>true</IsDefaultVersion>"));
+
+        // v1 should no longer be default
+        let req = make_request(
+            "GetPolicyVersion",
+            vec![("PolicyArn", policy_arn), ("VersionId", "v1")],
+        );
+        let resp = svc.get_policy_version(&req).unwrap();
+        let body = String::from_utf8_lossy(&resp.body);
+        assert!(body.contains("<IsDefaultVersion>false</IsDefaultVersion>"));
+    }
+
+    // ---- Server Certificate Tests ----
+
+    #[test]
+    fn server_certificate_lifecycle() {
+        let svc = make_service();
+
+        // Upload
+        let req = make_request(
+            "UploadServerCertificate",
+            vec![
+                ("ServerCertificateName", "my-cert"),
+                (
+                    "CertificateBody",
+                    "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----",
+                ),
+                (
+                    "PrivateKey",
+                    "-----BEGIN RSA PRIVATE KEY-----\ntest\n-----END RSA PRIVATE KEY-----",
+                ),
+            ],
+        );
+        let resp = svc.upload_server_certificate(&req).unwrap();
+        let body = String::from_utf8_lossy(&resp.body);
+        assert!(body.contains("<ServerCertificateName>my-cert</ServerCertificateName>"));
+        assert!(body.contains("ASCA"));
+
+        // Get
+        let req = make_request(
+            "GetServerCertificate",
+            vec![("ServerCertificateName", "my-cert")],
+        );
+        let resp = svc.get_server_certificate(&req).unwrap();
+        let body = String::from_utf8_lossy(&resp.body);
+        assert!(body.contains("<ServerCertificateName>my-cert</ServerCertificateName>"));
+
+        // List
+        let req = make_request("ListServerCertificates", vec![]);
+        let resp = svc.list_server_certificates(&req).unwrap();
+        let body = String::from_utf8_lossy(&resp.body);
+        assert!(body.contains("my-cert"));
+
+        // Delete
+        let req = make_request(
+            "DeleteServerCertificate",
+            vec![("ServerCertificateName", "my-cert")],
+        );
+        svc.delete_server_certificate(&req).unwrap();
+
+        // Should be gone
+        let req = make_request(
+            "GetServerCertificate",
+            vec![("ServerCertificateName", "my-cert")],
+        );
+        assert!(svc.get_server_certificate(&req).is_err());
+    }
+
+    #[test]
+    fn server_certificate_duplicate_fails() {
+        let svc = make_service();
+        let req = make_request(
+            "UploadServerCertificate",
+            vec![
+                ("ServerCertificateName", "dup-cert"),
+                ("CertificateBody", "cert-body"),
+                ("PrivateKey", "key-body"),
+            ],
+        );
+        svc.upload_server_certificate(&req).unwrap();
+
+        let req = make_request(
+            "UploadServerCertificate",
+            vec![
+                ("ServerCertificateName", "dup-cert"),
+                ("CertificateBody", "cert-body"),
+                ("PrivateKey", "key-body"),
+            ],
+        );
+        assert!(svc.upload_server_certificate(&req).is_err());
+    }
+
+    // ---- SSH Public Key Tests ----
+
+    #[test]
+    fn ssh_public_key_lifecycle() {
+        let svc = make_service();
+        svc.create_user(&make_request("CreateUser", vec![("UserName", "sshuser")]))
+            .unwrap();
+
+        // Upload
+        let req = make_request(
+            "UploadSSHPublicKey",
+            vec![
+                ("UserName", "sshuser"),
+                (
+                    "SSHPublicKeyBody",
+                    "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQ test@example",
+                ),
+            ],
+        );
+        let resp = svc.upload_ssh_public_key(&req).unwrap();
+        let body = String::from_utf8_lossy(&resp.body);
+        assert!(body.contains("<Status>Active</Status>"));
+        assert!(body.contains("APKA"));
+        // Extract key ID
+        let kid_start = body.find("<SSHPublicKeyId>").unwrap() + 16;
+        let kid_end = body.find("</SSHPublicKeyId>").unwrap();
+        let key_id = &body[kid_start..kid_end];
+
+        // Get
+        let req = make_request(
+            "GetSSHPublicKey",
+            vec![("UserName", "sshuser"), ("SSHPublicKeyId", key_id)],
+        );
+        let resp = svc.get_ssh_public_key(&req).unwrap();
+        let body = String::from_utf8_lossy(&resp.body);
+        assert!(body.contains(key_id));
+        assert!(body.contains("<Status>Active</Status>"));
+
+        // List
+        let req = make_request("ListSSHPublicKeys", vec![("UserName", "sshuser")]);
+        let resp = svc.list_ssh_public_keys(&req).unwrap();
+        let body = String::from_utf8_lossy(&resp.body);
+        assert!(body.contains(key_id));
+
+        // Update status to Inactive
+        let req = make_request(
+            "UpdateSSHPublicKey",
+            vec![
+                ("UserName", "sshuser"),
+                ("SSHPublicKeyId", key_id),
+                ("Status", "Inactive"),
+            ],
+        );
+        svc.update_ssh_public_key(&req).unwrap();
+
+        // Verify status changed
+        let req = make_request(
+            "GetSSHPublicKey",
+            vec![("UserName", "sshuser"), ("SSHPublicKeyId", key_id)],
+        );
+        let resp = svc.get_ssh_public_key(&req).unwrap();
+        let body = String::from_utf8_lossy(&resp.body);
+        assert!(body.contains("<Status>Inactive</Status>"));
+
+        // Delete
+        let req = make_request(
+            "DeleteSSHPublicKey",
+            vec![("UserName", "sshuser"), ("SSHPublicKeyId", key_id)],
+        );
+        svc.delete_ssh_public_key(&req).unwrap();
+
+        // Should be empty now
+        let req = make_request("ListSSHPublicKeys", vec![("UserName", "sshuser")]);
+        let resp = svc.list_ssh_public_keys(&req).unwrap();
+        let body = String::from_utf8_lossy(&resp.body);
+        assert!(!body.contains(key_id));
+    }
+
+    // ---- Signing Certificate Tests ----
+
+    #[test]
+    fn signing_certificate_lifecycle() {
+        let svc = make_service();
+        svc.create_user(&make_request("CreateUser", vec![("UserName", "certuser")]))
+            .unwrap();
+
+        let pem = "-----BEGIN CERTIFICATE-----\nMIIBxTCCAW4=\n-----END CERTIFICATE-----";
+
+        // Upload
+        let req = make_request(
+            "UploadSigningCertificate",
+            vec![("UserName", "certuser"), ("CertificateBody", pem)],
+        );
+        let resp = svc.upload_signing_certificate(&req).unwrap();
+        let body = String::from_utf8_lossy(&resp.body);
+        assert!(body.contains("<Status>Active</Status>"));
+        assert!(body.contains("<UserName>certuser</UserName>"));
+        let cid_start = body.find("<CertificateId>").unwrap() + 15;
+        let cid_end = body.find("</CertificateId>").unwrap();
+        let cert_id = &body[cid_start..cid_end];
+
+        // List
+        let req = make_request("ListSigningCertificates", vec![("UserName", "certuser")]);
+        let resp = svc.list_signing_certificates(&req).unwrap();
+        let body = String::from_utf8_lossy(&resp.body);
+        assert!(body.contains(cert_id));
+
+        // Update to Inactive
+        let req = make_request(
+            "UpdateSigningCertificate",
+            vec![
+                ("UserName", "certuser"),
+                ("CertificateId", cert_id),
+                ("Status", "Inactive"),
+            ],
+        );
+        svc.update_signing_certificate(&req).unwrap();
+
+        // Delete
+        let req = make_request(
+            "DeleteSigningCertificate",
+            vec![("UserName", "certuser"), ("CertificateId", cert_id)],
+        );
+        svc.delete_signing_certificate(&req).unwrap();
+
+        // Should be empty
+        let req = make_request("ListSigningCertificates", vec![("UserName", "certuser")]);
+        let resp = svc.list_signing_certificates(&req).unwrap();
+        let body = String::from_utf8_lossy(&resp.body);
+        assert!(!body.contains(cert_id));
+    }
+
+    #[test]
+    fn signing_certificate_malformed_pem_fails() {
+        let svc = make_service();
+        svc.create_user(&make_request("CreateUser", vec![("UserName", "badcert")]))
+            .unwrap();
+
+        let req = make_request(
+            "UploadSigningCertificate",
+            vec![
+                ("UserName", "badcert"),
+                ("CertificateBody", "not-a-pem-cert"),
+            ],
+        );
+        assert!(svc.upload_signing_certificate(&req).is_err());
+    }
+
+    // ---- Credential Report Tests ----
+
+    #[test]
+    fn credential_report_lifecycle() {
+        let svc = make_service();
+
+        // GetCredentialReport without generating first should fail
+        let req = make_request("GetCredentialReport", vec![]);
+        assert!(svc.get_credential_report(&req).is_err());
+
+        // Generate
+        let req = make_request("GenerateCredentialReport", vec![]);
+        let resp = svc.generate_credential_report(&req).unwrap();
+        let body = String::from_utf8_lossy(&resp.body);
+        assert!(body.contains("<State>STARTED</State>"));
+
+        // Generate again returns COMPLETE
+        let req = make_request("GenerateCredentialReport", vec![]);
+        let resp = svc.generate_credential_report(&req).unwrap();
+        let body = String::from_utf8_lossy(&resp.body);
+        assert!(body.contains("<State>COMPLETE</State>"));
+
+        // Get credential report
+        let req = make_request("GetCredentialReport", vec![]);
+        let resp = svc.get_credential_report(&req).unwrap();
+        let body = String::from_utf8_lossy(&resp.body);
+        assert!(body.contains("<ReportFormat>text/csv</ReportFormat>"));
+        assert!(body.contains("<Content>"));
+    }
+
+    // ---- Service Linked Role Tests ----
+
+    #[test]
+    fn service_linked_role_lifecycle() {
+        let svc = make_service();
+
+        // Create
+        let req = make_request(
+            "CreateServiceLinkedRole",
+            vec![("AWSServiceName", "elasticloadbalancing.amazonaws.com")],
+        );
+        let resp = svc.create_service_linked_role(&req).unwrap();
+        let body = String::from_utf8_lossy(&resp.body);
+        assert!(body.contains("AWSServiceRoleForElasticLoadBalancing"));
+        assert!(body.contains("/aws-service-role/elasticloadbalancing.amazonaws.com/"));
+
+        // Delete
+        let req = make_request(
+            "DeleteServiceLinkedRole",
+            vec![("RoleName", "AWSServiceRoleForElasticLoadBalancing")],
+        );
+        let resp = svc.delete_service_linked_role(&req).unwrap();
+        let body = String::from_utf8_lossy(&resp.body);
+        assert!(body.contains("<DeletionTaskId>"));
+        let tid_start = body.find("<DeletionTaskId>").unwrap() + 16;
+        let tid_end = body.find("</DeletionTaskId>").unwrap();
+        let task_id = &body[tid_start..tid_end];
+
+        // Check deletion status
+        let req = make_request(
+            "GetServiceLinkedRoleDeletionStatus",
+            vec![("DeletionTaskId", task_id)],
+        );
+        let resp = svc.get_service_linked_role_deletion_status(&req).unwrap();
+        let body = String::from_utf8_lossy(&resp.body);
+        assert!(body.contains("<Status>SUCCEEDED</Status>"));
+    }
+
+    // ---- Permission Boundary Tests ----
+
+    #[test]
+    fn role_permissions_boundary() {
+        let svc = make_service();
+        let trust = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ec2.amazonaws.com"},"Action":"sts:AssumeRole"}]}"#;
+        svc.create_role(&make_request(
+            "CreateRole",
+            vec![
+                ("RoleName", "bound-role"),
+                ("AssumeRolePolicyDocument", trust),
+            ],
+        ))
+        .unwrap();
+
+        // Put boundary
+        let boundary_arn = "arn:aws:iam::123456789012:policy/boundary-policy";
+        let req = make_request(
+            "PutRolePermissionsBoundary",
+            vec![
+                ("RoleName", "bound-role"),
+                ("PermissionsBoundary", boundary_arn),
+            ],
+        );
+        svc.put_role_permissions_boundary(&req).unwrap();
+
+        // Verify via GetRole
+        let req = make_request("GetRole", vec![("RoleName", "bound-role")]);
+        let resp = svc.get_role(&req).unwrap();
+        let body = String::from_utf8_lossy(&resp.body);
+        assert!(body.contains(boundary_arn));
+
+        // Delete boundary
+        let req = make_request(
+            "DeleteRolePermissionsBoundary",
+            vec![("RoleName", "bound-role")],
+        );
+        svc.delete_role_permissions_boundary(&req).unwrap();
+
+        // Verify removed
+        let req = make_request("GetRole", vec![("RoleName", "bound-role")]);
+        let resp = svc.get_role(&req).unwrap();
+        let body = String::from_utf8_lossy(&resp.body);
+        assert!(!body.contains(boundary_arn));
+    }
+
+    // ---- Tag Role Tests ----
+
+    #[test]
+    fn tag_untag_role() {
+        let svc = make_service();
+        let trust = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ec2.amazonaws.com"},"Action":"sts:AssumeRole"}]}"#;
+        svc.create_role(&make_request(
+            "CreateRole",
+            vec![
+                ("RoleName", "tag-role"),
+                ("AssumeRolePolicyDocument", trust),
+            ],
+        ))
+        .unwrap();
+
+        // Tag
+        let req = make_request(
+            "TagRole",
+            vec![
+                ("RoleName", "tag-role"),
+                ("Tags.member.1.Key", "env"),
+                ("Tags.member.1.Value", "prod"),
+            ],
+        );
+        svc.tag_role(&req).unwrap();
+
+        // List tags
+        let req = make_request("ListRoleTags", vec![("RoleName", "tag-role")]);
+        let resp = svc.list_role_tags(&req).unwrap();
+        let body = String::from_utf8_lossy(&resp.body);
+        assert!(body.contains("<Key>env</Key>"));
+        assert!(body.contains("<Value>prod</Value>"));
+
+        // Untag
+        let req = make_request(
+            "UntagRole",
+            vec![("RoleName", "tag-role"), ("TagKeys.member.1", "env")],
+        );
+        svc.untag_role(&req).unwrap();
+
+        let req = make_request("ListRoleTags", vec![("RoleName", "tag-role")]);
+        let resp = svc.list_role_tags(&req).unwrap();
+        let body = String::from_utf8_lossy(&resp.body);
+        assert!(!body.contains("<Key>env</Key>"));
+    }
+
+    // ---- Tag Policy Tests ----
+
+    #[test]
+    fn tag_untag_policy() {
+        let svc = make_service();
+        let policy_doc = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:*","Resource":"*"}]}"#;
+        let req = make_request(
+            "CreatePolicy",
+            vec![("PolicyName", "tag-pol"), ("PolicyDocument", policy_doc)],
+        );
+        let resp = svc.create_policy(&req).unwrap();
+        let body = String::from_utf8_lossy(&resp.body);
+        let arn_start = body.find("<Arn>").unwrap() + 5;
+        let arn_end = body.find("</Arn>").unwrap();
+        let policy_arn = body[arn_start..arn_end].to_string();
+
+        let req = make_request(
+            "TagPolicy",
+            vec![
+                ("PolicyArn", &policy_arn),
+                ("Tags.member.1.Key", "team"),
+                ("Tags.member.1.Value", "platform"),
+            ],
+        );
+        svc.tag_policy(&req).unwrap();
+
+        let req = make_request("ListPolicyTags", vec![("PolicyArn", &policy_arn)]);
+        let resp = svc.list_policy_tags(&req).unwrap();
+        let body = String::from_utf8_lossy(&resp.body);
+        assert!(body.contains("<Key>team</Key>"));
+
+        let req = make_request(
+            "UntagPolicy",
+            vec![("PolicyArn", &policy_arn), ("TagKeys.member.1", "team")],
+        );
+        svc.untag_policy(&req).unwrap();
+
+        let req = make_request("ListPolicyTags", vec![("PolicyArn", &policy_arn)]);
+        let resp = svc.list_policy_tags(&req).unwrap();
+        let body = String::from_utf8_lossy(&resp.body);
+        assert!(!body.contains("<Key>team</Key>"));
+    }
+
+    // ---- Tag Instance Profile Tests ----
+
+    #[test]
+    fn tag_untag_instance_profile() {
+        let svc = make_service();
+        svc.create_instance_profile(&make_request(
+            "CreateInstanceProfile",
+            vec![("InstanceProfileName", "tag-ip")],
+        ))
+        .unwrap();
+
+        let req = make_request(
+            "TagInstanceProfile",
+            vec![
+                ("InstanceProfileName", "tag-ip"),
+                ("Tags.member.1.Key", "dept"),
+                ("Tags.member.1.Value", "eng"),
+            ],
+        );
+        svc.tag_instance_profile(&req).unwrap();
+
+        let req = make_request(
+            "ListInstanceProfileTags",
+            vec![("InstanceProfileName", "tag-ip")],
+        );
+        let resp = svc.list_instance_profile_tags(&req).unwrap();
+        let body = String::from_utf8_lossy(&resp.body);
+        assert!(body.contains("<Key>dept</Key>"));
+
+        let req = make_request(
+            "UntagInstanceProfile",
+            vec![
+                ("InstanceProfileName", "tag-ip"),
+                ("TagKeys.member.1", "dept"),
+            ],
+        );
+        svc.untag_instance_profile(&req).unwrap();
+
+        let req = make_request(
+            "ListInstanceProfileTags",
+            vec![("InstanceProfileName", "tag-ip")],
+        );
+        let resp = svc.list_instance_profile_tags(&req).unwrap();
+        let body = String::from_utf8_lossy(&resp.body);
+        assert!(!body.contains("<Key>dept</Key>"));
+    }
+
+    // ---- Tag OIDC Provider Tests ----
+
+    #[test]
+    fn tag_untag_oidc_provider() {
+        let svc = make_service();
+        let req = make_request(
+            "CreateOpenIDConnectProvider",
+            vec![
+                ("Url", "https://oidc.example.com"),
+                (
+                    "ThumbprintList.member.1",
+                    "abcdef1234567890abcdef1234567890abcdef12",
+                ),
+            ],
+        );
+        let resp = svc.create_oidc_provider(&req).unwrap();
+        let body = String::from_utf8_lossy(&resp.body);
+        let arn_start =
+            body.find("<OpenIDConnectProviderArn>").unwrap() + "<OpenIDConnectProviderArn>".len();
+        let arn_end = body.find("</OpenIDConnectProviderArn>").unwrap();
+        let oidc_arn = body[arn_start..arn_end].to_string();
+
+        let req = make_request(
+            "TagOpenIDConnectProvider",
+            vec![
+                ("OpenIDConnectProviderArn", &oidc_arn),
+                ("Tags.member.1.Key", "stage"),
+                ("Tags.member.1.Value", "dev"),
+            ],
+        );
+        svc.tag_oidc_provider(&req).unwrap();
+
+        let req = make_request(
+            "ListOpenIDConnectProviderTags",
+            vec![("OpenIDConnectProviderArn", &oidc_arn)],
+        );
+        let resp = svc.list_oidc_provider_tags(&req).unwrap();
+        let body = String::from_utf8_lossy(&resp.body);
+        assert!(body.contains("<Key>stage</Key>"));
+
+        let req = make_request(
+            "UntagOpenIDConnectProvider",
+            vec![
+                ("OpenIDConnectProviderArn", &oidc_arn),
+                ("TagKeys.member.1", "stage"),
+            ],
+        );
+        svc.untag_oidc_provider(&req).unwrap();
+
+        let req = make_request(
+            "ListOpenIDConnectProviderTags",
+            vec![("OpenIDConnectProviderArn", &oidc_arn)],
+        );
+        let resp = svc.list_oidc_provider_tags(&req).unwrap();
+        let body = String::from_utf8_lossy(&resp.body);
+        assert!(!body.contains("<Key>stage</Key>"));
+    }
+
+    // ---- Update Role Tests ----
+
+    #[test]
+    fn update_role_description_and_max_session() {
+        let svc = make_service();
+        let trust = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ec2.amazonaws.com"},"Action":"sts:AssumeRole"}]}"#;
+        svc.create_role(&make_request(
+            "CreateRole",
+            vec![
+                ("RoleName", "upd-role"),
+                ("AssumeRolePolicyDocument", trust),
+            ],
+        ))
+        .unwrap();
+
+        // UpdateRole with Description and MaxSessionDuration
+        let req = make_request(
+            "UpdateRole",
+            vec![
+                ("RoleName", "upd-role"),
+                ("Description", "new description"),
+                ("MaxSessionDuration", "7200"),
+            ],
+        );
+        svc.update_role(&req).unwrap();
+
+        // UpdateRoleDescription
+        let req = make_request(
+            "UpdateRoleDescription",
+            vec![("RoleName", "upd-role"), ("Description", "updated desc")],
+        );
+        let resp = svc.update_role_description(&req).unwrap();
+        let body = String::from_utf8_lossy(&resp.body);
+        assert!(body.contains("<Description>updated desc</Description>"));
+    }
+
+    // ---- UpdateAssumeRolePolicy Tests ----
+
+    #[test]
+    fn update_assume_role_policy() {
+        let svc = make_service();
+        let trust = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ec2.amazonaws.com"},"Action":"sts:AssumeRole"}]}"#;
+        svc.create_role(&make_request(
+            "CreateRole",
+            vec![
+                ("RoleName", "arp-role"),
+                ("AssumeRolePolicyDocument", trust),
+            ],
+        ))
+        .unwrap();
+
+        let new_trust = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"lambda.amazonaws.com"},"Action":"sts:AssumeRole"}]}"#;
+        let req = make_request(
+            "UpdateAssumeRolePolicy",
+            vec![("RoleName", "arp-role"), ("PolicyDocument", new_trust)],
+        );
+        svc.update_assume_role_policy(&req).unwrap();
+
+        // Verify by GetRole
+        let req = make_request("GetRole", vec![("RoleName", "arp-role")]);
+        let resp = svc.get_role(&req).unwrap();
+        let body = String::from_utf8_lossy(&resp.body);
+        assert!(body.contains("lambda.amazonaws.com"));
+    }
+
+    // ---- UpdateGroup Tests ----
+
+    #[test]
+    fn update_group_rename() {
+        let svc = make_service();
+        svc.create_group(&make_request("CreateGroup", vec![("GroupName", "old-grp")]))
+            .unwrap();
+
+        let req = make_request(
+            "UpdateGroup",
+            vec![("GroupName", "old-grp"), ("NewGroupName", "new-grp")],
+        );
+        svc.update_group(&req).unwrap();
+
+        // Old name should not exist
+        assert!(svc
+            .get_group(&make_request("GetGroup", vec![("GroupName", "old-grp")]))
+            .is_err());
+
+        // New name should exist
+        let resp = svc
+            .get_group(&make_request("GetGroup", vec![("GroupName", "new-grp")]))
+            .unwrap();
+        let body = String::from_utf8_lossy(&resp.body);
+        assert!(body.contains("<GroupName>new-grp</GroupName>"));
+    }
+
+    // ---- UpdateUser Tests ----
+
+    #[test]
+    fn update_user_rename() {
+        let svc = make_service();
+        svc.create_user(&make_request("CreateUser", vec![("UserName", "old-user")]))
+            .unwrap();
+
+        let req = make_request(
+            "UpdateUser",
+            vec![("UserName", "old-user"), ("NewUserName", "new-user")],
+        );
+        svc.update_user(&req).unwrap();
+
+        assert!(svc
+            .get_user(&make_request("GetUser", vec![("UserName", "old-user")]))
+            .is_err());
+
+        let resp = svc
+            .get_user(&make_request("GetUser", vec![("UserName", "new-user")]))
+            .unwrap();
+        let body = String::from_utf8_lossy(&resp.body);
+        assert!(body.contains("<UserName>new-user</UserName>"));
+    }
+
+    // ---- Account Password Policy Tests ----
+
+    #[test]
+    fn account_password_policy_lifecycle() {
+        let svc = make_service();
+
+        // Get before setting returns error
+        let req = make_request("GetAccountPasswordPolicy", vec![]);
+        assert!(svc.get_account_password_policy(&req).is_err());
+
+        // Update (creates the policy)
+        let req = make_request(
+            "UpdateAccountPasswordPolicy",
+            vec![
+                ("MinimumPasswordLength", "12"),
+                ("RequireSymbols", "true"),
+                ("RequireNumbers", "true"),
+            ],
+        );
+        svc.update_account_password_policy(&req).unwrap();
+
+        // Get
+        let req = make_request("GetAccountPasswordPolicy", vec![]);
+        let resp = svc.get_account_password_policy(&req).unwrap();
+        let body = String::from_utf8_lossy(&resp.body);
+        assert!(body.contains("<MinimumPasswordLength>12</MinimumPasswordLength>"));
+        assert!(body.contains("<RequireSymbols>true</RequireSymbols>"));
+
+        // Delete
+        let req = make_request("DeleteAccountPasswordPolicy", vec![]);
+        svc.delete_account_password_policy(&req).unwrap();
+
+        // Should be gone
+        let req = make_request("GetAccountPasswordPolicy", vec![]);
+        assert!(svc.get_account_password_policy(&req).is_err());
+    }
+
+    // ---- GetAccountAuthorizationDetails Tests ----
+
+    #[test]
+    fn get_account_authorization_details() {
+        let svc = make_service();
+
+        // Create a user and role
+        svc.create_user(&make_request("CreateUser", vec![("UserName", "auth-user")]))
+            .unwrap();
+        let trust = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ec2.amazonaws.com"},"Action":"sts:AssumeRole"}]}"#;
+        svc.create_role(&make_request(
+            "CreateRole",
+            vec![
+                ("RoleName", "auth-role"),
+                ("AssumeRolePolicyDocument", trust),
+            ],
+        ))
+        .unwrap();
+
+        let req = make_request("GetAccountAuthorizationDetails", vec![]);
+        let resp = svc.get_account_authorization_details(&req).unwrap();
+        let body = String::from_utf8_lossy(&resp.body);
+        assert!(body.contains("<UserName>auth-user</UserName>"));
+        assert!(body.contains("<RoleName>auth-role</RoleName>"));
+    }
+
+    // ---- ListEntitiesForPolicy Tests ----
+
+    #[test]
+    fn list_entities_for_policy() {
+        let svc = make_service();
+
+        // Create policy
+        let policy_doc = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:*","Resource":"*"}]}"#;
+        let req = make_request(
+            "CreatePolicy",
+            vec![("PolicyName", "ent-pol"), ("PolicyDocument", policy_doc)],
+        );
+        let resp = svc.create_policy(&req).unwrap();
+        let body = String::from_utf8_lossy(&resp.body);
+        let arn_start = body.find("<Arn>").unwrap() + 5;
+        let arn_end = body.find("</Arn>").unwrap();
+        let policy_arn = body[arn_start..arn_end].to_string();
+
+        // Create role and attach policy
+        let trust = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ec2.amazonaws.com"},"Action":"sts:AssumeRole"}]}"#;
+        svc.create_role(&make_request(
+            "CreateRole",
+            vec![
+                ("RoleName", "ent-role"),
+                ("AssumeRolePolicyDocument", trust),
+            ],
+        ))
+        .unwrap();
+        svc.attach_role_policy(&make_request(
+            "AttachRolePolicy",
+            vec![("RoleName", "ent-role"), ("PolicyArn", &policy_arn)],
+        ))
+        .unwrap();
+
+        // Create user and attach policy
+        svc.create_user(&make_request("CreateUser", vec![("UserName", "ent-user")]))
+            .unwrap();
+        svc.attach_user_policy(&make_request(
+            "AttachUserPolicy",
+            vec![("UserName", "ent-user"), ("PolicyArn", &policy_arn)],
+        ))
+        .unwrap();
+
+        let req = make_request("ListEntitiesForPolicy", vec![("PolicyArn", &policy_arn)]);
+        let resp = svc.list_entities_for_policy(&req).unwrap();
+        let body = String::from_utf8_lossy(&resp.body);
+        assert!(body.contains("<RoleName>ent-role</RoleName>"));
+        assert!(body.contains("<UserName>ent-user</UserName>"));
+    }
+
+    // ---- GetAccessKeyLastUsed Tests ----
+
+    #[test]
+    fn get_access_key_last_used() {
+        let svc = make_service();
+        svc.create_user(&make_request("CreateUser", vec![("UserName", "keyuser")]))
+            .unwrap();
+
+        let req = make_request("CreateAccessKey", vec![("UserName", "keyuser")]);
+        let resp = svc.create_access_key(&req).unwrap();
+        let body = String::from_utf8_lossy(&resp.body);
+        let kid_start = body.find("<AccessKeyId>").unwrap() + 13;
+        let kid_end = body.find("</AccessKeyId>").unwrap();
+        let key_id = body[kid_start..kid_end].to_string();
+
+        let req = make_request("GetAccessKeyLastUsed", vec![("AccessKeyId", &key_id)]);
+        let resp = svc.get_access_key_last_used(&req).unwrap();
+        let body = String::from_utf8_lossy(&resp.body);
+        assert!(body.contains("<UserName>keyuser</UserName>"));
+        // No last used info yet -- should show N/A
+        assert!(body.contains("<ServiceName>N/A</ServiceName>"));
+    }
 }
