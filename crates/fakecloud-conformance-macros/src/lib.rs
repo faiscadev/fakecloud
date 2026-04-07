@@ -525,7 +525,8 @@ fn build_canonical(
 /// Attribute macro for Level 2 conformance tests.
 ///
 /// Usage:
-/// ```ignore
+///
+/// ```text
 /// #[test_action("sqs", "CreateQueue", checksum = "a3f8b2c1")]
 /// fn test_create_queue() { ... }
 /// ```
