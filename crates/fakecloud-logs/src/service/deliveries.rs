@@ -854,7 +854,6 @@ impl LogsService {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::service::extract_log_group_from_arn;
     use crate::service::test_helpers::*;
     use serde_json::{json, Value};

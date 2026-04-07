@@ -272,7 +272,6 @@ impl LogsService {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::service::test_helpers::*;
     use serde_json::{json, Value};
 
