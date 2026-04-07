@@ -1788,3 +1788,317 @@ async fn dynamodb_contributor_insights_tracks_access() {
         "ContributorInsightsRuleList should not be empty"
     );
 }
+
+#[tokio::test]
+async fn dynamodb_scan_pagination() {
+    let server = TestServer::start().await;
+    let client = server.dynamodb_client().await;
+
+    client
+        .create_table()
+        .table_name("ScanPagTable")
+        .key_schema(
+            KeySchemaElement::builder()
+                .attribute_name("pk")
+                .key_type(KeyType::Hash)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            AttributeDefinition::builder()
+                .attribute_name("pk")
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .billing_mode(BillingMode::PayPerRequest)
+        .send()
+        .await
+        .unwrap();
+
+    for i in 0..5 {
+        client
+            .put_item()
+            .table_name("ScanPagTable")
+            .item("pk", AttributeValue::S(format!("item{i}")))
+            .item("data", AttributeValue::S(format!("value{i}")))
+            .send()
+            .await
+            .unwrap();
+    }
+
+    // Scan with limit=2: should return 2 items and LastEvaluatedKey
+    let resp = client
+        .scan()
+        .table_name("ScanPagTable")
+        .limit(2)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.count(), 2);
+    let lek = resp
+        .last_evaluated_key()
+        .expect("should have LastEvaluatedKey");
+    assert!(lek.contains_key("pk"), "LastEvaluatedKey should contain pk");
+
+    // Page through all items using ExclusiveStartKey
+    let mut all_items = resp.items().to_vec();
+    let mut start_key = Some(lek.clone());
+
+    while let Some(ref sk) = start_key {
+        let resp = client
+            .scan()
+            .table_name("ScanPagTable")
+            .limit(2)
+            .set_exclusive_start_key(Some(sk.clone()))
+            .send()
+            .await
+            .unwrap();
+        all_items.extend(resp.items().to_vec());
+        start_key = resp.last_evaluated_key().map(|m| m.to_owned());
+    }
+
+    assert_eq!(all_items.len(), 5, "should have retrieved all 5 items");
+
+    let mut pks: Vec<String> = all_items
+        .iter()
+        .map(|item| item["pk"].as_s().unwrap().clone())
+        .collect();
+    pks.sort();
+    pks.dedup();
+    assert_eq!(pks.len(), 5, "all items should be unique");
+}
+
+#[tokio::test]
+async fn dynamodb_scan_no_pagination_when_all_fit() {
+    let server = TestServer::start().await;
+    let client = server.dynamodb_client().await;
+
+    client
+        .create_table()
+        .table_name("ScanNoPagTable")
+        .key_schema(
+            KeySchemaElement::builder()
+                .attribute_name("pk")
+                .key_type(KeyType::Hash)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            AttributeDefinition::builder()
+                .attribute_name("pk")
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .billing_mode(BillingMode::PayPerRequest)
+        .send()
+        .await
+        .unwrap();
+
+    for i in 0..3 {
+        client
+            .put_item()
+            .table_name("ScanNoPagTable")
+            .item("pk", AttributeValue::S(format!("item{i}")))
+            .send()
+            .await
+            .unwrap();
+    }
+
+    // Scan with limit > item count: no LastEvaluatedKey
+    let resp = client
+        .scan()
+        .table_name("ScanNoPagTable")
+        .limit(10)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.count(), 3);
+    assert!(
+        resp.last_evaluated_key().is_none(),
+        "LastEvaluatedKey should be absent when all items fit"
+    );
+
+    // Scan without limit: no LastEvaluatedKey
+    let resp = client
+        .scan()
+        .table_name("ScanNoPagTable")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.count(), 3);
+    assert!(
+        resp.last_evaluated_key().is_none(),
+        "LastEvaluatedKey should be absent without limit"
+    );
+}
+
+#[tokio::test]
+async fn dynamodb_query_pagination() {
+    let server = TestServer::start().await;
+    let client = server.dynamodb_client().await;
+
+    client
+        .create_table()
+        .table_name("QueryPagTable")
+        .key_schema(
+            KeySchemaElement::builder()
+                .attribute_name("pk")
+                .key_type(KeyType::Hash)
+                .build()
+                .unwrap(),
+        )
+        .key_schema(
+            KeySchemaElement::builder()
+                .attribute_name("sk")
+                .key_type(KeyType::Range)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            AttributeDefinition::builder()
+                .attribute_name("pk")
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            AttributeDefinition::builder()
+                .attribute_name("sk")
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .billing_mode(BillingMode::PayPerRequest)
+        .send()
+        .await
+        .unwrap();
+
+    for i in 0..5 {
+        client
+            .put_item()
+            .table_name("QueryPagTable")
+            .item("pk", AttributeValue::S("user1".to_string()))
+            .item("sk", AttributeValue::S(format!("item{i:03}")))
+            .item("data", AttributeValue::S(format!("value{i}")))
+            .send()
+            .await
+            .unwrap();
+    }
+
+    // Query with limit=2
+    let resp = client
+        .query()
+        .table_name("QueryPagTable")
+        .key_condition_expression("pk = :pk")
+        .expression_attribute_values(":pk", AttributeValue::S("user1".to_string()))
+        .limit(2)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.count(), 2);
+    let lek = resp
+        .last_evaluated_key()
+        .expect("should have LastEvaluatedKey");
+    assert!(lek.contains_key("pk"), "LastEvaluatedKey should contain pk");
+    assert!(lek.contains_key("sk"), "LastEvaluatedKey should contain sk");
+
+    // Page through all items
+    let mut all_items = resp.items().to_vec();
+    let mut start_key = Some(lek.clone());
+
+    while let Some(ref sk) = start_key {
+        let resp = client
+            .query()
+            .table_name("QueryPagTable")
+            .key_condition_expression("pk = :pk")
+            .expression_attribute_values(":pk", AttributeValue::S("user1".to_string()))
+            .limit(2)
+            .set_exclusive_start_key(Some(sk.clone()))
+            .send()
+            .await
+            .unwrap();
+        all_items.extend(resp.items().to_vec());
+        start_key = resp.last_evaluated_key().map(|m| m.to_owned());
+    }
+
+    assert_eq!(all_items.len(), 5, "should have retrieved all 5 items");
+
+    // Verify items came back sorted by sort key
+    let sks: Vec<String> = all_items
+        .iter()
+        .map(|item| item["sk"].as_s().unwrap().clone())
+        .collect();
+    let mut sorted_sks = sks.clone();
+    sorted_sks.sort();
+    assert_eq!(sks, sorted_sks, "items should be sorted by sort key");
+}
+
+#[tokio::test]
+async fn dynamodb_query_no_pagination_when_all_fit() {
+    let server = TestServer::start().await;
+    let client = server.dynamodb_client().await;
+
+    client
+        .create_table()
+        .table_name("QueryNoPagTable")
+        .key_schema(
+            KeySchemaElement::builder()
+                .attribute_name("pk")
+                .key_type(KeyType::Hash)
+                .build()
+                .unwrap(),
+        )
+        .key_schema(
+            KeySchemaElement::builder()
+                .attribute_name("sk")
+                .key_type(KeyType::Range)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            AttributeDefinition::builder()
+                .attribute_name("pk")
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            AttributeDefinition::builder()
+                .attribute_name("sk")
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .billing_mode(BillingMode::PayPerRequest)
+        .send()
+        .await
+        .unwrap();
+
+    for i in 0..2 {
+        client
+            .put_item()
+            .table_name("QueryNoPagTable")
+            .item("pk", AttributeValue::S("user1".to_string()))
+            .item("sk", AttributeValue::S(format!("item{i}")))
+            .send()
+            .await
+            .unwrap();
+    }
+
+    let resp = client
+        .query()
+        .table_name("QueryNoPagTable")
+        .key_condition_expression("pk = :pk")
+        .expression_attribute_values(":pk", AttributeValue::S("user1".to_string()))
+        .limit(10)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.count(), 2);
+    assert!(
+        resp.last_evaluated_key().is_none(),
+        "LastEvaluatedKey should be absent when all items fit"
+    );
+}

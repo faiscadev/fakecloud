@@ -545,6 +545,8 @@ impl DynamoDbService {
         let scan_forward = body["ScanIndexForward"].as_bool().unwrap_or(true);
         let limit = body["Limit"].as_i64().map(|l| l as usize);
         let index_name = body["IndexName"].as_str();
+        let exclusive_start_key: Option<HashMap<String, AttributeValue>> =
+            parse_key_map(&body["ExclusiveStartKey"]);
 
         let (items_to_scan, hash_key_name, range_key_name): (
             &[HashMap<String, AttributeValue>],
@@ -621,6 +623,15 @@ impl DynamoDbService {
             }
         }
 
+        // Apply ExclusiveStartKey: skip items up to and including the start key
+        if let Some(ref start_key) = exclusive_start_key {
+            if let Some(pos) = matched.iter().position(|item| {
+                item_matches_key(item, start_key, &hash_key_name, range_key_name.as_deref())
+            }) {
+                matched = matched.split_off(pos + 1);
+            }
+        }
+
         if let Some(filter) = filter_expression {
             matched.retain(|item| {
                 evaluate_filter_expression(filter, item, &expr_attr_names, &expr_attr_values)
@@ -629,9 +640,22 @@ impl DynamoDbService {
 
         let scanned_count = matched.len();
 
-        if let Some(lim) = limit {
+        let has_more = if let Some(lim) = limit {
+            let more = matched.len() > lim;
             matched.truncate(lim);
-        }
+            more
+        } else {
+            false
+        };
+
+        // Build LastEvaluatedKey from the last returned item if there are more results
+        let last_evaluated_key = if has_more {
+            matched
+                .last()
+                .map(|item| extract_key_for_schema(item, &hash_key_name, range_key_name.as_deref()))
+        } else {
+            None
+        };
 
         // Collect partition key values for contributor insights
         let insights_enabled = table.contributor_insights_status == "ENABLED";
@@ -653,11 +677,15 @@ impl DynamoDbService {
             })
             .collect();
 
-        let result = json!({
+        let mut result = json!({
             "Items": items,
             "Count": items.len(),
             "ScannedCount": scanned_count,
         });
+
+        if let Some(lek) = last_evaluated_key {
+            result["LastEvaluatedKey"] = json!(lek);
+        }
 
         drop(state);
 
@@ -691,8 +719,23 @@ impl DynamoDbService {
         let expr_attr_values = parse_expression_attribute_values(&body);
         let filter_expression = body["FilterExpression"].as_str();
         let limit = body["Limit"].as_i64().map(|l| l as usize);
+        let exclusive_start_key: Option<HashMap<String, AttributeValue>> =
+            parse_key_map(&body["ExclusiveStartKey"]);
+
+        let hash_key_name = table.hash_key_name().to_string();
+        let range_key_name = table.range_key_name().map(|s| s.to_string());
 
         let mut matched: Vec<&HashMap<String, AttributeValue>> = table.items.iter().collect();
+
+        // Apply ExclusiveStartKey: skip items up to and including the start key
+        if let Some(ref start_key) = exclusive_start_key {
+            if let Some(pos) = matched.iter().position(|item| {
+                item_matches_key(item, start_key, &hash_key_name, range_key_name.as_deref())
+            }) {
+                matched = matched.split_off(pos + 1);
+            }
+        }
+
         let scanned_count = matched.len();
 
         if let Some(filter) = filter_expression {
@@ -701,9 +744,22 @@ impl DynamoDbService {
             });
         }
 
-        if let Some(lim) = limit {
+        let has_more = if let Some(lim) = limit {
+            let more = matched.len() > lim;
             matched.truncate(lim);
-        }
+            more
+        } else {
+            false
+        };
+
+        // Build LastEvaluatedKey from the last returned item if there are more results
+        let last_evaluated_key = if has_more {
+            matched
+                .last()
+                .map(|item| extract_key_for_schema(item, &hash_key_name, range_key_name.as_deref()))
+        } else {
+            None
+        };
 
         // Collect partition key values for contributor insights
         let insights_enabled = table.contributor_insights_status == "ENABLED";
@@ -725,11 +781,15 @@ impl DynamoDbService {
             })
             .collect();
 
-        let result = json!({
+        let mut result = json!({
             "Items": items,
             "Count": items.len(),
             "ScannedCount": scanned_count,
         });
+
+        if let Some(lek) = last_evaluated_key {
+            result["LastEvaluatedKey"] = json!(lek);
+        }
 
         drop(state);
 
@@ -3184,6 +3244,57 @@ fn extract_key(
     if let Some(range_key) = table.range_key_name() {
         if let Some(v) = item.get(range_key) {
             key.insert(range_key.to_string(), v.clone());
+        }
+    }
+    key
+}
+
+/// Parse a JSON object into a key map (used for ExclusiveStartKey).
+fn parse_key_map(value: &Value) -> Option<HashMap<String, AttributeValue>> {
+    let obj = value.as_object()?;
+    if obj.is_empty() {
+        return None;
+    }
+    Some(obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+}
+
+/// Check whether an item's key attributes match the given key map.
+fn item_matches_key(
+    item: &HashMap<String, AttributeValue>,
+    key: &HashMap<String, AttributeValue>,
+    hash_key_name: &str,
+    range_key_name: Option<&str>,
+) -> bool {
+    let hash_match = match (item.get(hash_key_name), key.get(hash_key_name)) {
+        (Some(a), Some(b)) => a == b,
+        _ => false,
+    };
+    if !hash_match {
+        return false;
+    }
+    match range_key_name {
+        Some(rk) => match (item.get(rk), key.get(rk)) {
+            (Some(a), Some(b)) => a == b,
+            (None, None) => true,
+            _ => false,
+        },
+        None => true,
+    }
+}
+
+/// Extract the primary key from an item given explicit key attribute names.
+fn extract_key_for_schema(
+    item: &HashMap<String, AttributeValue>,
+    hash_key_name: &str,
+    range_key_name: Option<&str>,
+) -> HashMap<String, AttributeValue> {
+    let mut key = HashMap::new();
+    if let Some(v) = item.get(hash_key_name) {
+        key.insert(hash_key_name.to_string(), v.clone());
+    }
+    if let Some(rk) = range_key_name {
+        if let Some(v) = item.get(rk) {
+            key.insert(rk.to_string(), v.clone());
         }
     }
     key
@@ -5892,6 +6003,230 @@ mod tests {
         assert!(
             contributors.is_empty(),
             "counters should be empty after disabling insights"
+        );
+    }
+
+    #[test]
+    fn scan_pagination_with_limit() {
+        let svc = make_service();
+        create_test_table(&svc);
+
+        // Insert 5 items
+        for i in 0..5 {
+            let req = make_request(
+                "PutItem",
+                json!({
+                    "TableName": "test-table",
+                    "Item": {
+                        "pk": { "S": format!("item{i}") },
+                        "data": { "S": format!("value{i}") }
+                    }
+                }),
+            );
+            svc.put_item(&req).unwrap();
+        }
+
+        // Scan with limit=2
+        let req = make_request("Scan", json!({ "TableName": "test-table", "Limit": 2 }));
+        let resp = svc.scan(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["Count"], 2);
+        assert!(
+            body["LastEvaluatedKey"].is_object(),
+            "should have LastEvaluatedKey when limit < total items"
+        );
+        assert!(body["LastEvaluatedKey"]["pk"].is_object());
+
+        // Page through all items
+        let mut all_items: Vec<Value> = body["Items"].as_array().unwrap().clone();
+        let mut lek = body["LastEvaluatedKey"].clone();
+
+        while lek.is_object() {
+            let req = make_request(
+                "Scan",
+                json!({
+                    "TableName": "test-table",
+                    "Limit": 2,
+                    "ExclusiveStartKey": lek
+                }),
+            );
+            let resp = svc.scan(&req).unwrap();
+            let body: Value = serde_json::from_slice(&resp.body).unwrap();
+            all_items.extend(body["Items"].as_array().unwrap().iter().cloned());
+            lek = body["LastEvaluatedKey"].clone();
+        }
+
+        assert_eq!(
+            all_items.len(),
+            5,
+            "should retrieve all 5 items via pagination"
+        );
+    }
+
+    #[test]
+    fn scan_no_pagination_when_all_fit() {
+        let svc = make_service();
+        create_test_table(&svc);
+
+        for i in 0..3 {
+            let req = make_request(
+                "PutItem",
+                json!({
+                    "TableName": "test-table",
+                    "Item": {
+                        "pk": { "S": format!("item{i}") }
+                    }
+                }),
+            );
+            svc.put_item(&req).unwrap();
+        }
+
+        // Scan with limit > item count
+        let req = make_request("Scan", json!({ "TableName": "test-table", "Limit": 10 }));
+        let resp = svc.scan(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["Count"], 3);
+        assert!(
+            body["LastEvaluatedKey"].is_null(),
+            "should not have LastEvaluatedKey when all items fit"
+        );
+
+        // Scan without limit
+        let req = make_request("Scan", json!({ "TableName": "test-table" }));
+        let resp = svc.scan(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["Count"], 3);
+        assert!(body["LastEvaluatedKey"].is_null());
+    }
+
+    fn create_composite_table(svc: &DynamoDbService) {
+        let req = make_request(
+            "CreateTable",
+            json!({
+                "TableName": "composite-table",
+                "KeySchema": [
+                    { "AttributeName": "pk", "KeyType": "HASH" },
+                    { "AttributeName": "sk", "KeyType": "RANGE" }
+                ],
+                "AttributeDefinitions": [
+                    { "AttributeName": "pk", "AttributeType": "S" },
+                    { "AttributeName": "sk", "AttributeType": "S" }
+                ],
+                "BillingMode": "PAY_PER_REQUEST"
+            }),
+        );
+        svc.create_table(&req).unwrap();
+    }
+
+    #[test]
+    fn query_pagination_with_composite_key() {
+        let svc = make_service();
+        create_composite_table(&svc);
+
+        // Insert 5 items under the same partition key
+        for i in 0..5 {
+            let req = make_request(
+                "PutItem",
+                json!({
+                    "TableName": "composite-table",
+                    "Item": {
+                        "pk": { "S": "user1" },
+                        "sk": { "S": format!("item{i:03}") },
+                        "data": { "S": format!("value{i}") }
+                    }
+                }),
+            );
+            svc.put_item(&req).unwrap();
+        }
+
+        // Query with limit=2
+        let req = make_request(
+            "Query",
+            json!({
+                "TableName": "composite-table",
+                "KeyConditionExpression": "pk = :pk",
+                "ExpressionAttributeValues": { ":pk": { "S": "user1" } },
+                "Limit": 2
+            }),
+        );
+        let resp = svc.query(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["Count"], 2);
+        assert!(body["LastEvaluatedKey"].is_object());
+        assert!(body["LastEvaluatedKey"]["pk"].is_object());
+        assert!(body["LastEvaluatedKey"]["sk"].is_object());
+
+        // Page through all items
+        let mut all_items: Vec<Value> = body["Items"].as_array().unwrap().clone();
+        let mut lek = body["LastEvaluatedKey"].clone();
+
+        while lek.is_object() {
+            let req = make_request(
+                "Query",
+                json!({
+                    "TableName": "composite-table",
+                    "KeyConditionExpression": "pk = :pk",
+                    "ExpressionAttributeValues": { ":pk": { "S": "user1" } },
+                    "Limit": 2,
+                    "ExclusiveStartKey": lek
+                }),
+            );
+            let resp = svc.query(&req).unwrap();
+            let body: Value = serde_json::from_slice(&resp.body).unwrap();
+            all_items.extend(body["Items"].as_array().unwrap().iter().cloned());
+            lek = body["LastEvaluatedKey"].clone();
+        }
+
+        assert_eq!(
+            all_items.len(),
+            5,
+            "should retrieve all 5 items via pagination"
+        );
+
+        // Verify items came back sorted by sort key
+        let sks: Vec<String> = all_items
+            .iter()
+            .map(|item| item["sk"]["S"].as_str().unwrap().to_string())
+            .collect();
+        let mut sorted = sks.clone();
+        sorted.sort();
+        assert_eq!(sks, sorted, "items should be sorted by sort key");
+    }
+
+    #[test]
+    fn query_no_pagination_when_all_fit() {
+        let svc = make_service();
+        create_composite_table(&svc);
+
+        for i in 0..2 {
+            let req = make_request(
+                "PutItem",
+                json!({
+                    "TableName": "composite-table",
+                    "Item": {
+                        "pk": { "S": "user1" },
+                        "sk": { "S": format!("item{i}") }
+                    }
+                }),
+            );
+            svc.put_item(&req).unwrap();
+        }
+
+        let req = make_request(
+            "Query",
+            json!({
+                "TableName": "composite-table",
+                "KeyConditionExpression": "pk = :pk",
+                "ExpressionAttributeValues": { ":pk": { "S": "user1" } },
+                "Limit": 10
+            }),
+        );
+        let resp = svc.query(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["Count"], 2);
+        assert!(
+            body["LastEvaluatedKey"].is_null(),
+            "should not have LastEvaluatedKey when all items fit"
         );
     }
 }
