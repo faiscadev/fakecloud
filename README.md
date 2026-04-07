@@ -113,6 +113,7 @@ fakecloud is now listening at `http://localhost:4566`.
 | **CloudWatch Logs** | 113 | Groups, streams, filtering, deliveries, transformers, query language, anomaly detection |
 | **KMS** | 53 | Encryption, key management, aliases, grants, real ECDH and key import |
 | **CloudFormation** | 8 | Template parsing, resource provisioning, custom resources via Lambda |
+| **SES v2** | 26 | Identities, templates, configuration sets, contact lists, contacts, send email |
 
 ### Cross-Service Integration
 
@@ -186,7 +187,7 @@ fakecloud is organized as a Cargo workspace:
 Protocol handling:
 - **Query protocol** (SQS, SNS, IAM, STS, CloudFormation): form-encoded body, `Action` parameter, XML responses
 - **JSON protocol** (SSM, EventBridge, DynamoDB, Secrets Manager, CloudWatch Logs, KMS): JSON body, `X-Amz-Target` header, JSON responses
-- **REST protocol** (S3, Lambda): HTTP method + path-based routing, XML/JSON responses
+- **REST protocol** (S3, Lambda, SES v2): HTTP method + path-based routing, XML/JSON responses
 - SigV4 signatures are parsed for service routing but never validated
 
 ## Testing
