@@ -104,7 +104,17 @@ jobs:
         run: |
           publish() {
             echo "Publishing $1..."
-            cargo publish -p "$1" 2>&1 || true
+            OUTPUT=$(cargo publish -p "$1" 2>&1) && {
+              echo "Successfully published $1"
+            } || {
+              if echo "$OUTPUT" | grep -q "already uploaded"; then
+                echo "Skipping $1: already published"
+              else
+                echo "ERROR publishing $1:"
+                echo "$OUTPUT"
+                exit 1
+              fi
+            }
             echo "Waiting for crates.io index..."
             sleep 60
           }
