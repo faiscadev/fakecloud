@@ -691,8 +691,8 @@ impl SesV2Service {
             "ContactListName": list.contact_list_name,
             "Description": list.description,
             "Topics": topics,
-            "CreatedTimestamp": list.created_at.to_rfc3339(),
-            "LastUpdatedTimestamp": list.last_updated_at.to_rfc3339(),
+            "CreatedTimestamp": list.created_at.timestamp() as f64,
+            "LastUpdatedTimestamp": list.last_updated_at.timestamp() as f64,
             "Tags": [],
         });
 
@@ -707,7 +707,7 @@ impl SesV2Service {
             .map(|l| {
                 json!({
                     "ContactListName": l.contact_list_name,
-                    "LastUpdatedTimestamp": l.last_updated_at.to_rfc3339(),
+                    "LastUpdatedTimestamp": l.last_updated_at.timestamp() as f64,
                 })
             })
             .collect();
@@ -879,8 +879,8 @@ impl SesV2Service {
             "TopicPreferences": topic_preferences,
             "TopicDefaultPreferences": topic_default_preferences,
             "UnsubscribeAll": contact.unsubscribe_all,
-            "CreatedTimestamp": contact.created_at.to_rfc3339(),
-            "LastUpdatedTimestamp": contact.last_updated_at.to_rfc3339(),
+            "CreatedTimestamp": contact.created_at.timestamp() as f64,
+            "LastUpdatedTimestamp": contact.last_updated_at.timestamp() as f64,
         });
 
         if let Some(ref attrs) = contact.attributes_data {
@@ -936,7 +936,7 @@ impl SesV2Service {
                             "TopicPreferences": topic_prefs,
                             "TopicDefaultPreferences": topic_defaults,
                             "UnsubscribeAll": c.unsubscribe_all,
-                            "LastUpdatedTimestamp": c.last_updated_at.to_rfc3339(),
+                            "LastUpdatedTimestamp": c.last_updated_at.timestamp() as f64,
                         })
                     })
                     .collect()
@@ -1807,8 +1807,8 @@ mod tests {
         assert_eq!(body["Description"], "Test list");
         assert_eq!(body["Topics"][0]["TopicName"], "newsletters");
         assert_eq!(body["Topics"][0]["DefaultSubscriptionStatus"], "OPT_IN");
-        assert!(body["CreatedTimestamp"].as_str().is_some());
-        assert!(body["LastUpdatedTimestamp"].as_str().is_some());
+        assert!(body["CreatedTimestamp"].as_f64().is_some());
+        assert!(body["LastUpdatedTimestamp"].as_f64().is_some());
 
         // List contact lists
         let req = make_request(Method::GET, "/v2/email/contact-lists", "{}");
@@ -1949,7 +1949,7 @@ mod tests {
             body["TopicDefaultPreferences"][0]["SubscriptionStatus"],
             "OPT_OUT"
         );
-        assert!(body["CreatedTimestamp"].as_str().is_some());
+        assert!(body["CreatedTimestamp"].as_f64().is_some());
 
         // List contacts
         let req = make_request(
