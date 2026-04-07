@@ -2601,6 +2601,12 @@ async fn s3_bucket_encryption_crud() {
         .as_array()
         .unwrap();
     assert!(!rules.is_empty());
+    assert_eq!(
+        rules[0]["ApplyServerSideEncryptionByDefault"]["SSEAlgorithm"]
+            .as_str()
+            .unwrap(),
+        "AES256"
+    );
 
     // Delete encryption config
     let output = server
@@ -3200,6 +3206,12 @@ async fn s3_bucket_notification_configuration_crud() {
         "get notification config failed after clear: {}",
         output.stderr_text()
     );
+    let json = output.stdout_json();
+    let queues = json["QueueConfigurations"]
+        .as_array()
+        .map(|a| a.len())
+        .unwrap_or(0);
+    assert_eq!(queues, 0, "Expected empty QueueConfigurations after clear");
 }
 
 #[tokio::test]
@@ -3229,5 +3241,10 @@ async fn s3_get_bucket_location() {
     assert!(
         json.get("LocationConstraint").is_some(),
         "Expected LocationConstraint in response"
+    );
+    assert!(
+        json["LocationConstraint"].is_null(),
+        "us-east-1 LocationConstraint should be null, got: {}",
+        json["LocationConstraint"]
     );
 }
