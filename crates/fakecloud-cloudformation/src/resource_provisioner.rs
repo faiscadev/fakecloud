@@ -105,7 +105,7 @@ impl ResourceProvisioner {
             .unwrap_or(&resource.logical_id);
 
         let mut state = self.sqs_state.write();
-        let queue_url = format!("http://localhost:4566/{}/{}", state.account_id, queue_name);
+        let queue_url = format!("{}/{}/{}", state.endpoint, state.account_id, queue_name);
         let arn = format!(
             "arn:aws:sqs:{}:{}:{}",
             state.region, state.account_id, queue_name
@@ -854,6 +854,7 @@ mod tests {
             sns_state: Arc::new(RwLock::new(fakecloud_sns::state::SnsState::new(
                 "123456789012",
                 "us-east-1",
+                "http://localhost:4566",
             ))),
             ssm_state: Arc::new(RwLock::new(fakecloud_ssm::state::SsmState::new(
                 "123456789012",

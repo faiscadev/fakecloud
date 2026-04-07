@@ -938,6 +938,7 @@ impl SnsService {
             .map(|s| s.endpoint.clone())
             .collect();
 
+        let endpoint = state.endpoint.clone();
         drop(state);
 
         // Determine actual message content per protocol
@@ -1011,6 +1012,7 @@ impl SnsService {
                     &subject,
                     &sqs_message,
                     &envelope_attrs,
+                    &endpoint,
                 );
                 self.delivery
                     .send_to_sqs(queue_arn, &envelope_str, &HashMap::new());
@@ -1025,6 +1027,7 @@ impl SnsService {
                 &subject,
                 &default_message,
                 &envelope_attrs,
+                &endpoint,
             );
             let body = sns_envelope_str;
             let topic = topic_arn.clone();
@@ -1060,6 +1063,7 @@ impl SnsService {
                         subject.as_deref(),
                         &envelope_attrs,
                         &now,
+                        &endpoint,
                     );
                     (function_arn.clone(), payload)
                 })
@@ -1173,6 +1177,7 @@ impl SnsService {
             .get(&topic_arn)
             .ok_or_else(|| not_found("Topic"))?;
         let is_fifo = topic.is_fifo;
+        let endpoint = state.endpoint.clone();
         drop(state);
 
         // Parse batch entries: PublishBatchRequestEntries.member.N.*
@@ -1334,6 +1339,7 @@ impl SnsService {
                         subject,
                         &sqs_message,
                         &envelope_attrs,
+                        &endpoint,
                     );
                     self.delivery
                         .send_to_sqs(queue_arn, &envelope_str, &HashMap::new());
@@ -2510,6 +2516,7 @@ impl SnsService {
 
 /// Build an SNS Lambda event payload (matches real AWS format).
 /// Used by both direct Publish and cross-service delivery.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_sns_lambda_event(
     message_id: &str,
     topic_arn: &str,
@@ -2518,6 +2525,7 @@ pub(crate) fn build_sns_lambda_event(
     subject: Option<&str>,
     message_attributes: &serde_json::Map<String, Value>,
     timestamp: &chrono::DateTime<Utc>,
+    endpoint: &str,
 ) -> String {
     let sns_event = serde_json::json!({
         "Records": [{
@@ -2533,7 +2541,7 @@ pub(crate) fn build_sns_lambda_event(
                 "Message": message,
                 "MessageAttributes": message_attributes,
                 "Type": "Notification",
-                "UnsubscribeUrl": format!("http://localhost:4566/?Action=Unsubscribe&SubscriptionArn={}", subscription_arn),
+                "UnsubscribeUrl": format!("{}/?Action=Unsubscribe&SubscriptionArn={}", endpoint, subscription_arn),
                 "TopicArn": topic_arn,
                 "Subject": subject.unwrap_or(""),
             }
@@ -2550,6 +2558,7 @@ fn build_sns_envelope(
     subject: &Option<String>,
     message: &str,
     message_attributes: &serde_json::Map<String, Value>,
+    endpoint: &str,
 ) -> String {
     let mut map = serde_json::Map::new();
     map.insert(
@@ -2584,8 +2593,8 @@ fn build_sns_envelope(
     map.insert(
         "UnsubscribeURL".to_string(),
         Value::String(format!(
-            "http://localhost:4566/?Action=Unsubscribe&SubscriptionArn={}",
-            topic_arn
+            "{}/?Action=Unsubscribe&SubscriptionArn={}",
+            endpoint, topic_arn
         )),
     );
     if !message_attributes.is_empty() {
@@ -3479,6 +3488,7 @@ mod tests {
             Some("test subject"),
             &attrs,
             &now,
+            "http://localhost:4566",
         );
 
         let parsed: Value = serde_json::from_str(&payload).unwrap();
@@ -3494,6 +3504,61 @@ mod tests {
         assert!(
             unsub_url.contains(sub_arn),
             "UnsubscribeUrl should contain subscription ARN"
+        );
+    }
+
+    #[test]
+    fn build_sns_envelope_uses_configured_endpoint() {
+        let endpoint = "http://myhost:5555";
+        let topic_arn = "arn:aws:sns:us-east-1:123456789012:my-topic";
+        let attrs = serde_json::Map::new();
+
+        let envelope = build_sns_envelope(
+            "msg-002",
+            topic_arn,
+            &None,
+            "test message",
+            &attrs,
+            endpoint,
+        );
+
+        let parsed: Value = serde_json::from_str(&envelope).unwrap();
+        let unsub_url = parsed["UnsubscribeURL"].as_str().unwrap();
+        assert!(
+            unsub_url.starts_with("http://myhost:5555/"),
+            "UnsubscribeURL should use the configured endpoint, got: {unsub_url}"
+        );
+        assert!(
+            unsub_url.contains(topic_arn),
+            "UnsubscribeURL should contain topic ARN"
+        );
+    }
+
+    #[test]
+    fn build_sns_lambda_event_uses_configured_endpoint() {
+        let now = Utc::now();
+        let sub_arn = "arn:aws:sns:us-east-1:123456789012:my-topic:abc-def-123";
+        let attrs = serde_json::Map::new();
+        let endpoint = "http://custom:9999";
+
+        let payload = build_sns_lambda_event(
+            "msg-003",
+            "arn:aws:sns:us-east-1:123456789012:my-topic",
+            sub_arn,
+            "hello",
+            None,
+            &attrs,
+            &now,
+            endpoint,
+        );
+
+        let parsed: Value = serde_json::from_str(&payload).unwrap();
+        let unsub_url = parsed["Records"][0]["Sns"]["UnsubscribeUrl"]
+            .as_str()
+            .unwrap();
+        assert!(
+            unsub_url.starts_with("http://custom:9999/"),
+            "UnsubscribeUrl should use configured endpoint, got: {unsub_url}"
         );
     }
 }

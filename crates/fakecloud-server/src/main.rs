@@ -61,15 +61,25 @@ async fn main() {
         )
         .init();
 
+    // Derive endpoint URL from the configured bind address
+    let endpoint_url = {
+        let addr = &cli.addr;
+        let host = addr.split(':').next().unwrap_or("0.0.0.0");
+        let host = if host == "0.0.0.0" { "localhost" } else { host };
+        let port = addr.split(':').nth(1).unwrap_or("4566");
+        format!("http://{host}:{port}")
+    };
+
     // Shared state
     let iam_state = Arc::new(parking_lot::RwLock::new(
         fakecloud_iam::state::IamState::new(&cli.account_id),
     ));
     let sqs_state = Arc::new(parking_lot::RwLock::new(
-        fakecloud_sqs::state::SqsState::new(&cli.account_id, &cli.region, "http://localhost:4566"),
+        fakecloud_sqs::state::SqsState::new(&cli.account_id, &cli.region, &endpoint_url),
     ));
     let sns_state = Arc::new(parking_lot::RwLock::new({
-        let mut s = fakecloud_sns::state::SnsState::new(&cli.account_id, &cli.region);
+        let mut s =
+            fakecloud_sns::state::SnsState::new(&cli.account_id, &cli.region, &endpoint_url);
         s.seed_default_opted_out();
         s
     }));

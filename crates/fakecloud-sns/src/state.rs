@@ -84,6 +84,7 @@ pub struct SentEmail {
 pub struct SnsState {
     pub account_id: String,
     pub region: String,
+    pub endpoint: String,
     pub topics: BTreeMap<String, SnsTopic>, // arn -> topic (ordered for predictable iteration)
     pub subscriptions: BTreeMap<String, SnsSubscription>, // sub_arn -> subscription
     pub published: Vec<PublishedMessage>,
@@ -98,10 +99,11 @@ pub struct SnsState {
 }
 
 impl SnsState {
-    pub fn new(account_id: &str, region: &str) -> Self {
+    pub fn new(account_id: &str, region: &str, endpoint: &str) -> Self {
         Self {
             account_id: account_id.to_string(),
             region: region.to_string(),
+            endpoint: endpoint.to_string(),
             topics: BTreeMap::new(),
             subscriptions: BTreeMap::new(),
             published: Vec::new(),

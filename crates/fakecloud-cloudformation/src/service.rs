@@ -681,6 +681,7 @@ mod tests {
             Arc::new(RwLock::new(fakecloud_sns::state::SnsState::new(
                 "123456789012",
                 "us-east-1",
+                "http://localhost:4566",
             ))),
             Arc::new(RwLock::new(fakecloud_ssm::state::SsmState::new(
                 "123456789012",

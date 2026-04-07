@@ -74,6 +74,8 @@ impl SnsDelivery for SnsDeliveryImpl {
             .map(|s| s.endpoint.clone())
             .collect();
 
+        let endpoint = state.endpoint.clone();
+
         // Build SNS Lambda event payload (matches real AWS format)
         let now = Utc::now();
         let empty_attrs = serde_json::Map::new();
@@ -88,6 +90,7 @@ impl SnsDelivery for SnsDeliveryImpl {
                     subject,
                     &empty_attrs,
                     &now,
+                    &endpoint,
                 );
                 (function_arn.clone(), payload)
             })
@@ -147,7 +150,7 @@ impl SnsDelivery for SnsDeliveryImpl {
             "SignatureVersion": "1",
             "Signature": "FAKE_SIGNATURE",
             "SigningCertURL": "https://sns.us-east-1.amazonaws.com/SimpleNotificationService-0000000000000000000000.pem",
-            "UnsubscribeURL": format!("http://localhost:4566/?Action=Unsubscribe&SubscriptionArn={}", topic_arn),
+            "UnsubscribeURL": format!("{}/?Action=Unsubscribe&SubscriptionArn={}", endpoint, topic_arn),
         });
         let envelope_str = sns_envelope.to_string();
 
