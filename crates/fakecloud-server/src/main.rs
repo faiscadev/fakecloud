@@ -168,6 +168,7 @@ async fn main() {
     );
 
     // Step 3: S3 delivery (S3 notifications can push to SQS, SNS, and Lambda)
+    let sns_delivery_for_ses = sns_delivery.clone();
     let delivery_for_s3 = {
         let mut bus = DeliveryBus::new()
             .with_sqs(sqs_delivery.clone())
@@ -179,6 +180,7 @@ async fn main() {
     };
 
     // Step 4: Logs delivery (subscription filters can push to SQS)
+    let sqs_delivery_for_ses = sqs_delivery.clone();
     let delivery_for_logs = Arc::new(DeliveryBus::new().with_sqs(sqs_delivery));
 
     // Clone state refs for internal endpoints
@@ -237,6 +239,7 @@ async fn main() {
     registry.register(Arc::new(eb_service));
 
     // Spawn the EventBridge scheduler as a background task
+    let eb_state_for_ses = eb_state.clone();
     let mut scheduler = fakecloud_eventbridge::scheduler::Scheduler::new(eb_state, delivery_for_eb)
         .with_lambda(lambda_state.clone())
         .with_logs(logs_state.clone());
@@ -273,7 +276,25 @@ async fn main() {
     registry.register(Arc::new(
         S3Service::new(s3_state.clone(), delivery_for_s3).with_kms(kms_state),
     ));
-    registry.register(Arc::new(SesV2Service::new(ses_state)));
+    // SES delivery bus (event fanout to SNS topics and EventBridge buses)
+    let eb_delivery_for_ses = Arc::new(
+        fakecloud_eventbridge::delivery::EventBridgeDeliveryImpl::new(
+            eb_state_for_ses,
+            Arc::new(DeliveryBus::new().with_sqs(sqs_delivery_for_ses)),
+        ),
+    );
+    let delivery_for_ses = Arc::new(
+        DeliveryBus::new()
+            .with_sns(sns_delivery_for_ses)
+            .with_eventbridge(eb_delivery_for_ses),
+    );
+    let ses_delivery_ctx = fakecloud_ses::fanout::SesDeliveryContext {
+        ses_state: ses_state.clone(),
+        delivery_bus: delivery_for_ses,
+    };
+    registry.register(Arc::new(
+        SesV2Service::new(ses_state).with_delivery(ses_delivery_ctx),
+    ));
 
     // Spawn background tasks
     let lifecycle_processor = fakecloud_s3::lifecycle::LifecycleProcessor::new(s3_state);

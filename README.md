@@ -113,7 +113,7 @@ fakecloud is now listening at `http://localhost:4566`.
 | **CloudWatch Logs** | 113 | Groups, streams, filtering, deliveries, transformers, query language, anomaly detection |
 | **KMS** | 53 | Encryption, key management, aliases, grants, real ECDH and key import |
 | **CloudFormation** | 8 | Template parsing, resource provisioning, custom resources via Lambda |
-| **SES v2** | 97 | Identities, templates, configuration sets, contact lists, contacts, send email, tagging, suppression list, event destinations, identity policies, DKIM/feedback/mail-from attributes, config set options, custom verification email templates, template rendering, dedicated IP pools & IPs, multi-region endpoints, account settings, import/export jobs, tenants, reputation entities, metrics |
+| **SES v2** | 97 | Identities, templates, configuration sets, contact lists, contacts, send email, tagging, suppression list, event destinations, identity policies, DKIM/feedback/mail-from attributes, config set options, custom verification email templates, template rendering, dedicated IP pools & IPs, multi-region endpoints, account settings, import/export jobs, tenants, reputation entities, metrics, event fanout (SNS/EventBridge), mailbox simulator |
 
 ### Cross-Service Integration
 
@@ -125,6 +125,7 @@ integration tests:
 - **S3 -> SNS/SQS/Lambda**: Bucket notifications on object create/delete
 - **SQS -> Lambda**: Event source mapping polls and invokes
 - **SecretsManager -> Lambda**: Rotation invokes Lambda for all 4 steps
+- **SES -> SNS/EventBridge**: Email event fanout (send, delivery, bounce, complaint) via configured event destinations
 - **CloudFormation -> Lambda**: Custom resources invoke via ServiceToken
 - **S3 Lifecycle**: Background expiration and storage class transitions
 - **EventBridge Scheduler**: Cron and rate-based rules fire on schedule

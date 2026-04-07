@@ -11,6 +11,8 @@ pub struct DeliveryBus {
     sqs_sender: Option<Arc<dyn SqsDelivery>>,
     /// Publish a message to an SNS topic by ARN.
     sns_sender: Option<Arc<dyn SnsDelivery>>,
+    /// Put an event onto an EventBridge bus.
+    eventbridge_sender: Option<Arc<dyn EventBridgeDelivery>>,
     /// Invoke a Lambda function by ARN.
     lambda_invoker: Option<Arc<dyn LambdaDelivery>>,
 }
@@ -52,6 +54,13 @@ pub trait SnsDelivery: Send + Sync {
     fn publish_to_topic(&self, topic_arn: &str, message: &str, subject: Option<&str>);
 }
 
+/// Trait for putting events onto an EventBridge bus from cross-service integrations.
+pub trait EventBridgeDelivery: Send + Sync {
+    /// Put an event onto the specified event bus.
+    /// The implementation should handle rule matching and target delivery.
+    fn put_event(&self, source: &str, detail_type: &str, detail: &str, event_bus_name: &str);
+}
+
 /// Trait for invoking Lambda functions from cross-service integrations.
 pub trait LambdaDelivery: Send + Sync {
     /// Invoke a Lambda function with the given payload.
@@ -68,6 +77,7 @@ impl DeliveryBus {
         Self {
             sqs_sender: None,
             sns_sender: None,
+            eventbridge_sender: None,
             lambda_invoker: None,
         }
     }
@@ -79,6 +89,11 @@ impl DeliveryBus {
 
     pub fn with_sns(mut self, sender: Arc<dyn SnsDelivery>) -> Self {
         self.sns_sender = Some(sender);
+        self
+    }
+
+    pub fn with_eventbridge(mut self, sender: Arc<dyn EventBridgeDelivery>) -> Self {
+        self.eventbridge_sender = Some(sender);
         self
     }
 
@@ -123,6 +138,19 @@ impl DeliveryBus {
     pub fn publish_to_sns(&self, topic_arn: &str, message: &str, subject: Option<&str>) {
         if let Some(ref sender) = self.sns_sender {
             sender.publish_to_topic(topic_arn, message, subject);
+        }
+    }
+
+    /// Put an event onto an EventBridge bus.
+    pub fn put_event_to_eventbridge(
+        &self,
+        source: &str,
+        detail_type: &str,
+        detail: &str,
+        event_bus_name: &str,
+    ) {
+        if let Some(ref sender) = self.eventbridge_sender {
+            sender.put_event(source, detail_type, detail, event_bus_name);
         }
     }
 

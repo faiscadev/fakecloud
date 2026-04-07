@@ -3540,7 +3540,7 @@ fn build_auth_params_response(auth_type: &str, params: &Value) -> Value {
 // ─── Event Pattern Matching ─────────────────────────────────────────
 
 /// Match an event against an EventBridge event pattern.
-fn matches_pattern(
+pub fn matches_pattern(
     pattern_json: Option<&str>,
     source: &str,
     detail_type: &str,
