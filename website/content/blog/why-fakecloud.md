@@ -1,7 +1,7 @@
 +++
 title = "Why I'm building a free, open-source AWS emulator"
 date = 2026-04-06
-description = "LocalStack went proprietary. Our builds broke. So I built a free, open-source replacement in Rust — 14 AWS services, 842 API operations, 100% conformance."
+description = "LocalStack went proprietary. Our builds broke. So I built a free, open-source replacement in Rust — 13 AWS services, 731 API operations, 100% conformance."
 
 [extra]
 author = "Lucas Vieira"
@@ -37,11 +37,11 @@ fakecloud doesn't try to be a scalable production cloud. It's not that. It's a t
 
 What does that mean in practice? If you call `CreateQueue`, then `SendMessage`, then `ReceiveMessage` on real AWS and get back your message with specific attributes — fakecloud should do exactly the same thing. If it doesn't, that's a fakecloud bug.
 
-We currently verify this with 280+ E2E tests that use the official `aws-sdk-rust` crate and 34,856 auto-generated conformance test variants validated against official AWS Smithy models — covering all 842 API operations across 14 services at 100% conformance. The plan for the near future: set up a real AWS account and run our test suite against both fakecloud and real AWS side by side, so we can verify behavioral parity automatically.
+We currently verify this with 280+ E2E tests that use the official `aws-sdk-rust` crate and 34,856 auto-generated conformance test variants validated against official AWS Smithy models — covering all 731 API operations across 13 services at 100% conformance. The plan for the near future: set up a real AWS account and run our test suite against both fakecloud and real AWS side by side, so we can verify behavioral parity automatically.
 
 ## What's here today
 
-14 services, 842 API operations, all open source, all free:
+13 services, 731 API operations, all open source, all free:
 
 - **S3** (74 actions) — objects, multipart uploads, versioning, lifecycle, notifications, encryption
 - **SQS** (20 actions) — FIFO queues, dead-letter queues, long polling, batch operations
@@ -56,7 +56,6 @@ We currently verify this with 280+ E2E tests that use the official `aws-sdk-rust
 - **CloudWatch Logs** (113 actions) — groups, streams, filtering, deliveries, transformers, anomaly detection
 - **KMS** (53 actions) — encryption, aliases, key management, grants, custom key stores
 - **CloudFormation** (8 actions) — template parsing, resource provisioning
-- **SES** (111 actions) — v2 identities, templates, configuration sets, send email, event fanout (SNS/EventBridge), mailbox simulator; v1 inbound receipt rules, receipt filters, inbound email pipeline
 
 Services talk to each other: S3 notifications deliver to SNS/SQS. SNS fans out to SQS. EventBridge rules fire on schedule and deliver to targets. This is the kind of cross-service behavior that matters in integration tests and that most emulators get wrong or skip entirely.
 
