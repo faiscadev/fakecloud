@@ -24,6 +24,7 @@ use fakecloud_lambda::service::LambdaService;
 use fakecloud_logs::service::LogsService;
 use fakecloud_s3::service::S3Service;
 use fakecloud_secretsmanager::service::SecretsManagerService;
+use fakecloud_ses::service::SesV2Service;
 use fakecloud_sns::service::SnsService;
 use fakecloud_sqs::service::SqsService;
 use fakecloud_ssm::service::SsmService;
@@ -128,6 +129,9 @@ async fn main() {
     let cloudformation_state = Arc::new(parking_lot::RwLock::new(
         fakecloud_cloudformation::state::CloudFormationState::new(&cli.account_id, &cli.region),
     ));
+    let ses_state = Arc::new(parking_lot::RwLock::new(
+        fakecloud_ses::state::SesState::new(&cli.account_id, &cli.region),
+    ));
 
     // Cross-service delivery bus
     // Step 1: SQS delivery (SNS and EventBridge can push messages into SQS queues)
@@ -179,6 +183,7 @@ async fn main() {
 
     // Clone state refs for internal endpoints
     let lambda_invocations_state = lambda_state.clone();
+    let ses_emails_state = ses_state.clone();
 
     // Clone state for reset endpoint before moving into services
     let reset_state = ResetState {
@@ -194,6 +199,7 @@ async fn main() {
         logs: logs_state.clone(),
         kms: kms_state.clone(),
         cloudformation: cloudformation_state.clone(),
+        ses: ses_state.clone(),
         container_runtime: container_runtime.clone(),
     };
 
@@ -267,6 +273,7 @@ async fn main() {
     registry.register(Arc::new(
         S3Service::new(s3_state.clone(), delivery_for_s3).with_kms(kms_state),
     ));
+    registry.register(Arc::new(SesV2Service::new(ses_state)));
 
     // Spawn background tasks
     let lifecycle_processor = fakecloud_s3::lifecycle::LifecycleProcessor::new(s3_state);
@@ -340,6 +347,36 @@ async fn main() {
                 }
             }),
         )
+        .route(
+            "/_fakecloud/ses/emails",
+            axum::routing::get({
+                let ss = ses_emails_state.clone();
+                move || async move {
+                    let state = ss.read();
+                    let emails: Vec<serde_json::Value> = state
+                        .sent_emails
+                        .iter()
+                        .map(|email| {
+                            serde_json::json!({
+                                "messageId": email.message_id,
+                                "from": email.from,
+                                "to": email.to,
+                                "cc": email.cc,
+                                "bcc": email.bcc,
+                                "subject": email.subject,
+                                "htmlBody": email.html_body,
+                                "textBody": email.text_body,
+                                "rawData": email.raw_data,
+                                "templateName": email.template_name,
+                                "templateData": email.template_data,
+                                "timestamp": email.timestamp.to_rfc3339(),
+                            })
+                        })
+                        .collect();
+                    axum::Json(serde_json::json!({ "emails": emails }))
+                }
+            }),
+        )
         .fallback(dispatch::dispatch)
         .layer(Extension(Arc::new(registry)))
         .layer(Extension(Arc::new(config)))
@@ -373,6 +410,7 @@ struct ResetState {
     logs: fakecloud_logs::state::SharedLogsState,
     kms: fakecloud_kms::state::SharedKmsState,
     cloudformation: fakecloud_cloudformation::state::SharedCloudFormationState,
+    ses: fakecloud_ses::state::SharedSesState,
     container_runtime: Option<Arc<fakecloud_lambda::runtime::ContainerRuntime>>,
 }
 
@@ -412,6 +450,7 @@ impl ResetState {
         self.logs.write().reset();
         self.kms.write().reset();
         self.cloudformation.write().reset();
+        self.ses.write().reset();
         tracing::info!("state reset via reset API");
         axum::Json(serde_json::json!({"status": "ok"}))
     }

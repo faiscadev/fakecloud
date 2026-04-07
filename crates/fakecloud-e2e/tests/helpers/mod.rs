@@ -127,6 +127,11 @@ impl TestServer {
         aws_sdk_cloudformation::Client::new(&self.aws_config().await)
     }
 
+    /// Create an SES v2 client.
+    pub async fn sesv2_client(&self) -> aws_sdk_sesv2::Client {
+        aws_sdk_sesv2::Client::new(&self.aws_config().await)
+    }
+
     /// Create an S3 client (path-style addressing for single-endpoint emulator).
     pub async fn s3_client(&self) -> aws_sdk_s3::Client {
         let config = self.aws_config().await;

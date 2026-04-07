@@ -28,6 +28,7 @@ fakecloud-secretsmanager = { workspace = true }
 fakecloud-logs = { workspace = true }
 fakecloud-kms = { workspace = true }
 fakecloud-cloudformation = { workspace = true }
+fakecloud-ses = { workspace = true }
 axum = { workspace = true }
 chrono = { workspace = true }
 parking_lot = { workspace = true }

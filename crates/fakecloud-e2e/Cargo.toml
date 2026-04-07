@@ -25,6 +25,7 @@ aws-sdk-secretsmanager = "1"
 aws-sdk-cloudwatchlogs = "1"
 aws-sdk-kms = "1"
 aws-sdk-cloudformation = "1"
+aws-sdk-sesv2 = "1"
 aws-credential-types = "1"
 aws-types = "1"
 reqwest = { version = "0.12", features = ["json"] }
