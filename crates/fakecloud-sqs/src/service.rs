@@ -2867,3 +2867,861 @@ fn parse_numbered_params(body: &Value, prefix: &str) -> Vec<String> {
     }
     result
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use parking_lot::RwLock;
+    use serde_json::json;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    fn expect_err(result: Result<AwsResponse, AwsServiceError>) -> AwsServiceError {
+        match result {
+            Err(e) => e,
+            Ok(_) => panic!("expected error but got Ok"),
+        }
+    }
+
+    fn make_service() -> SqsService {
+        let state: SharedSqsState = Arc::new(RwLock::new(crate::state::SqsState::new(
+            "123456789012",
+            "us-east-1",
+            "http://localhost:4566",
+        )));
+        SqsService::new(state)
+    }
+
+    fn make_request(action: &str, body: Value) -> AwsRequest {
+        AwsRequest {
+            service: "sqs".to_string(),
+            action: action.to_string(),
+            region: "us-east-1".to_string(),
+            account_id: "123456789012".to_string(),
+            request_id: "test-id".to_string(),
+            headers: http::HeaderMap::new(),
+            query_params: HashMap::new(),
+            body: serde_json::to_vec(&body).unwrap().into(),
+            path_segments: vec![],
+            raw_path: "/".to_string(),
+            method: http::Method::POST,
+            is_query_protocol: false,
+            access_key_id: None,
+        }
+    }
+
+    fn create_queue(svc: &SqsService, name: &str) -> String {
+        let req = make_request("CreateQueue", json!({ "QueueName": name }));
+        let resp = svc.create_queue(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        body["QueueUrl"].as_str().unwrap().to_string()
+    }
+
+    fn send_msg(svc: &SqsService, queue_url: &str, body_text: &str) -> String {
+        let req = make_request(
+            "SendMessage",
+            json!({ "QueueUrl": queue_url, "MessageBody": body_text }),
+        );
+        let resp = svc.send_message(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        body["MessageId"].as_str().unwrap().to_string()
+    }
+
+    fn receive_msgs(svc: &SqsService, queue_url: &str, max: u32) -> Vec<Value> {
+        let req = make_request(
+            "ReceiveMessage",
+            json!({
+                "QueueUrl": queue_url,
+                "MaxNumberOfMessages": max,
+                "VisibilityTimeout": 0,
+            }),
+        );
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let resp = rt.block_on(svc.receive_message(&req)).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        body["Messages"].as_array().cloned().unwrap_or_default()
+    }
+
+    // ── CreateQueue / GetQueueUrl / DeleteQueue / ListQueues ─────────
+
+    #[test]
+    fn create_queue_returns_url() {
+        let svc = make_service();
+        let url = create_queue(&svc, "my-queue");
+        assert!(url.contains("my-queue"));
+    }
+
+    #[test]
+    fn create_queue_idempotent_same_attributes() {
+        let svc = make_service();
+        let url1 = create_queue(&svc, "my-queue");
+        let url2 = create_queue(&svc, "my-queue");
+        assert_eq!(url1, url2);
+    }
+
+    #[test]
+    fn create_queue_conflict_different_attributes() {
+        let svc = make_service();
+        let req1 = make_request(
+            "CreateQueue",
+            json!({
+                "QueueName": "my-queue",
+                "Attributes": { "VisibilityTimeout": "60" }
+            }),
+        );
+        svc.create_queue(&req1).unwrap();
+
+        let req2 = make_request(
+            "CreateQueue",
+            json!({
+                "QueueName": "my-queue",
+                "Attributes": { "VisibilityTimeout": "120" }
+            }),
+        );
+        let err = expect_err(svc.create_queue(&req2));
+        assert!(err.to_string().contains("QueueAlreadyExists"));
+    }
+
+    #[test]
+    fn get_queue_url_existing() {
+        let svc = make_service();
+        let url = create_queue(&svc, "lookup-queue");
+        let req = make_request("GetQueueUrl", json!({ "QueueName": "lookup-queue" }));
+        let resp = svc.get_queue_url(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["QueueUrl"].as_str().unwrap(), url);
+    }
+
+    #[test]
+    fn get_queue_url_nonexistent() {
+        let svc = make_service();
+        let req = make_request("GetQueueUrl", json!({ "QueueName": "nope" }));
+        let err = expect_err(svc.get_queue_url(&req));
+        assert!(err.to_string().contains("QueueDoesNotExist"));
+    }
+
+    #[test]
+    fn delete_queue_removes_it() {
+        let svc = make_service();
+        let url = create_queue(&svc, "del-queue");
+        let req = make_request("DeleteQueue", json!({ "QueueUrl": url }));
+        svc.delete_queue(&req).unwrap();
+
+        let req2 = make_request("GetQueueUrl", json!({ "QueueName": "del-queue" }));
+        assert!(svc.get_queue_url(&req2).is_err());
+    }
+
+    #[test]
+    fn list_queues_all() {
+        let svc = make_service();
+        create_queue(&svc, "alpha");
+        create_queue(&svc, "beta");
+        create_queue(&svc, "gamma");
+
+        let req = make_request("ListQueues", json!({}));
+        let resp = svc.list_queues(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let urls = body["QueueUrls"].as_array().unwrap();
+        assert_eq!(urls.len(), 3);
+    }
+
+    #[test]
+    fn list_queues_with_prefix() {
+        let svc = make_service();
+        create_queue(&svc, "prod-orders");
+        create_queue(&svc, "prod-events");
+        create_queue(&svc, "dev-orders");
+
+        let req = make_request("ListQueues", json!({ "QueueNamePrefix": "prod-" }));
+        let resp = svc.list_queues(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let urls = body["QueueUrls"].as_array().unwrap();
+        assert_eq!(urls.len(), 2);
+        for u in urls {
+            assert!(u.as_str().unwrap().contains("prod-"));
+        }
+    }
+
+    #[test]
+    fn list_queues_pagination() {
+        let svc = make_service();
+        for i in 0..5 {
+            create_queue(&svc, &format!("page-queue-{i}"));
+        }
+
+        let req = make_request("ListQueues", json!({ "MaxResults": 2 }));
+        let resp = svc.list_queues(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let urls = body["QueueUrls"].as_array().unwrap();
+        assert_eq!(urls.len(), 2);
+        assert!(body["NextToken"].as_str().is_some());
+
+        // Second page
+        let token = body["NextToken"].as_str().unwrap();
+        let req2 = make_request("ListQueues", json!({ "MaxResults": 2, "NextToken": token }));
+        let resp2 = svc.list_queues(&req2).unwrap();
+        let body2: Value = serde_json::from_slice(&resp2.body).unwrap();
+        let urls2 = body2["QueueUrls"].as_array().unwrap();
+        assert_eq!(urls2.len(), 2);
+
+        // Third page (last 1)
+        let token2 = body2["NextToken"].as_str().unwrap();
+        let req3 = make_request(
+            "ListQueues",
+            json!({ "MaxResults": 2, "NextToken": token2 }),
+        );
+        let resp3 = svc.list_queues(&req3).unwrap();
+        let body3: Value = serde_json::from_slice(&resp3.body).unwrap();
+        let urls3 = body3["QueueUrls"].as_array().unwrap();
+        assert_eq!(urls3.len(), 1);
+        assert!(body3["NextToken"].is_null());
+    }
+
+    // ── SendMessage / ReceiveMessage / DeleteMessage ────────────────
+
+    #[test]
+    fn send_and_receive_message() {
+        let svc = make_service();
+        let url = create_queue(&svc, "msg-queue");
+        send_msg(&svc, &url, "hello world");
+
+        let msgs = receive_msgs(&svc, &url, 1);
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0]["Body"].as_str().unwrap(), "hello world");
+        assert!(msgs[0]["MessageId"].as_str().is_some());
+        assert!(msgs[0]["ReceiptHandle"].as_str().is_some());
+    }
+
+    #[test]
+    fn send_message_returns_md5() {
+        let svc = make_service();
+        let url = create_queue(&svc, "md5-queue");
+        let req = make_request(
+            "SendMessage",
+            json!({ "QueueUrl": url, "MessageBody": "test" }),
+        );
+        let resp = svc.send_message(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert!(body["MD5OfMessageBody"].as_str().is_some());
+        assert!(body["MessageId"].as_str().is_some());
+    }
+
+    #[test]
+    fn receive_empty_queue() {
+        let svc = make_service();
+        let url = create_queue(&svc, "empty-queue");
+        let msgs = receive_msgs(&svc, &url, 10);
+        assert!(msgs.is_empty());
+    }
+
+    #[test]
+    fn receive_respects_max_messages() {
+        let svc = make_service();
+        let url = create_queue(&svc, "multi-queue");
+        for i in 0..5 {
+            send_msg(&svc, &url, &format!("msg-{i}"));
+        }
+        let msgs = receive_msgs(&svc, &url, 3);
+        assert_eq!(msgs.len(), 3);
+    }
+
+    #[test]
+    fn delete_message_removes_from_inflight() {
+        let svc = make_service();
+        let url = create_queue(&svc, "del-msg-queue");
+        send_msg(&svc, &url, "to-delete");
+
+        // Receive with a high visibility timeout so it stays inflight
+        let req = make_request(
+            "ReceiveMessage",
+            json!({
+                "QueueUrl": url,
+                "MaxNumberOfMessages": 1,
+                "VisibilityTimeout": 300,
+            }),
+        );
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let resp = rt.block_on(svc.receive_message(&req)).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let receipt = body["Messages"][0]["ReceiptHandle"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // Delete it
+        let del_req = make_request(
+            "DeleteMessage",
+            json!({ "QueueUrl": url, "ReceiptHandle": receipt }),
+        );
+        svc.delete_message(&del_req).unwrap();
+
+        // Receive again with visibility 0 - should be empty
+        let msgs = receive_msgs(&svc, &url, 10);
+        assert!(msgs.is_empty());
+    }
+
+    #[test]
+    fn delete_message_invalid_receipt_handle() {
+        let svc = make_service();
+        let url = create_queue(&svc, "bad-receipt-queue");
+        let req = make_request(
+            "DeleteMessage",
+            json!({ "QueueUrl": url, "ReceiptHandle": "bogus" }),
+        );
+        let err = expect_err(svc.delete_message(&req));
+        assert!(err.to_string().contains("ReceiptHandleIsInvalid"));
+    }
+
+    // ── SendMessageBatch ────────────────────────────────────────────
+
+    #[test]
+    fn send_message_batch_success() {
+        let svc = make_service();
+        let url = create_queue(&svc, "batch-queue");
+        let req = make_request(
+            "SendMessageBatch",
+            json!({
+                "QueueUrl": url,
+                "Entries": [
+                    { "Id": "a", "MessageBody": "first" },
+                    { "Id": "b", "MessageBody": "second" },
+                    { "Id": "c", "MessageBody": "third" },
+                ]
+            }),
+        );
+        let resp = svc.send_message_batch(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let successful = body["Successful"].as_array().unwrap();
+        assert_eq!(successful.len(), 3);
+
+        let ids: Vec<&str> = successful
+            .iter()
+            .map(|e| e["Id"].as_str().unwrap())
+            .collect();
+        assert!(ids.contains(&"a"));
+        assert!(ids.contains(&"b"));
+        assert!(ids.contains(&"c"));
+
+        // Verify messages are receivable
+        let msgs = receive_msgs(&svc, &url, 10);
+        assert_eq!(msgs.len(), 3);
+    }
+
+    #[test]
+    fn send_message_batch_empty_fails() {
+        let svc = make_service();
+        let url = create_queue(&svc, "batch-empty-queue");
+        let req = make_request(
+            "SendMessageBatch",
+            json!({ "QueueUrl": url, "Entries": [] }),
+        );
+        let err = expect_err(svc.send_message_batch(&req));
+        assert!(err.to_string().contains("EmptyBatchRequest"));
+    }
+
+    #[test]
+    fn send_message_batch_duplicate_ids_fails() {
+        let svc = make_service();
+        let url = create_queue(&svc, "batch-dup-queue");
+        let req = make_request(
+            "SendMessageBatch",
+            json!({
+                "QueueUrl": url,
+                "Entries": [
+                    { "Id": "a", "MessageBody": "first" },
+                    { "Id": "a", "MessageBody": "second" },
+                ]
+            }),
+        );
+        let err = expect_err(svc.send_message_batch(&req));
+        assert!(err.to_string().contains("BatchEntryIdsNotDistinct"));
+    }
+
+    // ── ChangeMessageVisibility ─────────────────────────────────────
+
+    #[test]
+    fn change_message_visibility() {
+        let svc = make_service();
+        let url = create_queue(&svc, "vis-queue");
+        send_msg(&svc, &url, "visibility-test");
+
+        // Receive with high visibility timeout
+        let req = make_request(
+            "ReceiveMessage",
+            json!({
+                "QueueUrl": url,
+                "MaxNumberOfMessages": 1,
+                "VisibilityTimeout": 300,
+            }),
+        );
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let resp = rt.block_on(svc.receive_message(&req)).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let receipt = body["Messages"][0]["ReceiptHandle"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // Change visibility to 0 (make immediately visible)
+        let cmv_req = make_request(
+            "ChangeMessageVisibility",
+            json!({
+                "QueueUrl": url,
+                "ReceiptHandle": receipt,
+                "VisibilityTimeout": 0,
+            }),
+        );
+        svc.change_message_visibility(&cmv_req).unwrap();
+
+        // Message should be receivable again immediately
+        let msgs = receive_msgs(&svc, &url, 1);
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0]["Body"].as_str().unwrap(), "visibility-test");
+    }
+
+    #[test]
+    fn change_message_visibility_invalid_receipt() {
+        let svc = make_service();
+        let url = create_queue(&svc, "vis-bad-queue");
+        let req = make_request(
+            "ChangeMessageVisibility",
+            json!({
+                "QueueUrl": url,
+                "ReceiptHandle": "invalid-handle",
+                "VisibilityTimeout": 0,
+            }),
+        );
+        let err = expect_err(svc.change_message_visibility(&req));
+        assert!(err.to_string().contains("ReceiptHandleIsInvalid"));
+    }
+
+    // ── GetQueueAttributes / SetQueueAttributes ─────────────────────
+
+    #[test]
+    fn get_queue_attributes_all() {
+        let svc = make_service();
+        let url = create_queue(&svc, "attrs-queue");
+        let req = make_request(
+            "GetQueueAttributes",
+            json!({
+                "QueueUrl": url,
+                "AttributeNames": ["All"],
+            }),
+        );
+        let resp = svc.get_queue_attributes(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let attrs = body["Attributes"].as_object().unwrap();
+
+        assert_eq!(attrs["VisibilityTimeout"].as_str().unwrap(), "30");
+        assert_eq!(attrs["DelaySeconds"].as_str().unwrap(), "0");
+        assert!(attrs.contains_key("QueueArn"));
+        assert!(attrs.contains_key("ApproximateNumberOfMessages"));
+    }
+
+    #[test]
+    fn get_queue_attributes_specific() {
+        let svc = make_service();
+        let url = create_queue(&svc, "specific-attrs-queue");
+        let req = make_request(
+            "GetQueueAttributes",
+            json!({
+                "QueueUrl": url,
+                "AttributeNames": ["VisibilityTimeout", "DelaySeconds"],
+            }),
+        );
+        let resp = svc.get_queue_attributes(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let attrs = body["Attributes"].as_object().unwrap();
+
+        assert!(attrs.contains_key("VisibilityTimeout"));
+        assert!(attrs.contains_key("DelaySeconds"));
+        assert!(!attrs.contains_key("QueueArn"));
+    }
+
+    #[test]
+    fn set_queue_attributes_updates_values() {
+        let svc = make_service();
+        let url = create_queue(&svc, "set-attrs-queue");
+
+        let set_req = make_request(
+            "SetQueueAttributes",
+            json!({
+                "QueueUrl": url,
+                "Attributes": { "VisibilityTimeout": "60", "DelaySeconds": "10" },
+            }),
+        );
+        svc.set_queue_attributes(&set_req).unwrap();
+
+        let get_req = make_request(
+            "GetQueueAttributes",
+            json!({
+                "QueueUrl": url,
+                "AttributeNames": ["VisibilityTimeout", "DelaySeconds"],
+            }),
+        );
+        let resp = svc.get_queue_attributes(&get_req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let attrs = body["Attributes"].as_object().unwrap();
+        assert_eq!(attrs["VisibilityTimeout"].as_str().unwrap(), "60");
+        assert_eq!(attrs["DelaySeconds"].as_str().unwrap(), "10");
+    }
+
+    #[test]
+    fn get_queue_attributes_message_counts() {
+        let svc = make_service();
+        let url = create_queue(&svc, "count-queue");
+        send_msg(&svc, &url, "msg-1");
+        send_msg(&svc, &url, "msg-2");
+
+        let req = make_request(
+            "GetQueueAttributes",
+            json!({
+                "QueueUrl": url,
+                "AttributeNames": ["ApproximateNumberOfMessages"],
+            }),
+        );
+        let resp = svc.get_queue_attributes(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(
+            body["Attributes"]["ApproximateNumberOfMessages"]
+                .as_str()
+                .unwrap(),
+            "2"
+        );
+    }
+
+    #[test]
+    fn set_queue_attributes_removes_policy() {
+        let svc = make_service();
+        let url = create_queue(&svc, "policy-queue");
+
+        let set_req = make_request(
+            "SetQueueAttributes",
+            json!({
+                "QueueUrl": url,
+                "Attributes": { "Policy": "{\"Version\":\"2012-10-17\"}" },
+            }),
+        );
+        svc.set_queue_attributes(&set_req).unwrap();
+
+        let remove_req = make_request(
+            "SetQueueAttributes",
+            json!({
+                "QueueUrl": url,
+                "Attributes": { "Policy": "" },
+            }),
+        );
+        svc.set_queue_attributes(&remove_req).unwrap();
+
+        let get_req = make_request(
+            "GetQueueAttributes",
+            json!({
+                "QueueUrl": url,
+                "AttributeNames": ["All"],
+            }),
+        );
+        let resp = svc.get_queue_attributes(&get_req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let attrs = body["Attributes"].as_object().unwrap();
+        assert!(!attrs.contains_key("Policy"));
+    }
+
+    // ── PurgeQueue ──────────────────────────────────────────────────
+
+    #[test]
+    fn purge_queue_removes_all_messages() {
+        let svc = make_service();
+        let url = create_queue(&svc, "purge-queue");
+        send_msg(&svc, &url, "msg-1");
+        send_msg(&svc, &url, "msg-2");
+        send_msg(&svc, &url, "msg-3");
+
+        let req = make_request("PurgeQueue", json!({ "QueueUrl": url }));
+        svc.purge_queue(&req).unwrap();
+
+        let msgs = receive_msgs(&svc, &url, 10);
+        assert!(msgs.is_empty());
+    }
+
+    #[test]
+    fn purge_queue_nonexistent_fails() {
+        let svc = make_service();
+        let req = make_request(
+            "PurgeQueue",
+            json!({ "QueueUrl": "http://localhost:4566/123456789012/nope" }),
+        );
+        assert!(svc.purge_queue(&req).is_err());
+    }
+
+    // ── TagQueue / UntagQueue / ListQueueTags ───────────────────────
+
+    #[test]
+    fn tag_and_list_queue_tags() {
+        let svc = make_service();
+        let url = create_queue(&svc, "tag-queue");
+
+        let tag_req = make_request(
+            "TagQueue",
+            json!({
+                "QueueUrl": url,
+                "Tags": { "env": "prod", "team": "backend" },
+            }),
+        );
+        svc.tag_queue(&tag_req).unwrap();
+
+        let list_req = make_request("ListQueueTags", json!({ "QueueUrl": url }));
+        let resp = svc.list_queue_tags(&list_req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let tags = body["Tags"].as_object().unwrap();
+        assert_eq!(tags["env"].as_str().unwrap(), "prod");
+        assert_eq!(tags["team"].as_str().unwrap(), "backend");
+    }
+
+    #[test]
+    fn untag_queue_removes_tags() {
+        let svc = make_service();
+        let url = create_queue(&svc, "untag-queue");
+
+        let tag_req = make_request(
+            "TagQueue",
+            json!({
+                "QueueUrl": url,
+                "Tags": { "env": "prod", "team": "backend", "version": "1" },
+            }),
+        );
+        svc.tag_queue(&tag_req).unwrap();
+
+        let untag_req = make_request(
+            "UntagQueue",
+            json!({
+                "QueueUrl": url,
+                "TagKeys": ["env", "version"],
+            }),
+        );
+        svc.untag_queue(&untag_req).unwrap();
+
+        let list_req = make_request("ListQueueTags", json!({ "QueueUrl": url }));
+        let resp = svc.list_queue_tags(&list_req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let tags = body["Tags"].as_object().unwrap();
+        assert_eq!(tags.len(), 1);
+        assert_eq!(tags["team"].as_str().unwrap(), "backend");
+    }
+
+    #[test]
+    fn tag_queue_merges_with_existing() {
+        let svc = make_service();
+        let url = create_queue(&svc, "merge-tag-queue");
+
+        let tag1 = make_request("TagQueue", json!({ "QueueUrl": url, "Tags": { "a": "1" } }));
+        svc.tag_queue(&tag1).unwrap();
+
+        let tag2 = make_request("TagQueue", json!({ "QueueUrl": url, "Tags": { "b": "2" } }));
+        svc.tag_queue(&tag2).unwrap();
+
+        let list_req = make_request("ListQueueTags", json!({ "QueueUrl": url }));
+        let resp = svc.list_queue_tags(&list_req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let tags = body["Tags"].as_object().unwrap();
+        assert_eq!(tags.len(), 2);
+        assert_eq!(tags["a"].as_str().unwrap(), "1");
+        assert_eq!(tags["b"].as_str().unwrap(), "2");
+    }
+
+    #[test]
+    fn tag_queue_empty_tags_fails() {
+        let svc = make_service();
+        let url = create_queue(&svc, "empty-tag-queue");
+        let req = make_request("TagQueue", json!({ "QueueUrl": url, "Tags": {} }));
+        assert!(svc.tag_queue(&req).is_err());
+    }
+
+    #[test]
+    fn list_queue_tags_empty_by_default() {
+        let svc = make_service();
+        let url = create_queue(&svc, "no-tags-queue");
+        let req = make_request("ListQueueTags", json!({ "QueueUrl": url }));
+        let resp = svc.list_queue_tags(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let tags = body["Tags"].as_object().unwrap();
+        assert!(tags.is_empty());
+    }
+
+    // ── CreateQueue with tags and custom attributes ─────────────────
+
+    #[test]
+    fn create_queue_with_tags() {
+        let svc = make_service();
+        let req = make_request(
+            "CreateQueue",
+            json!({
+                "QueueName": "tagged-at-create",
+                "Tags": { "env": "test" },
+            }),
+        );
+        let resp = svc.create_queue(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let url = body["QueueUrl"].as_str().unwrap();
+
+        let list_req = make_request("ListQueueTags", json!({ "QueueUrl": url }));
+        let resp = svc.list_queue_tags(&list_req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["Tags"]["env"].as_str().unwrap(), "test");
+    }
+
+    #[test]
+    fn create_queue_with_custom_visibility_timeout() {
+        let svc = make_service();
+        let req = make_request(
+            "CreateQueue",
+            json!({
+                "QueueName": "custom-vt",
+                "Attributes": { "VisibilityTimeout": "45" },
+            }),
+        );
+        let resp = svc.create_queue(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let url = body["QueueUrl"].as_str().unwrap();
+
+        let get_req = make_request(
+            "GetQueueAttributes",
+            json!({
+                "QueueUrl": url,
+                "AttributeNames": ["VisibilityTimeout"],
+            }),
+        );
+        let resp = svc.get_queue_attributes(&get_req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(
+            body["Attributes"]["VisibilityTimeout"].as_str().unwrap(),
+            "45"
+        );
+    }
+
+    // ── FIFO queue ──────────────────────────────────────────────────
+
+    #[test]
+    fn create_fifo_queue() {
+        let svc = make_service();
+        let url = create_queue(&svc, "my-queue.fifo");
+        assert!(url.contains(".fifo"));
+
+        let req = make_request(
+            "GetQueueAttributes",
+            json!({
+                "QueueUrl": url,
+                "AttributeNames": ["FifoQueue"],
+            }),
+        );
+        let resp = svc.get_queue_attributes(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["Attributes"]["FifoQueue"].as_str().unwrap(), "true");
+    }
+
+    #[test]
+    fn fifo_queue_requires_message_group_id() {
+        let svc = make_service();
+        let url = create_queue(&svc, "strict.fifo");
+        let req = make_request(
+            "SendMessage",
+            json!({
+                "QueueUrl": url,
+                "MessageBody": "hello",
+                "MessageDeduplicationId": "dedup-1",
+            }),
+        );
+        let err = expect_err(svc.send_message(&req));
+        assert!(err.to_string().contains("MessageGroupId"));
+    }
+
+    // ── Queue name validation ───────────────────────────────────────
+
+    #[test]
+    fn create_queue_invalid_name() {
+        let svc = make_service();
+        let req = make_request(
+            "CreateQueue",
+            json!({ "QueueName": "bad name with spaces" }),
+        );
+        let err = expect_err(svc.create_queue(&req));
+        assert!(err.to_string().contains("InvalidParameterValue"));
+    }
+
+    // ── Message attributes ──────────────────────────────────────────
+
+    #[test]
+    fn send_message_with_attributes() {
+        let svc = make_service();
+        let url = create_queue(&svc, "msg-attrs-queue");
+        let req = make_request(
+            "SendMessage",
+            json!({
+                "QueueUrl": url,
+                "MessageBody": "with-attrs",
+                "MessageAttributes": {
+                    "Color": {
+                        "DataType": "String",
+                        "StringValue": "blue"
+                    }
+                }
+            }),
+        );
+        let resp = svc.send_message(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert!(body["MD5OfMessageAttributes"].as_str().is_some());
+    }
+
+    // ── Inflight tracking ───────────────────────────────────────────
+
+    #[test]
+    fn receive_increments_inflight_count() {
+        let svc = make_service();
+        let url = create_queue(&svc, "inflight-queue");
+        send_msg(&svc, &url, "tracked");
+
+        // Receive with high visibility timeout
+        let req = make_request(
+            "ReceiveMessage",
+            json!({
+                "QueueUrl": url,
+                "MaxNumberOfMessages": 1,
+                "VisibilityTimeout": 300,
+            }),
+        );
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(svc.receive_message(&req)).unwrap();
+
+        let attr_req = make_request(
+            "GetQueueAttributes",
+            json!({
+                "QueueUrl": url,
+                "AttributeNames": [
+                    "ApproximateNumberOfMessages",
+                    "ApproximateNumberOfMessagesNotVisible"
+                ],
+            }),
+        );
+        let resp = svc.get_queue_attributes(&attr_req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let attrs = body["Attributes"].as_object().unwrap();
+        assert_eq!(attrs["ApproximateNumberOfMessages"].as_str().unwrap(), "0");
+        assert_eq!(
+            attrs["ApproximateNumberOfMessagesNotVisible"]
+                .as_str()
+                .unwrap(),
+            "1"
+        );
+    }
+}
