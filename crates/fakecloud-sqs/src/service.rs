@@ -6,6 +6,7 @@ use serde_json::{json, Value};
 use sha2::Sha256;
 use std::collections::{HashMap, VecDeque};
 
+use fakecloud_aws::arn::Arn;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 
 use crate::state::{MessageAttribute, RedrivePolicy, SharedSqsState, SqsMessage, SqsQueue};
@@ -2297,7 +2298,7 @@ impl SqsService {
                 "Sid": label,
                 "Effect": "Allow",
                 "Principal": {
-                    "AWS": format!("arn:aws:iam::{account_id}:root")
+                    "AWS": Arn::global("iam", account_id, "root").to_string()
                 },
                 "Action": action_value,
                 "Resource": queue.arn,

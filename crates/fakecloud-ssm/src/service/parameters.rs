@@ -4,6 +4,7 @@ use chrono::Utc;
 use http::StatusCode;
 use serde_json::{json, Value};
 
+use fakecloud_aws::arn::Arn;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 use fakecloud_core::validation::*;
 
@@ -1166,11 +1167,12 @@ pub(super) fn remove_param(
 }
 
 pub(super) fn param_arn(region: &str, account_id: &str, name: &str) -> String {
-    if name.starts_with('/') {
-        format!("arn:aws:ssm:{region}:{account_id}:parameter{name}")
+    let resource = if name.starts_with('/') {
+        format!("parameter{name}")
     } else {
-        format!("arn:aws:ssm:{region}:{account_id}:parameter/{name}")
-    }
+        format!("parameter/{name}")
+    };
+    Arn::new("ssm", region, account_id, &resource).to_string()
 }
 
 /// Rewrite the region component of a parameter ARN.

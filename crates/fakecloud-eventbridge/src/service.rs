@@ -6,6 +6,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use fakecloud_aws::arn::Arn;
 use fakecloud_core::delivery::DeliveryBus;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 use fakecloud_core::validation::*;
@@ -466,7 +467,7 @@ impl EventBridgeService {
         let statement = json!({
             "Sid": statement_id,
             "Effect": "Allow",
-            "Principal": { "AWS": format!("arn:aws:iam::{principal}:root") },
+            "Principal": { "AWS": Arn::global("iam", principal, "root").to_string() },
             "Action": action,
             "Resource": bus.arn,
         });
@@ -3883,7 +3884,13 @@ pub fn deliver_to_logs(
         .entry(group_name.to_string())
         .or_insert_with(|| fakecloud_logs::state::LogGroup {
             name: group_name.to_string(),
-            arn: format!("arn:aws:logs:{region}:{account_id}:log-group:{group_name}"),
+            arn: Arn::new(
+                "logs",
+                &region,
+                &account_id,
+                &format!("log-group:{group_name}"),
+            )
+            .to_string(),
             creation_time: ts_millis,
             retention_in_days: None,
             kms_key_id: None,

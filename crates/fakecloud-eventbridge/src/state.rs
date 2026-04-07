@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+use fakecloud_aws::arn::Arn;
 use parking_lot::RwLock;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -190,7 +191,8 @@ pub struct EventBridgeState {
 impl EventBridgeState {
     pub fn new(account_id: &str, region: &str) -> Self {
         let now = Utc::now();
-        let default_bus_arn = format!("arn:aws:events:{region}:{account_id}:event-bus/default");
+        let default_bus_arn =
+            Arn::new("events", region, account_id, "event-bus/default").to_string();
         let mut buses = HashMap::new();
         buses.insert(
             "default".to_string(),

@@ -5,6 +5,7 @@ use http::StatusCode;
 use serde_json::Value;
 use std::collections::HashMap;
 
+use fakecloud_aws::arn::Arn;
 use fakecloud_core::delivery::DeliveryBus;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 
@@ -302,7 +303,7 @@ impl SnsService {
         let tags = parse_tags(req);
 
         let mut state = self.state.write();
-        let topic_arn = format!("arn:aws:sns:{}:{}:{}", req.region, state.account_id, name);
+        let topic_arn = Arn::new("sns", &req.region, &state.account_id, &name).to_string();
 
         if !state.topics.contains_key(&topic_arn) {
             let mut attributes = HashMap::new();
@@ -1904,12 +1905,12 @@ impl SnsService {
 
         // Build principal
         let principal = if account_ids.len() == 1 {
-            Value::String(format!("arn:aws:iam::{}:root", account_ids[0]))
+            Value::String(Arn::global("iam", &account_ids[0], "root").to_string())
         } else {
             Value::Array(
                 account_ids
                     .iter()
-                    .map(|id| Value::String(format!("arn:aws:iam::{}:root", id)))
+                    .map(|id| Value::String(Arn::global("iam", id, "root").to_string()))
                     .collect(),
             )
         };

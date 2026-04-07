@@ -1643,6 +1643,7 @@ dependencies = [
  "async-trait",
  "base64",
  "chrono",
+ "fakecloud-aws",
  "fakecloud-core",
  "http 1.4.0",
  "parking_lot",

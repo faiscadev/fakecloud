@@ -2,6 +2,7 @@ use chrono::Utc;
 use http::StatusCode;
 use serde_json::{json, Value};
 
+use fakecloud_aws::arn::Arn;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 use fakecloud_core::validation::*;
 
@@ -32,7 +33,7 @@ impl SsmService {
             status: "Connected".to_string(),
             start_date: now,
             end_date: None,
-            owner: format!("arn:aws:iam::{account_id}:root"),
+            owner: Arn::global("iam", &account_id, "root").to_string(),
             reason,
         };
         state.sessions.insert(session_id.clone(), session);

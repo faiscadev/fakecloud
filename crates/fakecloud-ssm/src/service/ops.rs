@@ -4,6 +4,7 @@ use chrono::Utc;
 use http::StatusCode;
 use serde_json::{json, Value};
 
+use fakecloud_aws::arn::Arn;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 use fakecloud_core::validation::*;
 
@@ -79,8 +80,8 @@ impl SsmService {
             tags,
             created_time: now,
             last_modified_time: now,
-            created_by: format!("arn:aws:iam::{}:root", state.account_id),
-            last_modified_by: format!("arn:aws:iam::{}:root", state.account_id),
+            created_by: Arn::global("iam", &state.account_id, "root").to_string(),
+            last_modified_by: Arn::global("iam", &state.account_id, "root").to_string(),
             ops_item_type,
             planned_start_time: None,
             planned_end_time: None,
@@ -158,7 +159,7 @@ impl SsmService {
         }
 
         item.last_modified_time = Utc::now();
-        item.last_modified_by = format!("arn:aws:iam::{}:root", account_id);
+        item.last_modified_by = Arn::global("iam", &account_id, "root").to_string();
 
         Ok(json_resp(json!({})))
     }
@@ -287,9 +288,9 @@ impl SsmService {
             resource_type,
             resource_uri,
             created_time: now,
-            created_by: format!("arn:aws:iam::{account_id}:root"),
+            created_by: Arn::global("iam", &account_id, "root").to_string(),
             last_modified_time: now,
-            last_modified_by: format!("arn:aws:iam::{account_id}:root"),
+            last_modified_by: Arn::global("iam", &account_id, "root").to_string(),
         });
 
         Ok(json_resp(json!({ "AssociationId": association_id })))

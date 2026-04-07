@@ -7,6 +7,7 @@ use http::StatusCode;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
+use fakecloud_aws::arn::Arn;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 use fakecloud_core::validation::*;
 
@@ -190,7 +191,7 @@ fn default_key_policy(account_id: &str) -> String {
             {
                 "Sid": "Enable IAM User Permissions",
                 "Effect": "Allow",
-                "Principal": {"AWS": format!("arn:aws:iam::{account_id}:root")},
+                "Principal": {"AWS": Arn::global("iam", account_id, "root").to_string()},
                 "Action": "kms:*",
                 "Resource": "*",
             }

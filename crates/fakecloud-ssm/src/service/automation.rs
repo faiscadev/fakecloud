@@ -4,6 +4,7 @@ use chrono::Utc;
 use http::StatusCode;
 use serde_json::{json, Value};
 
+use fakecloud_aws::arn::Arn;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 use fakecloud_core::validation::*;
 
@@ -80,7 +81,7 @@ impl SsmService {
             targets,
             max_concurrency,
             max_errors,
-            executed_by: format!("arn:aws:iam::{account_id}:root"),
+            executed_by: Arn::global("iam", &account_id, "root").to_string(),
             step_executions: Vec::new(),
             automation_subtype: None,
             runbooks: Vec::new(),
@@ -280,7 +281,7 @@ impl SsmService {
             targets: Vec::new(),
             max_concurrency: None,
             max_errors: None,
-            executed_by: format!("arn:aws:iam::{account_id}:root"),
+            executed_by: Arn::global("iam", &account_id, "root").to_string(),
             step_executions: Vec::new(),
             automation_subtype: Some("ChangeRequest".to_string()),
             runbooks,

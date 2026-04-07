@@ -1,6 +1,7 @@
 use chrono::Utc;
 use serde_json::json;
 
+use fakecloud_aws::arn::Arn;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 use fakecloud_core::validation::*;
 
@@ -54,7 +55,7 @@ impl SsmService {
                     "SettingValue": setting.setting_value,
                     "LastModifiedDate": setting.last_modified_date.timestamp_millis() as f64 / 1000.0,
                     "LastModifiedUser": setting.last_modified_user,
-                    "ARN": format!("arn:aws:ssm:{}:{}:servicesetting/{}", state.region, state.account_id, setting.setting_id),
+                    "ARN": Arn::new("ssm", &state.region, &state.account_id, &format!("servicesetting/{}", setting.setting_id)).to_string(),
                     "Status": setting.status,
                 }
             })))
@@ -66,7 +67,7 @@ impl SsmService {
                     "SettingValue": get_default_service_setting(setting_id),
                     "LastModifiedDate": Utc::now().timestamp_millis() as f64 / 1000.0,
                     "LastModifiedUser": "System",
-                    "ARN": format!("arn:aws:ssm:{}:{}:servicesetting/{}", state.region, state.account_id, setting_id),
+                    "ARN": Arn::new("ssm", &state.region, &state.account_id, &format!("servicesetting/{setting_id}")).to_string(),
                     "Status": "Default",
                 }
             })))
@@ -93,7 +94,7 @@ impl SsmService {
                 "SettingValue": default_value,
                 "LastModifiedDate": Utc::now().timestamp_millis() as f64 / 1000.0,
                 "LastModifiedUser": "System",
-                "ARN": format!("arn:aws:ssm:{}:{}:servicesetting/{}", state.region, state.account_id, setting_id),
+                "ARN": Arn::new("ssm", &state.region, &state.account_id, &format!("servicesetting/{setting_id}")).to_string(),
                 "Status": "Default",
             }
         })))
@@ -124,7 +125,7 @@ impl SsmService {
                 setting_id,
                 setting_value,
                 last_modified_date: now,
-                last_modified_user: format!("arn:aws:iam::{}:root", account_id),
+                last_modified_user: Arn::global("iam", &account_id, "root").to_string(),
                 status: "Customized".to_string(),
             },
         );
