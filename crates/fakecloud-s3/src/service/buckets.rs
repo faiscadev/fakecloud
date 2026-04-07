@@ -6,10 +6,9 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 use crate::state::S3Bucket;
 
 use super::{
-    canned_acl_grants, extract_xml_value, is_valid_bucket_name, is_valid_region,
-    no_such_bucket, s3_xml, xml_escape, S3Service,
+    canned_acl_grants, extract_xml_value, is_valid_bucket_name, is_valid_region, no_such_bucket,
+    s3_xml, xml_escape, S3Service,
 };
-
 
 impl S3Service {
     pub(super) fn list_buckets(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {

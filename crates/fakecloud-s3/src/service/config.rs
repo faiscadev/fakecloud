@@ -39,7 +39,10 @@ impl S3Service {
         Ok(empty_response(StatusCode::OK))
     }
 
-    pub(super) fn get_bucket_encryption(&self, bucket: &str) -> Result<AwsResponse, AwsServiceError> {
+    pub(super) fn get_bucket_encryption(
+        &self,
+        bucket: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
         let state = self.state.read();
         let b = state
             .buckets
@@ -56,7 +59,10 @@ impl S3Service {
         }
     }
 
-    pub(super) fn delete_bucket_encryption(&self, bucket: &str) -> Result<AwsResponse, AwsServiceError> {
+    pub(super) fn delete_bucket_encryption(
+        &self,
+        bucket: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
         let mut state = self.state.write();
         let b = state
             .buckets
@@ -94,7 +100,10 @@ impl S3Service {
         Ok(empty_response(StatusCode::OK))
     }
 
-    pub(super) fn get_bucket_lifecycle(&self, bucket: &str) -> Result<AwsResponse, AwsServiceError> {
+    pub(super) fn get_bucket_lifecycle(
+        &self,
+        bucket: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
         let state = self.state.read();
         let b = state
             .buckets
@@ -111,7 +120,10 @@ impl S3Service {
         }
     }
 
-    pub(super) fn delete_bucket_lifecycle(&self, bucket: &str) -> Result<AwsResponse, AwsServiceError> {
+    pub(super) fn delete_bucket_lifecycle(
+        &self,
+        bucket: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
         let mut state = self.state.write();
         let b = state
             .buckets
@@ -167,7 +179,10 @@ impl S3Service {
         }
     }
 
-    pub(super) fn delete_bucket_policy(&self, bucket: &str) -> Result<AwsResponse, AwsServiceError> {
+    pub(super) fn delete_bucket_policy(
+        &self,
+        bucket: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
         let mut state = self.state.write();
         let b = state
             .buckets
@@ -273,7 +288,10 @@ impl S3Service {
         Ok(empty_response(StatusCode::OK))
     }
 
-    pub(super) fn get_bucket_notification(&self, bucket: &str) -> Result<AwsResponse, AwsServiceError> {
+    pub(super) fn get_bucket_notification(
+        &self,
+        bucket: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
         let state = self.state.read();
         let b = state
             .buckets
@@ -356,7 +374,10 @@ impl S3Service {
         }
     }
 
-    pub(super) fn delete_bucket_website(&self, bucket: &str) -> Result<AwsResponse, AwsServiceError> {
+    pub(super) fn delete_bucket_website(
+        &self,
+        bucket: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
         let mut state = self.state.write();
         let b = state
             .buckets
@@ -405,7 +426,10 @@ impl S3Service {
         Ok(empty_response(StatusCode::OK))
     }
 
-    pub(super) fn get_bucket_accelerate(&self, bucket: &str) -> Result<AwsResponse, AwsServiceError> {
+    pub(super) fn get_bucket_accelerate(
+        &self,
+        bucket: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
         let state = self.state.read();
         let b = state
             .buckets
@@ -453,7 +477,10 @@ impl S3Service {
         Ok(empty_response(StatusCode::OK))
     }
 
-    pub(super) fn get_public_access_block(&self, bucket: &str) -> Result<AwsResponse, AwsServiceError> {
+    pub(super) fn get_public_access_block(
+        &self,
+        bucket: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
         let state = self.state.read();
         let b = state
             .buckets
@@ -487,7 +514,10 @@ impl S3Service {
         }
     }
 
-    pub(super) fn delete_public_access_block(&self, bucket: &str) -> Result<AwsResponse, AwsServiceError> {
+    pub(super) fn delete_public_access_block(
+        &self,
+        bucket: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
         let mut state = self.state.write();
         let b = state
             .buckets
@@ -544,7 +574,10 @@ impl S3Service {
     }
 
     #[allow(dead_code)]
-    pub(super) fn get_object_lock_config(&self, bucket: &str) -> Result<AwsResponse, AwsServiceError> {
+    pub(super) fn get_object_lock_config(
+        &self,
+        bucket: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
         let state = self.state.read();
         let b = state
             .buckets
@@ -715,7 +748,10 @@ impl S3Service {
         })
     }
 
-    pub(super) fn get_bucket_versioning(&self, bucket: &str) -> Result<AwsResponse, AwsServiceError> {
+    pub(super) fn get_bucket_versioning(
+        &self,
+        bucket: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
         let state = self.state.read();
         let b = state
             .buckets
@@ -733,7 +769,10 @@ impl S3Service {
         );
         Ok(s3_xml(StatusCode::OK, body))
     }
-    pub(super) fn get_object_lock_configuration(&self, bucket: &str) -> Result<AwsResponse, AwsServiceError> {
+    pub(super) fn get_object_lock_configuration(
+        &self,
+        bucket: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
         let state = self.state.read();
         let b = state
             .buckets
@@ -775,7 +814,10 @@ impl S3Service {
         Ok(empty_response(StatusCode::OK))
     }
 
-    pub(super) fn get_bucket_replication(&self, bucket: &str) -> Result<AwsResponse, AwsServiceError> {
+    pub(super) fn get_bucket_replication(
+        &self,
+        bucket: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
         let state = self.state.read();
         let b = state
             .buckets
@@ -792,7 +834,10 @@ impl S3Service {
         }
     }
 
-    pub(super) fn delete_bucket_replication(&self, bucket: &str) -> Result<AwsResponse, AwsServiceError> {
+    pub(super) fn delete_bucket_replication(
+        &self,
+        bucket: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
         let mut state = self.state.write();
         let b = state
             .buckets
@@ -817,7 +862,10 @@ impl S3Service {
         Ok(empty_response(StatusCode::OK))
     }
 
-    pub(super) fn get_bucket_ownership_controls(&self, bucket: &str) -> Result<AwsResponse, AwsServiceError> {
+    pub(super) fn get_bucket_ownership_controls(
+        &self,
+        bucket: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
         let state = self.state.read();
         let b = state
             .buckets

@@ -9,10 +9,9 @@ use crate::state::{MultipartUpload, S3Object, UploadPart};
 use md5::{Digest, Md5};
 
 use super::{
-    canned_acl_grants, compute_checksum, compute_md5, extract_user_metadata, no_such_bucket, no_such_key, no_such_upload,
-    parse_complete_multipart_xml, parse_grant_headers,
-    parse_url_encoded_tags, precondition_failed, resolve_object, s3_xml,
-    xml_escape, S3Service,
+    canned_acl_grants, compute_checksum, compute_md5, extract_user_metadata, no_such_bucket,
+    no_such_key, no_such_upload, parse_complete_multipart_xml, parse_grant_headers,
+    parse_url_encoded_tags, precondition_failed, resolve_object, s3_xml, xml_escape, S3Service,
 };
 
 impl S3Service {
@@ -573,7 +572,10 @@ impl S3Service {
         })
     }
 
-    pub(super) fn list_multipart_uploads(&self, bucket: &str) -> Result<AwsResponse, AwsServiceError> {
+    pub(super) fn list_multipart_uploads(
+        &self,
+        bucket: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
         let state = self.state.read();
         let b = state
             .buckets
@@ -728,5 +730,4 @@ impl S3Service {
         );
         Ok(s3_xml(StatusCode::OK, body))
     }
-
 }

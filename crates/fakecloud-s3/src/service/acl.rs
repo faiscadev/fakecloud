@@ -4,8 +4,8 @@ use bytes::Bytes;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use super::{
-    build_acl_xml, canned_acl_grants_for_object, no_such_bucket, no_such_key,
-    parse_acl_xml, parse_grant_headers, s3_xml, S3Service,
+    build_acl_xml, canned_acl_grants_for_object, no_such_bucket, no_such_key, parse_acl_xml,
+    parse_grant_headers, s3_xml, S3Service,
 };
 
 impl S3Service {
@@ -76,5 +76,4 @@ impl S3Service {
     }
 
     // ---- Object Tagging ----
-
 }

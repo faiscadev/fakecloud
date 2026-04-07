@@ -4,7 +4,6 @@ use chrono::Utc;
 
 use fakecloud_core::delivery::DeliveryBus;
 
-
 use super::{extract_xml_value, xml_escape};
 
 pub(crate) fn normalize_notification_ids(xml: &str) -> String {
@@ -339,7 +338,11 @@ pub(crate) fn parse_s3_key_filters(block: &str) -> (Option<String>, Option<Strin
 }
 
 /// Check if an object key matches the prefix/suffix filters.
-pub(crate) fn key_matches_filters(key: &str, prefix: &Option<String>, suffix: &Option<String>) -> bool {
+pub(crate) fn key_matches_filters(
+    key: &str,
+    prefix: &Option<String>,
+    suffix: &Option<String>,
+) -> bool {
     if let Some(p) = prefix {
         if !key.starts_with(p.as_str()) {
             return false;
@@ -563,4 +566,3 @@ pub(crate) fn deliver_notifications(
         }
     }
 }
-
