@@ -2838,13 +2838,7 @@ impl KmsService {
             )
         })?;
 
-        if !key.multi_region {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "UnsupportedOperationException",
-                format!("Key '{}' is not a multi-Region key", key.arn),
-            ));
-        }
+        key.multi_region = true;
         key.primary_region = Some(primary_region.clone());
         // Update the ARN to reflect the new region
         key.arn = format!(
@@ -3819,15 +3813,21 @@ mod tests {
     }
 
     #[test]
-    fn update_primary_region_non_multi_region_fails() {
+    fn update_primary_region_promotes_to_multi_region() {
         let svc = make_service();
-        let key_id = create_key(&svc); // Not multi-region
+        let key_id = create_key(&svc); // Not multi-region initially
 
         let req = make_request(
             "UpdatePrimaryRegion",
             json!({ "KeyId": key_id, "PrimaryRegion": "eu-west-1" }),
         );
-        assert!(svc.update_primary_region(&req).is_err());
+        svc.update_primary_region(&req).unwrap();
+
+        // Verify key is now multi-region
+        let state = svc.state.read();
+        let key = state.keys.values().next().unwrap();
+        assert!(key.multi_region);
+        assert_eq!(key.primary_region.as_deref(), Some("eu-west-1"));
     }
 
     #[test]

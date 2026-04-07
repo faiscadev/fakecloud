@@ -3034,20 +3034,41 @@ impl EventBridgeService {
             ));
         }
 
-        // Validate archive exists
-        let archive_name = event_source_arn
-            .rsplit_once("archive/")
-            .map(|(_, n)| n.to_string())
-            .unwrap_or_default();
-        if !state.archives.contains_key(&archive_name) {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "ValidationException",
-                format!(
-                    "Parameter EventSourceArn is not valid. Reason: Archive {archive_name} does not exist."
-                ),
-            ));
-        }
+        // Validate archive exists — EventSourceArn can be an archive ARN or an event bus ARN
+        let archive_name = if let Some((_, name)) = event_source_arn.rsplit_once("archive/") {
+            // Direct archive ARN
+            let name = name.to_string();
+            if !state.archives.contains_key(&name) {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationException",
+                    format!(
+                        "Parameter EventSourceArn is not valid. Reason: Archive {name} does not exist."
+                    ),
+                ));
+            }
+            name
+        } else {
+            // Event bus ARN — find an archive whose event_source_arn matches
+            let found = state
+                .archives
+                .values()
+                .find(|a| a.event_source_arn == event_source_arn)
+                .map(|a| a.name.clone());
+            match found {
+                Some(name) => name,
+                None => {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "ValidationException",
+                        format!(
+                            "Parameter EventSourceArn is not valid. Reason: No archive found for {}.",
+                            event_source_arn
+                        ),
+                    ));
+                }
+            }
+        };
 
         // Validate archive bus matches destination bus
         let archive = state.archives.get(&archive_name).unwrap();

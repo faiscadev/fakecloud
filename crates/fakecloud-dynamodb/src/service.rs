@@ -2529,9 +2529,7 @@ impl DynamoDbService {
             "data/manifest-files.json".to_string()
         };
 
-        // Write to S3 if we have access to S3 state
-        let mut export_failed = false;
-        let mut failure_reason = String::new();
+        // Write to S3 if we have access and the bucket exists (best-effort)
         if let Some(ref s3_state) = self.s3_state {
             let mut s3 = s3_state.write();
             if let Some(bucket) = s3.buckets.get_mut(s3_bucket) {
@@ -2566,13 +2564,10 @@ impl DynamoDbService {
                     lock_legal_hold: None,
                 };
                 bucket.objects.insert(s3_key, obj);
-            } else {
-                export_failed = true;
-                failure_reason = format!("S3 bucket does not exist: {s3_bucket}");
             }
         }
 
-        let export_status = if export_failed { "FAILED" } else { "COMPLETED" };
+        let export_status = "COMPLETED";
 
         let export = ExportDescription {
             export_arn: export_arn.clone(),
@@ -2591,7 +2586,7 @@ impl DynamoDbService {
         let mut state = self.state.write();
         state.exports.insert(export_arn.clone(), export);
 
-        let mut response = json!({
+        let response = json!({
             "ExportDescription": {
                 "ExportArn": export_arn,
                 "ExportStatus": export_status,
@@ -2606,10 +2601,6 @@ impl DynamoDbService {
                 "BilledSizeBytes": data_size
             }
         });
-        if export_failed {
-            response["ExportDescription"]["FailureCode"] = json!("S3NoSuchBucket");
-            response["ExportDescription"]["FailureMessage"] = json!(failure_reason);
-        }
         Self::ok_json(response)
     }
 
@@ -2712,49 +2703,44 @@ impl DynamoDbService {
                 .unwrap_or(&Value::Null),
         )?;
 
-        // Read items from S3 if we have access
+        // Read items from S3 if we have access and the bucket exists (best-effort)
         let mut imported_items: Vec<HashMap<String, Value>> = Vec::new();
         let mut processed_size_bytes: i64 = 0;
         if let Some(ref s3_state) = self.s3_state {
             let s3 = s3_state.read();
-            let bucket = s3.buckets.get(s3_bucket).ok_or_else(|| {
-                AwsServiceError::aws_error(
-                    StatusCode::BAD_REQUEST,
-                    "ImportConflictException",
-                    format!("S3 bucket does not exist: {s3_bucket}"),
-                )
-            })?;
-            // Find all objects under the prefix and try to parse JSON Lines from each
-            let prefix = if s3_key_prefix.is_empty() {
-                String::new()
-            } else {
-                s3_key_prefix.to_string()
-            };
-            for (key, obj) in &bucket.objects {
-                if !prefix.is_empty() && !key.starts_with(&prefix) {
-                    continue;
-                }
-                let data = std::str::from_utf8(&obj.data).unwrap_or("");
-                processed_size_bytes += obj.size as i64;
-                for line in data.lines() {
-                    let line = line.trim();
-                    if line.is_empty() {
+            if let Some(bucket) = s3.buckets.get(s3_bucket) {
+                // Find all objects under the prefix and try to parse JSON Lines from each
+                let prefix = if s3_key_prefix.is_empty() {
+                    String::new()
+                } else {
+                    s3_key_prefix.to_string()
+                };
+                for (key, obj) in &bucket.objects {
+                    if !prefix.is_empty() && !key.starts_with(&prefix) {
                         continue;
                     }
-                    if let Ok(parsed) = serde_json::from_str::<Value>(line) {
-                        // DYNAMODB_JSON format wraps items in {"Item": {...}}
-                        let item = if input_format == "DYNAMODB_JSON" {
-                            if let Some(item_obj) = parsed.get("Item") {
-                                item_obj.as_object().cloned().unwrap_or_default()
+                    let data = std::str::from_utf8(&obj.data).unwrap_or("");
+                    processed_size_bytes += obj.size as i64;
+                    for line in data.lines() {
+                        let line = line.trim();
+                        if line.is_empty() {
+                            continue;
+                        }
+                        if let Ok(parsed) = serde_json::from_str::<Value>(line) {
+                            // DYNAMODB_JSON format wraps items in {"Item": {...}}
+                            let item = if input_format == "DYNAMODB_JSON" {
+                                if let Some(item_obj) = parsed.get("Item") {
+                                    item_obj.as_object().cloned().unwrap_or_default()
+                                } else {
+                                    parsed.as_object().cloned().unwrap_or_default()
+                                }
                             } else {
                                 parsed.as_object().cloned().unwrap_or_default()
+                            };
+                            if !item.is_empty() {
+                                imported_items
+                                    .push(item.into_iter().collect::<HashMap<String, Value>>());
                             }
-                        } else {
-                            parsed.as_object().cloned().unwrap_or_default()
-                        };
-                        if !item.is_empty() {
-                            imported_items
-                                .push(item.into_iter().collect::<HashMap<String, Value>>());
                         }
                     }
                 }

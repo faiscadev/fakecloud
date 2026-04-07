@@ -382,22 +382,19 @@ impl LambdaService {
 
         let mut state = self.state.write();
 
-        // Resolve function name to ARN
-        let function_arn = if function_name.starts_with("arn:") {
-            function_name.clone()
-        } else {
-            let func = state.functions.get(&function_name).ok_or_else(|| {
-                AwsServiceError::aws_error(
-                    StatusCode::NOT_FOUND,
-                    "ResourceNotFoundException",
-                    format!(
-                        "Function not found: arn:aws:lambda:{}:{}:function:{}",
-                        state.region, state.account_id, function_name
-                    ),
-                )
-            })?;
-            func.function_arn.clone()
-        };
+        // Validate function exists if specified by name
+        if !function_name.starts_with("arn:") && !state.functions.contains_key(&function_name) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "ResourceNotFoundException",
+                format!(
+                    "Function not found: arn:aws:lambda:{}:{}:function:{}",
+                    state.region, state.account_id, function_name
+                ),
+            ));
+        }
+        // Store the function reference as provided (name or ARN)
+        let function_arn = function_name.clone();
 
         let batch_size = body["BatchSize"].as_i64().unwrap_or(10);
         let enabled = body["Enabled"].as_bool().unwrap_or(true);
