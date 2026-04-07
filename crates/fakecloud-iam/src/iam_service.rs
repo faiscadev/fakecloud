@@ -6482,4 +6482,610 @@ mod tests {
             "non-numeric MaxItems should return an error"
         );
     }
+
+    // ---- Group inline policy tests ----
+
+    #[test]
+    fn put_and_get_group_policy() {
+        let svc = make_service();
+        let policy_doc = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:*","Resource":"*"}]}"#;
+
+        // Create group
+        svc.handle_sync("CreateGroup", vec![("GroupName", "devs")]);
+
+        // Put inline policy
+        svc.handle_sync(
+            "PutGroupPolicy",
+            vec![
+                ("GroupName", "devs"),
+                ("PolicyName", "s3-access"),
+                ("PolicyDocument", policy_doc),
+            ],
+        );
+
+        // Get inline policy
+        let resp = svc.handle_sync(
+            "GetGroupPolicy",
+            vec![("GroupName", "devs"), ("PolicyName", "s3-access")],
+        );
+        assert!(resp.contains("s3-access"));
+        assert!(resp.contains("devs"));
+    }
+
+    #[test]
+    fn list_group_policies() {
+        let svc = make_service();
+        let doc = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"*","Resource":"*"}]}"#;
+
+        svc.handle_sync("CreateGroup", vec![("GroupName", "ops")]);
+        svc.handle_sync(
+            "PutGroupPolicy",
+            vec![
+                ("GroupName", "ops"),
+                ("PolicyName", "pol-a"),
+                ("PolicyDocument", doc),
+            ],
+        );
+        svc.handle_sync(
+            "PutGroupPolicy",
+            vec![
+                ("GroupName", "ops"),
+                ("PolicyName", "pol-b"),
+                ("PolicyDocument", doc),
+            ],
+        );
+
+        let resp = svc.handle_sync("ListGroupPolicies", vec![("GroupName", "ops")]);
+        assert!(resp.contains("pol-a"));
+        assert!(resp.contains("pol-b"));
+    }
+
+    #[test]
+    fn delete_group_policy() {
+        let svc = make_service();
+        let doc = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"*","Resource":"*"}]}"#;
+
+        svc.handle_sync("CreateGroup", vec![("GroupName", "team")]);
+        svc.handle_sync(
+            "PutGroupPolicy",
+            vec![
+                ("GroupName", "team"),
+                ("PolicyName", "temp"),
+                ("PolicyDocument", doc),
+            ],
+        );
+
+        // Delete
+        svc.handle_sync(
+            "DeleteGroupPolicy",
+            vec![("GroupName", "team"), ("PolicyName", "temp")],
+        );
+
+        // List should be empty
+        let resp = svc.handle_sync("ListGroupPolicies", vec![("GroupName", "team")]);
+        assert!(!resp.contains("temp"));
+    }
+
+    #[test]
+    fn get_group_policy_not_found() {
+        let svc = make_service();
+        svc.handle_sync("CreateGroup", vec![("GroupName", "g1")]);
+
+        let req = make_request(
+            "GetGroupPolicy",
+            vec![("GroupName", "g1"), ("PolicyName", "nope")],
+        );
+        let result = svc.get_group_policy(&req);
+        assert!(result.is_err());
+    }
+
+    // ---- Group managed policy attachment tests ----
+
+    #[test]
+    fn attach_and_list_group_policies_managed() {
+        let svc = make_service();
+        let doc = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"*","Resource":"*"}]}"#;
+
+        svc.handle_sync("CreateGroup", vec![("GroupName", "eng")]);
+        svc.handle_sync(
+            "CreatePolicy",
+            vec![("PolicyName", "read-policy"), ("PolicyDocument", doc)],
+        );
+
+        let create_resp = svc.handle_sync(
+            "CreatePolicy",
+            vec![("PolicyName", "write-policy"), ("PolicyDocument", doc)],
+        );
+        // Extract the ARN from the second policy
+        let arn_start = create_resp.find("<Arn>").unwrap() + 5;
+        let arn_end = create_resp.find("</Arn>").unwrap();
+        let write_arn = &create_resp[arn_start..arn_end];
+
+        // Attach both policies - for the first one, extract its ARN too
+        // Just use the write_arn which we already have
+        svc.handle_sync(
+            "AttachGroupPolicy",
+            vec![("GroupName", "eng"), ("PolicyArn", write_arn)],
+        );
+
+        let list = svc.handle_sync("ListAttachedGroupPolicies", vec![("GroupName", "eng")]);
+        assert!(list.contains("write-policy"));
+    }
+
+    #[test]
+    fn detach_group_policy() {
+        let svc = make_service();
+        let doc = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"*","Resource":"*"}]}"#;
+
+        svc.handle_sync("CreateGroup", vec![("GroupName", "detach-grp")]);
+        let resp = svc.handle_sync(
+            "CreatePolicy",
+            vec![("PolicyName", "detach-pol"), ("PolicyDocument", doc)],
+        );
+        let arn = extract_xml_value(&resp, "Arn");
+
+        svc.handle_sync(
+            "AttachGroupPolicy",
+            vec![("GroupName", "detach-grp"), ("PolicyArn", &arn)],
+        );
+
+        // Detach
+        svc.handle_sync(
+            "DetachGroupPolicy",
+            vec![("GroupName", "detach-grp"), ("PolicyArn", &arn)],
+        );
+
+        let list = svc.handle_sync(
+            "ListAttachedGroupPolicies",
+            vec![("GroupName", "detach-grp")],
+        );
+        assert!(!list.contains("detach-pol"));
+    }
+
+    #[test]
+    fn detach_group_policy_not_attached_fails() {
+        let svc = make_service();
+        svc.handle_sync("CreateGroup", vec![("GroupName", "grp-err")]);
+
+        let req = make_request(
+            "DetachGroupPolicy",
+            vec![
+                ("GroupName", "grp-err"),
+                ("PolicyArn", "arn:aws:iam::123456789012:policy/nope"),
+            ],
+        );
+        let result = svc.detach_group_policy(&req);
+        assert!(result.is_err());
+    }
+
+    // ---- User inline policy tests ----
+
+    #[test]
+    fn put_get_delete_user_inline_policy() {
+        let svc = make_service();
+        let doc = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"sqs:*","Resource":"*"}]}"#;
+
+        svc.handle_sync("CreateUser", vec![("UserName", "alice")]);
+
+        // Put
+        svc.handle_sync(
+            "PutUserPolicy",
+            vec![
+                ("UserName", "alice"),
+                ("PolicyName", "sqs-access"),
+                ("PolicyDocument", doc),
+            ],
+        );
+
+        // Get
+        let resp = svc.handle_sync(
+            "GetUserPolicy",
+            vec![("UserName", "alice"), ("PolicyName", "sqs-access")],
+        );
+        assert!(resp.contains("sqs-access"));
+        assert!(resp.contains("alice"));
+
+        // List
+        let list = svc.handle_sync("ListUserPolicies", vec![("UserName", "alice")]);
+        assert!(list.contains("sqs-access"));
+
+        // Delete
+        svc.handle_sync(
+            "DeleteUserPolicy",
+            vec![("UserName", "alice"), ("PolicyName", "sqs-access")],
+        );
+
+        let list = svc.handle_sync("ListUserPolicies", vec![("UserName", "alice")]);
+        assert!(!list.contains("sqs-access"));
+    }
+
+    #[test]
+    fn get_user_policy_not_found() {
+        let svc = make_service();
+        svc.handle_sync("CreateUser", vec![("UserName", "bob")]);
+
+        let req = make_request(
+            "GetUserPolicy",
+            vec![("UserName", "bob"), ("PolicyName", "ghost")],
+        );
+        let result = svc.get_user_policy(&req);
+        assert!(result.is_err());
+    }
+
+    // ---- User managed policy attachment tests ----
+
+    #[test]
+    fn attach_detach_list_user_policies_managed() {
+        let svc = make_service();
+        let doc = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"*","Resource":"*"}]}"#;
+
+        svc.handle_sync("CreateUser", vec![("UserName", "carol")]);
+        let resp = svc.handle_sync(
+            "CreatePolicy",
+            vec![("PolicyName", "user-pol"), ("PolicyDocument", doc)],
+        );
+        let arn = extract_xml_value(&resp, "Arn");
+
+        // Attach
+        svc.handle_sync(
+            "AttachUserPolicy",
+            vec![("UserName", "carol"), ("PolicyArn", &arn)],
+        );
+
+        // List attached
+        let list = svc.handle_sync("ListAttachedUserPolicies", vec![("UserName", "carol")]);
+        assert!(list.contains("user-pol"));
+
+        // Detach
+        svc.handle_sync(
+            "DetachUserPolicy",
+            vec![("UserName", "carol"), ("PolicyArn", &arn)],
+        );
+
+        let list = svc.handle_sync("ListAttachedUserPolicies", vec![("UserName", "carol")]);
+        assert!(!list.contains("user-pol"));
+    }
+
+    #[test]
+    fn attach_user_policy_nonexistent_user_fails() {
+        let svc = make_service();
+        let req = make_request(
+            "AttachUserPolicy",
+            vec![
+                ("UserName", "nobody"),
+                ("PolicyArn", "arn:aws:iam::123456789012:policy/x"),
+            ],
+        );
+        let result = svc.attach_user_policy(&req);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn detach_user_policy_not_attached_fails() {
+        let svc = make_service();
+        svc.handle_sync("CreateUser", vec![("UserName", "dave")]);
+
+        let req = make_request(
+            "DetachUserPolicy",
+            vec![
+                ("UserName", "dave"),
+                ("PolicyArn", "arn:aws:iam::123456789012:policy/nope"),
+            ],
+        );
+        let result = svc.detach_user_policy(&req);
+        assert!(result.is_err());
+    }
+
+    // ---- Login profile tests ----
+
+    #[test]
+    fn login_profile_lifecycle() {
+        let svc = make_service();
+        svc.handle_sync("CreateUser", vec![("UserName", "loginuser")]);
+
+        // Create login profile
+        let resp = svc.handle_sync(
+            "CreateLoginProfile",
+            vec![
+                ("UserName", "loginuser"),
+                ("Password", "S3cureP@ss!"),
+                ("PasswordResetRequired", "true"),
+            ],
+        );
+        assert!(resp.contains("loginuser"));
+        assert!(resp.contains("<PasswordResetRequired>true</PasswordResetRequired>"));
+
+        // Get login profile
+        let resp = svc.handle_sync("GetLoginProfile", vec![("UserName", "loginuser")]);
+        assert!(resp.contains("loginuser"));
+        assert!(resp.contains("<PasswordResetRequired>true</PasswordResetRequired>"));
+
+        // Update login profile
+        svc.handle_sync(
+            "UpdateLoginProfile",
+            vec![
+                ("UserName", "loginuser"),
+                ("PasswordResetRequired", "false"),
+            ],
+        );
+
+        let resp = svc.handle_sync("GetLoginProfile", vec![("UserName", "loginuser")]);
+        assert!(resp.contains("<PasswordResetRequired>false</PasswordResetRequired>"));
+
+        // Delete login profile
+        svc.handle_sync("DeleteLoginProfile", vec![("UserName", "loginuser")]);
+
+        // Should fail now
+        let req = make_request("GetLoginProfile", vec![("UserName", "loginuser")]);
+        assert!(svc.get_login_profile(&req).is_err());
+    }
+
+    #[test]
+    fn create_login_profile_duplicate_fails() {
+        let svc = make_service();
+        svc.handle_sync("CreateUser", vec![("UserName", "dupuser")]);
+        svc.handle_sync(
+            "CreateLoginProfile",
+            vec![("UserName", "dupuser"), ("Password", "pass1")],
+        );
+
+        let req = make_request(
+            "CreateLoginProfile",
+            vec![("UserName", "dupuser"), ("Password", "pass2")],
+        );
+        assert!(svc.create_login_profile(&req).is_err());
+    }
+
+    #[test]
+    fn delete_login_profile_nonexistent_fails() {
+        let svc = make_service();
+        svc.handle_sync("CreateUser", vec![("UserName", "nologin")]);
+
+        let req = make_request("DeleteLoginProfile", vec![("UserName", "nologin")]);
+        assert!(svc.delete_login_profile(&req).is_err());
+    }
+
+    // ---- MFA tests ----
+
+    #[test]
+    fn virtual_mfa_device_lifecycle() {
+        let svc = make_service();
+
+        // Create virtual MFA device
+        let resp = svc.handle_sync(
+            "CreateVirtualMFADevice",
+            vec![("VirtualMFADeviceName", "my-mfa")],
+        );
+        assert!(resp.contains("my-mfa"));
+        assert!(resp.contains("<Base32StringSeed>"));
+        assert!(resp.contains("<QRCodePNG>"));
+        let serial = extract_xml_value(&resp, "SerialNumber");
+
+        // List should include it
+        let list = svc.handle_sync("ListVirtualMFADevices", vec![]);
+        assert!(list.contains("my-mfa"));
+
+        // Delete
+        svc.handle_sync("DeleteVirtualMFADevice", vec![("SerialNumber", &serial)]);
+
+        // List should be empty
+        let list = svc.handle_sync("ListVirtualMFADevices", vec![]);
+        assert!(!list.contains("my-mfa"));
+    }
+
+    #[test]
+    fn delete_virtual_mfa_device_not_found() {
+        let svc = make_service();
+        let req = make_request(
+            "DeleteVirtualMFADevice",
+            vec![("SerialNumber", "arn:aws:iam::123456789012:mfa/ghost")],
+        );
+        assert!(svc.delete_virtual_mfa_device(&req).is_err());
+    }
+
+    #[test]
+    fn enable_and_list_mfa_devices() {
+        let svc = make_service();
+        svc.handle_sync("CreateUser", vec![("UserName", "mfauser")]);
+
+        // Create virtual MFA
+        let resp = svc.handle_sync(
+            "CreateVirtualMFADevice",
+            vec![("VirtualMFADeviceName", "dev-mfa")],
+        );
+        let serial = extract_xml_value(&resp, "SerialNumber");
+
+        // Enable MFA device for user
+        svc.handle_sync(
+            "EnableMFADevice",
+            vec![
+                ("UserName", "mfauser"),
+                ("SerialNumber", &serial),
+                ("AuthenticationCode1", "123456"),
+                ("AuthenticationCode2", "654321"),
+            ],
+        );
+
+        // List MFA devices for user
+        let list = svc.handle_sync("ListMFADevices", vec![("UserName", "mfauser")]);
+        assert!(list.contains(&serial));
+        assert!(list.contains("mfauser"));
+    }
+
+    #[test]
+    fn deactivate_mfa_device() {
+        let svc = make_service();
+        svc.handle_sync("CreateUser", vec![("UserName", "deactuser")]);
+
+        let resp = svc.handle_sync(
+            "CreateVirtualMFADevice",
+            vec![("VirtualMFADeviceName", "deact-mfa")],
+        );
+        let serial = extract_xml_value(&resp, "SerialNumber");
+
+        svc.handle_sync(
+            "EnableMFADevice",
+            vec![
+                ("UserName", "deactuser"),
+                ("SerialNumber", &serial),
+                ("AuthenticationCode1", "111111"),
+                ("AuthenticationCode2", "222222"),
+            ],
+        );
+
+        // Deactivate
+        svc.handle_sync(
+            "DeactivateMFADevice",
+            vec![("UserName", "deactuser"), ("SerialNumber", &serial)],
+        );
+
+        // Should no longer appear in user's MFA device list
+        let list = svc.handle_sync("ListMFADevices", vec![("UserName", "deactuser")]);
+        assert!(!list.contains(&serial));
+    }
+
+    #[test]
+    fn list_virtual_mfa_devices_assignment_filter() {
+        let svc = make_service();
+        svc.handle_sync("CreateUser", vec![("UserName", "filteruser")]);
+
+        // Create two MFA devices with distinct names
+        let resp1 = svc.handle_sync(
+            "CreateVirtualMFADevice",
+            vec![("VirtualMFADeviceName", "enabled-device")],
+        );
+        let serial1 = extract_xml_value(&resp1, "SerialNumber");
+        svc.handle_sync(
+            "CreateVirtualMFADevice",
+            vec![("VirtualMFADeviceName", "spare-device")],
+        );
+
+        // Enable only the first
+        svc.handle_sync(
+            "EnableMFADevice",
+            vec![
+                ("UserName", "filteruser"),
+                ("SerialNumber", &serial1),
+                ("AuthenticationCode1", "123456"),
+                ("AuthenticationCode2", "654321"),
+            ],
+        );
+
+        // Filter by Assigned
+        let assigned = svc.handle_sync(
+            "ListVirtualMFADevices",
+            vec![("AssignmentStatus", "Assigned")],
+        );
+        assert!(assigned.contains("enabled-device"));
+        assert!(!assigned.contains("spare-device"));
+
+        // Filter by Unassigned
+        let unassigned = svc.handle_sync(
+            "ListVirtualMFADevices",
+            vec![("AssignmentStatus", "Unassigned")],
+        );
+        assert!(!unassigned.contains("enabled-device"));
+        assert!(unassigned.contains("spare-device"));
+    }
+
+    // ---- Account tests ----
+
+    #[test]
+    fn get_account_summary() {
+        let svc = make_service();
+
+        // Create some resources to verify counts
+        svc.handle_sync("CreateUser", vec![("UserName", "u1")]);
+        svc.handle_sync("CreateUser", vec![("UserName", "u2")]);
+        svc.handle_sync("CreateGroup", vec![("GroupName", "g1")]);
+
+        let resp = svc.handle_sync("GetAccountSummary", vec![]);
+        assert!(resp.contains("<key>Users</key><value>2</value>"));
+        assert!(resp.contains("<key>Groups</key><value>1</value>"));
+        assert!(resp.contains("<key>UsersQuota</key><value>5000</value>"));
+    }
+
+    #[test]
+    fn account_alias_lifecycle() {
+        let svc = make_service();
+
+        // Create alias
+        svc.handle_sync("CreateAccountAlias", vec![("AccountAlias", "my-org")]);
+
+        // List aliases
+        let list = svc.handle_sync("ListAccountAliases", vec![]);
+        assert!(list.contains("my-org"));
+
+        // Delete alias
+        svc.handle_sync("DeleteAccountAlias", vec![("AccountAlias", "my-org")]);
+
+        let list = svc.handle_sync("ListAccountAliases", vec![]);
+        assert!(!list.contains("my-org"));
+    }
+
+    #[test]
+    fn create_account_alias_idempotent() {
+        let svc = make_service();
+        svc.handle_sync("CreateAccountAlias", vec![("AccountAlias", "test-alias")]);
+        svc.handle_sync("CreateAccountAlias", vec![("AccountAlias", "test-alias")]);
+
+        let list = svc.handle_sync("ListAccountAliases", vec![]);
+        // Should only appear once
+        let count = list.matches("test-alias").count();
+        assert_eq!(count, 1, "alias should appear exactly once");
+    }
+
+    // ---- Helper methods for tests ----
+
+    fn extract_xml_value(xml: &str, tag: &str) -> String {
+        let open = format!("<{tag}>");
+        let close = format!("</{tag}>");
+        let start = xml.find(&open).unwrap() + open.len();
+        let end = xml.find(&close).unwrap();
+        xml[start..end].to_string()
+    }
+
+    impl IamService {
+        /// Synchronous helper for unit tests: dispatches to the correct method
+        fn handle_sync(&self, action: &str, params: Vec<(&str, &str)>) -> String {
+            let req = make_request(action, params);
+            let resp = match action {
+                "CreateUser" => self.create_user(&req),
+                "CreateGroup" => self.create_group(&req),
+                "CreatePolicy" => self.create_policy(&req),
+                "ListPolicies" => self.list_policies(&req),
+                "PutGroupPolicy" => self.put_group_policy(&req),
+                "GetGroupPolicy" => self.get_group_policy(&req),
+                "DeleteGroupPolicy" => self.delete_group_policy(&req),
+                "ListGroupPolicies" => self.list_group_policies(&req),
+                "AttachGroupPolicy" => self.attach_group_policy(&req),
+                "DetachGroupPolicy" => self.detach_group_policy(&req),
+                "ListAttachedGroupPolicies" => self.list_attached_group_policies(&req),
+                "PutUserPolicy" => self.put_user_policy(&req),
+                "GetUserPolicy" => self.get_user_policy(&req),
+                "DeleteUserPolicy" => self.delete_user_policy(&req),
+                "ListUserPolicies" => self.list_user_policies(&req),
+                "AttachUserPolicy" => self.attach_user_policy(&req),
+                "DetachUserPolicy" => self.detach_user_policy(&req),
+                "ListAttachedUserPolicies" => self.list_attached_user_policies(&req),
+                "CreateLoginProfile" => self.create_login_profile(&req),
+                "GetLoginProfile" => self.get_login_profile(&req),
+                "UpdateLoginProfile" => self.update_login_profile(&req),
+                "DeleteLoginProfile" => self.delete_login_profile(&req),
+                "CreateVirtualMFADevice" => self.create_virtual_mfa_device(&req),
+                "DeleteVirtualMFADevice" => self.delete_virtual_mfa_device(&req),
+                "ListVirtualMFADevices" => self.list_virtual_mfa_devices(&req),
+                "EnableMFADevice" => self.enable_mfa_device(&req),
+                "DeactivateMFADevice" => self.deactivate_mfa_device(&req),
+                "ListMFADevices" => self.list_mfa_devices(&req),
+                "GetAccountSummary" => self.get_account_summary(&req),
+                "CreateAccountAlias" => self.create_account_alias(&req),
+                "DeleteAccountAlias" => self.delete_account_alias(&req),
+                "ListAccountAliases" => self.list_account_aliases(&req),
+                other => panic!("handle_sync: unhandled action {other}"),
+            }
+            .unwrap();
+            String::from_utf8(resp.body.to_vec()).unwrap()
+        }
+    }
 }

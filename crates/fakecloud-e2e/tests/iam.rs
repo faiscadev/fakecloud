@@ -914,6 +914,585 @@ async fn sts_assume_role_validates_external_id() {
     );
 }
 
+// ---- Group Managed Policy Tests ----
+
+#[tokio::test]
+async fn iam_attach_detach_group_policy() {
+    let server = TestServer::start().await;
+    let client = server.iam_client().await;
+
+    // Create group
+    client
+        .create_group()
+        .group_name("policy-group")
+        .send()
+        .await
+        .unwrap();
+
+    // Create managed policy
+    let policy_doc = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:*","Resource":"*"}]}"#;
+    let policy = client
+        .create_policy()
+        .policy_name("s3-full")
+        .policy_document(policy_doc)
+        .send()
+        .await
+        .unwrap();
+    let policy_arn = policy.policy().unwrap().arn().unwrap().to_string();
+
+    // Attach
+    client
+        .attach_group_policy()
+        .group_name("policy-group")
+        .policy_arn(&policy_arn)
+        .send()
+        .await
+        .unwrap();
+
+    // List attached
+    let attached = client
+        .list_attached_group_policies()
+        .group_name("policy-group")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(attached.attached_policies().len(), 1);
+    assert_eq!(
+        attached.attached_policies()[0].policy_name().unwrap(),
+        "s3-full"
+    );
+
+    // Detach
+    client
+        .detach_group_policy()
+        .group_name("policy-group")
+        .policy_arn(&policy_arn)
+        .send()
+        .await
+        .unwrap();
+
+    let attached = client
+        .list_attached_group_policies()
+        .group_name("policy-group")
+        .send()
+        .await
+        .unwrap();
+    assert!(attached.attached_policies().is_empty());
+}
+
+// ---- Group Inline Policy Tests ----
+
+#[tokio::test]
+async fn iam_group_inline_policy() {
+    let server = TestServer::start().await;
+    let client = server.iam_client().await;
+
+    client
+        .create_group()
+        .group_name("inline-group")
+        .send()
+        .await
+        .unwrap();
+
+    let inline_doc = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"sqs:*","Resource":"*"}]}"#;
+    client
+        .put_group_policy()
+        .group_name("inline-group")
+        .policy_name("sqs-access")
+        .policy_document(inline_doc)
+        .send()
+        .await
+        .unwrap();
+
+    // List inline policies
+    let policies = client
+        .list_group_policies()
+        .group_name("inline-group")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(policies.policy_names().len(), 1);
+    assert_eq!(policies.policy_names()[0], "sqs-access");
+
+    // Get inline policy
+    let get = client
+        .get_group_policy()
+        .group_name("inline-group")
+        .policy_name("sqs-access")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get.policy_name(), "sqs-access");
+    assert_eq!(get.group_name(), "inline-group");
+
+    // Delete inline policy
+    client
+        .delete_group_policy()
+        .group_name("inline-group")
+        .policy_name("sqs-access")
+        .send()
+        .await
+        .unwrap();
+
+    let policies = client
+        .list_group_policies()
+        .group_name("inline-group")
+        .send()
+        .await
+        .unwrap();
+    assert!(policies.policy_names().is_empty());
+}
+
+// ---- User Managed Policy Attachment Tests ----
+
+#[tokio::test]
+async fn iam_attach_detach_user_policy() {
+    let server = TestServer::start().await;
+    let client = server.iam_client().await;
+
+    client
+        .create_user()
+        .user_name("policy-user")
+        .send()
+        .await
+        .unwrap();
+
+    let policy_doc = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"logs:*","Resource":"*"}]}"#;
+    let policy = client
+        .create_policy()
+        .policy_name("logs-full")
+        .policy_document(policy_doc)
+        .send()
+        .await
+        .unwrap();
+    let policy_arn = policy.policy().unwrap().arn().unwrap().to_string();
+
+    // Attach
+    client
+        .attach_user_policy()
+        .user_name("policy-user")
+        .policy_arn(&policy_arn)
+        .send()
+        .await
+        .unwrap();
+
+    // List attached
+    let attached = client
+        .list_attached_user_policies()
+        .user_name("policy-user")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(attached.attached_policies().len(), 1);
+    assert_eq!(
+        attached.attached_policies()[0].policy_name().unwrap(),
+        "logs-full"
+    );
+
+    // Detach
+    client
+        .detach_user_policy()
+        .user_name("policy-user")
+        .policy_arn(&policy_arn)
+        .send()
+        .await
+        .unwrap();
+
+    let attached = client
+        .list_attached_user_policies()
+        .user_name("policy-user")
+        .send()
+        .await
+        .unwrap();
+    assert!(attached.attached_policies().is_empty());
+}
+
+// ---- User Inline Policy Tests ----
+
+#[tokio::test]
+async fn iam_user_inline_policy() {
+    let server = TestServer::start().await;
+    let client = server.iam_client().await;
+
+    client
+        .create_user()
+        .user_name("inline-user")
+        .send()
+        .await
+        .unwrap();
+
+    let inline_doc = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"dynamodb:*","Resource":"*"}]}"#;
+    client
+        .put_user_policy()
+        .user_name("inline-user")
+        .policy_name("ddb-access")
+        .policy_document(inline_doc)
+        .send()
+        .await
+        .unwrap();
+
+    // List
+    let policies = client
+        .list_user_policies()
+        .user_name("inline-user")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(policies.policy_names().len(), 1);
+    assert_eq!(policies.policy_names()[0], "ddb-access");
+
+    // Get
+    let get = client
+        .get_user_policy()
+        .user_name("inline-user")
+        .policy_name("ddb-access")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get.policy_name(), "ddb-access");
+    assert_eq!(get.user_name(), "inline-user");
+
+    // Delete
+    client
+        .delete_user_policy()
+        .user_name("inline-user")
+        .policy_name("ddb-access")
+        .send()
+        .await
+        .unwrap();
+
+    let policies = client
+        .list_user_policies()
+        .user_name("inline-user")
+        .send()
+        .await
+        .unwrap();
+    assert!(policies.policy_names().is_empty());
+}
+
+// ---- Login Profile Tests ----
+
+#[tokio::test]
+async fn iam_login_profile_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.iam_client().await;
+
+    client
+        .create_user()
+        .user_name("login-user")
+        .send()
+        .await
+        .unwrap();
+
+    // Create login profile
+    let resp = client
+        .create_login_profile()
+        .user_name("login-user")
+        .password("S3cureP@ss!")
+        .password_reset_required(true)
+        .send()
+        .await
+        .unwrap();
+    let profile = resp.login_profile().unwrap();
+    assert_eq!(profile.user_name(), "login-user");
+    assert!(profile.password_reset_required());
+
+    // Get login profile
+    let get = client
+        .get_login_profile()
+        .user_name("login-user")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get.login_profile().unwrap().user_name(), "login-user");
+    assert!(get.login_profile().unwrap().password_reset_required());
+
+    // Update login profile
+    client
+        .update_login_profile()
+        .user_name("login-user")
+        .password_reset_required(false)
+        .send()
+        .await
+        .unwrap();
+
+    let get = client
+        .get_login_profile()
+        .user_name("login-user")
+        .send()
+        .await
+        .unwrap();
+    assert!(!get.login_profile().unwrap().password_reset_required());
+
+    // Delete login profile
+    client
+        .delete_login_profile()
+        .user_name("login-user")
+        .send()
+        .await
+        .unwrap();
+
+    // Get should fail after delete
+    let result = client
+        .get_login_profile()
+        .user_name("login-user")
+        .send()
+        .await;
+    assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn iam_login_profile_duplicate_fails() {
+    let server = TestServer::start().await;
+    let client = server.iam_client().await;
+
+    client
+        .create_user()
+        .user_name("dup-login")
+        .send()
+        .await
+        .unwrap();
+    client
+        .create_login_profile()
+        .user_name("dup-login")
+        .password("pass1")
+        .send()
+        .await
+        .unwrap();
+
+    let result = client
+        .create_login_profile()
+        .user_name("dup-login")
+        .password("pass2")
+        .send()
+        .await;
+    assert!(result.is_err());
+}
+
+// ---- MFA Tests ----
+
+#[tokio::test]
+async fn iam_virtual_mfa_lifecycle_cli() {
+    let server = TestServer::start().await;
+    let tmp_dir = std::env::temp_dir();
+    let outfile = tmp_dir.join("test-mfa-lifecycle.png");
+
+    // Create virtual MFA device
+    let output = server
+        .aws_cli(&[
+            "iam",
+            "create-virtual-mfa-device",
+            "--virtual-mfa-device-name",
+            "lifecycle-mfa",
+            "--outfile",
+            outfile.to_str().unwrap(),
+            "--bootstrap-method",
+            "QRCodePNG",
+        ])
+        .await;
+    let _ = std::fs::remove_file(&outfile);
+    assert!(
+        output.success(),
+        "create-virtual-mfa-device failed: {}",
+        output.stderr_text()
+    );
+    let json = output.stdout_json();
+    let serial = json["VirtualMFADevice"]["SerialNumber"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // List virtual MFA devices
+    let output = server.aws_cli(&["iam", "list-virtual-mfa-devices"]).await;
+    assert!(output.success());
+    let json = output.stdout_json();
+    let devices = json["VirtualMFADevices"].as_array().unwrap();
+    assert_eq!(devices.len(), 1);
+
+    // Delete virtual MFA device
+    let output = server
+        .aws_cli(&[
+            "iam",
+            "delete-virtual-mfa-device",
+            "--serial-number",
+            &serial,
+        ])
+        .await;
+    assert!(
+        output.success(),
+        "delete-virtual-mfa-device failed: {}",
+        output.stderr_text()
+    );
+
+    // List should be empty
+    let output = server.aws_cli(&["iam", "list-virtual-mfa-devices"]).await;
+    assert!(output.success());
+    let json = output.stdout_json();
+    assert!(json["VirtualMFADevices"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn iam_enable_deactivate_list_mfa_cli() {
+    let server = TestServer::start().await;
+    let iam = server.iam_client().await;
+    let tmp_dir = std::env::temp_dir();
+    let outfile = tmp_dir.join("test-enable-mfa.png");
+
+    // Create user
+    iam.create_user()
+        .user_name("mfa-cli-user")
+        .send()
+        .await
+        .unwrap();
+
+    // Create virtual MFA device
+    let output = server
+        .aws_cli(&[
+            "iam",
+            "create-virtual-mfa-device",
+            "--virtual-mfa-device-name",
+            "cli-mfa",
+            "--outfile",
+            outfile.to_str().unwrap(),
+            "--bootstrap-method",
+            "QRCodePNG",
+        ])
+        .await;
+    let _ = std::fs::remove_file(&outfile);
+    assert!(output.success());
+    let serial = output.stdout_json()["VirtualMFADevice"]["SerialNumber"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Enable MFA device
+    let output = server
+        .aws_cli(&[
+            "iam",
+            "enable-mfa-device",
+            "--user-name",
+            "mfa-cli-user",
+            "--serial-number",
+            &serial,
+            "--authentication-code1",
+            "123456",
+            "--authentication-code2",
+            "654321",
+        ])
+        .await;
+    assert!(
+        output.success(),
+        "enable-mfa-device failed: {}",
+        output.stderr_text()
+    );
+
+    // List MFA devices for user
+    let output = server
+        .aws_cli(&["iam", "list-mfa-devices", "--user-name", "mfa-cli-user"])
+        .await;
+    assert!(output.success());
+    let json = output.stdout_json();
+    let devices = json["MFADevices"].as_array().unwrap();
+    assert_eq!(devices.len(), 1);
+    assert_eq!(devices[0]["UserName"].as_str().unwrap(), "mfa-cli-user");
+
+    // Deactivate MFA device
+    let output = server
+        .aws_cli(&[
+            "iam",
+            "deactivate-mfa-device",
+            "--user-name",
+            "mfa-cli-user",
+            "--serial-number",
+            &serial,
+        ])
+        .await;
+    assert!(
+        output.success(),
+        "deactivate-mfa-device failed: {}",
+        output.stderr_text()
+    );
+
+    // List MFA devices - should be empty for the user now
+    let output = server
+        .aws_cli(&["iam", "list-mfa-devices", "--user-name", "mfa-cli-user"])
+        .await;
+    assert!(output.success());
+    let json = output.stdout_json();
+    assert!(json["MFADevices"].as_array().unwrap().is_empty());
+}
+
+// ---- Account Tests ----
+
+#[tokio::test]
+async fn iam_get_account_summary_cli() {
+    let server = TestServer::start().await;
+    let iam = server.iam_client().await;
+
+    // Create some resources
+    iam.create_user()
+        .user_name("summary-user")
+        .send()
+        .await
+        .unwrap();
+    iam.create_group()
+        .group_name("summary-group")
+        .send()
+        .await
+        .unwrap();
+
+    let output = server.aws_cli(&["iam", "get-account-summary"]).await;
+    assert!(
+        output.success(),
+        "get-account-summary failed: {}",
+        output.stderr_text()
+    );
+    let json = output.stdout_json();
+    let summary = &json["SummaryMap"];
+    assert_eq!(summary["Users"].as_i64().unwrap(), 1);
+    assert_eq!(summary["Groups"].as_i64().unwrap(), 1);
+    assert_eq!(summary["UsersQuota"].as_i64().unwrap(), 5000);
+}
+
+#[tokio::test]
+async fn iam_account_alias_lifecycle_cli() {
+    let server = TestServer::start().await;
+
+    // Create alias
+    let output = server
+        .aws_cli(&["iam", "create-account-alias", "--account-alias", "test-org"])
+        .await;
+    assert!(
+        output.success(),
+        "create-account-alias failed: {}",
+        output.stderr_text()
+    );
+
+    // List aliases
+    let output = server.aws_cli(&["iam", "list-account-aliases"]).await;
+    assert!(output.success());
+    let json = output.stdout_json();
+    let aliases = json["AccountAliases"].as_array().unwrap();
+    assert_eq!(aliases.len(), 1);
+    assert_eq!(aliases[0].as_str().unwrap(), "test-org");
+
+    // Delete alias
+    let output = server
+        .aws_cli(&["iam", "delete-account-alias", "--account-alias", "test-org"])
+        .await;
+    assert!(
+        output.success(),
+        "delete-account-alias failed: {}",
+        output.stderr_text()
+    );
+
+    // List should be empty
+    let output = server.aws_cli(&["iam", "list-account-aliases"]).await;
+    assert!(output.success());
+    let json = output.stdout_json();
+    assert!(json["AccountAliases"].as_array().unwrap().is_empty());
+}
+
 /// Regression: ListVirtualMFADevices should only return virtual MFA devices,
 /// excluding hardware MFA devices created via EnableMFADevice with a non-virtual serial.
 #[tokio::test]
