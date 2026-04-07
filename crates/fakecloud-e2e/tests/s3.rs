@@ -2497,3 +2497,737 @@ async fn s3_complete_multipart_entity_too_small() {
         "Error should mention EntityTooSmall, got: {err_str}"
     );
 }
+
+// ---- Bucket Configuration CRUD Tests ----
+
+#[tokio::test]
+async fn s3_bucket_policy_crud() {
+    let server = TestServer::start().await;
+
+    let output = server
+        .aws_cli(&["s3api", "create-bucket", "--bucket", "policy-bucket"])
+        .await;
+    assert!(output.success(), "create failed: {}", output.stderr_text());
+
+    // Put bucket policy
+    let policy = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":"*","Action":"s3:GetObject","Resource":"arn:aws:s3:::policy-bucket/*"}]}"#;
+    let output = server
+        .aws_cli(&[
+            "s3api",
+            "put-bucket-policy",
+            "--bucket",
+            "policy-bucket",
+            "--policy",
+            policy,
+        ])
+        .await;
+    assert!(
+        output.success(),
+        "put policy failed: {}",
+        output.stderr_text()
+    );
+
+    // Get bucket policy
+    let output = server
+        .aws_cli(&["s3api", "get-bucket-policy", "--bucket", "policy-bucket"])
+        .await;
+    assert!(
+        output.success(),
+        "get policy failed: {}",
+        output.stderr_text()
+    );
+    let json = output.stdout_json();
+    let returned_policy: serde_json::Value =
+        serde_json::from_str(json["Policy"].as_str().unwrap()).unwrap();
+    assert_eq!(returned_policy["Version"], "2012-10-17");
+    assert_eq!(returned_policy["Statement"][0]["Effect"], "Allow");
+
+    // Delete bucket policy
+    let output = server
+        .aws_cli(&["s3api", "delete-bucket-policy", "--bucket", "policy-bucket"])
+        .await;
+    assert!(
+        output.success(),
+        "delete policy failed: {}",
+        output.stderr_text()
+    );
+
+    // Get again — should fail
+    let output = server
+        .aws_cli(&["s3api", "get-bucket-policy", "--bucket", "policy-bucket"])
+        .await;
+    assert!(!output.success(), "expected error after policy deletion");
+}
+
+#[tokio::test]
+async fn s3_bucket_encryption_crud() {
+    let server = TestServer::start().await;
+
+    let output = server
+        .aws_cli(&["s3api", "create-bucket", "--bucket", "enc-bucket"])
+        .await;
+    assert!(output.success(), "create failed: {}", output.stderr_text());
+
+    // Put encryption config
+    let enc_config =
+        r#"{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}"#;
+    let output = server
+        .aws_cli(&[
+            "s3api",
+            "put-bucket-encryption",
+            "--bucket",
+            "enc-bucket",
+            "--server-side-encryption-configuration",
+            enc_config,
+        ])
+        .await;
+    assert!(
+        output.success(),
+        "put encryption failed: {}",
+        output.stderr_text()
+    );
+
+    // Get encryption config
+    let output = server
+        .aws_cli(&["s3api", "get-bucket-encryption", "--bucket", "enc-bucket"])
+        .await;
+    assert!(
+        output.success(),
+        "get encryption failed: {}",
+        output.stderr_text()
+    );
+    let json = output.stdout_json();
+    let rules = json["ServerSideEncryptionConfiguration"]["Rules"]
+        .as_array()
+        .unwrap();
+    assert!(!rules.is_empty());
+
+    // Delete encryption config
+    let output = server
+        .aws_cli(&[
+            "s3api",
+            "delete-bucket-encryption",
+            "--bucket",
+            "enc-bucket",
+        ])
+        .await;
+    assert!(
+        output.success(),
+        "delete encryption failed: {}",
+        output.stderr_text()
+    );
+
+    // Get again — should fail
+    let output = server
+        .aws_cli(&["s3api", "get-bucket-encryption", "--bucket", "enc-bucket"])
+        .await;
+    assert!(
+        !output.success(),
+        "expected error after encryption deletion"
+    );
+}
+
+#[tokio::test]
+async fn s3_bucket_cors_crud() {
+    let server = TestServer::start().await;
+
+    let output = server
+        .aws_cli(&["s3api", "create-bucket", "--bucket", "cors-crud-bucket"])
+        .await;
+    assert!(output.success(), "create failed: {}", output.stderr_text());
+
+    // Put CORS config
+    let cors_config = r#"{"CORSRules":[{"AllowedOrigins":["https://example.com"],"AllowedMethods":["GET","PUT"],"AllowedHeaders":["*"],"MaxAgeSeconds":3600}]}"#;
+    let output = server
+        .aws_cli(&[
+            "s3api",
+            "put-bucket-cors",
+            "--bucket",
+            "cors-crud-bucket",
+            "--cors-configuration",
+            cors_config,
+        ])
+        .await;
+    assert!(
+        output.success(),
+        "put cors failed: {}",
+        output.stderr_text()
+    );
+
+    // Get CORS config
+    let output = server
+        .aws_cli(&["s3api", "get-bucket-cors", "--bucket", "cors-crud-bucket"])
+        .await;
+    assert!(
+        output.success(),
+        "get cors failed: {}",
+        output.stderr_text()
+    );
+    let json = output.stdout_json();
+    let rules = json["CORSRules"].as_array().unwrap();
+    assert_eq!(rules.len(), 1);
+    assert_eq!(rules[0]["AllowedOrigins"][0], "https://example.com");
+
+    // Delete CORS config
+    let output = server
+        .aws_cli(&[
+            "s3api",
+            "delete-bucket-cors",
+            "--bucket",
+            "cors-crud-bucket",
+        ])
+        .await;
+    assert!(
+        output.success(),
+        "delete cors failed: {}",
+        output.stderr_text()
+    );
+
+    // Get again — should fail
+    let output = server
+        .aws_cli(&["s3api", "get-bucket-cors", "--bucket", "cors-crud-bucket"])
+        .await;
+    assert!(!output.success(), "expected error after cors deletion");
+}
+
+#[tokio::test]
+async fn s3_bucket_versioning_put_get() {
+    let server = TestServer::start().await;
+    let client = server.s3_client().await;
+
+    client
+        .create_bucket()
+        .bucket("versioning-cfg-bucket")
+        .send()
+        .await
+        .unwrap();
+
+    // Initially versioning should not be enabled
+    let resp = client
+        .get_bucket_versioning()
+        .bucket("versioning-cfg-bucket")
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        resp.status().is_none(),
+        "Expected no versioning status initially"
+    );
+
+    // Enable versioning
+    use aws_sdk_s3::types::{BucketVersioningStatus, VersioningConfiguration};
+    client
+        .put_bucket_versioning()
+        .bucket("versioning-cfg-bucket")
+        .versioning_configuration(
+            VersioningConfiguration::builder()
+                .status(BucketVersioningStatus::Enabled)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    // Verify enabled
+    let resp = client
+        .get_bucket_versioning()
+        .bucket("versioning-cfg-bucket")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), Some(&BucketVersioningStatus::Enabled));
+
+    // Suspend versioning
+    client
+        .put_bucket_versioning()
+        .bucket("versioning-cfg-bucket")
+        .versioning_configuration(
+            VersioningConfiguration::builder()
+                .status(BucketVersioningStatus::Suspended)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .get_bucket_versioning()
+        .bucket("versioning-cfg-bucket")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), Some(&BucketVersioningStatus::Suspended));
+}
+
+#[tokio::test]
+async fn s3_bucket_website_crud() {
+    let server = TestServer::start().await;
+
+    let output = server
+        .aws_cli(&["s3api", "create-bucket", "--bucket", "website-bucket"])
+        .await;
+    assert!(output.success(), "create failed: {}", output.stderr_text());
+
+    // Put website configuration
+    let website_config =
+        r#"{"IndexDocument":{"Suffix":"index.html"},"ErrorDocument":{"Key":"error.html"}}"#;
+    let output = server
+        .aws_cli(&[
+            "s3api",
+            "put-bucket-website",
+            "--bucket",
+            "website-bucket",
+            "--website-configuration",
+            website_config,
+        ])
+        .await;
+    assert!(
+        output.success(),
+        "put website failed: {}",
+        output.stderr_text()
+    );
+
+    // Get website configuration
+    let output = server
+        .aws_cli(&["s3api", "get-bucket-website", "--bucket", "website-bucket"])
+        .await;
+    assert!(
+        output.success(),
+        "get website failed: {}",
+        output.stderr_text()
+    );
+    let json = output.stdout_json();
+    assert_eq!(json["IndexDocument"]["Suffix"], "index.html");
+    assert_eq!(json["ErrorDocument"]["Key"], "error.html");
+
+    // Delete website configuration
+    let output = server
+        .aws_cli(&[
+            "s3api",
+            "delete-bucket-website",
+            "--bucket",
+            "website-bucket",
+        ])
+        .await;
+    assert!(
+        output.success(),
+        "delete website failed: {}",
+        output.stderr_text()
+    );
+
+    // Get again — should fail
+    let output = server
+        .aws_cli(&["s3api", "get-bucket-website", "--bucket", "website-bucket"])
+        .await;
+    assert!(!output.success(), "expected error after website deletion");
+}
+
+#[tokio::test]
+async fn s3_bucket_logging_put_get() {
+    let server = TestServer::start().await;
+
+    let output = server
+        .aws_cli(&["s3api", "create-bucket", "--bucket", "logging-bucket"])
+        .await;
+    assert!(output.success(), "create failed: {}", output.stderr_text());
+
+    let output = server
+        .aws_cli(&["s3api", "create-bucket", "--bucket", "log-target"])
+        .await;
+    assert!(output.success(), "create failed: {}", output.stderr_text());
+
+    // Put logging configuration
+    let logging_config =
+        r#"{"LoggingEnabled":{"TargetBucket":"log-target","TargetPrefix":"logs/"}}"#;
+    let output = server
+        .aws_cli(&[
+            "s3api",
+            "put-bucket-logging",
+            "--bucket",
+            "logging-bucket",
+            "--bucket-logging-status",
+            logging_config,
+        ])
+        .await;
+    assert!(
+        output.success(),
+        "put logging failed: {}",
+        output.stderr_text()
+    );
+
+    // Get logging configuration
+    let output = server
+        .aws_cli(&["s3api", "get-bucket-logging", "--bucket", "logging-bucket"])
+        .await;
+    assert!(
+        output.success(),
+        "get logging failed: {}",
+        output.stderr_text()
+    );
+    let json = output.stdout_json();
+    assert_eq!(json["LoggingEnabled"]["TargetBucket"], "log-target");
+    assert_eq!(json["LoggingEnabled"]["TargetPrefix"], "logs/");
+}
+
+#[tokio::test]
+async fn s3_bucket_replication_crud() {
+    let server = TestServer::start().await;
+    let client = server.s3_client().await;
+
+    client
+        .create_bucket()
+        .bucket("repl-cfg-src")
+        .send()
+        .await
+        .unwrap();
+    client
+        .create_bucket()
+        .bucket("repl-cfg-dst")
+        .send()
+        .await
+        .unwrap();
+
+    // Enable versioning on source (required for replication)
+    client
+        .put_bucket_versioning()
+        .bucket("repl-cfg-src")
+        .versioning_configuration(
+            aws_sdk_s3::types::VersioningConfiguration::builder()
+                .status(aws_sdk_s3::types::BucketVersioningStatus::Enabled)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    // Put replication config
+    let repl_config = serde_json::json!({
+        "Role": "arn:aws:iam::123456789012:role/replication-role",
+        "Rules": [{
+            "ID": "replicate-all",
+            "Status": "Enabled",
+            "Filter": { "Prefix": "" },
+            "Destination": { "Bucket": "arn:aws:s3:::repl-cfg-dst" }
+        }]
+    });
+    let output = server
+        .aws_cli(&[
+            "s3api",
+            "put-bucket-replication",
+            "--bucket",
+            "repl-cfg-src",
+            "--replication-configuration",
+            &repl_config.to_string(),
+        ])
+        .await;
+    assert!(
+        output.success(),
+        "put replication failed: {}",
+        output.stderr_text()
+    );
+
+    // Get replication config
+    let output = server
+        .aws_cli(&[
+            "s3api",
+            "get-bucket-replication",
+            "--bucket",
+            "repl-cfg-src",
+        ])
+        .await;
+    assert!(
+        output.success(),
+        "get replication failed: {}",
+        output.stderr_text()
+    );
+    let json = output.stdout_json();
+    let rules = json["ReplicationConfiguration"]["Rules"]
+        .as_array()
+        .unwrap();
+    assert_eq!(rules.len(), 1);
+    assert_eq!(rules[0]["ID"], "replicate-all");
+
+    // Delete replication config
+    let output = server
+        .aws_cli(&[
+            "s3api",
+            "delete-bucket-replication",
+            "--bucket",
+            "repl-cfg-src",
+        ])
+        .await;
+    assert!(
+        output.success(),
+        "delete replication failed: {}",
+        output.stderr_text()
+    );
+
+    // Get again — should fail
+    let output = server
+        .aws_cli(&[
+            "s3api",
+            "get-bucket-replication",
+            "--bucket",
+            "repl-cfg-src",
+        ])
+        .await;
+    assert!(
+        !output.success(),
+        "expected error after replication deletion"
+    );
+}
+
+#[tokio::test]
+async fn s3_public_access_block_crud() {
+    let server = TestServer::start().await;
+
+    let output = server
+        .aws_cli(&["s3api", "create-bucket", "--bucket", "pab-bucket"])
+        .await;
+    assert!(output.success(), "create failed: {}", output.stderr_text());
+
+    // Put public access block
+    let pab_config = r#"{"BlockPublicAcls":true,"IgnorePublicAcls":true,"BlockPublicPolicy":true,"RestrictPublicBuckets":true}"#;
+    let output = server
+        .aws_cli(&[
+            "s3api",
+            "put-public-access-block",
+            "--bucket",
+            "pab-bucket",
+            "--public-access-block-configuration",
+            pab_config,
+        ])
+        .await;
+    assert!(
+        output.success(),
+        "put public access block failed: {}",
+        output.stderr_text()
+    );
+
+    // Get public access block
+    let output = server
+        .aws_cli(&["s3api", "get-public-access-block", "--bucket", "pab-bucket"])
+        .await;
+    assert!(
+        output.success(),
+        "get public access block failed: {}",
+        output.stderr_text()
+    );
+    let json = output.stdout_json();
+    let config = &json["PublicAccessBlockConfiguration"];
+    assert_eq!(config["BlockPublicAcls"], true);
+    assert_eq!(config["IgnorePublicAcls"], true);
+    assert_eq!(config["BlockPublicPolicy"], true);
+    assert_eq!(config["RestrictPublicBuckets"], true);
+
+    // Delete public access block
+    let output = server
+        .aws_cli(&[
+            "s3api",
+            "delete-public-access-block",
+            "--bucket",
+            "pab-bucket",
+        ])
+        .await;
+    assert!(
+        output.success(),
+        "delete public access block failed: {}",
+        output.stderr_text()
+    );
+
+    // Get again — should fail
+    let output = server
+        .aws_cli(&["s3api", "get-public-access-block", "--bucket", "pab-bucket"])
+        .await;
+    assert!(
+        !output.success(),
+        "expected error after public access block deletion"
+    );
+}
+
+#[tokio::test]
+async fn s3_bucket_ownership_controls_crud() {
+    let server = TestServer::start().await;
+
+    let output = server
+        .aws_cli(&["s3api", "create-bucket", "--bucket", "ownership-bucket"])
+        .await;
+    assert!(output.success(), "create failed: {}", output.stderr_text());
+
+    // Put ownership controls
+    let ownership_config = r#"{"Rules":[{"ObjectOwnership":"BucketOwnerEnforced"}]}"#;
+    let output = server
+        .aws_cli(&[
+            "s3api",
+            "put-bucket-ownership-controls",
+            "--bucket",
+            "ownership-bucket",
+            "--ownership-controls",
+            ownership_config,
+        ])
+        .await;
+    assert!(
+        output.success(),
+        "put ownership controls failed: {}",
+        output.stderr_text()
+    );
+
+    // Get ownership controls
+    let output = server
+        .aws_cli(&[
+            "s3api",
+            "get-bucket-ownership-controls",
+            "--bucket",
+            "ownership-bucket",
+        ])
+        .await;
+    assert!(
+        output.success(),
+        "get ownership controls failed: {}",
+        output.stderr_text()
+    );
+    let json = output.stdout_json();
+    let rules = json["OwnershipControls"]["Rules"].as_array().unwrap();
+    assert_eq!(rules.len(), 1);
+    assert_eq!(rules[0]["ObjectOwnership"], "BucketOwnerEnforced");
+
+    // Delete ownership controls
+    let output = server
+        .aws_cli(&[
+            "s3api",
+            "delete-bucket-ownership-controls",
+            "--bucket",
+            "ownership-bucket",
+        ])
+        .await;
+    assert!(
+        output.success(),
+        "delete ownership controls failed: {}",
+        output.stderr_text()
+    );
+
+    // Get again — should fail
+    let output = server
+        .aws_cli(&[
+            "s3api",
+            "get-bucket-ownership-controls",
+            "--bucket",
+            "ownership-bucket",
+        ])
+        .await;
+    assert!(
+        !output.success(),
+        "expected error after ownership controls deletion"
+    );
+}
+
+#[tokio::test]
+async fn s3_bucket_notification_configuration_crud() {
+    let server = TestServer::start().await;
+
+    let output = server
+        .aws_cli(&["s3api", "create-bucket", "--bucket", "notif-cfg-bucket"])
+        .await;
+    assert!(output.success(), "create failed: {}", output.stderr_text());
+
+    // Put notification configuration with a queue config
+    let notif_config = r#"{"QueueConfigurations":[{"QueueArn":"arn:aws:sqs:us-east-1:123456789012:my-queue","Events":["s3:ObjectCreated:*"]}]}"#;
+    let output = server
+        .aws_cli(&[
+            "s3api",
+            "put-bucket-notification-configuration",
+            "--bucket",
+            "notif-cfg-bucket",
+            "--notification-configuration",
+            notif_config,
+        ])
+        .await;
+    assert!(
+        output.success(),
+        "put notification config failed: {}",
+        output.stderr_text()
+    );
+
+    // Get notification configuration
+    let output = server
+        .aws_cli(&[
+            "s3api",
+            "get-bucket-notification-configuration",
+            "--bucket",
+            "notif-cfg-bucket",
+        ])
+        .await;
+    assert!(
+        output.success(),
+        "get notification config failed: {}",
+        output.stderr_text()
+    );
+    let json = output.stdout_json();
+    let queues = json["QueueConfigurations"].as_array().unwrap();
+    assert_eq!(queues.len(), 1);
+    assert!(queues[0]["QueueArn"].as_str().unwrap().contains("my-queue"));
+
+    // Put empty notification configuration (effectively deletes)
+    let empty_config =
+        r#"{"QueueConfigurations":[],"TopicConfigurations":[],"LambdaFunctionConfigurations":[]}"#;
+    let output = server
+        .aws_cli(&[
+            "s3api",
+            "put-bucket-notification-configuration",
+            "--bucket",
+            "notif-cfg-bucket",
+            "--notification-configuration",
+            empty_config,
+        ])
+        .await;
+    assert!(
+        output.success(),
+        "put empty notification config failed: {}",
+        output.stderr_text()
+    );
+
+    // Get again — should return empty configuration
+    let output = server
+        .aws_cli(&[
+            "s3api",
+            "get-bucket-notification-configuration",
+            "--bucket",
+            "notif-cfg-bucket",
+        ])
+        .await;
+    assert!(
+        output.success(),
+        "get notification config failed after clear: {}",
+        output.stderr_text()
+    );
+}
+
+#[tokio::test]
+async fn s3_get_bucket_location() {
+    let server = TestServer::start().await;
+
+    let output = server
+        .aws_cli(&["s3api", "create-bucket", "--bucket", "location-bucket"])
+        .await;
+    assert!(output.success(), "create failed: {}", output.stderr_text());
+
+    let output = server
+        .aws_cli(&[
+            "s3api",
+            "get-bucket-location",
+            "--bucket",
+            "location-bucket",
+        ])
+        .await;
+    assert!(
+        output.success(),
+        "get location failed: {}",
+        output.stderr_text()
+    );
+    let json = output.stdout_json();
+    // us-east-1 returns null LocationConstraint per AWS convention
+    assert!(
+        json.get("LocationConstraint").is_some(),
+        "Expected LocationConstraint in response"
+    );
+}
