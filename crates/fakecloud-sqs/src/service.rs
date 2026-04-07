@@ -707,7 +707,7 @@ impl SqsService {
         let max_results = body["MaxResults"]
             .as_u64()
             .or_else(|| body["MaxResults"].as_str().and_then(|s| s.parse().ok()))
-            .map(|n| n.min(1000) as usize)
+            .map(|n| n.clamp(1, 1000) as usize)
             .unwrap_or(1000);
 
         let offset = body["NextToken"]
