@@ -250,6 +250,7 @@ async fn ssm_label_unlabel_parameter_version() {
     client
         .unlabel_parameter_version()
         .name("/conf/label")
+        .parameter_version(1)
         .labels("prod")
         .send()
         .await
