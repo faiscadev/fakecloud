@@ -10,6 +10,16 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.94"
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --workspace
+
   fmt:
     runs-on: ubuntu-latest
     steps:
