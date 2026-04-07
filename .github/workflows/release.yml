@@ -114,8 +114,8 @@ jobs:
         run: |
           COMMIT_SHA="${GITHUB_SHA}"
           STATUS=$(gh api "repos/${{ github.repository }}/commits/${COMMIT_SHA}/status" --jq '.state')
-          if [ "$STATUS" = "failure" ]; then
-            echo "::error::CI checks failed on commit ${COMMIT_SHA}"
+          if [ "$STATUS" != "success" ]; then
+            echo "::error::CI checks not successful on commit ${COMMIT_SHA} (status: ${STATUS})"
             exit 1
           fi
           echo "CI status on ${COMMIT_SHA}: ${STATUS}"
