@@ -1543,3 +1543,627 @@ async fn logs_delivery_pipeline_forwards_events() {
     assert!(data.contains("delivered msg 1"));
     assert!(data.contains("delivered msg 2"));
 }
+
+// ---- Subscription filters ----
+
+#[tokio::test]
+async fn logs_subscription_filter_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.logs_client().await;
+
+    client
+        .create_log_group()
+        .log_group_name("/sub/e2e")
+        .send()
+        .await
+        .unwrap();
+
+    // Put subscription filter
+    client
+        .put_subscription_filter()
+        .log_group_name("/sub/e2e")
+        .filter_name("my-sub-filter")
+        .filter_pattern("ERROR")
+        .destination_arn("arn:aws:lambda:us-east-1:123456789012:function:my-fn")
+        .send()
+        .await
+        .unwrap();
+
+    // Describe
+    let resp = client
+        .describe_subscription_filters()
+        .log_group_name("/sub/e2e")
+        .send()
+        .await
+        .unwrap();
+    let filters = resp.subscription_filters();
+    assert_eq!(filters.len(), 1);
+    assert_eq!(filters[0].filter_name().unwrap(), "my-sub-filter");
+    assert_eq!(filters[0].filter_pattern().unwrap(), "ERROR");
+
+    // Delete
+    client
+        .delete_subscription_filter()
+        .log_group_name("/sub/e2e")
+        .filter_name("my-sub-filter")
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .describe_subscription_filters()
+        .log_group_name("/sub/e2e")
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.subscription_filters().is_empty());
+}
+
+// ---- Metric filters ----
+
+#[tokio::test]
+async fn logs_metric_filter_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.logs_client().await;
+
+    client
+        .create_log_group()
+        .log_group_name("/mf/e2e")
+        .send()
+        .await
+        .unwrap();
+
+    // Put metric filter
+    client
+        .put_metric_filter()
+        .log_group_name("/mf/e2e")
+        .filter_name("err-metric")
+        .filter_pattern("ERROR")
+        .metric_transformations(
+            aws_sdk_cloudwatchlogs::types::MetricTransformation::builder()
+                .metric_name("ErrorCount")
+                .metric_namespace("MyApp")
+                .metric_value("1")
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    // Describe
+    let resp = client
+        .describe_metric_filters()
+        .log_group_name("/mf/e2e")
+        .send()
+        .await
+        .unwrap();
+    let filters = resp.metric_filters();
+    assert_eq!(filters.len(), 1);
+    assert_eq!(filters[0].filter_name().unwrap(), "err-metric");
+    assert_eq!(filters[0].filter_pattern().unwrap(), "ERROR");
+    assert_eq!(
+        filters[0].metric_transformations()[0].metric_name(),
+        "ErrorCount"
+    );
+
+    // Delete
+    client
+        .delete_metric_filter()
+        .log_group_name("/mf/e2e")
+        .filter_name("err-metric")
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .describe_metric_filters()
+        .log_group_name("/mf/e2e")
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.metric_filters().is_empty());
+}
+
+// ---- Destinations ----
+
+#[tokio::test]
+async fn logs_destination_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.logs_client().await;
+
+    // Put destination
+    let resp = client
+        .put_destination()
+        .destination_name("e2e-dest")
+        .target_arn("arn:aws:kinesis:us-east-1:123456789012:stream/my-stream")
+        .role_arn("arn:aws:iam::123456789012:role/logs-role")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.destination().unwrap().destination_name().unwrap(),
+        "e2e-dest"
+    );
+
+    // Put destination policy
+    client
+        .put_destination_policy()
+        .destination_name("e2e-dest")
+        .access_policy("{\"Version\":\"2012-10-17\"}")
+        .send()
+        .await
+        .unwrap();
+
+    // Describe
+    let resp = client.describe_destinations().send().await.unwrap();
+    let dests = resp.destinations();
+    assert_eq!(dests.len(), 1);
+    assert_eq!(
+        dests[0].access_policy().unwrap(),
+        "{\"Version\":\"2012-10-17\"}"
+    );
+
+    // Delete
+    client
+        .delete_destination()
+        .destination_name("e2e-dest")
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client.describe_destinations().send().await.unwrap();
+    assert!(resp.destinations().is_empty());
+}
+
+// ---- Resource policies ----
+
+#[tokio::test]
+async fn logs_resource_policy_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.logs_client().await;
+
+    // Put
+    let resp = client
+        .put_resource_policy()
+        .policy_name("e2e-policy")
+        .policy_document("{\"Version\":\"2012-10-17\",\"Statement\":[]}")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.resource_policy().unwrap().policy_name().unwrap(),
+        "e2e-policy"
+    );
+
+    // Describe
+    let resp = client.describe_resource_policies().send().await.unwrap();
+    assert_eq!(resp.resource_policies().len(), 1);
+
+    // Delete
+    client
+        .delete_resource_policy()
+        .policy_name("e2e-policy")
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client.describe_resource_policies().send().await.unwrap();
+    assert!(resp.resource_policies().is_empty());
+}
+
+// ---- Query definitions ----
+
+#[tokio::test]
+async fn logs_query_definition_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.logs_client().await;
+
+    // Put
+    let resp = client
+        .put_query_definition()
+        .name("e2e-query")
+        .query_string("fields @timestamp, @message | limit 25")
+        .log_group_names("/app/web")
+        .send()
+        .await
+        .unwrap();
+    let qd_id = resp.query_definition_id().unwrap().to_string();
+
+    // Describe
+    let resp = client.describe_query_definitions().send().await.unwrap();
+    let defs = resp.query_definitions();
+    assert_eq!(defs.len(), 1);
+    assert_eq!(defs[0].name().unwrap(), "e2e-query");
+
+    // Delete
+    let resp = client
+        .delete_query_definition()
+        .query_definition_id(&qd_id)
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.success());
+
+    let resp = client.describe_query_definitions().send().await.unwrap();
+    assert!(resp.query_definitions().is_empty());
+}
+
+// ---- Tagging (new API) ----
+
+#[tokio::test]
+async fn logs_tag_untag_list_tags_for_resource() {
+    let server = TestServer::start().await;
+    let client = server.logs_client().await;
+
+    client
+        .create_log_group()
+        .log_group_name("/tag-new/e2e")
+        .send()
+        .await
+        .unwrap();
+
+    // Get log group ARN
+    let groups = client
+        .describe_log_groups()
+        .log_group_name_prefix("/tag-new/e2e")
+        .send()
+        .await
+        .unwrap();
+    let arn = groups.log_groups()[0].arn().unwrap().to_string();
+
+    // Tag
+    client
+        .tag_resource()
+        .resource_arn(&arn)
+        .tags("env", "staging")
+        .tags("service", "api")
+        .send()
+        .await
+        .unwrap();
+
+    // List
+    let resp = client
+        .list_tags_for_resource()
+        .resource_arn(&arn)
+        .send()
+        .await
+        .unwrap();
+    let tags = resp.tags().unwrap();
+    assert_eq!(tags.get("env").unwrap(), "staging");
+    assert_eq!(tags.get("service").unwrap(), "api");
+
+    // Untag
+    client
+        .untag_resource()
+        .resource_arn(&arn)
+        .tag_keys("service")
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .list_tags_for_resource()
+        .resource_arn(&arn)
+        .send()
+        .await
+        .unwrap();
+    let tags = resp.tags().unwrap();
+    assert_eq!(tags.len(), 1);
+    assert!(tags.get("service").is_none());
+    assert_eq!(tags.get("env").unwrap(), "staging");
+}
+
+// ---- Delivery sources/destinations/deliveries CRUD ----
+
+#[tokio::test]
+async fn logs_delivery_source_crud() {
+    let server = TestServer::start().await;
+    let client = server.logs_client().await;
+
+    client
+        .create_log_group()
+        .log_group_name("/ds/e2e")
+        .send()
+        .await
+        .unwrap();
+
+    let groups = client
+        .describe_log_groups()
+        .log_group_name_prefix("/ds/e2e")
+        .send()
+        .await
+        .unwrap();
+    let group_arn = groups.log_groups()[0].arn().unwrap().to_string();
+
+    // Put
+    client
+        .put_delivery_source()
+        .name("e2e-src")
+        .resource_arn(&group_arn)
+        .log_type("APPLICATION_LOGS")
+        .send()
+        .await
+        .unwrap();
+
+    // Get
+    let resp = client
+        .get_delivery_source()
+        .name("e2e-src")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.delivery_source().unwrap().name().unwrap(), "e2e-src");
+
+    // Describe
+    let resp = client.describe_delivery_sources().send().await.unwrap();
+    assert_eq!(resp.delivery_sources().len(), 1);
+
+    // Delete
+    client
+        .delete_delivery_source()
+        .name("e2e-src")
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client.describe_delivery_sources().send().await.unwrap();
+    assert!(resp.delivery_sources().is_empty());
+}
+
+#[tokio::test]
+async fn logs_delivery_destination_crud() {
+    let server = TestServer::start().await;
+    let client = server.logs_client().await;
+
+    // Put
+    let resp = client
+        .put_delivery_destination()
+        .name("e2e-dd")
+        .delivery_destination_configuration(
+            aws_sdk_cloudwatchlogs::types::DeliveryDestinationConfiguration::builder()
+                .destination_resource_arn("arn:aws:s3:::e2e-bucket")
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let dd_arn = resp
+        .delivery_destination()
+        .unwrap()
+        .arn()
+        .unwrap()
+        .to_string();
+
+    // Get
+    let resp = client
+        .get_delivery_destination()
+        .name("e2e-dd")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.delivery_destination().unwrap().name().unwrap(),
+        "e2e-dd"
+    );
+
+    // Describe
+    let resp = client
+        .describe_delivery_destinations()
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.delivery_destinations().len(), 1);
+
+    // Delete
+    client
+        .delete_delivery_destination()
+        .name("e2e-dd")
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .describe_delivery_destinations()
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.delivery_destinations().is_empty());
+
+    // Use dd_arn to suppress unused warning
+    assert!(!dd_arn.is_empty());
+}
+
+#[tokio::test]
+async fn logs_delivery_full_crud() {
+    let server = TestServer::start().await;
+    let client = server.logs_client().await;
+
+    client
+        .create_log_group()
+        .log_group_name("/del-crud/e2e")
+        .send()
+        .await
+        .unwrap();
+
+    let groups = client
+        .describe_log_groups()
+        .log_group_name_prefix("/del-crud/e2e")
+        .send()
+        .await
+        .unwrap();
+    let group_arn = groups.log_groups()[0].arn().unwrap().to_string();
+
+    // Source
+    client
+        .put_delivery_source()
+        .name("crud-src")
+        .resource_arn(&group_arn)
+        .log_type("APPLICATION_LOGS")
+        .send()
+        .await
+        .unwrap();
+
+    // Destination
+    let dest_resp = client
+        .put_delivery_destination()
+        .name("crud-dest")
+        .delivery_destination_configuration(
+            aws_sdk_cloudwatchlogs::types::DeliveryDestinationConfiguration::builder()
+                .destination_resource_arn("arn:aws:s3:::crud-bucket")
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let dest_arn = dest_resp
+        .delivery_destination()
+        .unwrap()
+        .arn()
+        .unwrap()
+        .to_string();
+
+    // Create delivery
+    let resp = client
+        .create_delivery()
+        .delivery_source_name("crud-src")
+        .delivery_destination_arn(&dest_arn)
+        .send()
+        .await
+        .unwrap();
+    let delivery_id = resp.delivery().unwrap().id().unwrap().to_string();
+
+    // Get delivery
+    let resp = client.get_delivery().id(&delivery_id).send().await.unwrap();
+    assert_eq!(
+        resp.delivery().unwrap().delivery_source_name().unwrap(),
+        "crud-src"
+    );
+
+    // Describe deliveries
+    let resp = client.describe_deliveries().send().await.unwrap();
+    assert_eq!(resp.deliveries().len(), 1);
+
+    // Delete delivery
+    client
+        .delete_delivery()
+        .id(&delivery_id)
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client.describe_deliveries().send().await.unwrap();
+    assert!(resp.deliveries().is_empty());
+}
+
+// ---- StopQuery ----
+
+#[tokio::test]
+async fn logs_stop_query() {
+    let server = TestServer::start().await;
+    let client = server.logs_client().await;
+
+    client
+        .create_log_group()
+        .log_group_name("/stop-query/e2e")
+        .send()
+        .await
+        .unwrap();
+
+    let now = chrono::Utc::now().timestamp_millis();
+    let resp = client
+        .start_query()
+        .log_group_name("/stop-query/e2e")
+        .start_time((now / 1000) - 1)
+        .end_time((now / 1000) + 10)
+        .query_string("fields @timestamp")
+        .send()
+        .await
+        .unwrap();
+    let query_id = resp.query_id().unwrap().to_string();
+
+    // StopQuery (on already-complete query returns success)
+    let resp = client
+        .stop_query()
+        .query_id(&query_id)
+        .send()
+        .await
+        .unwrap();
+    // success may be true or false depending on query state
+    let _ = resp.success();
+}
+
+// ---- GetLogGroupFields ----
+
+#[tokio::test]
+async fn logs_get_log_group_fields() {
+    let server = TestServer::start().await;
+    let client = server.logs_client().await;
+
+    client
+        .create_log_group()
+        .log_group_name("/fields/e2e")
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .get_log_group_fields()
+        .log_group_name("/fields/e2e")
+        .send()
+        .await
+        .unwrap();
+    assert!(!resp.log_group_fields().is_empty());
+}
+
+// ---- PutLogGroupDeletionProtection ----
+
+#[tokio::test]
+async fn logs_deletion_protection() {
+    let server = TestServer::start().await;
+    let client = server.logs_client().await;
+
+    client
+        .create_log_group()
+        .log_group_name("/dp/e2e-protect")
+        .send()
+        .await
+        .unwrap();
+
+    // Enable deletion protection
+    client
+        .put_log_group_deletion_protection()
+        .log_group_identifier("/dp/e2e-protect")
+        .deletion_protection_enabled(true)
+        .send()
+        .await
+        .unwrap();
+
+    // Disable
+    client
+        .put_log_group_deletion_protection()
+        .log_group_identifier("/dp/e2e-protect")
+        .deletion_protection_enabled(false)
+        .send()
+        .await
+        .unwrap();
+}
+
+// ---- GetLogRecord ----
+
+#[tokio::test]
+async fn logs_get_log_record() {
+    let server = TestServer::start().await;
+    let client = server.logs_client().await;
+
+    let resp = client
+        .get_log_record()
+        .log_record_pointer("some-pointer")
+        .send()
+        .await
+        .unwrap();
+    // Returns a (possibly empty) map of fields
+    let _ = resp.log_record();
+}
