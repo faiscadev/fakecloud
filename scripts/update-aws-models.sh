@@ -35,6 +35,7 @@ SERVICES=(
     [kms]=kms
     [cloudformation]=cloudformation
     [sesv2]=sesv2
+    [cognito-identity-provider]=cognito-identity-provider
 )
 
 # Sparse checkout only the models we need

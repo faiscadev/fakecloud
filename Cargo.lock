@@ -1565,6 +1565,7 @@ dependencies = [
  "aws-credential-types",
  "aws-sdk-cloudformation",
  "aws-sdk-cloudwatchlogs",
+ "aws-sdk-cognitoidentityprovider",
  "aws-sdk-dynamodb",
  "aws-sdk-eventbridge",
  "aws-sdk-iam",
