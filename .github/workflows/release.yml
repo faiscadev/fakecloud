@@ -100,6 +100,28 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
+      - name: Verify tag matches Cargo.toml version
+        run: |
+          TAG="${GITHUB_REF#refs/tags/v}"
+          VERSION=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
+          if [ "$TAG" != "$VERSION" ]; then
+            echo "::error::Tag v${TAG} does not match Cargo.toml version ${VERSION}"
+            exit 1
+          fi
+          echo "Tag v${TAG} matches Cargo.toml version ${VERSION}"
+
+      - name: Verify CI checks passed on tagged commit
+        run: |
+          COMMIT_SHA="${GITHUB_SHA}"
+          STATUS=$(gh api "repos/${{ github.repository }}/commits/${COMMIT_SHA}/status" --jq '.state')
+          if [ "$STATUS" = "failure" ]; then
+            echo "::error::CI checks failed on commit ${COMMIT_SHA}"
+            exit 1
+          fi
+          echo "CI status on ${COMMIT_SHA}: ${STATUS}"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
       - name: Publish all crates
         run: |
           publish() {
