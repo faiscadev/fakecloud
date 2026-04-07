@@ -3434,12 +3434,12 @@ impl SesV2Service {
             "ImportDestination": job.import_destination,
             "ImportDataSource": job.import_data_source,
             "JobStatus": job.job_status,
-            "CreatedTimestamp": job.created_timestamp.to_rfc3339(),
+            "CreatedTimestamp": job.created_timestamp.timestamp() as f64,
             "ProcessedRecordsCount": job.processed_records_count,
             "FailedRecordsCount": job.failed_records_count,
         });
         if let Some(ref ts) = job.completed_timestamp {
-            response["CompletedTimestamp"] = json!(ts.to_rfc3339());
+            response["CompletedTimestamp"] = json!(ts.timestamp() as f64);
         }
 
         Ok(AwsResponse::json(StatusCode::OK, response.to_string()))
@@ -3477,7 +3477,7 @@ impl SesV2Service {
                     "JobId": j.job_id,
                     "ImportDestination": j.import_destination,
                     "JobStatus": j.job_status,
-                    "CreatedTimestamp": j.created_timestamp.to_rfc3339(),
+                    "CreatedTimestamp": j.created_timestamp.timestamp() as f64,
                 });
                 if j.processed_records_count > 0 {
                     obj["ProcessedRecordsCount"] = json!(j.processed_records_count);
@@ -3565,14 +3565,14 @@ impl SesV2Service {
             "JobStatus": job.job_status,
             "ExportDestination": job.export_destination,
             "ExportDataSource": job.export_data_source,
-            "CreatedTimestamp": job.created_timestamp.to_rfc3339(),
+            "CreatedTimestamp": job.created_timestamp.timestamp() as f64,
             "Statistics": {
                 "ProcessedRecordsCount": 0,
                 "ExportedRecordsCount": 0,
             },
         });
         if let Some(ref ts) = job.completed_timestamp {
-            response["CompletedTimestamp"] = json!(ts.to_rfc3339());
+            response["CompletedTimestamp"] = json!(ts.timestamp() as f64);
         }
 
         Ok(AwsResponse::json(StatusCode::OK, response.to_string()))
@@ -3605,10 +3605,10 @@ impl SesV2Service {
                     "JobId": j.job_id,
                     "ExportSourceType": j.export_source_type,
                     "JobStatus": j.job_status,
-                    "CreatedTimestamp": j.created_timestamp.to_rfc3339(),
+                    "CreatedTimestamp": j.created_timestamp.timestamp() as f64,
                 });
                 if let Some(ref ts) = j.completed_timestamp {
-                    obj["CompletedTimestamp"] = json!(ts.to_rfc3339());
+                    obj["CompletedTimestamp"] = json!(ts.timestamp() as f64);
                 }
                 obj
             })
@@ -3696,7 +3696,7 @@ impl SesV2Service {
             "TenantName": tenant_name,
             "TenantId": tenant_id,
             "TenantArn": tenant_arn,
-            "CreatedTimestamp": now.to_rfc3339(),
+            "CreatedTimestamp": now.timestamp() as f64,
             "SendingStatus": "ENABLED",
             "Tags": tags,
         });
@@ -3733,7 +3733,7 @@ impl SesV2Service {
                 "TenantName": tenant.tenant_name,
                 "TenantId": tenant.tenant_id,
                 "TenantArn": tenant.tenant_arn,
-                "CreatedTimestamp": tenant.created_timestamp.to_rfc3339(),
+                "CreatedTimestamp": tenant.created_timestamp.timestamp() as f64,
                 "SendingStatus": tenant.sending_status,
                 "Tags": tenant.tags,
             }
@@ -3751,7 +3751,7 @@ impl SesV2Service {
                     "TenantName": t.tenant_name,
                     "TenantId": t.tenant_id,
                     "TenantArn": t.tenant_arn,
-                    "CreatedTimestamp": t.created_timestamp.to_rfc3339(),
+                    "CreatedTimestamp": t.created_timestamp.timestamp() as f64,
                 })
             })
             .collect();
@@ -3954,7 +3954,7 @@ impl SesV2Service {
                             "TenantName": tenant.tenant_name,
                             "TenantId": tenant.tenant_id,
                             "ResourceArn": assoc.resource_arn,
-                            "AssociatedTimestamp": assoc.associated_timestamp.to_rfc3339(),
+                            "AssociatedTimestamp": assoc.associated_timestamp.timestamp() as f64,
                         }));
                     }
                 }
@@ -4384,32 +4384,16 @@ impl fakecloud_core::service::AwsService for SesV2Service {
             "GetTenant" => self.get_tenant(&req),
             "ListTenants" => self.list_tenants(&req),
             "DeleteTenant" => self.delete_tenant(&req),
-            "CreateTenantResourceAssociation" => {
-                self.create_tenant_resource_association(&req)
-            }
-            "DeleteTenantResourceAssociation" => {
-                self.delete_tenant_resource_association(&req)
-            }
+            "CreateTenantResourceAssociation" => self.create_tenant_resource_association(&req),
+            "DeleteTenantResourceAssociation" => self.delete_tenant_resource_association(&req),
             "ListTenantResources" => self.list_tenant_resources(&req),
             "ListResourceTenants" => self.list_resource_tenants(&req),
-            "GetReputationEntity" => {
-                self.get_reputation_entity(res, sub)
-            }
+            "GetReputationEntity" => self.get_reputation_entity(res, sub),
             "ListReputationEntities" => self.list_reputation_entities(&req),
             "UpdateReputationEntityCustomerManagedStatus" => {
-                self.update_reputation_entity_customer_managed_status(
-                    res,
-                    sub,
-                    &req,
-                )
+                self.update_reputation_entity_customer_managed_status(res, sub, &req)
             }
-            "UpdateReputationEntityPolicy" => {
-                self.update_reputation_entity_policy(
-                    res,
-                    sub,
-                    &req,
-                )
-            }
+            "UpdateReputationEntityPolicy" => self.update_reputation_entity_policy(res, sub, &req),
             "BatchGetMetricData" => self.batch_get_metric_data(&req),
             _ => Err(AwsServiceError::action_not_implemented("ses", action)),
         }
