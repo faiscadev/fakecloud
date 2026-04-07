@@ -1,8 +1,9 @@
 mod helpers;
 
 use aws_sdk_sesv2::types::{
-    Body, Content, Destination, EmailContent, EmailTemplateContent, Message, RawMessage,
-    SubscriptionStatus, Tag, Template, Topic, TopicPreference,
+    Body, Content, Destination, EmailContent, EmailTemplateContent, EventDestinationDefinition,
+    EventType, Message, RawMessage, SnsDestination, SubscriptionStatus, SuppressionListReason, Tag,
+    Template, Topic, TopicPreference,
 };
 use helpers::TestServer;
 
@@ -854,4 +855,254 @@ async fn ses_untag_multiple_keys() {
     assert_eq!(tags.len(), 1);
     assert_eq!(tags[0].key(), "b");
     assert_eq!(tags[0].value(), "2");
+}
+
+// --- Suppression List ---
+
+#[tokio::test]
+async fn ses_suppression_list_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.sesv2_client().await;
+
+    // Put suppressed destination
+    client
+        .put_suppressed_destination()
+        .email_address("bounce@example.com")
+        .reason(SuppressionListReason::Bounce)
+        .send()
+        .await
+        .unwrap();
+
+    // Get suppressed destination
+    let get = client
+        .get_suppressed_destination()
+        .email_address("bounce@example.com")
+        .send()
+        .await
+        .unwrap();
+    let dest = get.suppressed_destination().unwrap();
+    assert_eq!(dest.email_address(), "bounce@example.com");
+    assert_eq!(dest.reason(), &SuppressionListReason::Bounce);
+    // last_update_time is a required field; verify it's a positive epoch
+    assert!(dest.last_update_time().secs() > 0);
+
+    // Put another with COMPLAINT
+    client
+        .put_suppressed_destination()
+        .email_address("complaint@example.com")
+        .reason(SuppressionListReason::Complaint)
+        .send()
+        .await
+        .unwrap();
+
+    // List suppressed destinations
+    let list = client.list_suppressed_destinations().send().await.unwrap();
+    assert_eq!(list.suppressed_destination_summaries().len(), 2);
+
+    // Delete suppressed destination
+    client
+        .delete_suppressed_destination()
+        .email_address("bounce@example.com")
+        .send()
+        .await
+        .unwrap();
+
+    // Verify deleted
+    let result = client
+        .get_suppressed_destination()
+        .email_address("bounce@example.com")
+        .send()
+        .await;
+    assert!(result.is_err());
+
+    // List should have 1
+    let list = client.list_suppressed_destinations().send().await.unwrap();
+    assert_eq!(list.suppressed_destination_summaries().len(), 1);
+}
+
+// --- Event Destinations ---
+
+#[tokio::test]
+async fn ses_event_destination_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.sesv2_client().await;
+
+    // Create config set
+    client
+        .create_configuration_set()
+        .configuration_set_name("evt-config")
+        .send()
+        .await
+        .unwrap();
+
+    // Create event destination
+    client
+        .create_configuration_set_event_destination()
+        .configuration_set_name("evt-config")
+        .event_destination_name("my-sns-dest")
+        .event_destination(
+            EventDestinationDefinition::builder()
+                .enabled(true)
+                .matching_event_types(EventType::Send)
+                .matching_event_types(EventType::Bounce)
+                .sns_destination(
+                    SnsDestination::builder()
+                        .topic_arn("arn:aws:sns:us-east-1:123456789012:my-topic")
+                        .build()
+                        .unwrap(),
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    // Get event destinations
+    let get = client
+        .get_configuration_set_event_destinations()
+        .configuration_set_name("evt-config")
+        .send()
+        .await
+        .unwrap();
+    let dests = get.event_destinations();
+    assert_eq!(dests.len(), 1);
+    assert_eq!(dests[0].name(), "my-sns-dest");
+    assert!(dests[0].enabled());
+    assert_eq!(dests[0].matching_event_types().len(), 2);
+    assert!(dests[0].sns_destination().is_some());
+    assert_eq!(
+        dests[0].sns_destination().unwrap().topic_arn(),
+        "arn:aws:sns:us-east-1:123456789012:my-topic"
+    );
+
+    // Update event destination
+    client
+        .update_configuration_set_event_destination()
+        .configuration_set_name("evt-config")
+        .event_destination_name("my-sns-dest")
+        .event_destination(
+            EventDestinationDefinition::builder()
+                .enabled(false)
+                .matching_event_types(EventType::Delivery)
+                .sns_destination(
+                    SnsDestination::builder()
+                        .topic_arn("arn:aws:sns:us-east-1:123456789012:updated-topic")
+                        .build()
+                        .unwrap(),
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    // Verify update
+    let get = client
+        .get_configuration_set_event_destinations()
+        .configuration_set_name("evt-config")
+        .send()
+        .await
+        .unwrap();
+    let dests = get.event_destinations();
+    assert!(!dests[0].enabled());
+    assert_eq!(dests[0].matching_event_types().len(), 1);
+
+    // Delete event destination
+    client
+        .delete_configuration_set_event_destination()
+        .configuration_set_name("evt-config")
+        .event_destination_name("my-sns-dest")
+        .send()
+        .await
+        .unwrap();
+
+    // Verify deleted
+    let get = client
+        .get_configuration_set_event_destinations()
+        .configuration_set_name("evt-config")
+        .send()
+        .await
+        .unwrap();
+    assert!(get.event_destinations().is_empty());
+}
+
+// --- Email Identity Policies ---
+
+#[tokio::test]
+async fn ses_identity_policy_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.sesv2_client().await;
+
+    // Create identity
+    client
+        .create_email_identity()
+        .email_identity("policy-test@example.com")
+        .send()
+        .await
+        .unwrap();
+
+    let policy_doc = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":"*","Action":"ses:SendEmail","Resource":"*"}]}"#;
+
+    // Create policy
+    client
+        .create_email_identity_policy()
+        .email_identity("policy-test@example.com")
+        .policy_name("my-policy")
+        .policy(policy_doc)
+        .send()
+        .await
+        .unwrap();
+
+    // Get policies
+    let get = client
+        .get_email_identity_policies()
+        .email_identity("policy-test@example.com")
+        .send()
+        .await
+        .unwrap();
+    let policies = get.policies().unwrap();
+    assert_eq!(policies.len(), 1);
+    assert!(policies.contains_key("my-policy"));
+    assert_eq!(policies.get("my-policy").unwrap().as_str(), policy_doc);
+
+    // Update policy
+    let updated_doc = r#"{"Version":"2012-10-17","Statement":[]}"#;
+    client
+        .update_email_identity_policy()
+        .email_identity("policy-test@example.com")
+        .policy_name("my-policy")
+        .policy(updated_doc)
+        .send()
+        .await
+        .unwrap();
+
+    // Verify update
+    let get = client
+        .get_email_identity_policies()
+        .email_identity("policy-test@example.com")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        get.policies().unwrap().get("my-policy").unwrap().as_str(),
+        updated_doc
+    );
+
+    // Delete policy
+    client
+        .delete_email_identity_policy()
+        .email_identity("policy-test@example.com")
+        .policy_name("my-policy")
+        .send()
+        .await
+        .unwrap();
+
+    // Verify deleted
+    let get = client
+        .get_email_identity_policies()
+        .email_identity("policy-test@example.com")
+        .send()
+        .await
+        .unwrap();
+    assert!(get.policies().unwrap().is_empty());
 }

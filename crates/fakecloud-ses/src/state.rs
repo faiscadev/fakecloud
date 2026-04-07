@@ -75,6 +75,30 @@ pub struct TopicPreference {
     pub subscription_status: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct SuppressedDestination {
+    pub email_address: String,
+    pub reason: String,
+    pub last_update_time: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventDestination {
+    pub name: String,
+    pub enabled: bool,
+    pub matching_event_types: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kinesis_firehose_destination: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cloud_watch_destination: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sns_destination: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub event_bridge_destination: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pinpoint_destination: Option<serde_json::Value>,
+}
+
 pub struct SesState {
     pub account_id: String,
     pub region: String,
@@ -86,6 +110,12 @@ pub struct SesState {
     pub contacts: HashMap<String, HashMap<String, Contact>>,
     /// Tags keyed by resource ARN, value is key→value tag map.
     pub tags: HashMap<String, HashMap<String, String>>,
+    /// Suppression list: email → suppressed destination info.
+    pub suppressed_destinations: HashMap<String, SuppressedDestination>,
+    /// Event destinations: config set name → list of event destinations.
+    pub event_destinations: HashMap<String, Vec<EventDestination>>,
+    /// Identity policies: identity name → policy name → policy JSON document.
+    pub identity_policies: HashMap<String, HashMap<String, String>>,
 }
 
 impl SesState {
@@ -100,6 +130,9 @@ impl SesState {
             contact_lists: HashMap::new(),
             contacts: HashMap::new(),
             tags: HashMap::new(),
+            suppressed_destinations: HashMap::new(),
+            event_destinations: HashMap::new(),
+            identity_policies: HashMap::new(),
         }
     }
 
@@ -111,6 +144,9 @@ impl SesState {
         self.contact_lists.clear();
         self.contacts.clear();
         self.tags.clear();
+        self.suppressed_destinations.clear();
+        self.event_destinations.clear();
+        self.identity_policies.clear();
     }
 }
 

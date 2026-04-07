@@ -7,8 +7,8 @@ use std::collections::HashMap;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use crate::state::{
-    ConfigurationSet, Contact, ContactList, EmailIdentity, EmailTemplate, SentEmail,
-    SharedSesState, Topic, TopicPreference,
+    ConfigurationSet, Contact, ContactList, EmailIdentity, EmailTemplate, EventDestination,
+    SentEmail, SharedSesState, SuppressedDestination, Topic, TopicPreference,
 };
 
 pub struct SesV2Service {
@@ -51,6 +51,18 @@ impl SesV2Service {
     ///   GET    /v2/email/contact-lists/{name}/contacts/{email} -> GetContact
     ///   PUT    /v2/email/contact-lists/{name}/contacts/{email} -> UpdateContact
     ///   DELETE /v2/email/contact-lists/{name}/contacts/{email} -> DeleteContact
+    ///   PUT    /v2/email/suppression/addresses            -> PutSuppressedDestination
+    ///   GET    /v2/email/suppression/addresses            -> ListSuppressedDestinations
+    ///   GET    /v2/email/suppression/addresses/{email}    -> GetSuppressedDestination
+    ///   DELETE /v2/email/suppression/addresses/{email}    -> DeleteSuppressedDestination
+    ///   POST   /v2/email/configuration-sets/{name}/event-destinations -> CreateConfigurationSetEventDestination
+    ///   GET    /v2/email/configuration-sets/{name}/event-destinations -> GetConfigurationSetEventDestinations
+    ///   PUT    /v2/email/configuration-sets/{name}/event-destinations/{dest} -> UpdateConfigurationSetEventDestination
+    ///   DELETE /v2/email/configuration-sets/{name}/event-destinations/{dest} -> DeleteConfigurationSetEventDestination
+    ///   POST   /v2/email/identities/{id}/policies/{policy} -> CreateEmailIdentityPolicy
+    ///   GET    /v2/email/identities/{id}/policies         -> GetEmailIdentityPolicies
+    ///   PUT    /v2/email/identities/{id}/policies/{policy} -> UpdateEmailIdentityPolicy
+    ///   DELETE /v2/email/identities/{id}/policies/{policy} -> DeleteEmailIdentityPolicy
     fn resolve_action(req: &AwsRequest) -> Option<(&str, Option<String>, Option<String>)> {
         let segs = &req.path_segments;
 
@@ -170,6 +182,73 @@ impl SesV2Service {
             (Method::DELETE, 6) if segs[2] == "contact-lists" && segs[4] == "contacts" => {
                 Some(("DeleteContact", resource, Some(decode(&segs[5]))))
             }
+
+            // /v2/email/suppression/addresses
+            (Method::PUT, 4) if segs[2] == "suppression" && segs[3] == "addresses" => {
+                Some(("PutSuppressedDestination", None, None))
+            }
+            (Method::GET, 4) if segs[2] == "suppression" && segs[3] == "addresses" => {
+                Some(("ListSuppressedDestinations", None, None))
+            }
+            // /v2/email/suppression/addresses/{email}
+            (Method::GET, 5) if segs[2] == "suppression" && segs[3] == "addresses" => {
+                Some(("GetSuppressedDestination", Some(decode(&segs[4])), None))
+            }
+            (Method::DELETE, 5) if segs[2] == "suppression" && segs[3] == "addresses" => {
+                Some(("DeleteSuppressedDestination", Some(decode(&segs[4])), None))
+            }
+
+            // /v2/email/configuration-sets/{name}/event-destinations
+            (Method::POST, 5)
+                if segs[2] == "configuration-sets" && segs[4] == "event-destinations" =>
+            {
+                Some(("CreateConfigurationSetEventDestination", resource, None))
+            }
+            (Method::GET, 5)
+                if segs[2] == "configuration-sets" && segs[4] == "event-destinations" =>
+            {
+                Some(("GetConfigurationSetEventDestinations", resource, None))
+            }
+            // /v2/email/configuration-sets/{name}/event-destinations/{dest-name}
+            (Method::PUT, 6)
+                if segs[2] == "configuration-sets" && segs[4] == "event-destinations" =>
+            {
+                Some((
+                    "UpdateConfigurationSetEventDestination",
+                    resource,
+                    Some(decode(&segs[5])),
+                ))
+            }
+            (Method::DELETE, 6)
+                if segs[2] == "configuration-sets" && segs[4] == "event-destinations" =>
+            {
+                Some((
+                    "DeleteConfigurationSetEventDestination",
+                    resource,
+                    Some(decode(&segs[5])),
+                ))
+            }
+
+            // /v2/email/identities/{id}/policies
+            (Method::GET, 5) if segs[2] == "identities" && segs[4] == "policies" => {
+                Some(("GetEmailIdentityPolicies", resource, None))
+            }
+            // /v2/email/identities/{id}/policies/{policy-name}
+            (Method::POST, 6) if segs[2] == "identities" && segs[4] == "policies" => Some((
+                "CreateEmailIdentityPolicy",
+                resource,
+                Some(decode(&segs[5])),
+            )),
+            (Method::PUT, 6) if segs[2] == "identities" && segs[4] == "policies" => Some((
+                "UpdateEmailIdentityPolicy",
+                resource,
+                Some(decode(&segs[5])),
+            )),
+            (Method::DELETE, 6) if segs[2] == "identities" && segs[4] == "policies" => Some((
+                "DeleteEmailIdentityPolicy",
+                resource,
+                Some(decode(&segs[5])),
+            )),
 
             _ => None,
         }
@@ -346,6 +425,9 @@ impl SesV2Service {
         );
         state.tags.remove(&arn);
 
+        // Remove policies for this identity
+        state.identity_policies.remove(identity_name);
+
         Ok(AwsResponse::json(StatusCode::OK, "{}"))
     }
 
@@ -444,6 +526,9 @@ impl SesV2Service {
             req.region, req.account_id, name
         );
         state.tags.remove(&arn);
+
+        // Remove event destinations for this configuration set
+        state.event_destinations.remove(name);
 
         Ok(AwsResponse::json(StatusCode::OK, "{}"))
     }
@@ -1213,6 +1298,422 @@ impl SesV2Service {
         Ok(AwsResponse::json(StatusCode::OK, response.to_string()))
     }
 
+    // --- Suppression List operations ---
+
+    fn put_suppressed_destination(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body: Value = Self::parse_body(req)?;
+        let email = match body["EmailAddress"].as_str() {
+            Some(e) => e.to_string(),
+            None => {
+                return Ok(Self::json_error(
+                    StatusCode::BAD_REQUEST,
+                    "BadRequestException",
+                    "EmailAddress is required",
+                ));
+            }
+        };
+        let reason = match body["Reason"].as_str() {
+            Some(r) if r == "BOUNCE" || r == "COMPLAINT" => r.to_string(),
+            Some(_) => {
+                return Ok(Self::json_error(
+                    StatusCode::BAD_REQUEST,
+                    "BadRequestException",
+                    "Reason must be BOUNCE or COMPLAINT",
+                ));
+            }
+            None => {
+                return Ok(Self::json_error(
+                    StatusCode::BAD_REQUEST,
+                    "BadRequestException",
+                    "Reason is required",
+                ));
+            }
+        };
+
+        let mut state = self.state.write();
+        state.suppressed_destinations.insert(
+            email.clone(),
+            SuppressedDestination {
+                email_address: email,
+                reason,
+                last_update_time: Utc::now(),
+            },
+        );
+
+        Ok(AwsResponse::json(StatusCode::OK, "{}"))
+    }
+
+    fn get_suppressed_destination(&self, email: &str) -> Result<AwsResponse, AwsServiceError> {
+        let state = self.state.read();
+        let dest = match state.suppressed_destinations.get(email) {
+            Some(d) => d,
+            None => {
+                return Ok(Self::json_error(
+                    StatusCode::NOT_FOUND,
+                    "NotFoundException",
+                    &format!("{} is not on the suppression list", email),
+                ));
+            }
+        };
+
+        let response = json!({
+            "SuppressedDestination": {
+                "EmailAddress": dest.email_address,
+                "Reason": dest.reason,
+                "LastUpdateTime": dest.last_update_time.timestamp() as f64,
+            }
+        });
+
+        Ok(AwsResponse::json(StatusCode::OK, response.to_string()))
+    }
+
+    fn delete_suppressed_destination(&self, email: &str) -> Result<AwsResponse, AwsServiceError> {
+        let mut state = self.state.write();
+        if state.suppressed_destinations.remove(email).is_none() {
+            return Ok(Self::json_error(
+                StatusCode::NOT_FOUND,
+                "NotFoundException",
+                &format!("{} is not on the suppression list", email),
+            ));
+        }
+        Ok(AwsResponse::json(StatusCode::OK, "{}"))
+    }
+
+    fn list_suppressed_destinations(&self) -> Result<AwsResponse, AwsServiceError> {
+        let state = self.state.read();
+        let summaries: Vec<Value> = state
+            .suppressed_destinations
+            .values()
+            .map(|d| {
+                json!({
+                    "EmailAddress": d.email_address,
+                    "Reason": d.reason,
+                    "LastUpdateTime": d.last_update_time.timestamp() as f64,
+                })
+            })
+            .collect();
+
+        let response = json!({
+            "SuppressedDestinationSummaries": summaries,
+        });
+
+        Ok(AwsResponse::json(StatusCode::OK, response.to_string()))
+    }
+
+    // --- Event Destination operations ---
+
+    fn create_configuration_set_event_destination(
+        &self,
+        config_set_name: &str,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body: Value = Self::parse_body(req)?;
+
+        let state_read = self.state.read();
+        if !state_read.configuration_sets.contains_key(config_set_name) {
+            return Ok(Self::json_error(
+                StatusCode::NOT_FOUND,
+                "NotFoundException",
+                &format!("Configuration set {} does not exist", config_set_name),
+            ));
+        }
+        drop(state_read);
+
+        let dest_name = match body["EventDestinationName"].as_str() {
+            Some(n) => n.to_string(),
+            None => {
+                return Ok(Self::json_error(
+                    StatusCode::BAD_REQUEST,
+                    "BadRequestException",
+                    "EventDestinationName is required",
+                ));
+            }
+        };
+
+        let event_dest = parse_event_destination_definition(&dest_name, &body["EventDestination"]);
+
+        let mut state = self.state.write();
+        let dests = state
+            .event_destinations
+            .entry(config_set_name.to_string())
+            .or_default();
+
+        if dests.iter().any(|d| d.name == dest_name) {
+            return Ok(Self::json_error(
+                StatusCode::CONFLICT,
+                "AlreadyExistsException",
+                &format!("Event destination {} already exists", dest_name),
+            ));
+        }
+
+        dests.push(event_dest);
+
+        Ok(AwsResponse::json(StatusCode::OK, "{}"))
+    }
+
+    fn get_configuration_set_event_destinations(
+        &self,
+        config_set_name: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let state = self.state.read();
+
+        if !state.configuration_sets.contains_key(config_set_name) {
+            return Ok(Self::json_error(
+                StatusCode::NOT_FOUND,
+                "NotFoundException",
+                &format!("Configuration set {} does not exist", config_set_name),
+            ));
+        }
+
+        let dests = state
+            .event_destinations
+            .get(config_set_name)
+            .cloned()
+            .unwrap_or_default();
+
+        let dests_json: Vec<Value> = dests.iter().map(event_destination_to_json).collect();
+
+        let response = json!({
+            "EventDestinations": dests_json,
+        });
+
+        Ok(AwsResponse::json(StatusCode::OK, response.to_string()))
+    }
+
+    fn update_configuration_set_event_destination(
+        &self,
+        config_set_name: &str,
+        dest_name: &str,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body: Value = Self::parse_body(req)?;
+
+        let mut state = self.state.write();
+
+        if !state.configuration_sets.contains_key(config_set_name) {
+            return Ok(Self::json_error(
+                StatusCode::NOT_FOUND,
+                "NotFoundException",
+                &format!("Configuration set {} does not exist", config_set_name),
+            ));
+        }
+
+        let dests = state
+            .event_destinations
+            .entry(config_set_name.to_string())
+            .or_default();
+
+        let existing = match dests.iter_mut().find(|d| d.name == dest_name) {
+            Some(d) => d,
+            None => {
+                return Ok(Self::json_error(
+                    StatusCode::NOT_FOUND,
+                    "NotFoundException",
+                    &format!("Event destination {} does not exist", dest_name),
+                ));
+            }
+        };
+
+        let updated = parse_event_destination_definition(dest_name, &body["EventDestination"]);
+        *existing = updated;
+
+        Ok(AwsResponse::json(StatusCode::OK, "{}"))
+    }
+
+    fn delete_configuration_set_event_destination(
+        &self,
+        config_set_name: &str,
+        dest_name: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let mut state = self.state.write();
+
+        if !state.configuration_sets.contains_key(config_set_name) {
+            return Ok(Self::json_error(
+                StatusCode::NOT_FOUND,
+                "NotFoundException",
+                &format!("Configuration set {} does not exist", config_set_name),
+            ));
+        }
+
+        let dests = state
+            .event_destinations
+            .entry(config_set_name.to_string())
+            .or_default();
+
+        let len_before = dests.len();
+        dests.retain(|d| d.name != dest_name);
+
+        if dests.len() == len_before {
+            return Ok(Self::json_error(
+                StatusCode::NOT_FOUND,
+                "NotFoundException",
+                &format!("Event destination {} does not exist", dest_name),
+            ));
+        }
+
+        Ok(AwsResponse::json(StatusCode::OK, "{}"))
+    }
+
+    // --- Email Identity Policy operations ---
+
+    fn create_email_identity_policy(
+        &self,
+        identity_name: &str,
+        policy_name: &str,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body: Value = Self::parse_body(req)?;
+
+        let policy = match body["Policy"].as_str() {
+            Some(p) => p.to_string(),
+            None => {
+                return Ok(Self::json_error(
+                    StatusCode::BAD_REQUEST,
+                    "BadRequestException",
+                    "Policy is required",
+                ));
+            }
+        };
+
+        let mut state = self.state.write();
+
+        if !state.identities.contains_key(identity_name) {
+            return Ok(Self::json_error(
+                StatusCode::NOT_FOUND,
+                "NotFoundException",
+                &format!("Identity {} does not exist", identity_name),
+            ));
+        }
+
+        let policies = state
+            .identity_policies
+            .entry(identity_name.to_string())
+            .or_default();
+
+        if policies.contains_key(policy_name) {
+            return Ok(Self::json_error(
+                StatusCode::CONFLICT,
+                "AlreadyExistsException",
+                &format!("Policy {} already exists", policy_name),
+            ));
+        }
+
+        policies.insert(policy_name.to_string(), policy);
+
+        Ok(AwsResponse::json(StatusCode::OK, "{}"))
+    }
+
+    fn get_email_identity_policies(
+        &self,
+        identity_name: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let state = self.state.read();
+
+        if !state.identities.contains_key(identity_name) {
+            return Ok(Self::json_error(
+                StatusCode::NOT_FOUND,
+                "NotFoundException",
+                &format!("Identity {} does not exist", identity_name),
+            ));
+        }
+
+        let policies = state
+            .identity_policies
+            .get(identity_name)
+            .cloned()
+            .unwrap_or_default();
+
+        let policies_json: Value = policies
+            .into_iter()
+            .map(|(k, v)| (k, Value::String(v)))
+            .collect::<serde_json::Map<String, Value>>()
+            .into();
+
+        let response = json!({
+            "Policies": policies_json,
+        });
+
+        Ok(AwsResponse::json(StatusCode::OK, response.to_string()))
+    }
+
+    fn update_email_identity_policy(
+        &self,
+        identity_name: &str,
+        policy_name: &str,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body: Value = Self::parse_body(req)?;
+
+        let policy = match body["Policy"].as_str() {
+            Some(p) => p.to_string(),
+            None => {
+                return Ok(Self::json_error(
+                    StatusCode::BAD_REQUEST,
+                    "BadRequestException",
+                    "Policy is required",
+                ));
+            }
+        };
+
+        let mut state = self.state.write();
+
+        if !state.identities.contains_key(identity_name) {
+            return Ok(Self::json_error(
+                StatusCode::NOT_FOUND,
+                "NotFoundException",
+                &format!("Identity {} does not exist", identity_name),
+            ));
+        }
+
+        let policies = state
+            .identity_policies
+            .entry(identity_name.to_string())
+            .or_default();
+
+        if !policies.contains_key(policy_name) {
+            return Ok(Self::json_error(
+                StatusCode::NOT_FOUND,
+                "NotFoundException",
+                &format!("Policy {} does not exist", policy_name),
+            ));
+        }
+
+        policies.insert(policy_name.to_string(), policy);
+
+        Ok(AwsResponse::json(StatusCode::OK, "{}"))
+    }
+
+    fn delete_email_identity_policy(
+        &self,
+        identity_name: &str,
+        policy_name: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let mut state = self.state.write();
+
+        if !state.identities.contains_key(identity_name) {
+            return Ok(Self::json_error(
+                StatusCode::NOT_FOUND,
+                "NotFoundException",
+                &format!("Identity {} does not exist", identity_name),
+            ));
+        }
+
+        let policies = state
+            .identity_policies
+            .entry(identity_name.to_string())
+            .or_default();
+
+        if policies.remove(policy_name).is_none() {
+            return Ok(Self::json_error(
+                StatusCode::NOT_FOUND,
+                "NotFoundException",
+                &format!("Policy {} does not exist", policy_name),
+            ));
+        }
+
+        Ok(AwsResponse::json(StatusCode::OK, "{}"))
+    }
+
     fn send_bulk_email(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body: Value = Self::parse_body(req)?;
 
@@ -1335,6 +1836,63 @@ fn extract_string_array(value: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
+fn parse_event_destination_definition(name: &str, def: &Value) -> EventDestination {
+    let enabled = def["Enabled"].as_bool().unwrap_or(false);
+    let matching_event_types = extract_string_array(&def["MatchingEventTypes"]);
+    let kinesis_firehose_destination = def
+        .get("KinesisFirehoseDestination")
+        .filter(|v| v.is_object())
+        .cloned();
+    let cloud_watch_destination = def
+        .get("CloudWatchDestination")
+        .filter(|v| v.is_object())
+        .cloned();
+    let sns_destination = def.get("SnsDestination").filter(|v| v.is_object()).cloned();
+    let event_bridge_destination = def
+        .get("EventBridgeDestination")
+        .filter(|v| v.is_object())
+        .cloned();
+    let pinpoint_destination = def
+        .get("PinpointDestination")
+        .filter(|v| v.is_object())
+        .cloned();
+
+    EventDestination {
+        name: name.to_string(),
+        enabled,
+        matching_event_types,
+        kinesis_firehose_destination,
+        cloud_watch_destination,
+        sns_destination,
+        event_bridge_destination,
+        pinpoint_destination,
+    }
+}
+
+fn event_destination_to_json(dest: &EventDestination) -> Value {
+    let mut obj = json!({
+        "Name": dest.name,
+        "Enabled": dest.enabled,
+        "MatchingEventTypes": dest.matching_event_types,
+    });
+    if let Some(ref v) = dest.kinesis_firehose_destination {
+        obj["KinesisFirehoseDestination"] = v.clone();
+    }
+    if let Some(ref v) = dest.cloud_watch_destination {
+        obj["CloudWatchDestination"] = v.clone();
+    }
+    if let Some(ref v) = dest.sns_destination {
+        obj["SnsDestination"] = v.clone();
+    }
+    if let Some(ref v) = dest.event_bridge_destination {
+        obj["EventBridgeDestination"] = v.clone();
+    }
+    if let Some(ref v) = dest.pinpoint_destination {
+        obj["PinpointDestination"] = v.clone();
+    }
+    obj
+}
+
 #[async_trait]
 impl fakecloud_core::service::AwsService for SesV2Service {
     fn service_name(&self) -> &str {
@@ -1384,6 +1942,26 @@ impl fakecloud_core::service::AwsService for SesV2Service {
             "ListContacts" => self.list_contacts(res),
             "UpdateContact" => self.update_contact(res, sub, &req),
             "DeleteContact" => self.delete_contact(res, sub),
+            "PutSuppressedDestination" => self.put_suppressed_destination(&req),
+            "GetSuppressedDestination" => self.get_suppressed_destination(res),
+            "DeleteSuppressedDestination" => self.delete_suppressed_destination(res),
+            "ListSuppressedDestinations" => self.list_suppressed_destinations(),
+            "CreateConfigurationSetEventDestination" => {
+                self.create_configuration_set_event_destination(res, &req)
+            }
+            "GetConfigurationSetEventDestinations" => {
+                self.get_configuration_set_event_destinations(res)
+            }
+            "UpdateConfigurationSetEventDestination" => {
+                self.update_configuration_set_event_destination(res, sub, &req)
+            }
+            "DeleteConfigurationSetEventDestination" => {
+                self.delete_configuration_set_event_destination(res, sub)
+            }
+            "CreateEmailIdentityPolicy" => self.create_email_identity_policy(res, sub, &req),
+            "GetEmailIdentityPolicies" => self.get_email_identity_policies(res),
+            "UpdateEmailIdentityPolicy" => self.update_email_identity_policy(res, sub, &req),
+            "DeleteEmailIdentityPolicy" => self.delete_email_identity_policy(res, sub),
             _ => Err(AwsServiceError::action_not_implemented("ses", action)),
         }
     }
@@ -1419,6 +1997,18 @@ impl fakecloud_core::service::AwsService for SesV2Service {
             "ListContacts",
             "UpdateContact",
             "DeleteContact",
+            "PutSuppressedDestination",
+            "GetSuppressedDestination",
+            "DeleteSuppressedDestination",
+            "ListSuppressedDestinations",
+            "CreateConfigurationSetEventDestination",
+            "GetConfigurationSetEventDestinations",
+            "UpdateConfigurationSetEventDestination",
+            "DeleteConfigurationSetEventDestination",
+            "CreateEmailIdentityPolicy",
+            "GetEmailIdentityPolicies",
+            "UpdateEmailIdentityPolicy",
+            "DeleteEmailIdentityPolicy",
         ]
     }
 }
@@ -2492,5 +3082,567 @@ mod tests {
 
     fn urlencoded(s: &str) -> String {
         form_urlencoded::byte_serialize(s.as_bytes()).collect()
+    }
+
+    // --- Suppression List tests ---
+
+    #[tokio::test]
+    async fn test_suppressed_destination_lifecycle() {
+        let state = make_state();
+        let svc = SesV2Service::new(state);
+
+        // Put suppressed destination
+        let req = make_request(
+            Method::PUT,
+            "/v2/email/suppression/addresses",
+            r#"{"EmailAddress": "bounce@example.com", "Reason": "BOUNCE"}"#,
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+
+        // Get suppressed destination
+        let req = make_request(
+            Method::GET,
+            "/v2/email/suppression/addresses/bounce%40example.com",
+            "",
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(
+            body["SuppressedDestination"]["EmailAddress"],
+            "bounce@example.com"
+        );
+        assert_eq!(body["SuppressedDestination"]["Reason"], "BOUNCE");
+        assert!(body["SuppressedDestination"]["LastUpdateTime"]
+            .as_f64()
+            .is_some());
+
+        // List suppressed destinations
+        let req = make_request(Method::GET, "/v2/email/suppression/addresses", "");
+        let resp = svc.handle(req).await.unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(
+            body["SuppressedDestinationSummaries"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+
+        // Delete suppressed destination
+        let req = make_request(
+            Method::DELETE,
+            "/v2/email/suppression/addresses/bounce%40example.com",
+            "",
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+
+        // Verify deleted
+        let req = make_request(
+            Method::GET,
+            "/v2/email/suppression/addresses/bounce%40example.com",
+            "",
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_suppressed_destination_complaint() {
+        let state = make_state();
+        let svc = SesV2Service::new(state);
+
+        let req = make_request(
+            Method::PUT,
+            "/v2/email/suppression/addresses",
+            r#"{"EmailAddress": "complaint@example.com", "Reason": "COMPLAINT"}"#,
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+
+        let req = make_request(
+            Method::GET,
+            "/v2/email/suppression/addresses/complaint%40example.com",
+            "",
+        );
+        let resp = svc.handle(req).await.unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["SuppressedDestination"]["Reason"], "COMPLAINT");
+    }
+
+    #[tokio::test]
+    async fn test_suppressed_destination_invalid_reason() {
+        let state = make_state();
+        let svc = SesV2Service::new(state);
+
+        let req = make_request(
+            Method::PUT,
+            "/v2/email/suppression/addresses",
+            r#"{"EmailAddress": "bad@example.com", "Reason": "INVALID"}"#,
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_suppressed_destination_upsert() {
+        let state = make_state();
+        let svc = SesV2Service::new(state);
+
+        // Put with BOUNCE
+        let req = make_request(
+            Method::PUT,
+            "/v2/email/suppression/addresses",
+            r#"{"EmailAddress": "user@example.com", "Reason": "BOUNCE"}"#,
+        );
+        svc.handle(req).await.unwrap();
+
+        // Put again with COMPLAINT (upsert)
+        let req = make_request(
+            Method::PUT,
+            "/v2/email/suppression/addresses",
+            r#"{"EmailAddress": "user@example.com", "Reason": "COMPLAINT"}"#,
+        );
+        svc.handle(req).await.unwrap();
+
+        let req = make_request(
+            Method::GET,
+            "/v2/email/suppression/addresses/user%40example.com",
+            "",
+        );
+        let resp = svc.handle(req).await.unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["SuppressedDestination"]["Reason"], "COMPLAINT");
+    }
+
+    #[tokio::test]
+    async fn test_delete_nonexistent_suppressed_destination() {
+        let state = make_state();
+        let svc = SesV2Service::new(state);
+
+        let req = make_request(
+            Method::DELETE,
+            "/v2/email/suppression/addresses/nobody%40example.com",
+            "",
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::NOT_FOUND);
+    }
+
+    // --- Event Destination tests ---
+
+    #[tokio::test]
+    async fn test_event_destination_lifecycle() {
+        let state = make_state();
+        let svc = SesV2Service::new(state);
+
+        // Create config set first
+        let req = make_request(
+            Method::POST,
+            "/v2/email/configuration-sets",
+            r#"{"ConfigurationSetName": "my-config"}"#,
+        );
+        svc.handle(req).await.unwrap();
+
+        // Create event destination
+        let req = make_request(
+            Method::POST,
+            "/v2/email/configuration-sets/my-config/event-destinations",
+            r#"{
+                "EventDestinationName": "my-dest",
+                "EventDestination": {
+                    "Enabled": true,
+                    "MatchingEventTypes": ["SEND", "BOUNCE"],
+                    "SnsDestination": {"TopicArn": "arn:aws:sns:us-east-1:123456789012:my-topic"}
+                }
+            }"#,
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+
+        // Get event destinations
+        let req = make_request(
+            Method::GET,
+            "/v2/email/configuration-sets/my-config/event-destinations",
+            "",
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let dests = body["EventDestinations"].as_array().unwrap();
+        assert_eq!(dests.len(), 1);
+        assert_eq!(dests[0]["Name"], "my-dest");
+        assert_eq!(dests[0]["Enabled"], true);
+        assert_eq!(dests[0]["MatchingEventTypes"], json!(["SEND", "BOUNCE"]));
+        assert_eq!(
+            dests[0]["SnsDestination"]["TopicArn"],
+            "arn:aws:sns:us-east-1:123456789012:my-topic"
+        );
+
+        // Update event destination
+        let req = make_request(
+            Method::PUT,
+            "/v2/email/configuration-sets/my-config/event-destinations/my-dest",
+            r#"{
+                "EventDestination": {
+                    "Enabled": false,
+                    "MatchingEventTypes": ["DELIVERY"],
+                    "SnsDestination": {"TopicArn": "arn:aws:sns:us-east-1:123456789012:updated-topic"}
+                }
+            }"#,
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+
+        // Verify update
+        let req = make_request(
+            Method::GET,
+            "/v2/email/configuration-sets/my-config/event-destinations",
+            "",
+        );
+        let resp = svc.handle(req).await.unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let dests = body["EventDestinations"].as_array().unwrap();
+        assert_eq!(dests[0]["Enabled"], false);
+        assert_eq!(dests[0]["MatchingEventTypes"], json!(["DELIVERY"]));
+
+        // Delete event destination
+        let req = make_request(
+            Method::DELETE,
+            "/v2/email/configuration-sets/my-config/event-destinations/my-dest",
+            "",
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+
+        // Verify deleted
+        let req = make_request(
+            Method::GET,
+            "/v2/email/configuration-sets/my-config/event-destinations",
+            "",
+        );
+        let resp = svc.handle(req).await.unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert!(body["EventDestinations"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_event_destination_config_set_not_found() {
+        let state = make_state();
+        let svc = SesV2Service::new(state);
+
+        let req = make_request(
+            Method::POST,
+            "/v2/email/configuration-sets/nonexistent/event-destinations",
+            r#"{
+                "EventDestinationName": "dest",
+                "EventDestination": {"Enabled": true, "MatchingEventTypes": ["SEND"]}
+            }"#,
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_event_destination_duplicate() {
+        let state = make_state();
+        let svc = SesV2Service::new(state);
+
+        let req = make_request(
+            Method::POST,
+            "/v2/email/configuration-sets",
+            r#"{"ConfigurationSetName": "my-config"}"#,
+        );
+        svc.handle(req).await.unwrap();
+
+        let body = r#"{
+            "EventDestinationName": "dup-dest",
+            "EventDestination": {"Enabled": true, "MatchingEventTypes": ["SEND"]}
+        }"#;
+
+        let req = make_request(
+            Method::POST,
+            "/v2/email/configuration-sets/my-config/event-destinations",
+            body,
+        );
+        svc.handle(req).await.unwrap();
+
+        let req = make_request(
+            Method::POST,
+            "/v2/email/configuration-sets/my-config/event-destinations",
+            body,
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn test_update_nonexistent_event_destination() {
+        let state = make_state();
+        let svc = SesV2Service::new(state);
+
+        let req = make_request(
+            Method::POST,
+            "/v2/email/configuration-sets",
+            r#"{"ConfigurationSetName": "my-config"}"#,
+        );
+        svc.handle(req).await.unwrap();
+
+        let req = make_request(
+            Method::PUT,
+            "/v2/email/configuration-sets/my-config/event-destinations/nonexistent",
+            r#"{"EventDestination": {"Enabled": true, "MatchingEventTypes": ["SEND"]}}"#,
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_delete_nonexistent_event_destination() {
+        let state = make_state();
+        let svc = SesV2Service::new(state);
+
+        let req = make_request(
+            Method::POST,
+            "/v2/email/configuration-sets",
+            r#"{"ConfigurationSetName": "my-config"}"#,
+        );
+        svc.handle(req).await.unwrap();
+
+        let req = make_request(
+            Method::DELETE,
+            "/v2/email/configuration-sets/my-config/event-destinations/nonexistent",
+            "",
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_event_destinations_cleaned_on_config_set_delete() {
+        let state = make_state();
+        let svc = SesV2Service::new(state.clone());
+
+        let req = make_request(
+            Method::POST,
+            "/v2/email/configuration-sets",
+            r#"{"ConfigurationSetName": "my-config"}"#,
+        );
+        svc.handle(req).await.unwrap();
+
+        let req = make_request(
+            Method::POST,
+            "/v2/email/configuration-sets/my-config/event-destinations",
+            r#"{
+                "EventDestinationName": "dest1",
+                "EventDestination": {"Enabled": true, "MatchingEventTypes": ["SEND"]}
+            }"#,
+        );
+        svc.handle(req).await.unwrap();
+
+        let req = make_request(Method::DELETE, "/v2/email/configuration-sets/my-config", "");
+        svc.handle(req).await.unwrap();
+
+        let s = state.read();
+        assert!(!s.event_destinations.contains_key("my-config"));
+    }
+
+    // --- Email Identity Policy tests ---
+
+    #[tokio::test]
+    async fn test_identity_policy_lifecycle() {
+        let state = make_state();
+        let svc = SesV2Service::new(state);
+
+        // Create identity first
+        let req = make_request(
+            Method::POST,
+            "/v2/email/identities",
+            r#"{"EmailIdentity": "test@example.com"}"#,
+        );
+        svc.handle(req).await.unwrap();
+
+        // Create policy
+        let policy_doc = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":"*","Action":"ses:SendEmail","Resource":"*"}]}"#;
+        let req = make_request(
+            Method::POST,
+            "/v2/email/identities/test%40example.com/policies/my-policy",
+            &format!(
+                r#"{{"Policy": {}}}"#,
+                serde_json::to_string(policy_doc).unwrap()
+            ),
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+
+        // Get policies
+        let req = make_request(
+            Method::GET,
+            "/v2/email/identities/test%40example.com/policies",
+            "",
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert!(body["Policies"]["my-policy"].is_string());
+        assert_eq!(body["Policies"]["my-policy"].as_str().unwrap(), policy_doc);
+
+        // Update policy
+        let updated_doc = r#"{"Version":"2012-10-17","Statement":[]}"#;
+        let req = make_request(
+            Method::PUT,
+            "/v2/email/identities/test%40example.com/policies/my-policy",
+            &format!(
+                r#"{{"Policy": {}}}"#,
+                serde_json::to_string(updated_doc).unwrap()
+            ),
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+
+        // Verify update
+        let req = make_request(
+            Method::GET,
+            "/v2/email/identities/test%40example.com/policies",
+            "",
+        );
+        let resp = svc.handle(req).await.unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["Policies"]["my-policy"].as_str().unwrap(), updated_doc);
+
+        // Delete policy
+        let req = make_request(
+            Method::DELETE,
+            "/v2/email/identities/test%40example.com/policies/my-policy",
+            "",
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+
+        // Verify deleted
+        let req = make_request(
+            Method::GET,
+            "/v2/email/identities/test%40example.com/policies",
+            "",
+        );
+        let resp = svc.handle(req).await.unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert!(body["Policies"].as_object().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_identity_policy_identity_not_found() {
+        let state = make_state();
+        let svc = SesV2Service::new(state);
+
+        let req = make_request(
+            Method::POST,
+            "/v2/email/identities/nonexistent%40example.com/policies/my-policy",
+            r#"{"Policy": "{}"}"#,
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_identity_policy_duplicate() {
+        let state = make_state();
+        let svc = SesV2Service::new(state);
+
+        let req = make_request(
+            Method::POST,
+            "/v2/email/identities",
+            r#"{"EmailIdentity": "test@example.com"}"#,
+        );
+        svc.handle(req).await.unwrap();
+
+        let req = make_request(
+            Method::POST,
+            "/v2/email/identities/test%40example.com/policies/my-policy",
+            r#"{"Policy": "{}"}"#,
+        );
+        svc.handle(req).await.unwrap();
+
+        let req = make_request(
+            Method::POST,
+            "/v2/email/identities/test%40example.com/policies/my-policy",
+            r#"{"Policy": "{}"}"#,
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn test_update_nonexistent_policy() {
+        let state = make_state();
+        let svc = SesV2Service::new(state);
+
+        let req = make_request(
+            Method::POST,
+            "/v2/email/identities",
+            r#"{"EmailIdentity": "test@example.com"}"#,
+        );
+        svc.handle(req).await.unwrap();
+
+        let req = make_request(
+            Method::PUT,
+            "/v2/email/identities/test%40example.com/policies/nonexistent",
+            r#"{"Policy": "{}"}"#,
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_delete_nonexistent_policy() {
+        let state = make_state();
+        let svc = SesV2Service::new(state);
+
+        let req = make_request(
+            Method::POST,
+            "/v2/email/identities",
+            r#"{"EmailIdentity": "test@example.com"}"#,
+        );
+        svc.handle(req).await.unwrap();
+
+        let req = make_request(
+            Method::DELETE,
+            "/v2/email/identities/test%40example.com/policies/nonexistent",
+            "",
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_policies_cleaned_on_identity_delete() {
+        let state = make_state();
+        let svc = SesV2Service::new(state.clone());
+
+        let req = make_request(
+            Method::POST,
+            "/v2/email/identities",
+            r#"{"EmailIdentity": "test@example.com"}"#,
+        );
+        svc.handle(req).await.unwrap();
+
+        let req = make_request(
+            Method::POST,
+            "/v2/email/identities/test%40example.com/policies/my-policy",
+            r#"{"Policy": "{}"}"#,
+        );
+        svc.handle(req).await.unwrap();
+
+        let req = make_request(
+            Method::DELETE,
+            "/v2/email/identities/test%40example.com",
+            "",
+        );
+        svc.handle(req).await.unwrap();
+
+        let s = state.read();
+        assert!(!s.identity_policies.contains_key("test@example.com"));
     }
 }
