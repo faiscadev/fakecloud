@@ -315,42 +315,48 @@ impl DynamoDbService {
     // ── Item Operations ─────────────────────────────────────────────────
 
     fn put_item(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        // --- Parse request body and expression attributes WITHOUT holding any lock ---
         let body = Self::parse_body(req)?;
         let table_name = require_str(&body, "TableName")?;
         let item = require_object(&body, "Item")?;
-
-        let mut state = self.state.write();
-        let table = get_table_mut(&mut state.tables, table_name)?;
-
-        validate_key_in_item(table, &item)?;
-
-        let condition = body["ConditionExpression"].as_str();
+        let condition = body["ConditionExpression"].as_str().map(|s| s.to_string());
         let expr_attr_names = parse_expression_attribute_names(&body);
         let expr_attr_values = parse_expression_attribute_values(&body);
+        let return_values = body["ReturnValues"].as_str().unwrap_or("NONE").to_string();
 
-        let key = extract_key(table, &item);
-        let existing_idx = table.find_item_index(&key);
+        // --- Acquire write lock ONLY for validation + mutation ---
+        let old_item = {
+            let mut state = self.state.write();
+            let table = get_table_mut(&mut state.tables, table_name)?;
 
-        if let Some(cond) = condition {
-            let existing = existing_idx.map(|i| &table.items[i]);
-            evaluate_condition(cond, existing, &expr_attr_names, &expr_attr_values)?;
-        }
+            validate_key_in_item(table, &item)?;
 
-        let return_values = body["ReturnValues"].as_str().unwrap_or("NONE");
-        let old_item = if return_values == "ALL_OLD" {
-            existing_idx.map(|i| table.items[i].clone())
-        } else {
-            None
+            let key = extract_key(table, &item);
+            let existing_idx = table.find_item_index(&key);
+
+            if let Some(ref cond) = condition {
+                let existing = existing_idx.map(|i| &table.items[i]);
+                evaluate_condition(cond, existing, &expr_attr_names, &expr_attr_values)?;
+            }
+
+            let old_item = if return_values == "ALL_OLD" {
+                existing_idx.map(|i| table.items[i].clone())
+            } else {
+                None
+            };
+
+            if let Some(idx) = existing_idx {
+                table.items[idx] = item.clone();
+            } else {
+                table.items.push(item.clone());
+            }
+
+            table.record_item_access(&item);
+            table.recalculate_stats();
+
+            old_item
         };
-
-        if let Some(idx) = existing_idx {
-            table.items[idx] = item.clone();
-        } else {
-            table.items.push(item.clone());
-        }
-
-        table.record_item_access(&item);
-        table.recalculate_stats();
+        // --- Write lock released, build response ---
 
         let mut result = json!({});
         if let Some(old) = old_item {
@@ -361,23 +367,36 @@ impl DynamoDbService {
     }
 
     fn get_item(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        // --- Parse request body WITHOUT holding any lock ---
         let body = Self::parse_body(req)?;
         let table_name = require_str(&body, "TableName")?;
         let key = require_object(&body, "Key")?;
 
-        let mut state = self.state.write();
-        let table = get_table_mut(&mut state.tables, table_name)?;
+        // --- Use a read lock for the lookup (allows concurrent GetItem calls) ---
+        let (result, needs_insights) = {
+            let state = self.state.read();
+            let table = get_table(&state.tables, table_name)?;
+            let needs_insights = table.contributor_insights_status == "ENABLED";
 
-        table.record_key_access(&key);
-
-        let result = match table.find_item_index(&key) {
-            Some(idx) => {
-                let item = &table.items[idx];
-                let projected = project_item(item, &body);
-                json!({ "Item": projected })
-            }
-            None => json!({}),
+            let result = match table.find_item_index(&key) {
+                Some(idx) => {
+                    let item = &table.items[idx];
+                    let projected = project_item(item, &body);
+                    json!({ "Item": projected })
+                }
+                None => json!({}),
+            };
+            (result, needs_insights)
         };
+        // --- Read lock released ---
+
+        // Only acquire write lock if contributor insights tracking is enabled
+        if needs_insights {
+            let mut state = self.state.write();
+            if let Some(table) = state.tables.get_mut(table_name) {
+                table.record_key_access(&key);
+            }
+        }
 
         Self::ok_json(result)
     }

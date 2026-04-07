@@ -62,11 +62,6 @@ pub struct SqsQueue {
     pub receipt_handle_map: HashMap<String, Vec<String>>,
 }
 
-// TODO: SQS needs ListQueueTags and TagQueue action handlers.
-// The dual-protocol SQS agent will add these to service.rs.
-// Tags are stored in SqsQueue::tags above and should be populated
-// from CreateQueue request params (Tag.N.Key / Tag.N.Value).
-
 pub struct SqsState {
     pub account_id: String,
     pub region: String,
