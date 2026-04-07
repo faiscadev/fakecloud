@@ -623,10 +623,32 @@ impl DynamoDbService {
             }
         }
 
-        // Apply ExclusiveStartKey: skip items up to and including the start key
+        // For GSI queries, we need the table's primary key attributes to uniquely
+        // identify items (GSI keys are not unique).
+        let table_pk_hash = table.hash_key_name().to_string();
+        let table_pk_range = table.range_key_name().map(|s| s.to_string());
+        let is_gsi_query = index_name.is_some()
+            && (hash_key_name != table_pk_hash
+                || range_key_name.as_deref() != table_pk_range.as_deref());
+
+        // Apply ExclusiveStartKey: skip items up to and including the start key.
+        // For GSI queries the start key contains both index keys and table PK, so
+        // we must match on ALL of them to find the exact item.
         if let Some(ref start_key) = exclusive_start_key {
             if let Some(pos) = matched.iter().position(|item| {
-                item_matches_key(item, start_key, &hash_key_name, range_key_name.as_deref())
+                let index_match =
+                    item_matches_key(item, start_key, &hash_key_name, range_key_name.as_deref());
+                if is_gsi_query {
+                    index_match
+                        && item_matches_key(
+                            item,
+                            start_key,
+                            &table_pk_hash,
+                            table_pk_range.as_deref(),
+                        )
+                } else {
+                    index_match
+                }
             }) {
                 matched = matched.split_off(pos + 1);
             }
@@ -648,11 +670,20 @@ impl DynamoDbService {
             false
         };
 
-        // Build LastEvaluatedKey from the last returned item if there are more results
+        // Build LastEvaluatedKey from the last returned item if there are more results.
+        // For GSI queries, include both the index keys and the table's primary key
+        // so the item can be uniquely identified on resume.
         let last_evaluated_key = if has_more {
-            matched
-                .last()
-                .map(|item| extract_key_for_schema(item, &hash_key_name, range_key_name.as_deref()))
+            matched.last().map(|item| {
+                let mut key =
+                    extract_key_for_schema(item, &hash_key_name, range_key_name.as_deref());
+                if is_gsi_query {
+                    let table_key =
+                        extract_key_for_schema(item, &table_pk_hash, table_pk_range.as_deref());
+                    key.extend(table_key);
+                }
+                key
+            })
         } else {
             None
         };
@@ -6227,6 +6258,143 @@ mod tests {
         assert!(
             body["LastEvaluatedKey"].is_null(),
             "should not have LastEvaluatedKey when all items fit"
+        );
+    }
+
+    fn create_gsi_table(svc: &DynamoDbService) {
+        let req = make_request(
+            "CreateTable",
+            json!({
+                "TableName": "gsi-table",
+                "KeySchema": [
+                    { "AttributeName": "pk", "KeyType": "HASH" }
+                ],
+                "AttributeDefinitions": [
+                    { "AttributeName": "pk", "AttributeType": "S" },
+                    { "AttributeName": "gsi_pk", "AttributeType": "S" },
+                    { "AttributeName": "gsi_sk", "AttributeType": "S" }
+                ],
+                "BillingMode": "PAY_PER_REQUEST",
+                "GlobalSecondaryIndexes": [
+                    {
+                        "IndexName": "gsi-index",
+                        "KeySchema": [
+                            { "AttributeName": "gsi_pk", "KeyType": "HASH" },
+                            { "AttributeName": "gsi_sk", "KeyType": "RANGE" }
+                        ],
+                        "Projection": { "ProjectionType": "ALL" }
+                    }
+                ]
+            }),
+        );
+        svc.create_table(&req).unwrap();
+    }
+
+    #[test]
+    fn gsi_query_last_evaluated_key_includes_table_pk() {
+        let svc = make_service();
+        create_gsi_table(&svc);
+
+        // Insert 3 items with the SAME GSI key but different table PKs
+        for i in 0..3 {
+            let req = make_request(
+                "PutItem",
+                json!({
+                    "TableName": "gsi-table",
+                    "Item": {
+                        "pk": { "S": format!("item{i}") },
+                        "gsi_pk": { "S": "shared" },
+                        "gsi_sk": { "S": "sort" }
+                    }
+                }),
+            );
+            svc.put_item(&req).unwrap();
+        }
+
+        // Query GSI with Limit=1 to trigger pagination
+        let req = make_request(
+            "Query",
+            json!({
+                "TableName": "gsi-table",
+                "IndexName": "gsi-index",
+                "KeyConditionExpression": "gsi_pk = :v",
+                "ExpressionAttributeValues": { ":v": { "S": "shared" } },
+                "Limit": 1
+            }),
+        );
+        let resp = svc.query(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["Count"], 1);
+        let lek = &body["LastEvaluatedKey"];
+        assert!(lek.is_object(), "should have LastEvaluatedKey");
+        // Must contain the index keys
+        assert!(lek["gsi_pk"].is_object(), "LEK must contain gsi_pk");
+        assert!(lek["gsi_sk"].is_object(), "LEK must contain gsi_sk");
+        // Must also contain the table PK
+        assert!(
+            lek["pk"].is_object(),
+            "LEK must contain table PK for GSI queries"
+        );
+    }
+
+    #[test]
+    fn gsi_query_pagination_returns_all_items() {
+        let svc = make_service();
+        create_gsi_table(&svc);
+
+        // Insert 4 items with the SAME GSI key but different table PKs
+        for i in 0..4 {
+            let req = make_request(
+                "PutItem",
+                json!({
+                    "TableName": "gsi-table",
+                    "Item": {
+                        "pk": { "S": format!("item{i:03}") },
+                        "gsi_pk": { "S": "shared" },
+                        "gsi_sk": { "S": "sort" }
+                    }
+                }),
+            );
+            svc.put_item(&req).unwrap();
+        }
+
+        // Paginate through all items with Limit=2
+        let mut all_pks = Vec::new();
+        let mut lek: Option<Value> = None;
+
+        loop {
+            let mut query = json!({
+                "TableName": "gsi-table",
+                "IndexName": "gsi-index",
+                "KeyConditionExpression": "gsi_pk = :v",
+                "ExpressionAttributeValues": { ":v": { "S": "shared" } },
+                "Limit": 2
+            });
+            if let Some(ref start_key) = lek {
+                query["ExclusiveStartKey"] = start_key.clone();
+            }
+
+            let req = make_request("Query", query);
+            let resp = svc.query(&req).unwrap();
+            let body: Value = serde_json::from_slice(&resp.body).unwrap();
+
+            for item in body["Items"].as_array().unwrap() {
+                let pk = item["pk"]["S"].as_str().unwrap().to_string();
+                all_pks.push(pk);
+            }
+
+            if body["LastEvaluatedKey"].is_object() {
+                lek = Some(body["LastEvaluatedKey"].clone());
+            } else {
+                break;
+            }
+        }
+
+        all_pks.sort();
+        assert_eq!(
+            all_pks,
+            vec!["item000", "item001", "item002", "item003"],
+            "pagination should return all items without duplicates"
         );
     }
 }

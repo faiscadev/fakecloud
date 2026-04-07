@@ -2,9 +2,10 @@ mod helpers;
 
 use aws_sdk_dynamodb::types::{
     AttributeDefinition, AttributeValue, BillingMode, ContributorInsightsAction, Delete,
-    DeleteRequest, Get, KeySchemaElement, KeyType, PointInTimeRecoverySpecification,
-    ProvisionedThroughput, Put, PutRequest, Replica, ScalarAttributeType, Tag,
-    TimeToLiveSpecification, TransactGetItem, TransactWriteItem, WriteRequest,
+    DeleteRequest, Get, GlobalSecondaryIndex, KeySchemaElement, KeyType,
+    PointInTimeRecoverySpecification, Projection, ProjectionType, ProvisionedThroughput, Put,
+    PutRequest, Replica, ScalarAttributeType, Tag, TimeToLiveSpecification, TransactGetItem,
+    TransactWriteItem, WriteRequest,
 };
 use helpers::TestServer;
 use std::collections::HashMap;
@@ -2100,5 +2101,155 @@ async fn dynamodb_query_no_pagination_when_all_fit() {
     assert!(
         resp.last_evaluated_key().is_none(),
         "LastEvaluatedKey should be absent when all items fit"
+    );
+}
+
+#[tokio::test]
+async fn dynamodb_gsi_query_pagination() {
+    let server = TestServer::start().await;
+    let client = server.dynamodb_client().await;
+
+    // Create a table with a GSI
+    client
+        .create_table()
+        .table_name("GsiPagTable")
+        .key_schema(
+            KeySchemaElement::builder()
+                .attribute_name("pk")
+                .key_type(KeyType::Hash)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            AttributeDefinition::builder()
+                .attribute_name("pk")
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            AttributeDefinition::builder()
+                .attribute_name("gsi_pk")
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            AttributeDefinition::builder()
+                .attribute_name("gsi_sk")
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .global_secondary_indexes(
+            GlobalSecondaryIndex::builder()
+                .index_name("gsi-index")
+                .key_schema(
+                    KeySchemaElement::builder()
+                        .attribute_name("gsi_pk")
+                        .key_type(KeyType::Hash)
+                        .build()
+                        .unwrap(),
+                )
+                .key_schema(
+                    KeySchemaElement::builder()
+                        .attribute_name("gsi_sk")
+                        .key_type(KeyType::Range)
+                        .build()
+                        .unwrap(),
+                )
+                .projection(
+                    Projection::builder()
+                        .projection_type(ProjectionType::All)
+                        .build(),
+                )
+                .build()
+                .unwrap(),
+        )
+        .billing_mode(BillingMode::PayPerRequest)
+        .send()
+        .await
+        .unwrap();
+
+    // Insert 4 items with the same GSI key but different table PKs
+    for i in 0..4 {
+        client
+            .put_item()
+            .table_name("GsiPagTable")
+            .item("pk", AttributeValue::S(format!("item{i:03}")))
+            .item("gsi_pk", AttributeValue::S("shared".to_string()))
+            .item("gsi_sk", AttributeValue::S("sort".to_string()))
+            .send()
+            .await
+            .unwrap();
+    }
+
+    // First page: query GSI with limit=2
+    let resp = client
+        .query()
+        .table_name("GsiPagTable")
+        .index_name("gsi-index")
+        .key_condition_expression("gsi_pk = :v")
+        .expression_attribute_values(":v", AttributeValue::S("shared".to_string()))
+        .limit(2)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.count(), 2);
+    let lek = resp
+        .last_evaluated_key()
+        .expect("should have LastEvaluatedKey");
+    // LEK must include both index keys AND table PK
+    assert!(
+        lek.contains_key("gsi_pk"),
+        "LastEvaluatedKey should contain gsi_pk"
+    );
+    assert!(
+        lek.contains_key("gsi_sk"),
+        "LastEvaluatedKey should contain gsi_sk"
+    );
+    assert!(
+        lek.contains_key("pk"),
+        "LastEvaluatedKey should contain table PK for GSI queries"
+    );
+
+    // Paginate through all items and collect PKs
+    let mut all_pks: Vec<String> = resp
+        .items()
+        .iter()
+        .map(|item| item["pk"].as_s().unwrap().clone())
+        .collect();
+
+    let mut exclusive_start_key: Option<HashMap<String, AttributeValue>> =
+        resp.last_evaluated_key().map(|m| m.to_owned());
+
+    while exclusive_start_key.is_some() {
+        let mut q = client
+            .query()
+            .table_name("GsiPagTable")
+            .index_name("gsi-index")
+            .key_condition_expression("gsi_pk = :v")
+            .expression_attribute_values(":v", AttributeValue::S("shared".to_string()))
+            .limit(2);
+
+        for (k, v) in exclusive_start_key.as_ref().unwrap() {
+            q = q.exclusive_start_key(k.clone(), v.clone());
+        }
+
+        let resp = q.send().await.unwrap();
+
+        for item in resp.items() {
+            all_pks.push(item["pk"].as_s().unwrap().clone());
+        }
+
+        exclusive_start_key = resp.last_evaluated_key().map(|m| m.to_owned());
+    }
+
+    all_pks.sort();
+    assert_eq!(
+        all_pks,
+        vec!["item000", "item001", "item002", "item003"],
+        "GSI pagination should return all items without duplicates"
     );
 }
