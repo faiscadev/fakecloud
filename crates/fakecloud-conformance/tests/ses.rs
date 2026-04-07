@@ -1,7 +1,8 @@
 mod helpers;
 
 use aws_sdk_sesv2::types::{
-    Body, Content, Destination, EmailContent, EmailTemplateContent, Message, Template,
+    Body, Content, Destination, EmailContent, EmailTemplateContent, Message, SubscriptionStatus,
+    Template, Topic, TopicPreference,
 };
 use fakecloud_conformance_macros::test_action;
 use helpers::TestServer;
@@ -344,4 +345,186 @@ async fn ses_send_bulk_email() {
         assert_eq!(result.status().unwrap().as_str(), "SUCCESS");
         assert!(result.message_id().is_some());
     }
+}
+
+// -- Contact List CRUD --
+
+#[test_action("ses", "CreateContactList", checksum = "00000000")]
+#[test_action("ses", "GetContactList", checksum = "00000000")]
+#[test_action("ses", "ListContactLists", checksum = "00000000")]
+#[test_action("ses", "UpdateContactList", checksum = "00000000")]
+#[test_action("ses", "DeleteContactList", checksum = "00000000")]
+#[tokio::test]
+async fn ses_contact_list_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.sesv2_client().await;
+
+    // Create
+    client
+        .create_contact_list()
+        .contact_list_name("my-list")
+        .description("Test list")
+        .topics(
+            Topic::builder()
+                .topic_name("newsletters")
+                .display_name("Newsletters")
+                .description("Weekly newsletters")
+                .default_subscription_status(SubscriptionStatus::OptIn)
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    // Get
+    let get = client
+        .get_contact_list()
+        .contact_list_name("my-list")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get.contact_list_name(), Some("my-list"));
+    assert_eq!(get.description(), Some("Test list"));
+    assert_eq!(get.topics().len(), 1);
+    assert_eq!(get.topics()[0].topic_name(), "newsletters");
+
+    // List
+    let list = client.list_contact_lists().send().await.unwrap();
+    assert_eq!(list.contact_lists().len(), 1);
+
+    // Update
+    client
+        .update_contact_list()
+        .contact_list_name("my-list")
+        .description("Updated")
+        .send()
+        .await
+        .unwrap();
+
+    let get = client
+        .get_contact_list()
+        .contact_list_name("my-list")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get.description(), Some("Updated"));
+
+    // Delete
+    client
+        .delete_contact_list()
+        .contact_list_name("my-list")
+        .send()
+        .await
+        .unwrap();
+
+    let list = client.list_contact_lists().send().await.unwrap();
+    assert!(list.contact_lists().is_empty());
+}
+
+// -- Contact CRUD --
+
+#[test_action("ses", "CreateContact", checksum = "00000000")]
+#[test_action("ses", "GetContact", checksum = "00000000")]
+#[test_action("ses", "ListContacts", checksum = "00000000")]
+#[test_action("ses", "UpdateContact", checksum = "00000000")]
+#[test_action("ses", "DeleteContact", checksum = "00000000")]
+#[tokio::test]
+async fn ses_contact_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.sesv2_client().await;
+
+    // Create contact list first
+    client
+        .create_contact_list()
+        .contact_list_name("my-list")
+        .topics(
+            Topic::builder()
+                .topic_name("newsletters")
+                .display_name("Newsletters")
+                .description("Weekly newsletters")
+                .default_subscription_status(SubscriptionStatus::OptOut)
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    // Create contact
+    client
+        .create_contact()
+        .contact_list_name("my-list")
+        .email_address("user@example.com")
+        .topic_preferences(
+            TopicPreference::builder()
+                .topic_name("newsletters")
+                .subscription_status(SubscriptionStatus::OptIn)
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    // Get contact
+    let get = client
+        .get_contact()
+        .contact_list_name("my-list")
+        .email_address("user@example.com")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get.email_address(), Some("user@example.com"));
+    assert!(!get.unsubscribe_all());
+    assert_eq!(get.topic_preferences().len(), 1);
+    assert_eq!(
+        get.topic_preferences()[0].subscription_status(),
+        &SubscriptionStatus::OptIn
+    );
+
+    // List contacts
+    let list = client
+        .list_contacts()
+        .contact_list_name("my-list")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(list.contacts().len(), 1);
+
+    // Update contact
+    client
+        .update_contact()
+        .contact_list_name("my-list")
+        .email_address("user@example.com")
+        .unsubscribe_all(true)
+        .send()
+        .await
+        .unwrap();
+
+    let get = client
+        .get_contact()
+        .contact_list_name("my-list")
+        .email_address("user@example.com")
+        .send()
+        .await
+        .unwrap();
+    assert!(get.unsubscribe_all());
+
+    // Delete contact
+    client
+        .delete_contact()
+        .contact_list_name("my-list")
+        .email_address("user@example.com")
+        .send()
+        .await
+        .unwrap();
+
+    let list = client
+        .list_contacts()
+        .contact_list_name("my-list")
+        .send()
+        .await
+        .unwrap();
+    assert!(list.contacts().is_empty());
 }

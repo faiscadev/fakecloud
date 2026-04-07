@@ -1,7 +1,8 @@
 mod helpers;
 
 use aws_sdk_sesv2::types::{
-    Body, Content, Destination, EmailContent, EmailTemplateContent, Message, RawMessage, Template,
+    Body, Content, Destination, EmailContent, EmailTemplateContent, Message, RawMessage,
+    SubscriptionStatus, Template, Topic, TopicPreference,
 };
 use helpers::TestServer;
 
@@ -365,6 +366,246 @@ async fn ses_error_create_duplicate_identity() {
     let err = result.unwrap_err();
     let service_err = err.as_service_error().unwrap();
     assert!(service_err.is_already_exists_exception());
+}
+
+#[tokio::test]
+async fn ses_contact_list_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.sesv2_client().await;
+
+    // Create contact list with topics
+    client
+        .create_contact_list()
+        .contact_list_name("my-list")
+        .description("A test list")
+        .topics(
+            Topic::builder()
+                .topic_name("newsletters")
+                .display_name("Newsletters")
+                .description("Weekly newsletters")
+                .default_subscription_status(SubscriptionStatus::OptIn)
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    // Get contact list
+    let get = client
+        .get_contact_list()
+        .contact_list_name("my-list")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get.contact_list_name(), Some("my-list"));
+    assert_eq!(get.description(), Some("A test list"));
+    let topics = get.topics();
+    assert_eq!(topics.len(), 1);
+    assert_eq!(topics[0].topic_name(), "newsletters");
+    assert_eq!(
+        topics[0].default_subscription_status(),
+        &SubscriptionStatus::OptIn
+    );
+
+    // List contact lists
+    let list = client.list_contact_lists().send().await.unwrap();
+    assert_eq!(list.contact_lists().len(), 1);
+    assert_eq!(list.contact_lists()[0].contact_list_name(), Some("my-list"));
+
+    // Update contact list
+    client
+        .update_contact_list()
+        .contact_list_name("my-list")
+        .description("Updated description")
+        .topics(
+            Topic::builder()
+                .topic_name("promotions")
+                .display_name("Promotions")
+                .description("Promo emails")
+                .default_subscription_status(SubscriptionStatus::OptOut)
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    // Verify update
+    let get = client
+        .get_contact_list()
+        .contact_list_name("my-list")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get.description(), Some("Updated description"));
+    assert_eq!(get.topics().len(), 1);
+    assert_eq!(get.topics()[0].topic_name(), "promotions");
+
+    // Delete contact list
+    client
+        .delete_contact_list()
+        .contact_list_name("my-list")
+        .send()
+        .await
+        .unwrap();
+
+    // Verify deleted
+    let result = client
+        .get_contact_list()
+        .contact_list_name("my-list")
+        .send()
+        .await;
+    assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn ses_contact_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.sesv2_client().await;
+
+    // Create contact list with a topic
+    client
+        .create_contact_list()
+        .contact_list_name("my-list")
+        .topics(
+            Topic::builder()
+                .topic_name("newsletters")
+                .display_name("Newsletters")
+                .description("Weekly newsletters")
+                .default_subscription_status(SubscriptionStatus::OptOut)
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    // Create contact with topic preferences
+    client
+        .create_contact()
+        .contact_list_name("my-list")
+        .email_address("user@example.com")
+        .topic_preferences(
+            TopicPreference::builder()
+                .topic_name("newsletters")
+                .subscription_status(SubscriptionStatus::OptIn)
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    // Get contact
+    let get = client
+        .get_contact()
+        .contact_list_name("my-list")
+        .email_address("user@example.com")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get.email_address(), Some("user@example.com"));
+    assert_eq!(get.contact_list_name(), Some("my-list"));
+    assert!(!get.unsubscribe_all());
+    let prefs = get.topic_preferences();
+    assert_eq!(prefs.len(), 1);
+    assert_eq!(prefs[0].topic_name(), "newsletters");
+    assert_eq!(prefs[0].subscription_status(), &SubscriptionStatus::OptIn);
+    // Check topic defaults
+    let defaults = get.topic_default_preferences();
+    assert_eq!(defaults.len(), 1);
+    assert_eq!(
+        defaults[0].subscription_status(),
+        &SubscriptionStatus::OptOut
+    );
+
+    // List contacts
+    let list = client
+        .list_contacts()
+        .contact_list_name("my-list")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(list.contacts().len(), 1);
+
+    // Update contact
+    client
+        .update_contact()
+        .contact_list_name("my-list")
+        .email_address("user@example.com")
+        .unsubscribe_all(true)
+        .send()
+        .await
+        .unwrap();
+
+    // Verify update
+    let get = client
+        .get_contact()
+        .contact_list_name("my-list")
+        .email_address("user@example.com")
+        .send()
+        .await
+        .unwrap();
+    assert!(get.unsubscribe_all());
+
+    // Delete contact
+    client
+        .delete_contact()
+        .contact_list_name("my-list")
+        .email_address("user@example.com")
+        .send()
+        .await
+        .unwrap();
+
+    // Verify deleted
+    let result = client
+        .get_contact()
+        .contact_list_name("my-list")
+        .email_address("user@example.com")
+        .send()
+        .await;
+    assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn ses_error_duplicate_contact_list() {
+    let server = TestServer::start().await;
+    let client = server.sesv2_client().await;
+
+    client
+        .create_contact_list()
+        .contact_list_name("dup-list")
+        .send()
+        .await
+        .unwrap();
+
+    let result = client
+        .create_contact_list()
+        .contact_list_name("dup-list")
+        .send()
+        .await;
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    let service_err = err.as_service_error().unwrap();
+    assert!(service_err.is_already_exists_exception());
+}
+
+#[tokio::test]
+async fn ses_error_contact_in_nonexistent_list() {
+    let server = TestServer::start().await;
+    let client = server.sesv2_client().await;
+
+    let result = client
+        .create_contact()
+        .contact_list_name("nonexistent")
+        .email_address("user@example.com")
+        .send()
+        .await;
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    let service_err = err.as_service_error().unwrap();
+    assert!(service_err.is_not_found_exception());
 }
 
 #[tokio::test]

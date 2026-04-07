@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -42,6 +42,39 @@ pub struct SentEmail {
     pub timestamp: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct ContactList {
+    pub contact_list_name: String,
+    pub description: Option<String>,
+    pub topics: Vec<Topic>,
+    pub created_at: DateTime<Utc>,
+    pub last_updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Topic {
+    pub topic_name: String,
+    pub display_name: String,
+    pub description: String,
+    pub default_subscription_status: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Contact {
+    pub email_address: String,
+    pub topic_preferences: Vec<TopicPreference>,
+    pub unsubscribe_all: bool,
+    pub attributes_data: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub last_updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TopicPreference {
+    pub topic_name: String,
+    pub subscription_status: String,
+}
+
 pub struct SesState {
     pub account_id: String,
     pub region: String,
@@ -49,6 +82,8 @@ pub struct SesState {
     pub configuration_sets: HashMap<String, ConfigurationSet>,
     pub templates: HashMap<String, EmailTemplate>,
     pub sent_emails: Vec<SentEmail>,
+    pub contact_lists: HashMap<String, ContactList>,
+    pub contacts: HashMap<String, HashMap<String, Contact>>,
 }
 
 impl SesState {
@@ -60,6 +95,8 @@ impl SesState {
             configuration_sets: HashMap::new(),
             templates: HashMap::new(),
             sent_emails: Vec::new(),
+            contact_lists: HashMap::new(),
+            contacts: HashMap::new(),
         }
     }
 
@@ -68,6 +105,8 @@ impl SesState {
         self.configuration_sets.clear();
         self.templates.clear();
         self.sent_emails.clear();
+        self.contact_lists.clear();
+        self.contacts.clear();
     }
 }
 
