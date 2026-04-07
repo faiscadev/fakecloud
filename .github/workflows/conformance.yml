@@ -31,7 +31,9 @@ jobs:
 
       - name: Check conformance (fails if coverage drops)
         id: check
-        run: cargo run -p fakecloud-conformance -- check 2>&1 | tee conformance-report.txt
+        run: |
+          set -o pipefail
+          cargo run -p fakecloud-conformance -- check 2>&1 | tee conformance-report.txt
 
       - name: Audit handwritten tests (fails if implemented action lacks a test)
         if: always() && steps.check.outcome != 'skipped'
