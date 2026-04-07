@@ -146,6 +146,12 @@ impl SesV2Service {
             (Method::GET, 5) if segs[2] == "contact-lists" && segs[4] == "contacts" => {
                 Some(("ListContacts", resource, None))
             }
+            // /v2/email/contact-lists/{name}/contacts/list (SDK sends POST for ListContacts)
+            (Method::POST, 6)
+                if segs[2] == "contact-lists" && segs[4] == "contacts" && segs[5] == "list" =>
+            {
+                Some(("ListContacts", resource, None))
+            }
             // /v2/email/contact-lists/{name}/contacts/{email}
             (Method::GET, 6) if segs[2] == "contact-lists" && segs[4] == "contacts" => {
                 Some(("GetContact", resource, Some(decode(&segs[5]))))
