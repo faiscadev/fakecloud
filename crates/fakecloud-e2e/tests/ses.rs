@@ -676,7 +676,7 @@ async fn ses_tag_identity() {
         .await
         .unwrap();
 
-    let arn = format!("arn:aws:ses:us-east-1:000000000000:identity/tag-test@example.com");
+    let arn = "arn:aws:ses:us-east-1:000000000000:identity/tag-test@example.com".to_string();
 
     // Tag it
     client
