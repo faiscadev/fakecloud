@@ -208,7 +208,7 @@ server per test.
 
 ## Contributing
 
-Contributions are welcome. fakecloud is still in early development (Phase 1).
+Contributions are welcome.
 
 1. Fork the repository
 2. Create a feature branch: `git checkout -b feat/my-feature`
@@ -218,10 +218,6 @@ Contributions are welcome. fakecloud is still in early development (Phase 1).
    - Add E2E tests for new actions
 4. Run the full test suite: `cargo test --workspace`
 5. Open a pull request
-
-### Planned services (Phase 2)
-
-EC2, RDS, ECS, Elastic Load Balancing, CloudWatch Metrics, Route 53, API Gateway, Step Functions.
 
 ## What fakecloud Is (and Isn't)
 
