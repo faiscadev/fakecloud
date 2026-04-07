@@ -1739,3 +1739,441 @@ async fn ssm_describe_instance_associations_status() {
         .unwrap();
     assert!(resp.instance_association_status_infos().is_empty());
 }
+
+// ── Parameter Labels ─────────────────────────────────────────
+
+#[tokio::test]
+async fn ssm_label_and_unlabel_parameter_version() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+
+    // Create parameter with two versions
+    client
+        .put_parameter()
+        .name("/label/e2e")
+        .value("v1")
+        .r#type(ParameterType::String)
+        .send()
+        .await
+        .unwrap();
+    client
+        .put_parameter()
+        .name("/label/e2e")
+        .value("v2")
+        .r#type(ParameterType::String)
+        .overwrite(true)
+        .send()
+        .await
+        .unwrap();
+
+    // Label version 1
+    client
+        .label_parameter_version()
+        .name("/label/e2e")
+        .parameter_version(1)
+        .labels("prod")
+        .labels("stable")
+        .send()
+        .await
+        .unwrap();
+
+    // Verify labels via parameter history
+    let history = client
+        .get_parameter_history()
+        .name("/label/e2e")
+        .send()
+        .await
+        .unwrap();
+    let v1 = history
+        .parameters()
+        .iter()
+        .find(|p| p.version() == 1)
+        .unwrap();
+    assert!(v1.labels().contains(&"prod".to_string()));
+    assert!(v1.labels().contains(&"stable".to_string()));
+
+    // Unlabel "prod"
+    client
+        .unlabel_parameter_version()
+        .name("/label/e2e")
+        .parameter_version(1)
+        .labels("prod")
+        .send()
+        .await
+        .unwrap();
+
+    // Verify only "stable" remains
+    let history = client
+        .get_parameter_history()
+        .name("/label/e2e")
+        .send()
+        .await
+        .unwrap();
+    let v1 = history
+        .parameters()
+        .iter()
+        .find(|p| p.version() == 1)
+        .unwrap();
+    assert!(!v1.labels().contains(&"prod".to_string()));
+    assert!(v1.labels().contains(&"stable".to_string()));
+}
+
+// ── Document Operations ──────────────────────────────────────
+
+#[tokio::test]
+async fn ssm_update_document_and_default_version() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+
+    let doc_v1 = r#"{"schemaVersion":"2.2","description":"v1","mainSteps":[{"action":"aws:runShellScript","name":"run","inputs":{"runCommand":["echo v1"]}}]}"#;
+    let doc_v2 = r#"{"schemaVersion":"2.2","description":"v2","mainSteps":[{"action":"aws:runShellScript","name":"run","inputs":{"runCommand":["echo v2"]}}]}"#;
+
+    // Create
+    client
+        .create_document()
+        .name("e2e-update-doc")
+        .content(doc_v1)
+        .document_type(aws_sdk_ssm::types::DocumentType::Command)
+        .document_format(aws_sdk_ssm::types::DocumentFormat::Json)
+        .send()
+        .await
+        .unwrap();
+
+    // Update (creates version 2)
+    let resp = client
+        .update_document()
+        .name("e2e-update-doc")
+        .content(doc_v2)
+        .document_version("$LATEST")
+        .send()
+        .await
+        .unwrap();
+    let desc = resp.document_description().unwrap();
+    assert_eq!(desc.document_version().unwrap(), "2");
+
+    // List versions
+    let versions = client
+        .list_document_versions()
+        .name("e2e-update-doc")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(versions.document_versions().len(), 2);
+
+    // Update default version to 2
+    let resp = client
+        .update_document_default_version()
+        .name("e2e-update-doc")
+        .document_version("2")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.description().unwrap().default_version().unwrap(), "2");
+
+    // Verify describe shows default version = 2
+    let desc = client
+        .describe_document()
+        .name("e2e-update-doc")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(desc.document().unwrap().default_version().unwrap(), "2");
+}
+
+#[tokio::test]
+async fn ssm_document_permissions() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+
+    let doc_content = r#"{"schemaVersion":"2.2","mainSteps":[{"action":"aws:runShellScript","name":"run","inputs":{"runCommand":["echo hi"]}}]}"#;
+
+    client
+        .create_document()
+        .name("e2e-perm-doc")
+        .content(doc_content)
+        .document_type(aws_sdk_ssm::types::DocumentType::Command)
+        .send()
+        .await
+        .unwrap();
+
+    // Add permissions
+    client
+        .modify_document_permission()
+        .name("e2e-perm-doc")
+        .permission_type(aws_sdk_ssm::types::DocumentPermissionType::Share)
+        .account_ids_to_add("111111111111")
+        .account_ids_to_add("222222222222")
+        .send()
+        .await
+        .unwrap();
+
+    // Describe permissions
+    let resp = client
+        .describe_document_permission()
+        .name("e2e-perm-doc")
+        .permission_type(aws_sdk_ssm::types::DocumentPermissionType::Share)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.account_ids().len(), 2);
+
+    // Remove one
+    client
+        .modify_document_permission()
+        .name("e2e-perm-doc")
+        .permission_type(aws_sdk_ssm::types::DocumentPermissionType::Share)
+        .account_ids_to_remove("111111111111")
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .describe_document_permission()
+        .name("e2e-perm-doc")
+        .permission_type(aws_sdk_ssm::types::DocumentPermissionType::Share)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.account_ids().len(), 1);
+}
+
+// ── Maintenance Window Targets and Tasks ─────────────────────
+
+#[tokio::test]
+async fn ssm_describe_maintenance_window_targets_and_tasks() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+
+    use aws_sdk_ssm::types::{MaintenanceWindowResourceType, MaintenanceWindowTaskType, Target};
+
+    // Create window
+    let mw = client
+        .create_maintenance_window()
+        .name("e2e-mw-desc")
+        .schedule("cron(0 2 ? * SUN *)")
+        .duration(3)
+        .cutoff(1)
+        .allow_unassociated_targets(true)
+        .send()
+        .await
+        .unwrap();
+    let window_id = mw.window_id().unwrap().to_string();
+
+    // Register target
+    let target = Target::builder().key("InstanceIds").values("i-001").build();
+    client
+        .register_target_with_maintenance_window()
+        .window_id(&window_id)
+        .resource_type(MaintenanceWindowResourceType::Instance)
+        .targets(target)
+        .name("e2e-target")
+        .description("test target")
+        .send()
+        .await
+        .unwrap();
+
+    // Register task
+    client
+        .register_task_with_maintenance_window()
+        .window_id(&window_id)
+        .task_arn("AWS-RunShellScript")
+        .task_type(MaintenanceWindowTaskType::RunCommand)
+        .name("e2e-task")
+        .max_concurrency("5")
+        .max_errors("1")
+        .send()
+        .await
+        .unwrap();
+
+    // Describe targets
+    let resp = client
+        .describe_maintenance_window_targets()
+        .window_id(&window_id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.targets().len(), 1);
+    assert_eq!(resp.targets()[0].name().unwrap(), "e2e-target");
+    assert_eq!(resp.targets()[0].description().unwrap(), "test target");
+
+    // Describe tasks
+    let resp = client
+        .describe_maintenance_window_tasks()
+        .window_id(&window_id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.tasks().len(), 1);
+    assert_eq!(resp.tasks()[0].name().unwrap(), "e2e-task");
+    assert_eq!(resp.tasks()[0].task_arn().unwrap(), "AWS-RunShellScript");
+    assert_eq!(resp.tasks()[0].max_concurrency().unwrap(), "5");
+}
+
+// ── Patch Baselines ──────────────────────────────────────────
+
+#[tokio::test]
+async fn ssm_patch_baseline_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+
+    // Create
+    let resp = client
+        .create_patch_baseline()
+        .name("e2e-pb")
+        .operating_system(aws_sdk_ssm::types::OperatingSystem::AmazonLinux2)
+        .description("E2E test baseline")
+        .send()
+        .await
+        .unwrap();
+    let baseline_id = resp.baseline_id().unwrap().to_string();
+
+    // GetPatchBaseline
+    let resp = client
+        .get_patch_baseline()
+        .baseline_id(&baseline_id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.name().unwrap(), "e2e-pb");
+    assert_eq!(resp.description().unwrap(), "E2E test baseline");
+    assert_eq!(
+        resp.operating_system(),
+        Some(&aws_sdk_ssm::types::OperatingSystem::AmazonLinux2)
+    );
+
+    // DescribePatchBaselines
+    let resp = client.describe_patch_baselines().send().await.unwrap();
+    assert!(resp
+        .baseline_identities()
+        .iter()
+        .any(|b| b.baseline_id().unwrap() == baseline_id));
+
+    // DeletePatchBaseline
+    client
+        .delete_patch_baseline()
+        .baseline_id(&baseline_id)
+        .send()
+        .await
+        .unwrap();
+
+    // Verify deleted
+    let result = client
+        .get_patch_baseline()
+        .baseline_id(&baseline_id)
+        .send()
+        .await;
+    assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn ssm_patch_group_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+
+    // Create baseline
+    let resp = client
+        .create_patch_baseline()
+        .name("e2e-pg-baseline")
+        .operating_system(aws_sdk_ssm::types::OperatingSystem::AmazonLinux2)
+        .send()
+        .await
+        .unwrap();
+    let baseline_id = resp.baseline_id().unwrap().to_string();
+
+    // Register patch group
+    let resp = client
+        .register_patch_baseline_for_patch_group()
+        .baseline_id(&baseline_id)
+        .patch_group("e2e-prod")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.patch_group().unwrap(), "e2e-prod");
+
+    // GetPatchBaselineForPatchGroup
+    let resp = client
+        .get_patch_baseline_for_patch_group()
+        .patch_group("e2e-prod")
+        .operating_system(aws_sdk_ssm::types::OperatingSystem::AmazonLinux2)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.baseline_id().unwrap(), baseline_id);
+
+    // DescribePatchGroups
+    let resp = client.describe_patch_groups().send().await.unwrap();
+    assert!(resp
+        .mappings()
+        .iter()
+        .any(|m| m.patch_group().unwrap() == "e2e-prod"));
+
+    // Deregister
+    client
+        .deregister_patch_baseline_for_patch_group()
+        .baseline_id(&baseline_id)
+        .patch_group("e2e-prod")
+        .send()
+        .await
+        .unwrap();
+
+    // Verify removed
+    let resp = client.describe_patch_groups().send().await.unwrap();
+    assert!(!resp
+        .mappings()
+        .iter()
+        .any(|m| m.patch_group().unwrap() == "e2e-prod"));
+}
+
+// ── Command Details ──────────────────────────────────────────
+
+#[tokio::test]
+async fn ssm_command_invocations() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+
+    // Create document
+    let doc_content = r#"{"schemaVersion":"2.2","mainSteps":[{"action":"aws:runShellScript","name":"run","inputs":{"runCommand":["echo hi"]}}]}"#;
+    client
+        .create_document()
+        .name("e2e-cmd-inv")
+        .content(doc_content)
+        .document_type(aws_sdk_ssm::types::DocumentType::Command)
+        .send()
+        .await
+        .unwrap();
+
+    // Send command
+    let resp = client
+        .send_command()
+        .document_name("e2e-cmd-inv")
+        .instance_ids("i-1234567890abcdef0")
+        .send()
+        .await
+        .unwrap();
+    let cmd_id = resp.command().unwrap().command_id().unwrap().to_string();
+
+    // GetCommandInvocation
+    let resp = client
+        .get_command_invocation()
+        .command_id(&cmd_id)
+        .instance_id("i-1234567890abcdef0")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.command_id().unwrap(), cmd_id);
+    assert_eq!(resp.instance_id().unwrap(), "i-1234567890abcdef0");
+    assert_eq!(
+        resp.status(),
+        Some(&aws_sdk_ssm::types::CommandInvocationStatus::Success)
+    );
+
+    // ListCommandInvocations
+    let resp = client
+        .list_command_invocations()
+        .command_id(&cmd_id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.command_invocations().len(), 1);
+    assert_eq!(resp.command_invocations()[0].command_id().unwrap(), cmd_id);
+}
