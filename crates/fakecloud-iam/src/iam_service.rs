@@ -6422,6 +6422,7 @@ mod tests {
             body: bytes::Bytes::new(),
             path_segments: vec![],
             raw_path: "/".to_string(),
+            raw_query: String::new(),
             method: http::Method::POST,
             is_query_protocol: true,
             access_key_id: None,

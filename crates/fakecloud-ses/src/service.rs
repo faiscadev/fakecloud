@@ -38,6 +38,9 @@ impl SesV2Service {
     ///   DELETE /v2/email/templates/{name}                -> DeleteEmailTemplate
     ///   POST   /v2/email/outbound-emails                 -> SendEmail
     ///   POST   /v2/email/outbound-bulk-emails            -> SendBulkEmail
+    ///   POST   /v2/email/tags                            -> TagResource
+    ///   DELETE /v2/email/tags                            -> UntagResource
+    ///   GET    /v2/email/tags                            -> ListTagsForResource
     ///   POST   /v2/email/contact-lists                   -> CreateContactList
     ///   GET    /v2/email/contact-lists                   -> ListContactLists
     ///   GET    /v2/email/contact-lists/{name}            -> GetContactList
@@ -139,6 +142,11 @@ impl SesV2Service {
             (Method::DELETE, 4) if segs[2] == "contact-lists" => {
                 Some(("DeleteContactList", resource, None))
             }
+            // /v2/email/tags
+            (Method::POST, 3) if segs[2] == "tags" => Some(("TagResource", None, None)),
+            (Method::DELETE, 3) if segs[2] == "tags" => Some(("UntagResource", None, None)),
+            (Method::GET, 3) if segs[2] == "tags" => Some(("ListTagsForResource", None, None)),
+
             // /v2/email/contact-lists/{name}/contacts
             (Method::POST, 5) if segs[2] == "contact-lists" && segs[4] == "contacts" => {
                 Some(("CreateContact", resource, None))
@@ -316,7 +324,11 @@ impl SesV2Service {
         Ok(AwsResponse::json(StatusCode::OK, response.to_string()))
     }
 
-    fn delete_email_identity(&self, identity_name: &str) -> Result<AwsResponse, AwsServiceError> {
+    fn delete_email_identity(
+        &self,
+        identity_name: &str,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
         let mut state = self.state.write();
 
         if state.identities.remove(identity_name).is_none() {
@@ -326,6 +338,13 @@ impl SesV2Service {
                 &format!("Identity {} does not exist", identity_name),
             ));
         }
+
+        // Remove tags for this identity
+        let arn = format!(
+            "arn:aws:ses:{}:{}:identity/{}",
+            req.region, req.account_id, identity_name
+        );
+        state.tags.remove(&arn);
 
         Ok(AwsResponse::json(StatusCode::OK, "{}"))
     }
@@ -404,7 +423,11 @@ impl SesV2Service {
         Ok(AwsResponse::json(StatusCode::OK, response.to_string()))
     }
 
-    fn delete_configuration_set(&self, name: &str) -> Result<AwsResponse, AwsServiceError> {
+    fn delete_configuration_set(
+        &self,
+        name: &str,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
         let mut state = self.state.write();
 
         if state.configuration_sets.remove(name).is_none() {
@@ -414,6 +437,13 @@ impl SesV2Service {
                 &format!("Configuration set {} does not exist", name),
             ));
         }
+
+        // Remove tags for this configuration set
+        let arn = format!(
+            "arn:aws:ses:{}:{}:configuration-set/{}",
+            req.region, req.account_id, name
+        );
+        state.tags.remove(&arn);
 
         Ok(AwsResponse::json(StatusCode::OK, "{}"))
     }
@@ -755,7 +785,11 @@ impl SesV2Service {
         Ok(AwsResponse::json(StatusCode::OK, "{}"))
     }
 
-    fn delete_contact_list(&self, name: &str) -> Result<AwsResponse, AwsServiceError> {
+    fn delete_contact_list(
+        &self,
+        name: &str,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
         let mut state = self.state.write();
 
         if state.contact_lists.remove(name).is_none() {
@@ -768,6 +802,13 @@ impl SesV2Service {
 
         // Also delete all contacts in this list
         state.contacts.remove(name);
+
+        // Remove tags for this contact list
+        let arn = format!(
+            "arn:aws:ses:{}:{}:contact-list/{}",
+            req.region, req.account_id, name
+        );
+        state.tags.remove(&arn);
 
         Ok(AwsResponse::json(StatusCode::OK, "{}"))
     }
@@ -1030,6 +1071,148 @@ impl SesV2Service {
         Ok(AwsResponse::json(StatusCode::OK, "{}"))
     }
 
+    // --- Tag operations ---
+
+    /// Validate that a resource ARN refers to an existing resource.
+    /// Returns `None` if the resource exists, or `Some(error_response)` if not.
+    fn validate_resource_arn(&self, arn: &str) -> Option<AwsResponse> {
+        let state = self.state.read();
+
+        // Parse ARN: arn:aws:ses:{region}:{account}:{resource-type}/{name}
+        let parts: Vec<&str> = arn.split(':').collect();
+        if parts.len() < 6 {
+            return Some(Self::json_error(
+                StatusCode::NOT_FOUND,
+                "NotFoundException",
+                &format!("Resource not found: {arn}"),
+            ));
+        }
+
+        let resource = parts[5..].join(":");
+        let found = if let Some(name) = resource.strip_prefix("identity/") {
+            state.identities.contains_key(name)
+        } else if let Some(name) = resource.strip_prefix("configuration-set/") {
+            state.configuration_sets.contains_key(name)
+        } else if let Some(name) = resource.strip_prefix("contact-list/") {
+            state.contact_lists.contains_key(name)
+        } else {
+            false
+        };
+
+        if found {
+            None
+        } else {
+            Some(Self::json_error(
+                StatusCode::NOT_FOUND,
+                "NotFoundException",
+                &format!("Resource not found: {arn}"),
+            ))
+        }
+    }
+
+    fn tag_resource(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body: Value = Self::parse_body(req)?;
+
+        let arn = match body["ResourceArn"].as_str() {
+            Some(a) => a.to_string(),
+            None => {
+                return Ok(Self::json_error(
+                    StatusCode::BAD_REQUEST,
+                    "BadRequestException",
+                    "ResourceArn is required",
+                ));
+            }
+        };
+
+        let tags_arr = match body["Tags"].as_array() {
+            Some(arr) => arr,
+            None => {
+                return Ok(Self::json_error(
+                    StatusCode::BAD_REQUEST,
+                    "BadRequestException",
+                    "Tags is required",
+                ));
+            }
+        };
+
+        if let Some(resp) = self.validate_resource_arn(&arn) {
+            return Ok(resp);
+        }
+
+        let mut state = self.state.write();
+        let tag_map = state.tags.entry(arn).or_default();
+        for tag in tags_arr {
+            if let (Some(k), Some(v)) = (tag["Key"].as_str(), tag["Value"].as_str()) {
+                tag_map.insert(k.to_string(), v.to_string());
+            }
+        }
+
+        Ok(AwsResponse::json(StatusCode::OK, "{}"))
+    }
+
+    fn untag_resource(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        // ResourceArn and TagKeys come as query params
+        let arn = match req.query_params.get("ResourceArn") {
+            Some(a) => a.to_string(),
+            None => {
+                return Ok(Self::json_error(
+                    StatusCode::BAD_REQUEST,
+                    "BadRequestException",
+                    "ResourceArn is required",
+                ));
+            }
+        };
+
+        if let Some(resp) = self.validate_resource_arn(&arn) {
+            return Ok(resp);
+        }
+
+        // Parse TagKeys from raw query string (supports repeated params)
+        let tag_keys: Vec<String> = form_urlencoded::parse(req.raw_query.as_bytes())
+            .filter(|(k, _)| k == "TagKeys")
+            .map(|(_, v)| v.into_owned())
+            .collect();
+
+        let mut state = self.state.write();
+        if let Some(tag_map) = state.tags.get_mut(&arn) {
+            for key in &tag_keys {
+                tag_map.remove(key);
+            }
+        }
+
+        Ok(AwsResponse::json(StatusCode::OK, "{}"))
+    }
+
+    fn list_tags_for_resource(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let arn = match req.query_params.get("ResourceArn") {
+            Some(a) => a.to_string(),
+            None => {
+                return Ok(Self::json_error(
+                    StatusCode::BAD_REQUEST,
+                    "BadRequestException",
+                    "ResourceArn is required",
+                ));
+            }
+        };
+
+        if let Some(resp) = self.validate_resource_arn(&arn) {
+            return Ok(resp);
+        }
+
+        let state = self.state.read();
+        let tags = state.tags.get(&arn);
+        let tags_json = match tags {
+            Some(t) => fakecloud_core::tags::tags_to_json(t, "Key", "Value"),
+            None => vec![],
+        };
+
+        let response = json!({
+            "Tags": tags_json,
+        });
+
+        Ok(AwsResponse::json(StatusCode::OK, response.to_string()))
+    }
+
     fn send_bulk_email(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body: Value = Self::parse_body(req)?;
 
@@ -1176,11 +1359,11 @@ impl fakecloud_core::service::AwsService for SesV2Service {
             "CreateEmailIdentity" => self.create_email_identity(&req),
             "ListEmailIdentities" => self.list_email_identities(),
             "GetEmailIdentity" => self.get_email_identity(res),
-            "DeleteEmailIdentity" => self.delete_email_identity(res),
+            "DeleteEmailIdentity" => self.delete_email_identity(res, &req),
             "CreateConfigurationSet" => self.create_configuration_set(&req),
             "ListConfigurationSets" => self.list_configuration_sets(),
             "GetConfigurationSet" => self.get_configuration_set(res),
-            "DeleteConfigurationSet" => self.delete_configuration_set(res),
+            "DeleteConfigurationSet" => self.delete_configuration_set(res, &req),
             "CreateEmailTemplate" => self.create_email_template(&req),
             "ListEmailTemplates" => self.list_email_templates(),
             "GetEmailTemplate" => self.get_email_template(res),
@@ -1188,11 +1371,14 @@ impl fakecloud_core::service::AwsService for SesV2Service {
             "DeleteEmailTemplate" => self.delete_email_template(res),
             "SendEmail" => self.send_email(&req),
             "SendBulkEmail" => self.send_bulk_email(&req),
+            "TagResource" => self.tag_resource(&req),
+            "UntagResource" => self.untag_resource(&req),
+            "ListTagsForResource" => self.list_tags_for_resource(&req),
             "CreateContactList" => self.create_contact_list(&req),
             "GetContactList" => self.get_contact_list(res),
             "ListContactLists" => self.list_contact_lists(),
             "UpdateContactList" => self.update_contact_list(res, &req),
-            "DeleteContactList" => self.delete_contact_list(res),
+            "DeleteContactList" => self.delete_contact_list(res, &req),
             "CreateContact" => self.create_contact(res, &req),
             "GetContact" => self.get_contact(res, sub),
             "ListContacts" => self.list_contacts(res),
@@ -1220,6 +1406,9 @@ impl fakecloud_core::service::AwsService for SesV2Service {
             "DeleteEmailTemplate",
             "SendEmail",
             "SendBulkEmail",
+            "TagResource",
+            "UntagResource",
+            "ListTagsForResource",
             "CreateContactList",
             "GetContactList",
             "ListContactLists",
@@ -1250,6 +1439,16 @@ mod tests {
     }
 
     fn make_request(method: Method, path: &str, body: &str) -> AwsRequest {
+        make_request_with_query(method, path, body, "", HashMap::new())
+    }
+
+    fn make_request_with_query(
+        method: Method,
+        path: &str,
+        body: &str,
+        raw_query: &str,
+        query_params: HashMap<String, String>,
+    ) -> AwsRequest {
         let path_segments: Vec<String> = path
             .split('/')
             .filter(|s| !s.is_empty())
@@ -1262,10 +1461,11 @@ mod tests {
             account_id: "123456789012".to_string(),
             request_id: "test-request-id".to_string(),
             headers: HeaderMap::new(),
-            query_params: HashMap::new(),
+            query_params,
             body: Bytes::from(body.to_string()),
             path_segments,
             raw_path: path.to_string(),
+            raw_query: raw_query.to_string(),
             method,
             is_query_protocol: false,
             access_key_id: None,
@@ -2102,5 +2302,195 @@ mod tests {
         // Verify contacts map is cleaned up
         let s = state.read();
         assert!(!s.contacts.contains_key("my-list"));
+    }
+
+    #[tokio::test]
+    async fn test_tag_resource() {
+        let state = make_state();
+        let svc = SesV2Service::new(state.clone());
+
+        // Create an identity
+        let req = make_request(
+            Method::POST,
+            "/v2/email/identities",
+            r#"{"EmailIdentity": "test@example.com"}"#,
+        );
+        svc.handle(req).await.unwrap();
+
+        // Tag it
+        let req = make_request(
+            Method::POST,
+            "/v2/email/tags",
+            r#"{"ResourceArn": "arn:aws:ses:us-east-1:123456789012:identity/test@example.com", "Tags": [{"Key": "env", "Value": "prod"}, {"Key": "team", "Value": "backend"}]}"#,
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+
+        // List tags
+        let mut qp = HashMap::new();
+        qp.insert(
+            "ResourceArn".to_string(),
+            "arn:aws:ses:us-east-1:123456789012:identity/test@example.com".to_string(),
+        );
+        let req = make_request_with_query(
+            Method::GET,
+            "/v2/email/tags",
+            "",
+            "ResourceArn=arn%3Aaws%3Ases%3Aus-east-1%3A123456789012%3Aidentity%2Ftest%40example.com",
+            qp,
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let tags = body["Tags"].as_array().unwrap();
+        assert_eq!(tags.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_untag_resource() {
+        let state = make_state();
+        let svc = SesV2Service::new(state.clone());
+
+        // Create an identity
+        let req = make_request(
+            Method::POST,
+            "/v2/email/identities",
+            r#"{"EmailIdentity": "test@example.com"}"#,
+        );
+        svc.handle(req).await.unwrap();
+
+        let arn = "arn:aws:ses:us-east-1:123456789012:identity/test@example.com";
+
+        // Tag it
+        let req = make_request(
+            Method::POST,
+            "/v2/email/tags",
+            &format!(
+                r#"{{"ResourceArn": "{arn}", "Tags": [{{"Key": "env", "Value": "prod"}}, {{"Key": "team", "Value": "backend"}}]}}"#
+            ),
+        );
+        svc.handle(req).await.unwrap();
+
+        // Untag - remove "env"
+        let mut qp = HashMap::new();
+        qp.insert("ResourceArn".to_string(), arn.to_string());
+        qp.insert("TagKeys".to_string(), "env".to_string());
+        let raw_query = format!("ResourceArn={}&TagKeys=env", urlencoded(arn));
+        let req = make_request_with_query(Method::DELETE, "/v2/email/tags", "", &raw_query, qp);
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+
+        // Verify only "team" remains
+        let s = state.read();
+        let tags = s.tags.get(arn).unwrap();
+        assert_eq!(tags.len(), 1);
+        assert_eq!(tags.get("team").unwrap(), "backend");
+    }
+
+    #[tokio::test]
+    async fn test_tag_nonexistent_resource() {
+        let state = make_state();
+        let svc = SesV2Service::new(state);
+
+        let req = make_request(
+            Method::POST,
+            "/v2/email/tags",
+            r#"{"ResourceArn": "arn:aws:ses:us-east-1:123456789012:identity/nope", "Tags": [{"Key": "k", "Value": "v"}]}"#,
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_delete_identity_removes_tags() {
+        let state = make_state();
+        let svc = SesV2Service::new(state.clone());
+
+        let req = make_request(
+            Method::POST,
+            "/v2/email/identities",
+            r#"{"EmailIdentity": "test@example.com"}"#,
+        );
+        svc.handle(req).await.unwrap();
+
+        let arn = "arn:aws:ses:us-east-1:123456789012:identity/test@example.com";
+        let req = make_request(
+            Method::POST,
+            "/v2/email/tags",
+            &format!(r#"{{"ResourceArn": "{arn}", "Tags": [{{"Key": "k", "Value": "v"}}]}}"#),
+        );
+        svc.handle(req).await.unwrap();
+
+        // Delete identity
+        let req = make_request(
+            Method::DELETE,
+            "/v2/email/identities/test%40example.com",
+            "",
+        );
+        svc.handle(req).await.unwrap();
+
+        // Tags should be gone
+        let s = state.read();
+        assert!(!s.tags.contains_key(arn));
+    }
+
+    #[tokio::test]
+    async fn test_delete_config_set_removes_tags() {
+        let state = make_state();
+        let svc = SesV2Service::new(state.clone());
+
+        let req = make_request(
+            Method::POST,
+            "/v2/email/configuration-sets",
+            r#"{"ConfigurationSetName": "my-config"}"#,
+        );
+        svc.handle(req).await.unwrap();
+
+        let arn = "arn:aws:ses:us-east-1:123456789012:configuration-set/my-config";
+        let req = make_request(
+            Method::POST,
+            "/v2/email/tags",
+            &format!(r#"{{"ResourceArn": "{arn}", "Tags": [{{"Key": "k", "Value": "v"}}]}}"#),
+        );
+        svc.handle(req).await.unwrap();
+
+        // Delete config set
+        let req = make_request(Method::DELETE, "/v2/email/configuration-sets/my-config", "");
+        svc.handle(req).await.unwrap();
+
+        let s = state.read();
+        assert!(!s.tags.contains_key(arn));
+    }
+
+    #[tokio::test]
+    async fn test_delete_contact_list_removes_tags() {
+        let state = make_state();
+        let svc = SesV2Service::new(state.clone());
+
+        let req = make_request(
+            Method::POST,
+            "/v2/email/contact-lists",
+            r#"{"ContactListName": "my-list"}"#,
+        );
+        svc.handle(req).await.unwrap();
+
+        let arn = "arn:aws:ses:us-east-1:123456789012:contact-list/my-list";
+        let req = make_request(
+            Method::POST,
+            "/v2/email/tags",
+            &format!(r#"{{"ResourceArn": "{arn}", "Tags": [{{"Key": "k", "Value": "v"}}]}}"#),
+        );
+        svc.handle(req).await.unwrap();
+
+        // Delete contact list
+        let req = make_request(Method::DELETE, "/v2/email/contact-lists/my-list", "");
+        svc.handle(req).await.unwrap();
+
+        let s = state.read();
+        assert!(!s.tags.contains_key(arn));
+    }
+
+    fn urlencoded(s: &str) -> String {
+        form_urlencoded::byte_serialize(s.as_bytes()).collect()
     }
 }

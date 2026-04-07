@@ -5017,6 +5017,7 @@ mod tests {
             body: serde_json::to_vec(&body).unwrap().into(),
             path_segments: vec![],
             raw_path: "/".to_string(),
+            raw_query: String::new(),
             method: http::Method::POST,
             is_query_protocol: false,
             access_key_id: None,

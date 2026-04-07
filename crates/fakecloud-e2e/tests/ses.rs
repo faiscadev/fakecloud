@@ -2,7 +2,7 @@ mod helpers;
 
 use aws_sdk_sesv2::types::{
     Body, Content, Destination, EmailContent, EmailTemplateContent, Message, RawMessage,
-    SubscriptionStatus, Template, Topic, TopicPreference,
+    SubscriptionStatus, Tag, Template, Topic, TopicPreference,
 };
 use helpers::TestServer;
 
@@ -661,4 +661,197 @@ async fn ses_introspection_endpoint() {
     assert_eq!(emails[0]["to"][0], "recipient@example.com");
     assert_eq!(emails[0]["subject"], "Introspection Test");
     assert!(!emails[0]["messageId"].as_str().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn ses_tag_identity() {
+    let server = TestServer::start().await;
+    let client = server.sesv2_client().await;
+
+    // Create identity
+    client
+        .create_email_identity()
+        .email_identity("tag-test@example.com")
+        .send()
+        .await
+        .unwrap();
+
+    let arn = format!("arn:aws:ses:us-east-1:000000000000:identity/tag-test@example.com");
+
+    // Tag it
+    client
+        .tag_resource()
+        .resource_arn(&arn)
+        .tags(Tag::builder().key("env").value("prod").build().unwrap())
+        .tags(Tag::builder().key("team").value("backend").build().unwrap())
+        .send()
+        .await
+        .unwrap();
+
+    // List tags
+    let resp = client
+        .list_tags_for_resource()
+        .resource_arn(&arn)
+        .send()
+        .await
+        .unwrap();
+    let tags = resp.tags();
+    assert_eq!(tags.len(), 2);
+
+    // Untag
+    client
+        .untag_resource()
+        .resource_arn(&arn)
+        .tag_keys("env")
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .list_tags_for_resource()
+        .resource_arn(&arn)
+        .send()
+        .await
+        .unwrap();
+    let tags = resp.tags();
+    assert_eq!(tags.len(), 1);
+    assert_eq!(tags[0].key(), "team");
+    assert_eq!(tags[0].value(), "backend");
+}
+
+#[tokio::test]
+async fn ses_tag_configuration_set() {
+    let server = TestServer::start().await;
+    let client = server.sesv2_client().await;
+
+    client
+        .create_configuration_set()
+        .configuration_set_name("tagged-config")
+        .send()
+        .await
+        .unwrap();
+
+    let arn = "arn:aws:ses:us-east-1:000000000000:configuration-set/tagged-config";
+
+    client
+        .tag_resource()
+        .resource_arn(arn)
+        .tags(
+            Tag::builder()
+                .key("project")
+                .value("fakecloud")
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .list_tags_for_resource()
+        .resource_arn(arn)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.tags().len(), 1);
+    assert_eq!(resp.tags()[0].key(), "project");
+
+    // Delete config set and verify tags are cleaned up
+    client
+        .delete_configuration_set()
+        .configuration_set_name("tagged-config")
+        .send()
+        .await
+        .unwrap();
+
+    // Listing tags for a deleted resource should fail
+    let err = client
+        .list_tags_for_resource()
+        .resource_arn(arn)
+        .send()
+        .await;
+    assert!(err.is_err());
+}
+
+#[tokio::test]
+async fn ses_delete_identity_removes_tags() {
+    let server = TestServer::start().await;
+    let client = server.sesv2_client().await;
+
+    client
+        .create_email_identity()
+        .email_identity("deleteme@example.com")
+        .send()
+        .await
+        .unwrap();
+
+    let arn = "arn:aws:ses:us-east-1:000000000000:identity/deleteme@example.com";
+
+    client
+        .tag_resource()
+        .resource_arn(arn)
+        .tags(Tag::builder().key("k").value("v").build().unwrap())
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .delete_email_identity()
+        .email_identity("deleteme@example.com")
+        .send()
+        .await
+        .unwrap();
+
+    let err = client
+        .list_tags_for_resource()
+        .resource_arn(arn)
+        .send()
+        .await;
+    assert!(err.is_err());
+}
+
+#[tokio::test]
+async fn ses_untag_multiple_keys() {
+    let server = TestServer::start().await;
+    let client = server.sesv2_client().await;
+
+    client
+        .create_email_identity()
+        .email_identity("multi@example.com")
+        .send()
+        .await
+        .unwrap();
+
+    let arn = "arn:aws:ses:us-east-1:000000000000:identity/multi@example.com";
+
+    client
+        .tag_resource()
+        .resource_arn(arn)
+        .tags(Tag::builder().key("a").value("1").build().unwrap())
+        .tags(Tag::builder().key("b").value("2").build().unwrap())
+        .tags(Tag::builder().key("c").value("3").build().unwrap())
+        .send()
+        .await
+        .unwrap();
+
+    // Remove two keys at once
+    client
+        .untag_resource()
+        .resource_arn(arn)
+        .tag_keys("a")
+        .tag_keys("c")
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .list_tags_for_resource()
+        .resource_arn(arn)
+        .send()
+        .await
+        .unwrap();
+    let tags = resp.tags();
+    assert_eq!(tags.len(), 1);
+    assert_eq!(tags[0].key(), "b");
+    assert_eq!(tags[0].value(), "2");
 }

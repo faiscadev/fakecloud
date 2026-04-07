@@ -17,6 +17,8 @@ pub struct AwsRequest {
     pub path_segments: Vec<String>,
     /// The raw URI path, before splitting into segments.
     pub raw_path: String,
+    /// The raw URI query string (everything after `?`), preserving repeated keys.
+    pub raw_query: String,
     pub method: Method,
     /// Whether this request came via Query (form-encoded) or JSON protocol.
     pub is_query_protocol: bool,

@@ -599,6 +599,7 @@ mod tests {
             body: Bytes::from(body.to_string()),
             path_segments,
             raw_path: path.to_string(),
+            raw_query: String::new(),
             method,
             is_query_protocol: false,
             access_key_id: None,

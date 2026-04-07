@@ -2139,6 +2139,7 @@ mod tests {
             body: Bytes::from(body.to_string()),
             path_segments: vec![],
             raw_path: "/".to_string(),
+            raw_query: String::new(),
             method: Method::POST,
             is_query_protocol: false,
             access_key_id: None,

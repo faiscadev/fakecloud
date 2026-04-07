@@ -802,6 +802,7 @@ mod tests {
             body: Default::default(),
             path_segments: vec![],
             raw_path: "/".into(),
+            raw_query: String::new(),
             method: http::Method::POST,
             is_query_protocol: true,
             access_key_id: None,

@@ -11,6 +11,7 @@ version.workspace = true
 fakecloud-core = { workspace = true }
 fakecloud-aws = { workspace = true }
 async-trait = { workspace = true }
+form_urlencoded = "1"
 chrono = { workspace = true }
 http = { workspace = true }
 parking_lot = { workspace = true }

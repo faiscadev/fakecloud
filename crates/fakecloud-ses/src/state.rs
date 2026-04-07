@@ -84,6 +84,8 @@ pub struct SesState {
     pub sent_emails: Vec<SentEmail>,
     pub contact_lists: HashMap<String, ContactList>,
     pub contacts: HashMap<String, HashMap<String, Contact>>,
+    /// Tags keyed by resource ARN, value is key→value tag map.
+    pub tags: HashMap<String, HashMap<String, String>>,
 }
 
 impl SesState {
@@ -97,6 +99,7 @@ impl SesState {
             sent_emails: Vec::new(),
             contact_lists: HashMap::new(),
             contacts: HashMap::new(),
+            tags: HashMap::new(),
         }
     }
 
@@ -107,6 +110,7 @@ impl SesState {
         self.sent_emails.clear();
         self.contact_lists.clear();
         self.contacts.clear();
+        self.tags.clear();
     }
 }
 

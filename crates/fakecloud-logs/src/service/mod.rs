@@ -621,6 +621,7 @@ pub(crate) mod test_helpers {
             body: Bytes::from(serde_json::to_vec(&body).unwrap()),
             path_segments: vec![],
             raw_path: "/".to_string(),
+            raw_query: String::new(),
             method: Method::POST,
             is_query_protocol: false,
             access_key_id: None,

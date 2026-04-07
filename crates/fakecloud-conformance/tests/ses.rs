@@ -2,7 +2,7 @@ mod helpers;
 
 use aws_sdk_sesv2::types::{
     Body, Content, Destination, EmailContent, EmailTemplateContent, Message, SubscriptionStatus,
-    Template, Topic, TopicPreference,
+    Tag, Template, Topic, TopicPreference,
 };
 use fakecloud_conformance_macros::test_action;
 use helpers::TestServer;
@@ -527,4 +527,63 @@ async fn ses_contact_lifecycle() {
         .await
         .unwrap();
     assert!(list.contacts().is_empty());
+}
+
+// -- Tagging --
+
+#[test_action("ses", "TagResource", checksum = "473ff38c")]
+#[test_action("ses", "UntagResource", checksum = "b8406c4d")]
+#[test_action("ses", "ListTagsForResource", checksum = "35efea8c")]
+#[tokio::test]
+async fn ses_tagging_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.sesv2_client().await;
+
+    // Create an identity to tag
+    client
+        .create_email_identity()
+        .email_identity("tag-test@example.com")
+        .send()
+        .await
+        .unwrap();
+
+    let arn = "arn:aws:ses:us-east-1:000000000000:identity/tag-test@example.com";
+
+    // Tag
+    client
+        .tag_resource()
+        .resource_arn(arn)
+        .tags(Tag::builder().key("env").value("prod").build().unwrap())
+        .tags(Tag::builder().key("team").value("backend").build().unwrap())
+        .send()
+        .await
+        .unwrap();
+
+    // List
+    let resp = client
+        .list_tags_for_resource()
+        .resource_arn(arn)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.tags().len(), 2);
+
+    // Untag
+    client
+        .untag_resource()
+        .resource_arn(arn)
+        .tag_keys("env")
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .list_tags_for_resource()
+        .resource_arn(arn)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.tags().len(), 1);
+    assert_eq!(resp.tags()[0].key(), "team");
+    assert_eq!(resp.tags()[0].value(), "backend");
 }

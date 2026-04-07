@@ -86,6 +86,7 @@ pub async fn dispatch(
 
     // Build path segments
     let path = parts.uri.path().to_string();
+    let raw_query = parts.uri.query().unwrap_or("").to_string();
     let path_segments: Vec<String> = path
         .split('/')
         .filter(|s| !s.is_empty())
@@ -126,6 +127,7 @@ pub async fn dispatch(
         body: body_bytes,
         path_segments,
         raw_path: path,
+        raw_query,
         method: parts.method,
         is_query_protocol: detected.protocol == AwsProtocol::Query,
         access_key_id,
