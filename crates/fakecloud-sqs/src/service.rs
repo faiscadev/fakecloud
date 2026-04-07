@@ -937,8 +937,7 @@ impl SqsService {
         // --- Acquire write lock ONLY for queue validation + mutation ---
         let (message_id, sequence_number) = {
             let mut state = self.state.write();
-            let resolved_url =
-                resolve_queue_url(&queue_url, &state).ok_or_else(queue_not_found)?;
+            let resolved_url = resolve_queue_url(&queue_url, &state).ok_or_else(queue_not_found)?;
             let queue = state
                 .queues
                 .get_mut(&resolved_url)
