@@ -35,8 +35,9 @@ proprietary image that requires an account and auth token.
 | Startup time | ~500ms | ~3s |
 | Idle memory | ~10 MiB | ~150 MiB |
 | Install size | ~19 MB binary | ~1 GB Docker image |
-| Conformance testing | 34,000+ Smithy model variants | None public |
-| AWS services | 14 | 80+ |
+| AWS services | 14 | 30+ free, 110+ paid |
+| SES inbound email | Real receipt rules + action execution | [Mocked](https://docs.localstack.cloud/user-guide/aws/ses/) |
+| KMS crypto operations | Real ECDH, key import, sign/verify | Symmetric only |
 
 ## Quick Start
 
