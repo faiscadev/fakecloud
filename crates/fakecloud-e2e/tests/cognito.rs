@@ -266,8 +266,7 @@ async fn cognito_create_user_pool_with_config() {
     let auto_verified = pool.auto_verified_attributes();
     assert!(
         auto_verified
-            .iter()
-            .any(|a| *a == aws_sdk_cognitoidentityprovider::types::VerifiedAttributeType::Email),
+            .contains(&aws_sdk_cognitoidentityprovider::types::VerifiedAttributeType::Email),
         "Should have email in auto verified attributes"
     );
 
