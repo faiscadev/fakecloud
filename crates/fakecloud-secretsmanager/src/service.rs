@@ -2469,4 +2469,537 @@ mod tests {
         assert!(new_ver.stages.contains(&"AWSCURRENT".to_string()));
         assert_eq!(secret.current_version_id.as_deref(), Some(token));
     }
+
+    #[tokio::test]
+    async fn test_rotate_secret_stores_rotation_config() {
+        let state = make_state();
+        let svc = SecretsManagerService::new(state.clone());
+
+        let req = make_request(
+            "CreateSecret",
+            r#"{"Name": "rot-cfg", "SecretString": "pw"}"#,
+        );
+        svc.handle(req).await.unwrap();
+
+        let token = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+        let body = serde_json::json!({
+            "SecretId": "rot-cfg",
+            "RotationLambdaARN": "arn:aws:lambda:us-east-1:123456789012:function:my-rotator",
+            "RotationRules": { "AutomaticallyAfterDays": 30 },
+            "ClientRequestToken": token,
+        });
+        let req = make_request("RotateSecret", &body.to_string());
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+
+        let s = state.read();
+        let secret = s.secrets.get("rot-cfg").unwrap();
+        assert_eq!(secret.rotation_enabled, Some(true));
+        assert_eq!(
+            secret.rotation_lambda_arn.as_deref(),
+            Some("arn:aws:lambda:us-east-1:123456789012:function:my-rotator")
+        );
+        assert!(secret.last_rotated_at.is_some());
+        let rules = secret.rotation_rules.as_ref().unwrap();
+        assert_eq!(rules.automatically_after_days, Some(30));
+
+        // Verify AWSPENDING version was created (Lambda ARN present)
+        let pending = secret.versions.get(token).unwrap();
+        assert!(pending.stages.contains(&"AWSPENDING".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_rotate_secret_version_stages_change() {
+        let state = make_state();
+        let svc = SecretsManagerService::new(state.clone());
+
+        let req = make_request(
+            "CreateSecret",
+            r#"{"Name": "rot-stages", "SecretString": "original"}"#,
+        );
+        svc.handle(req).await.unwrap();
+
+        // Get original version id
+        let original_vid = {
+            let s = state.read();
+            let secret = s.secrets.get("rot-stages").unwrap();
+            secret.current_version_id.clone().unwrap()
+        };
+
+        // Rotate without Lambda (simple rotation)
+        let token = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+        let body = serde_json::json!({
+            "SecretId": "rot-stages",
+            "ClientRequestToken": token,
+        });
+        let req = make_request("RotateSecret", &body.to_string());
+        svc.handle(req).await.unwrap();
+
+        let s = state.read();
+        let secret = s.secrets.get("rot-stages").unwrap();
+
+        // New version should be AWSCURRENT
+        let new_ver = secret.versions.get(token).unwrap();
+        assert!(new_ver.stages.contains(&"AWSCURRENT".to_string()));
+
+        // Old version should be AWSPREVIOUS
+        let old_ver = secret.versions.get(&original_vid).unwrap();
+        assert!(old_ver.stages.contains(&"AWSPREVIOUS".to_string()));
+        assert!(!old_ver.stages.contains(&"AWSCURRENT".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_cancel_rotate_secret() {
+        let state = make_state();
+        let svc = SecretsManagerService::new(state.clone());
+
+        let req = make_request(
+            "CreateSecret",
+            r#"{"Name": "cancel-rot", "SecretString": "pw"}"#,
+        );
+        svc.handle(req).await.unwrap();
+
+        // Enable rotation first
+        let token = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+        let body = serde_json::json!({
+            "SecretId": "cancel-rot",
+            "ClientRequestToken": token,
+        });
+        let req = make_request("RotateSecret", &body.to_string());
+        svc.handle(req).await.unwrap();
+
+        // Verify rotation is enabled
+        {
+            let s = state.read();
+            let secret = s.secrets.get("cancel-rot").unwrap();
+            assert_eq!(secret.rotation_enabled, Some(true));
+        }
+
+        // Cancel rotation
+        let req = make_request("CancelRotateSecret", r#"{"SecretId": "cancel-rot"}"#);
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["Name"], "cancel-rot");
+
+        // Verify rotation is disabled
+        let s = state.read();
+        let secret = s.secrets.get("cancel-rot").unwrap();
+        assert_eq!(secret.rotation_enabled, Some(false));
+    }
+
+    #[tokio::test]
+    async fn test_cancel_rotate_secret_fails_when_not_enabled() {
+        let state = make_state();
+        let svc = SecretsManagerService::new(state);
+
+        let req = make_request(
+            "CreateSecret",
+            r#"{"Name": "no-rot", "SecretString": "pw"}"#,
+        );
+        svc.handle(req).await.unwrap();
+
+        let req = make_request("CancelRotateSecret", r#"{"SecretId": "no-rot"}"#);
+        let result = svc.handle(req).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_batch_get_secret_value_multiple() {
+        let state = make_state();
+        let svc = SecretsManagerService::new(state);
+
+        for (name, val) in &[("batch-a", "va"), ("batch-b", "vb"), ("batch-c", "vc")] {
+            let req = make_request(
+                "CreateSecret",
+                &format!(r#"{{"Name": "{name}", "SecretString": "{val}"}}"#),
+            );
+            svc.handle(req).await.unwrap();
+        }
+
+        let body = serde_json::json!({
+            "SecretIdList": ["batch-a", "batch-b", "batch-c"]
+        });
+        let req = make_request("BatchGetSecretValue", &body.to_string());
+        let resp = svc.handle(req).await.unwrap();
+        let resp_body: Value = serde_json::from_slice(&resp.body).unwrap();
+
+        let values = resp_body["SecretValues"].as_array().unwrap();
+        assert_eq!(values.len(), 3);
+
+        // Verify each secret has the right value
+        let names: Vec<&str> = values.iter().map(|v| v["Name"].as_str().unwrap()).collect();
+        assert!(names.contains(&"batch-a"));
+        assert!(names.contains(&"batch-b"));
+        assert!(names.contains(&"batch-c"));
+
+        // Verify no errors
+        assert!(resp_body.get("Errors").is_none());
+    }
+
+    #[tokio::test]
+    async fn test_batch_get_secret_value_with_missing() {
+        let state = make_state();
+        let svc = SecretsManagerService::new(state);
+
+        let req = make_request(
+            "CreateSecret",
+            r#"{"Name": "exists", "SecretString": "val"}"#,
+        );
+        svc.handle(req).await.unwrap();
+
+        let body = serde_json::json!({
+            "SecretIdList": ["exists", "nonexistent"]
+        });
+        let req = make_request("BatchGetSecretValue", &body.to_string());
+        let resp = svc.handle(req).await.unwrap();
+        let resp_body: Value = serde_json::from_slice(&resp.body).unwrap();
+
+        let values = resp_body["SecretValues"].as_array().unwrap();
+        assert_eq!(values.len(), 1);
+        assert_eq!(values[0]["Name"], "exists");
+
+        let errors = resp_body["Errors"].as_array().unwrap();
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0]["SecretId"], "nonexistent");
+        assert_eq!(errors[0]["ErrorCode"], "ResourceNotFoundException");
+    }
+
+    #[tokio::test]
+    async fn test_update_secret_changes_description_and_kms() {
+        let state = make_state();
+        let svc = SecretsManagerService::new(state);
+
+        let req = make_request(
+            "CreateSecret",
+            r#"{"Name": "updatable", "SecretString": "val", "Description": "old desc"}"#,
+        );
+        svc.handle(req).await.unwrap();
+
+        // Update description and KmsKeyId
+        let body = serde_json::json!({
+            "SecretId": "updatable",
+            "Description": "new desc",
+            "KmsKeyId": "arn:aws:kms:us-east-1:123456789012:key/my-key"
+        });
+        let req = make_request("UpdateSecret", &body.to_string());
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+        let resp_body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(resp_body["Name"], "updatable");
+        // No VersionId since no new value was provided
+        assert!(resp_body.get("VersionId").is_none());
+
+        // Describe to verify changes
+        let req = make_request("DescribeSecret", r#"{"SecretId": "updatable"}"#);
+        let resp = svc.handle(req).await.unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["Description"], "new desc");
+        assert_eq!(
+            body["KmsKeyId"],
+            "arn:aws:kms:us-east-1:123456789012:key/my-key"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_update_secret_with_new_value() {
+        let state = make_state();
+        let svc = SecretsManagerService::new(state);
+
+        let req = make_request(
+            "CreateSecret",
+            r#"{"Name": "upd-val", "SecretString": "old"}"#,
+        );
+        svc.handle(req).await.unwrap();
+
+        // Update with a new value
+        let body = serde_json::json!({
+            "SecretId": "upd-val",
+            "SecretString": "new-value"
+        });
+        let req = make_request("UpdateSecret", &body.to_string());
+        let resp = svc.handle(req).await.unwrap();
+        let resp_body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert!(resp_body["VersionId"].as_str().is_some());
+
+        // Get should return new value
+        let req = make_request("GetSecretValue", r#"{"SecretId": "upd-val"}"#);
+        let resp = svc.handle(req).await.unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["SecretString"], "new-value");
+    }
+
+    #[tokio::test]
+    async fn test_get_random_password_custom_length() {
+        let state = make_state();
+        let svc = SecretsManagerService::new(state);
+
+        let req = make_request("GetRandomPassword", r#"{"PasswordLength": 64}"#);
+        let resp = svc.handle(req).await.unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["RandomPassword"].as_str().unwrap().len(), 64);
+    }
+
+    #[tokio::test]
+    async fn test_get_random_password_exclude_chars() {
+        let state = make_state();
+        let svc = SecretsManagerService::new(state);
+
+        let req = make_request(
+            "GetRandomPassword",
+            r#"{"PasswordLength": 100, "ExcludeCharacters": "abc123"}"#,
+        );
+        let resp = svc.handle(req).await.unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let password = body["RandomPassword"].as_str().unwrap();
+        assert_eq!(password.len(), 100);
+        assert!(!password.contains('a'));
+        assert!(!password.contains('b'));
+        assert!(!password.contains('c'));
+        assert!(!password.contains('1'));
+        assert!(!password.contains('2'));
+        assert!(!password.contains('3'));
+    }
+
+    #[tokio::test]
+    async fn test_get_random_password_exclude_types() {
+        let state = make_state();
+        let svc = SecretsManagerService::new(state);
+
+        // Exclude everything except lowercase
+        let body = serde_json::json!({
+            "PasswordLength": 50,
+            "ExcludeUppercase": true,
+            "ExcludeNumbers": true,
+            "ExcludePunctuation": true,
+            "RequireEachIncludedType": false,
+        });
+        let req = make_request("GetRandomPassword", &body.to_string());
+        let resp = svc.handle(req).await.unwrap();
+        let resp_body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let password = resp_body["RandomPassword"].as_str().unwrap();
+        assert_eq!(password.len(), 50);
+        assert!(password.chars().all(|c| c.is_ascii_lowercase()));
+    }
+
+    #[tokio::test]
+    async fn test_get_random_password_too_short() {
+        let state = make_state();
+        let svc = SecretsManagerService::new(state);
+
+        let req = make_request("GetRandomPassword", r#"{"PasswordLength": 3}"#);
+        assert!(svc.handle(req).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_get_random_password_too_long() {
+        let state = make_state();
+        let svc = SecretsManagerService::new(state);
+
+        let req = make_request("GetRandomPassword", r#"{"PasswordLength": 4097}"#);
+        assert!(svc.handle(req).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_update_secret_version_stage_move_current() {
+        let state = make_state();
+        let svc = SecretsManagerService::new(state.clone());
+
+        let req = make_request(
+            "CreateSecret",
+            r#"{"Name": "stage-test", "SecretString": "v1"}"#,
+        );
+        svc.handle(req).await.unwrap();
+
+        // Put a second version
+        let req = make_request(
+            "PutSecretValue",
+            r#"{"SecretId": "stage-test", "SecretString": "v2"}"#,
+        );
+        svc.handle(req).await.unwrap();
+
+        // Get version IDs
+        let (v1_id, v2_id) = {
+            let s = state.read();
+            let secret = s.secrets.get("stage-test").unwrap();
+            let current = secret.current_version_id.clone().unwrap();
+            let previous = secret
+                .versions
+                .iter()
+                .find(|(id, _)| **id != current)
+                .map(|(id, _)| id.clone())
+                .unwrap();
+            (previous, current)
+        };
+
+        // Move AWSCURRENT from v2 back to v1
+        let body = serde_json::json!({
+            "SecretId": "stage-test",
+            "VersionStage": "AWSCURRENT",
+            "MoveToVersionId": v1_id,
+            "RemoveFromVersionId": v2_id,
+        });
+        let req = make_request("UpdateSecretVersionStage", &body.to_string());
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+
+        // Verify v1 is now AWSCURRENT
+        let s = state.read();
+        let secret = s.secrets.get("stage-test").unwrap();
+        let v1 = secret.versions.get(&v1_id).unwrap();
+        assert!(v1.stages.contains(&"AWSCURRENT".to_string()));
+
+        // v2 should have AWSPREVIOUS
+        let v2 = secret.versions.get(&v2_id).unwrap();
+        assert!(v2.stages.contains(&"AWSPREVIOUS".to_string()));
+        assert!(!v2.stages.contains(&"AWSCURRENT".to_string()));
+
+        assert_eq!(secret.current_version_id.as_deref(), Some(v1_id.as_str()));
+    }
+
+    #[tokio::test]
+    async fn test_update_secret_version_stage_custom_label() {
+        let state = make_state();
+        let svc = SecretsManagerService::new(state.clone());
+
+        let req = make_request(
+            "CreateSecret",
+            r#"{"Name": "custom-stage", "SecretString": "v1"}"#,
+        );
+        svc.handle(req).await.unwrap();
+
+        let vid = {
+            let s = state.read();
+            s.secrets
+                .get("custom-stage")
+                .unwrap()
+                .current_version_id
+                .clone()
+                .unwrap()
+        };
+
+        // Add a custom label
+        let body = serde_json::json!({
+            "SecretId": "custom-stage",
+            "VersionStage": "MYAPP_LIVE",
+            "MoveToVersionId": vid,
+        });
+        let req = make_request("UpdateSecretVersionStage", &body.to_string());
+        svc.handle(req).await.unwrap();
+
+        let s = state.read();
+        let secret = s.secrets.get("custom-stage").unwrap();
+        let ver = secret.versions.get(&vid).unwrap();
+        assert!(ver.stages.contains(&"MYAPP_LIVE".to_string()));
+        assert!(ver.stages.contains(&"AWSCURRENT".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_validate_resource_policy() {
+        let state = make_state();
+        let svc = SecretsManagerService::new(state);
+
+        let policy = serde_json::json!({
+            "Version": "2012-10-17",
+            "Statement": [{
+                "Effect": "Allow",
+                "Principal": {"AWS": "arn:aws:iam::123456789012:root"},
+                "Action": "secretsmanager:GetSecretValue",
+                "Resource": "*"
+            }]
+        });
+
+        let body = serde_json::json!({
+            "ResourcePolicy": policy.to_string(),
+        });
+        let req = make_request("ValidateResourcePolicy", &body.to_string());
+        let resp = svc.handle(req).await.unwrap();
+        let resp_body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(resp_body["PolicyValidationPassed"], true);
+        assert_eq!(resp_body["ValidationErrors"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_validate_resource_policy_requires_policy() {
+        let state = make_state();
+        let svc = SecretsManagerService::new(state);
+
+        let req = make_request("ValidateResourcePolicy", r#"{}"#);
+        assert!(svc.handle(req).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_put_get_delete_resource_policy() {
+        let state = make_state();
+        let svc = SecretsManagerService::new(state);
+
+        let req = make_request(
+            "CreateSecret",
+            r#"{"Name": "policy-secret", "SecretString": "val"}"#,
+        );
+        svc.handle(req).await.unwrap();
+
+        // Get policy (should be empty initially)
+        let req = make_request("GetResourcePolicy", r#"{"SecretId": "policy-secret"}"#);
+        let resp = svc.handle(req).await.unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["Name"], "policy-secret");
+        assert!(body.get("ResourcePolicy").is_none());
+
+        // Put policy
+        let policy = r#"{"Version":"2012-10-17","Statement":[]}"#;
+        let put_body = serde_json::json!({
+            "SecretId": "policy-secret",
+            "ResourcePolicy": policy,
+        });
+        let req = make_request("PutResourcePolicy", &put_body.to_string());
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+
+        // Get policy (should have it now)
+        let req = make_request("GetResourcePolicy", r#"{"SecretId": "policy-secret"}"#);
+        let resp = svc.handle(req).await.unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["ResourcePolicy"], policy);
+
+        // Delete policy
+        let req = make_request("DeleteResourcePolicy", r#"{"SecretId": "policy-secret"}"#);
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+
+        // Get again (should be gone)
+        let req = make_request("GetResourcePolicy", r#"{"SecretId": "policy-secret"}"#);
+        let resp = svc.handle(req).await.unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert!(body.get("ResourcePolicy").is_none());
+    }
+
+    #[tokio::test]
+    async fn test_batch_get_secret_value_with_deleted() {
+        let state = make_state();
+        let svc = SecretsManagerService::new(state);
+
+        let req = make_request(
+            "CreateSecret",
+            r#"{"Name": "batch-del", "SecretString": "val"}"#,
+        );
+        svc.handle(req).await.unwrap();
+
+        // Soft-delete it
+        let req = make_request("DeleteSecret", r#"{"SecretId": "batch-del"}"#);
+        svc.handle(req).await.unwrap();
+
+        let body = serde_json::json!({
+            "SecretIdList": ["batch-del"]
+        });
+        let req = make_request("BatchGetSecretValue", &body.to_string());
+        let resp = svc.handle(req).await.unwrap();
+        let resp_body: Value = serde_json::from_slice(&resp.body).unwrap();
+
+        // Should have 0 values and 1 error
+        assert_eq!(resp_body["SecretValues"].as_array().unwrap().len(), 0);
+        let errors = resp_body["Errors"].as_array().unwrap();
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0]["ErrorCode"], "InvalidRequestException");
+    }
 }

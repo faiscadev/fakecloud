@@ -262,3 +262,230 @@ async fn secretsmanager_duplicate_create_fails() {
         .await;
     assert!(result.is_err());
 }
+
+#[tokio::test]
+async fn secretsmanager_batch_get_secret_value() {
+    let server = TestServer::start().await;
+    let client = server.secretsmanager_client().await;
+
+    // Create 3 secrets
+    for (name, val) in &[
+        ("batch-one", "value-one"),
+        ("batch-two", "value-two"),
+        ("batch-three", "value-three"),
+    ] {
+        client
+            .create_secret()
+            .name(*name)
+            .secret_string(*val)
+            .send()
+            .await
+            .unwrap();
+    }
+
+    // Batch get all 3
+    let resp = client
+        .batch_get_secret_value()
+        .secret_id_list("batch-one")
+        .secret_id_list("batch-two")
+        .secret_id_list("batch-three")
+        .send()
+        .await
+        .unwrap();
+
+    let values = resp.secret_values();
+    assert_eq!(values.len(), 3);
+
+    let names: Vec<&str> = values.iter().filter_map(|v| v.name()).collect();
+    assert!(names.contains(&"batch-one"));
+    assert!(names.contains(&"batch-two"));
+    assert!(names.contains(&"batch-three"));
+
+    // Verify actual values
+    for sv in values {
+        match sv.name().unwrap() {
+            "batch-one" => assert_eq!(sv.secret_string().unwrap(), "value-one"),
+            "batch-two" => assert_eq!(sv.secret_string().unwrap(), "value-two"),
+            "batch-three" => assert_eq!(sv.secret_string().unwrap(), "value-three"),
+            other => panic!("unexpected secret: {other}"),
+        }
+    }
+
+    // No errors
+    assert!(resp.errors().is_empty());
+}
+
+#[tokio::test]
+async fn secretsmanager_get_random_password() {
+    let server = TestServer::start().await;
+    let client = server.secretsmanager_client().await;
+
+    // Default length (32)
+    let resp = client.get_random_password().send().await.unwrap();
+    let pw = resp.random_password().unwrap();
+    assert_eq!(pw.len(), 32);
+
+    // Custom length
+    let resp = client
+        .get_random_password()
+        .password_length(64)
+        .send()
+        .await
+        .unwrap();
+    let pw = resp.random_password().unwrap();
+    assert_eq!(pw.len(), 64);
+
+    // Exclude uppercase, numbers, punctuation -> only lowercase
+    let resp = client
+        .get_random_password()
+        .password_length(50)
+        .exclude_uppercase(true)
+        .exclude_numbers(true)
+        .exclude_punctuation(true)
+        .require_each_included_type(false)
+        .send()
+        .await
+        .unwrap();
+    let pw = resp.random_password().unwrap();
+    assert_eq!(pw.len(), 50);
+    assert!(
+        pw.chars().all(|c| c.is_ascii_lowercase()),
+        "expected only lowercase, got: {pw}"
+    );
+
+    // Exclude specific characters
+    let resp = client
+        .get_random_password()
+        .password_length(100)
+        .exclude_characters("aeiou0123456789")
+        .exclude_punctuation(true)
+        .require_each_included_type(false)
+        .send()
+        .await
+        .unwrap();
+    let pw = resp.random_password().unwrap();
+    assert_eq!(pw.len(), 100);
+    for ch in "aeiou0123456789".chars() {
+        assert!(
+            !pw.contains(ch),
+            "password should not contain '{ch}', got: {pw}"
+        );
+    }
+
+    // Too short -> error
+    let result = client.get_random_password().password_length(3).send().await;
+    assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn secretsmanager_update_secret_then_get() {
+    let server = TestServer::start().await;
+    let client = server.secretsmanager_client().await;
+
+    client
+        .create_secret()
+        .name("update-me")
+        .secret_string("original")
+        .description("old description")
+        .send()
+        .await
+        .unwrap();
+
+    // Update description only (no new value)
+    client
+        .update_secret()
+        .secret_id("update-me")
+        .description("new description")
+        .send()
+        .await
+        .unwrap();
+
+    // Describe to verify description changed
+    let resp = client
+        .describe_secret()
+        .secret_id("update-me")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.description().unwrap(), "new description");
+
+    // Value should still be original
+    let resp = client
+        .get_secret_value()
+        .secret_id("update-me")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.secret_string().unwrap(), "original");
+
+    // Update with a new value
+    client
+        .update_secret()
+        .secret_id("update-me")
+        .secret_string("updated-value")
+        .send()
+        .await
+        .unwrap();
+
+    // Get should return updated value
+    let resp = client
+        .get_secret_value()
+        .secret_id("update-me")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.secret_string().unwrap(), "updated-value");
+}
+
+#[tokio::test]
+async fn secretsmanager_put_get_resource_policy() {
+    let server = TestServer::start().await;
+    let client = server.secretsmanager_client().await;
+
+    client
+        .create_secret()
+        .name("policy-test")
+        .secret_string("secret-value")
+        .send()
+        .await
+        .unwrap();
+
+    let policy = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":"*","Action":"secretsmanager:GetSecretValue","Resource":"*"}]}"#;
+
+    // Put resource policy
+    client
+        .put_resource_policy()
+        .secret_id("policy-test")
+        .resource_policy(policy)
+        .send()
+        .await
+        .unwrap();
+
+    // Get resource policy
+    let resp = client
+        .get_resource_policy()
+        .secret_id("policy-test")
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.name().unwrap(), "policy-test");
+    assert_eq!(resp.resource_policy().unwrap(), policy);
+
+    // Delete resource policy
+    client
+        .delete_resource_policy()
+        .secret_id("policy-test")
+        .send()
+        .await
+        .unwrap();
+
+    // Get again - should have no policy
+    let resp = client
+        .get_resource_policy()
+        .secret_id("policy-test")
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.resource_policy().is_none());
+}
