@@ -905,9 +905,14 @@ impl SnsService {
         });
 
         // Resolve the actual message per protocol for MessageStructure=json
-        // Validation already happened above, so unwrap is safe here
         let parsed_structure: Option<Value> = if message_structure.as_deref() == Some("json") {
-            Some(serde_json::from_str(&message).expect("already validated"))
+            Some(serde_json::from_str(&message).map_err(|_| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameter",
+                    "Invalid parameter: Message Structure - No JSON message body is parseable",
+                )
+            })?)
         } else {
             None
         };
@@ -1297,9 +1302,14 @@ impl SnsService {
             });
 
             // Resolve message for SQS via MessageStructure=json
-            // Validation already happened above, so unwrap is safe here
             let parsed_structure: Option<Value> = if structure.as_deref() == Some("json") {
-                Some(serde_json::from_str(message).expect("already validated"))
+                Some(serde_json::from_str(message).map_err(|_| {
+                    AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "InvalidParameter",
+                        "Invalid parameter: Message Structure - No JSON message body is parseable",
+                    )
+                })?)
             } else {
                 None
             };
