@@ -957,4 +957,286 @@ mod tests {
         let resp = svc.handle(req).await.unwrap();
         assert_eq!(resp.status, StatusCode::NOT_FOUND);
     }
+
+    #[tokio::test]
+    async fn test_send_email_raw_content() {
+        let state = make_state();
+        let svc = SesV2Service::new(state.clone());
+
+        let req = make_request(
+            Method::POST,
+            "/v2/email/outbound-emails",
+            r#"{
+                "FromEmailAddress": "sender@example.com",
+                "Destination": {
+                    "ToAddresses": ["to@example.com"]
+                },
+                "Content": {
+                    "Raw": {
+                        "Data": "From: sender@example.com\r\nTo: to@example.com\r\nSubject: Raw\r\n\r\nBody"
+                    }
+                }
+            }"#,
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert!(body["MessageId"].as_str().is_some());
+
+        let s = state.read();
+        assert_eq!(s.sent_emails.len(), 1);
+        assert!(s.sent_emails[0].raw_data.is_some());
+        assert!(
+            s.sent_emails[0].subject.is_none(),
+            "Raw emails should not have parsed subject"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_send_email_template_content() {
+        let state = make_state();
+        let svc = SesV2Service::new(state.clone());
+
+        let req = make_request(
+            Method::POST,
+            "/v2/email/outbound-emails",
+            r#"{
+                "FromEmailAddress": "sender@example.com",
+                "Destination": {
+                    "ToAddresses": ["to@example.com"]
+                },
+                "Content": {
+                    "Template": {
+                        "TemplateName": "welcome",
+                        "TemplateData": "{\"name\": \"Alice\"}"
+                    }
+                }
+            }"#,
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+
+        let s = state.read();
+        assert_eq!(s.sent_emails.len(), 1);
+        assert_eq!(s.sent_emails[0].template_name.as_deref(), Some("welcome"));
+        assert_eq!(
+            s.sent_emails[0].template_data.as_deref(),
+            Some("{\"name\": \"Alice\"}")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_send_email_missing_content() {
+        let state = make_state();
+        let svc = SesV2Service::new(state);
+
+        let req = make_request(
+            Method::POST,
+            "/v2/email/outbound-emails",
+            r#"{"FromEmailAddress": "sender@example.com", "Destination": {"ToAddresses": ["to@example.com"]}}"#,
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_send_email_with_cc_and_bcc() {
+        let state = make_state();
+        let svc = SesV2Service::new(state.clone());
+
+        let req = make_request(
+            Method::POST,
+            "/v2/email/outbound-emails",
+            r#"{
+                "FromEmailAddress": "sender@example.com",
+                "Destination": {
+                    "ToAddresses": ["to@example.com"],
+                    "CcAddresses": ["cc@example.com"],
+                    "BccAddresses": ["bcc@example.com"]
+                },
+                "Content": {
+                    "Simple": {
+                        "Subject": {"Data": "Test"},
+                        "Body": {"Text": {"Data": "Hello"}}
+                    }
+                }
+            }"#,
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+
+        let s = state.read();
+        assert_eq!(s.sent_emails[0].cc, vec!["cc@example.com"]);
+        assert_eq!(s.sent_emails[0].bcc, vec!["bcc@example.com"]);
+    }
+
+    #[tokio::test]
+    async fn test_send_bulk_email() {
+        let state = make_state();
+        let svc = SesV2Service::new(state.clone());
+
+        let req = make_request(
+            Method::POST,
+            "/v2/email/outbound-bulk-emails",
+            r#"{
+                "FromEmailAddress": "sender@example.com",
+                "DefaultContent": {
+                    "Template": {
+                        "TemplateName": "bulk-template",
+                        "TemplateData": "{\"default\": true}"
+                    }
+                },
+                "BulkEmailEntries": [
+                    {"Destination": {"ToAddresses": ["a@example.com"]}},
+                    {"Destination": {"ToAddresses": ["b@example.com"]}}
+                ]
+            }"#,
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let results = body["BulkEmailEntryResults"].as_array().unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0]["Status"], "SUCCESS");
+        assert_eq!(results[1]["Status"], "SUCCESS");
+
+        let s = state.read();
+        assert_eq!(s.sent_emails.len(), 2);
+        assert_eq!(s.sent_emails[0].to, vec!["a@example.com"]);
+        assert_eq!(s.sent_emails[1].to, vec!["b@example.com"]);
+    }
+
+    #[tokio::test]
+    async fn test_send_bulk_email_empty_entries() {
+        let state = make_state();
+        let svc = SesV2Service::new(state);
+
+        let req = make_request(
+            Method::POST,
+            "/v2/email/outbound-bulk-emails",
+            r#"{"FromEmailAddress": "s@example.com", "BulkEmailEntries": []}"#,
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_delete_nonexistent_identity() {
+        let state = make_state();
+        let svc = SesV2Service::new(state);
+
+        let req = make_request(
+            Method::DELETE,
+            "/v2/email/identities/nobody%40example.com",
+            "",
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_duplicate_configuration_set() {
+        let state = make_state();
+        let svc = SesV2Service::new(state);
+
+        let req = make_request(
+            Method::POST,
+            "/v2/email/configuration-sets",
+            r#"{"ConfigurationSetName": "dup-config"}"#,
+        );
+        svc.handle(req).await.unwrap();
+
+        let req = make_request(
+            Method::POST,
+            "/v2/email/configuration-sets",
+            r#"{"ConfigurationSetName": "dup-config"}"#,
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn test_duplicate_template() {
+        let state = make_state();
+        let svc = SesV2Service::new(state);
+
+        let req = make_request(
+            Method::POST,
+            "/v2/email/templates",
+            r#"{"TemplateName": "dup-tmpl", "TemplateContent": {}}"#,
+        );
+        svc.handle(req).await.unwrap();
+
+        let req = make_request(
+            Method::POST,
+            "/v2/email/templates",
+            r#"{"TemplateName": "dup-tmpl", "TemplateContent": {}}"#,
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn test_delete_nonexistent_template() {
+        let state = make_state();
+        let svc = SesV2Service::new(state);
+
+        let req = make_request(Method::DELETE, "/v2/email/templates/nope", "");
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_delete_nonexistent_configuration_set() {
+        let state = make_state();
+        let svc = SesV2Service::new(state);
+
+        let req = make_request(Method::DELETE, "/v2/email/configuration-sets/nope", "");
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_unknown_route() {
+        let state = make_state();
+        let svc = SesV2Service::new(state);
+
+        let req = make_request(Method::GET, "/v2/email/unknown-resource", "");
+        let result = svc.handle(req).await;
+        assert!(result.is_err(), "Unknown route should return error");
+    }
+
+    #[tokio::test]
+    async fn test_update_nonexistent_template() {
+        let state = make_state();
+        let svc = SesV2Service::new(state);
+
+        let req = make_request(
+            Method::PUT,
+            "/v2/email/templates/nonexistent",
+            r#"{"TemplateContent": {"Subject": "Updated"}}"#,
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_invalid_json_body() {
+        let state = make_state();
+        let svc = SesV2Service::new(state);
+
+        let req = make_request(Method::POST, "/v2/email/identities", "not valid json {{{");
+        let result = svc.handle(req).await;
+        assert!(result.is_err(), "Invalid JSON body should return error");
+    }
+
+    #[tokio::test]
+    async fn test_create_identity_missing_name() {
+        let state = make_state();
+        let svc = SesV2Service::new(state);
+
+        let req = make_request(Method::POST, "/v2/email/identities", r#"{}"#);
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::BAD_REQUEST);
+    }
 }

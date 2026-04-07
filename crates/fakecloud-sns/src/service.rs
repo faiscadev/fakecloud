@@ -3706,4 +3706,938 @@ mod tests {
             "Invalid policy JSON should return error, not panic"
         );
     }
+
+    // --- Helper to build SNS service + state for integration-style unit tests ---
+
+    fn make_sns() -> (SnsService, crate::state::SharedSnsState) {
+        use fakecloud_core::delivery::DeliveryBus;
+        use parking_lot::RwLock;
+        use std::sync::Arc;
+
+        let state = Arc::new(RwLock::new(crate::state::SnsState::new(
+            "123456789012",
+            "us-east-1",
+            "http://localhost:4566",
+        )));
+        let delivery = Arc::new(DeliveryBus::new());
+        let svc = SnsService::new(state.clone(), delivery);
+        (svc, state)
+    }
+
+    fn sns_request(action: &str, params: Vec<(&str, &str)>) -> fakecloud_core::service::AwsRequest {
+        let mut query_params = std::collections::HashMap::new();
+        query_params.insert("Action".to_string(), action.to_string());
+        for (k, v) in params {
+            query_params.insert(k.to_string(), v.to_string());
+        }
+        fakecloud_core::service::AwsRequest {
+            service: "sns".to_string(),
+            action: action.to_string(),
+            region: "us-east-1".to_string(),
+            account_id: "123456789012".to_string(),
+            request_id: "test-req".to_string(),
+            headers: http::HeaderMap::new(),
+            query_params,
+            body: Default::default(),
+            path_segments: vec![],
+            raw_path: "/".to_string(),
+            method: http::Method::POST,
+            is_query_protocol: true,
+            access_key_id: None,
+        }
+    }
+
+    fn assert_ok(result: &Result<AwsResponse, AwsServiceError>) {
+        assert!(
+            result.is_ok(),
+            "Expected Ok, got: {:?}",
+            result.as_ref().err()
+        );
+    }
+
+    fn response_body(result: &Result<AwsResponse, AwsServiceError>) -> String {
+        String::from_utf8(result.as_ref().unwrap().body.to_vec()).unwrap()
+    }
+
+    // --- Subscribe / Unsubscribe / ListSubscriptions / ListSubscriptionsByTopic ---
+
+    #[test]
+    fn subscribe_creates_subscription() {
+        let (svc, _state) = make_sns();
+        // Create topic first
+        let req = sns_request("CreateTopic", vec![("Name", "my-topic")]);
+        assert_ok(&svc.create_topic(&req));
+
+        let topic_arn = "arn:aws:sns:us-east-1:123456789012:my-topic";
+        let req = sns_request(
+            "Subscribe",
+            vec![
+                ("TopicArn", topic_arn),
+                ("Protocol", "email"),
+                ("Endpoint", "user@example.com"),
+            ],
+        );
+        let result = svc.subscribe(&req);
+        assert_ok(&result);
+        let body = response_body(&result);
+        assert!(
+            body.contains("<SubscriptionArn>"),
+            "Response should contain SubscriptionArn"
+        );
+        assert!(
+            body.contains(topic_arn),
+            "SubscriptionArn should contain topic ARN"
+        );
+    }
+
+    #[test]
+    fn subscribe_duplicate_returns_existing_arn() {
+        let (svc, _state) = make_sns();
+        let req = sns_request("CreateTopic", vec![("Name", "dup-topic")]);
+        assert_ok(&svc.create_topic(&req));
+
+        let topic_arn = "arn:aws:sns:us-east-1:123456789012:dup-topic";
+        let params = vec![
+            ("TopicArn", topic_arn),
+            ("Protocol", "email"),
+            ("Endpoint", "user@example.com"),
+        ];
+        let r1 = svc.subscribe(&sns_request("Subscribe", params.clone()));
+        assert_ok(&r1);
+        let body1 = response_body(&r1);
+
+        let r2 = svc.subscribe(&sns_request("Subscribe", params));
+        assert_ok(&r2);
+        let body2 = response_body(&r2);
+
+        // Both should return same subscription ARN
+        assert_eq!(body1, body2, "Duplicate subscribe should return same ARN");
+    }
+
+    #[test]
+    fn unsubscribe_removes_subscription() {
+        let (svc, state) = make_sns();
+        let req = sns_request("CreateTopic", vec![("Name", "unsub-topic")]);
+        assert_ok(&svc.create_topic(&req));
+
+        let topic_arn = "arn:aws:sns:us-east-1:123456789012:unsub-topic";
+        let req = sns_request(
+            "Subscribe",
+            vec![
+                ("TopicArn", topic_arn),
+                ("Protocol", "email"),
+                ("Endpoint", "user@example.com"),
+            ],
+        );
+        assert_ok(&svc.subscribe(&req));
+
+        // Get subscription ARN from state
+        let sub_arn = {
+            let s = state.read();
+            s.subscriptions.keys().next().unwrap().clone()
+        };
+
+        let req = sns_request("Unsubscribe", vec![("SubscriptionArn", &sub_arn)]);
+        assert_ok(&svc.unsubscribe(&req));
+
+        let s = state.read();
+        assert!(s.subscriptions.is_empty(), "Subscription should be removed");
+    }
+
+    #[test]
+    fn list_subscriptions_returns_all() {
+        let (svc, _state) = make_sns();
+        let req = sns_request("CreateTopic", vec![("Name", "list-topic")]);
+        assert_ok(&svc.create_topic(&req));
+
+        let topic_arn = "arn:aws:sns:us-east-1:123456789012:list-topic";
+        for i in 0..3 {
+            let email = format!("user{}@example.com", i);
+            let req = sns_request(
+                "Subscribe",
+                vec![
+                    ("TopicArn", topic_arn),
+                    ("Protocol", "email"),
+                    ("Endpoint", &email),
+                ],
+            );
+            assert_ok(&svc.subscribe(&req));
+        }
+
+        let req = sns_request("ListSubscriptions", vec![]);
+        let result = svc.list_subscriptions(&req);
+        assert_ok(&result);
+        let body = response_body(&result);
+        // Should contain all 3 subscriptions
+        let count = body.matches("<member>").count();
+        assert_eq!(count, 3, "Should list 3 subscriptions, found {}", count);
+    }
+
+    #[test]
+    fn list_subscriptions_by_topic_filters_correctly() {
+        let (svc, _state) = make_sns();
+        // Create two topics
+        assert_ok(&svc.create_topic(&sns_request("CreateTopic", vec![("Name", "topicA")])));
+        assert_ok(&svc.create_topic(&sns_request("CreateTopic", vec![("Name", "topicB")])));
+
+        let arn_a = "arn:aws:sns:us-east-1:123456789012:topicA";
+        let arn_b = "arn:aws:sns:us-east-1:123456789012:topicB";
+
+        // Subscribe 2 to A, 1 to B
+        assert_ok(&svc.subscribe(&sns_request(
+            "Subscribe",
+            vec![
+                ("TopicArn", arn_a),
+                ("Protocol", "email"),
+                ("Endpoint", "a1@example.com"),
+            ],
+        )));
+        assert_ok(&svc.subscribe(&sns_request(
+            "Subscribe",
+            vec![
+                ("TopicArn", arn_a),
+                ("Protocol", "email"),
+                ("Endpoint", "a2@example.com"),
+            ],
+        )));
+        assert_ok(&svc.subscribe(&sns_request(
+            "Subscribe",
+            vec![
+                ("TopicArn", arn_b),
+                ("Protocol", "email"),
+                ("Endpoint", "b1@example.com"),
+            ],
+        )));
+
+        let req = sns_request("ListSubscriptionsByTopic", vec![("TopicArn", arn_a)]);
+        let result = svc.list_subscriptions_by_topic(&req);
+        assert_ok(&result);
+        let body = response_body(&result);
+        let count = body.matches("<member>").count();
+        assert_eq!(
+            count, 2,
+            "Topic A should have 2 subscriptions, found {}",
+            count
+        );
+    }
+
+    // --- Publish / PublishBatch ---
+
+    #[test]
+    fn publish_to_topic_stores_message() {
+        let (svc, state) = make_sns();
+        assert_ok(&svc.create_topic(&sns_request("CreateTopic", vec![("Name", "pub-topic")])));
+
+        let topic_arn = "arn:aws:sns:us-east-1:123456789012:pub-topic";
+        let req = sns_request(
+            "Publish",
+            vec![
+                ("TopicArn", topic_arn),
+                ("Message", "Hello world"),
+                ("Subject", "Test subject"),
+            ],
+        );
+        let result = svc.publish(&req);
+        assert_ok(&result);
+        let body = response_body(&result);
+        assert!(
+            body.contains("<MessageId>"),
+            "Response should contain MessageId"
+        );
+
+        let s = state.read();
+        assert_eq!(s.published.len(), 1);
+        assert_eq!(s.published[0].message, "Hello world");
+        assert_eq!(s.published[0].subject.as_deref(), Some("Test subject"));
+    }
+
+    #[test]
+    fn publish_to_nonexistent_topic_returns_error() {
+        let (svc, _state) = make_sns();
+        let req = sns_request(
+            "Publish",
+            vec![
+                ("TopicArn", "arn:aws:sns:us-east-1:123456789012:nope"),
+                ("Message", "Hello"),
+            ],
+        );
+        let result = svc.publish(&req);
+        assert!(result.is_err(), "Publish to nonexistent topic should error");
+    }
+
+    #[test]
+    fn publish_without_topic_or_phone_returns_error() {
+        let (svc, _state) = make_sns();
+        let req = sns_request("Publish", vec![("Message", "Hello")]);
+        let result = svc.publish(&req);
+        assert!(result.is_err(), "Publish without target should error");
+    }
+
+    #[test]
+    fn publish_validates_subject_length() {
+        let (svc, _state) = make_sns();
+        assert_ok(&svc.create_topic(&sns_request("CreateTopic", vec![("Name", "subj-topic")])));
+
+        let topic_arn = "arn:aws:sns:us-east-1:123456789012:subj-topic";
+        let long_subject = "x".repeat(101);
+        let req = sns_request(
+            "Publish",
+            vec![
+                ("TopicArn", topic_arn),
+                ("Message", "Hello"),
+                ("Subject", &long_subject),
+            ],
+        );
+        let result = svc.publish(&req);
+        assert!(result.is_err(), "Subject > 100 chars should error");
+    }
+
+    #[test]
+    fn publish_to_sms_phone_number() {
+        let (svc, state) = make_sns();
+        let req = sns_request(
+            "Publish",
+            vec![("PhoneNumber", "+15551234567"), ("Message", "SMS test")],
+        );
+        let result = svc.publish(&req);
+        assert_ok(&result);
+
+        let s = state.read();
+        assert_eq!(s.sms_messages.len(), 1);
+        assert_eq!(s.sms_messages[0].0, "+15551234567");
+        assert_eq!(s.sms_messages[0].1, "SMS test");
+    }
+
+    #[test]
+    fn publish_to_invalid_phone_returns_error() {
+        let (svc, _state) = make_sns();
+        let req = sns_request(
+            "Publish",
+            vec![("PhoneNumber", "not-a-phone"), ("Message", "SMS test")],
+        );
+        let result = svc.publish(&req);
+        assert!(result.is_err(), "Invalid phone should error");
+    }
+
+    #[test]
+    fn publish_batch_stores_multiple_messages() {
+        let (svc, state) = make_sns();
+        assert_ok(&svc.create_topic(&sns_request("CreateTopic", vec![("Name", "batch-topic")])));
+
+        let topic_arn = "arn:aws:sns:us-east-1:123456789012:batch-topic";
+        let req = sns_request(
+            "PublishBatch",
+            vec![
+                ("TopicArn", topic_arn),
+                ("PublishBatchRequestEntries.member.1.Id", "msg1"),
+                ("PublishBatchRequestEntries.member.1.Message", "Hello 1"),
+                ("PublishBatchRequestEntries.member.2.Id", "msg2"),
+                ("PublishBatchRequestEntries.member.2.Message", "Hello 2"),
+            ],
+        );
+        let result = svc.publish_batch(&req);
+        assert_ok(&result);
+        let body = response_body(&result);
+        assert!(
+            body.contains("<Successful>"),
+            "Response should contain Successful element"
+        );
+
+        let s = state.read();
+        assert_eq!(s.published.len(), 2);
+    }
+
+    #[test]
+    fn publish_batch_rejects_duplicate_ids() {
+        let (svc, _state) = make_sns();
+        assert_ok(&svc.create_topic(&sns_request("CreateTopic", vec![("Name", "batch-dup")])));
+
+        let topic_arn = "arn:aws:sns:us-east-1:123456789012:batch-dup";
+        let req = sns_request(
+            "PublishBatch",
+            vec![
+                ("TopicArn", topic_arn),
+                ("PublishBatchRequestEntries.member.1.Id", "same"),
+                ("PublishBatchRequestEntries.member.1.Message", "Hello 1"),
+                ("PublishBatchRequestEntries.member.2.Id", "same"),
+                ("PublishBatchRequestEntries.member.2.Message", "Hello 2"),
+            ],
+        );
+        let result = svc.publish_batch(&req);
+        assert!(result.is_err(), "Duplicate batch IDs should error");
+    }
+
+    // --- SetSubscriptionAttributes / GetSubscriptionAttributes ---
+
+    #[test]
+    fn get_subscription_attributes_returns_defaults() {
+        let (svc, state) = make_sns();
+        assert_ok(&svc.create_topic(&sns_request("CreateTopic", vec![("Name", "attr-topic")])));
+
+        let topic_arn = "arn:aws:sns:us-east-1:123456789012:attr-topic";
+        assert_ok(&svc.subscribe(&sns_request(
+            "Subscribe",
+            vec![
+                ("TopicArn", topic_arn),
+                ("Protocol", "email"),
+                ("Endpoint", "u@example.com"),
+            ],
+        )));
+
+        let sub_arn = {
+            let s = state.read();
+            s.subscriptions.keys().next().unwrap().clone()
+        };
+
+        let req = sns_request(
+            "GetSubscriptionAttributes",
+            vec![("SubscriptionArn", &sub_arn)],
+        );
+        let result = svc.get_subscription_attributes(&req);
+        assert_ok(&result);
+        let body = response_body(&result);
+        assert!(
+            body.contains("<key>Protocol</key>"),
+            "Should contain Protocol attribute"
+        );
+        assert!(
+            body.contains("<value>email</value>"),
+            "Protocol should be email"
+        );
+        assert!(
+            body.contains("<key>Endpoint</key>"),
+            "Should contain Endpoint attribute"
+        );
+        assert!(
+            body.contains("<key>RawMessageDelivery</key>"),
+            "Should contain RawMessageDelivery"
+        );
+    }
+
+    #[test]
+    fn set_subscription_attributes_updates_value() {
+        let (svc, state) = make_sns();
+        assert_ok(&svc.create_topic(&sns_request("CreateTopic", vec![("Name", "setattr-topic")])));
+
+        let topic_arn = "arn:aws:sns:us-east-1:123456789012:setattr-topic";
+        assert_ok(&svc.subscribe(&sns_request(
+            "Subscribe",
+            vec![
+                ("TopicArn", topic_arn),
+                ("Protocol", "email"),
+                ("Endpoint", "u@example.com"),
+            ],
+        )));
+
+        let sub_arn = {
+            let s = state.read();
+            s.subscriptions.keys().next().unwrap().clone()
+        };
+
+        // Set RawMessageDelivery to true
+        let req = sns_request(
+            "SetSubscriptionAttributes",
+            vec![
+                ("SubscriptionArn", &sub_arn),
+                ("AttributeName", "RawMessageDelivery"),
+                ("AttributeValue", "true"),
+            ],
+        );
+        assert_ok(&svc.set_subscription_attributes(&req));
+
+        // Verify in state
+        let s = state.read();
+        let sub = s.subscriptions.get(&sub_arn).unwrap();
+        assert_eq!(sub.attributes.get("RawMessageDelivery").unwrap(), "true");
+    }
+
+    #[test]
+    fn set_subscription_attributes_rejects_invalid_attr() {
+        let (svc, state) = make_sns();
+        assert_ok(&svc.create_topic(&sns_request("CreateTopic", vec![("Name", "inv-attr")])));
+
+        let topic_arn = "arn:aws:sns:us-east-1:123456789012:inv-attr";
+        assert_ok(&svc.subscribe(&sns_request(
+            "Subscribe",
+            vec![
+                ("TopicArn", topic_arn),
+                ("Protocol", "email"),
+                ("Endpoint", "u@example.com"),
+            ],
+        )));
+
+        let sub_arn = {
+            let s = state.read();
+            s.subscriptions.keys().next().unwrap().clone()
+        };
+
+        let req = sns_request(
+            "SetSubscriptionAttributes",
+            vec![
+                ("SubscriptionArn", &sub_arn),
+                ("AttributeName", "BogusAttribute"),
+                ("AttributeValue", "whatever"),
+            ],
+        );
+        let result = svc.set_subscription_attributes(&req);
+        assert!(result.is_err(), "Invalid attribute name should error");
+    }
+
+    #[test]
+    fn get_subscription_attributes_nonexistent_returns_error() {
+        let (svc, _state) = make_sns();
+        let req = sns_request(
+            "GetSubscriptionAttributes",
+            vec![(
+                "SubscriptionArn",
+                "arn:aws:sns:us-east-1:123456789012:nope:fake",
+            )],
+        );
+        let result = svc.get_subscription_attributes(&req);
+        assert!(result.is_err(), "Nonexistent subscription should error");
+    }
+
+    // --- TagResource / UntagResource / ListTagsForResource ---
+
+    #[test]
+    fn tag_untag_list_tags_lifecycle() {
+        let (svc, _state) = make_sns();
+        assert_ok(&svc.create_topic(&sns_request("CreateTopic", vec![("Name", "tag-topic")])));
+
+        let topic_arn = "arn:aws:sns:us-east-1:123456789012:tag-topic";
+
+        // Tag the resource
+        let req = sns_request(
+            "TagResource",
+            vec![
+                ("ResourceArn", topic_arn),
+                ("Tags.member.1.Key", "env"),
+                ("Tags.member.1.Value", "prod"),
+                ("Tags.member.2.Key", "team"),
+                ("Tags.member.2.Value", "platform"),
+            ],
+        );
+        assert_ok(&svc.tag_resource(&req));
+
+        // List tags
+        let req = sns_request("ListTagsForResource", vec![("ResourceArn", topic_arn)]);
+        let result = svc.list_tags_for_resource(&req);
+        assert_ok(&result);
+        let body = response_body(&result);
+        assert!(
+            body.contains("<Key>env</Key>"),
+            "Should contain env tag key"
+        );
+        assert!(
+            body.contains("<Value>prod</Value>"),
+            "Should contain prod tag value"
+        );
+        assert!(
+            body.contains("<Key>team</Key>"),
+            "Should contain team tag key"
+        );
+
+        // Untag one key
+        let req = sns_request(
+            "UntagResource",
+            vec![("ResourceArn", topic_arn), ("TagKeys.member.1", "env")],
+        );
+        assert_ok(&svc.untag_resource(&req));
+
+        // Verify only team remains
+        let req = sns_request("ListTagsForResource", vec![("ResourceArn", topic_arn)]);
+        let result = svc.list_tags_for_resource(&req);
+        assert_ok(&result);
+        let body = response_body(&result);
+        assert!(
+            !body.contains("<Key>env</Key>"),
+            "env tag should be removed"
+        );
+        assert!(body.contains("<Key>team</Key>"), "team tag should remain");
+    }
+
+    #[test]
+    fn tag_resource_nonexistent_returns_error() {
+        let (svc, _state) = make_sns();
+        let req = sns_request(
+            "TagResource",
+            vec![
+                ("ResourceArn", "arn:aws:sns:us-east-1:123456789012:nope"),
+                ("Tags.member.1.Key", "k"),
+                ("Tags.member.1.Value", "v"),
+            ],
+        );
+        let result = svc.tag_resource(&req);
+        assert!(result.is_err(), "Tagging nonexistent resource should error");
+    }
+
+    #[test]
+    fn tag_resource_overwrites_existing_key() {
+        let (svc, _state) = make_sns();
+        assert_ok(&svc.create_topic(&sns_request("CreateTopic", vec![("Name", "tag-overwrite")])));
+
+        let topic_arn = "arn:aws:sns:us-east-1:123456789012:tag-overwrite";
+
+        // Add tag
+        let req = sns_request(
+            "TagResource",
+            vec![
+                ("ResourceArn", topic_arn),
+                ("Tags.member.1.Key", "env"),
+                ("Tags.member.1.Value", "dev"),
+            ],
+        );
+        assert_ok(&svc.tag_resource(&req));
+
+        // Overwrite tag
+        let req = sns_request(
+            "TagResource",
+            vec![
+                ("ResourceArn", topic_arn),
+                ("Tags.member.1.Key", "env"),
+                ("Tags.member.1.Value", "prod"),
+            ],
+        );
+        assert_ok(&svc.tag_resource(&req));
+
+        // Verify overwritten
+        let req = sns_request("ListTagsForResource", vec![("ResourceArn", topic_arn)]);
+        let body = response_body(&svc.list_tags_for_resource(&req));
+        assert!(
+            body.contains("<Value>prod</Value>"),
+            "Tag value should be overwritten to prod"
+        );
+        // Should only have 1 member
+        assert_eq!(
+            body.matches("<member>").count(),
+            1,
+            "Should have exactly 1 tag"
+        );
+    }
+
+    // --- SetTopicAttributes / GetTopicAttributes ---
+
+    #[test]
+    fn set_and_get_topic_attributes() {
+        let (svc, _state) = make_sns();
+        assert_ok(&svc.create_topic(&sns_request("CreateTopic", vec![("Name", "attr-topic2")])));
+
+        let topic_arn = "arn:aws:sns:us-east-1:123456789012:attr-topic2";
+
+        // Set DisplayName
+        let req = sns_request(
+            "SetTopicAttributes",
+            vec![
+                ("TopicArn", topic_arn),
+                ("AttributeName", "DisplayName"),
+                ("AttributeValue", "My Nice Topic"),
+            ],
+        );
+        assert_ok(&svc.set_topic_attributes(&req));
+
+        // Get attributes
+        let req = sns_request("GetTopicAttributes", vec![("TopicArn", topic_arn)]);
+        let result = svc.get_topic_attributes(&req);
+        assert_ok(&result);
+        let body = response_body(&result);
+        assert!(
+            body.contains("<value>My Nice Topic</value>"),
+            "DisplayName should be set"
+        );
+        assert!(
+            body.contains("<key>TopicArn</key>"),
+            "Should contain TopicArn"
+        );
+        assert!(body.contains("<key>Owner</key>"), "Should contain Owner");
+    }
+
+    #[test]
+    fn get_topic_attributes_nonexistent_returns_error() {
+        let (svc, _state) = make_sns();
+        let req = sns_request(
+            "GetTopicAttributes",
+            vec![("TopicArn", "arn:aws:sns:us-east-1:123456789012:nope")],
+        );
+        let result = svc.get_topic_attributes(&req);
+        assert!(result.is_err(), "Nonexistent topic should error");
+    }
+
+    #[test]
+    fn get_topic_attributes_wrong_region_returns_error() {
+        let (svc, _state) = make_sns();
+        assert_ok(&svc.create_topic(&sns_request("CreateTopic", vec![("Name", "region-topic")])));
+
+        // The topic was created in us-east-1, but try to get it with a different region in the ARN
+        let req = sns_request(
+            "GetTopicAttributes",
+            vec![(
+                "TopicArn",
+                "arn:aws:sns:eu-west-1:123456789012:region-topic",
+            )],
+        );
+        let result = svc.get_topic_attributes(&req);
+        assert!(result.is_err(), "Topic in wrong region should error");
+    }
+
+    // --- ConfirmSubscription ---
+
+    #[test]
+    fn confirm_subscription_returns_arn() {
+        let (svc, _state) = make_sns();
+        assert_ok(&svc.create_topic(&sns_request("CreateTopic", vec![("Name", "confirm-topic")])));
+
+        let topic_arn = "arn:aws:sns:us-east-1:123456789012:confirm-topic";
+        let req = sns_request(
+            "ConfirmSubscription",
+            vec![("TopicArn", topic_arn), ("Token", "fake-token")],
+        );
+        let result = svc.confirm_subscription(&req);
+        assert_ok(&result);
+        let body = response_body(&result);
+        assert!(
+            body.contains("<SubscriptionArn>"),
+            "Should return a SubscriptionArn"
+        );
+    }
+
+    // --- CreateTopic / DeleteTopic / ListTopics ---
+
+    #[test]
+    fn create_delete_list_topics_lifecycle() {
+        let (svc, _state) = make_sns();
+        // Create two topics
+        assert_ok(&svc.create_topic(&sns_request("CreateTopic", vec![("Name", "topic1")])));
+        assert_ok(&svc.create_topic(&sns_request("CreateTopic", vec![("Name", "topic2")])));
+
+        // List
+        let req = sns_request("ListTopics", vec![]);
+        let body = response_body(&svc.list_topics(&req));
+        assert_eq!(body.matches("<TopicArn>").count(), 2);
+
+        // Delete one
+        let req = sns_request(
+            "DeleteTopic",
+            vec![("TopicArn", "arn:aws:sns:us-east-1:123456789012:topic1")],
+        );
+        assert_ok(&svc.delete_topic(&req));
+
+        // List again
+        let req = sns_request("ListTopics", vec![]);
+        let body = response_body(&svc.list_topics(&req));
+        assert_eq!(body.matches("<TopicArn>").count(), 1);
+        assert!(body.contains("topic2"), "topic2 should remain");
+    }
+
+    #[test]
+    fn create_topic_idempotent() {
+        let (svc, _state) = make_sns();
+        let r1 = svc.create_topic(&sns_request("CreateTopic", vec![("Name", "idem-topic")]));
+        assert_ok(&r1);
+        let r2 = svc.create_topic(&sns_request("CreateTopic", vec![("Name", "idem-topic")]));
+        assert_ok(&r2);
+        let body1 = response_body(&r1);
+        let body2 = response_body(&r2);
+        assert_eq!(
+            body1, body2,
+            "Creating same topic twice should be idempotent"
+        );
+    }
+
+    // --- AddPermission / RemovePermission ---
+
+    #[test]
+    fn add_and_remove_permission() {
+        let (svc, state) = make_sns();
+        assert_ok(&svc.create_topic(&sns_request("CreateTopic", vec![("Name", "perm-topic")])));
+
+        let topic_arn = "arn:aws:sns:us-east-1:123456789012:perm-topic";
+        let req = sns_request(
+            "AddPermission",
+            vec![
+                ("TopicArn", topic_arn),
+                ("Label", "MyPermission"),
+                ("AWSAccountId.member.1", "111111111111"),
+                ("ActionName.member.1", "Publish"),
+            ],
+        );
+        assert_ok(&svc.add_permission(&req));
+
+        // Verify policy has the new statement
+        {
+            let s = state.read();
+            let policy_str = s
+                .topics
+                .get(topic_arn)
+                .unwrap()
+                .attributes
+                .get("Policy")
+                .unwrap();
+            let policy: Value = serde_json::from_str(policy_str).unwrap();
+            let stmts = policy["Statement"].as_array().unwrap();
+            assert!(
+                stmts
+                    .iter()
+                    .any(|s| s["Sid"].as_str() == Some("MyPermission")),
+                "Policy should contain MyPermission statement"
+            );
+        }
+
+        // Remove permission
+        let req = sns_request(
+            "RemovePermission",
+            vec![("TopicArn", topic_arn), ("Label", "MyPermission")],
+        );
+        assert_ok(&svc.remove_permission(&req));
+
+        // Verify removed
+        {
+            let s = state.read();
+            let policy_str = s
+                .topics
+                .get(topic_arn)
+                .unwrap()
+                .attributes
+                .get("Policy")
+                .unwrap();
+            let policy: Value = serde_json::from_str(policy_str).unwrap();
+            let stmts = policy["Statement"].as_array().unwrap();
+            assert!(
+                !stmts
+                    .iter()
+                    .any(|s| s["Sid"].as_str() == Some("MyPermission")),
+                "MyPermission should be removed"
+            );
+        }
+    }
+
+    // --- FIFO topic ---
+
+    #[test]
+    fn publish_to_fifo_topic_requires_group_id() {
+        let (svc, _state) = make_sns();
+        let mut req = sns_request("CreateTopic", vec![("Name", "fifo-topic.fifo")]);
+        req.query_params.insert(
+            "Attributes.entry.1.key".to_string(),
+            "FifoTopic".to_string(),
+        );
+        req.query_params
+            .insert("Attributes.entry.1.value".to_string(), "true".to_string());
+        assert_ok(&svc.create_topic(&req));
+
+        let topic_arn = "arn:aws:sns:us-east-1:123456789012:fifo-topic.fifo";
+        // Publish without MessageGroupId — should fail
+        let req = sns_request(
+            "Publish",
+            vec![("TopicArn", topic_arn), ("Message", "Hello")],
+        );
+        let result = svc.publish(&req);
+        assert!(
+            result.is_err(),
+            "FIFO publish without MessageGroupId should error"
+        );
+    }
+
+    // --- SMS attributes ---
+
+    #[test]
+    fn set_and_get_sms_attributes() {
+        let (svc, _state) = make_sns();
+
+        let mut req = sns_request("SetSMSAttributes", vec![]);
+        req.query_params.insert(
+            "attributes.entry.1.key".to_string(),
+            "DefaultSMSType".to_string(),
+        );
+        req.query_params.insert(
+            "attributes.entry.1.value".to_string(),
+            "Transactional".to_string(),
+        );
+        assert_ok(&svc.set_sms_attributes(&req));
+
+        let req = sns_request("GetSMSAttributes", vec![]);
+        let result = svc.get_sms_attributes(&req);
+        assert_ok(&result);
+        let body = response_body(&result);
+        assert!(
+            body.contains("DefaultSMSType"),
+            "Should contain set SMS attribute"
+        );
+    }
+
+    // --- Phone opt-out ---
+
+    #[test]
+    fn check_phone_opted_out() {
+        let (svc, state) = make_sns();
+        state.write().seed_default_opted_out();
+
+        let req = sns_request(
+            "CheckIfPhoneNumberIsOptedOut",
+            vec![("phoneNumber", "+15005550099")],
+        );
+        let result = svc.check_if_phone_number_is_opted_out(&req);
+        assert_ok(&result);
+        let body = response_body(&result);
+        assert!(
+            body.contains("<isOptedOut>true</isOptedOut>"),
+            "Seeded number should be opted out"
+        );
+    }
+
+    #[test]
+    fn list_phone_numbers_opted_out() {
+        let (svc, state) = make_sns();
+        state.write().seed_default_opted_out();
+
+        let req = sns_request("ListPhoneNumbersOptedOut", vec![]);
+        let result = svc.list_phone_numbers_opted_out(&req);
+        assert_ok(&result);
+        let body = response_body(&result);
+        assert!(
+            body.contains("+15005550099"),
+            "Should list seeded opted-out number"
+        );
+    }
+
+    #[test]
+    fn opt_in_phone_number() {
+        let (svc, state) = make_sns();
+        state.write().seed_default_opted_out();
+
+        let req = sns_request("OptInPhoneNumber", vec![("phoneNumber", "+15005550099")]);
+        assert_ok(&svc.opt_in_phone_number(&req));
+
+        // Verify removed from opted-out list
+        let s = state.read();
+        assert!(
+            !s.opted_out_numbers.contains(&"+15005550099".to_string()),
+            "Phone should no longer be opted out"
+        );
+    }
+
+    // --- Delete topic also removes subscriptions ---
+
+    #[test]
+    fn delete_topic_removes_subscriptions() {
+        let (svc, state) = make_sns();
+        assert_ok(&svc.create_topic(&sns_request("CreateTopic", vec![("Name", "del-sub-topic")])));
+        let topic_arn = "arn:aws:sns:us-east-1:123456789012:del-sub-topic";
+        assert_ok(&svc.subscribe(&sns_request(
+            "Subscribe",
+            vec![
+                ("TopicArn", topic_arn),
+                ("Protocol", "email"),
+                ("Endpoint", "u@example.com"),
+            ],
+        )));
+
+        assert_eq!(state.read().subscriptions.len(), 1);
+
+        assert_ok(&svc.delete_topic(&sns_request("DeleteTopic", vec![("TopicArn", topic_arn)])));
+        assert_eq!(
+            state.read().subscriptions.len(),
+            0,
+            "Subscriptions should be removed with topic"
+        );
+    }
 }
