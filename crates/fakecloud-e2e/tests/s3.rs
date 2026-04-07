@@ -3248,3 +3248,592 @@ async fn s3_get_bucket_location() {
         json["LocationConstraint"]
     );
 }
+
+// ---- Object Property Operations ----
+
+#[tokio::test]
+async fn s3_object_acl_put_get() {
+    let server = TestServer::start().await;
+    let client = server.s3_client().await;
+
+    client
+        .create_bucket()
+        .bucket("obj-acl-bucket")
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .put_object()
+        .bucket("obj-acl-bucket")
+        .key("acl-test.txt")
+        .body(ByteStream::from_static(b"acl content"))
+        .send()
+        .await
+        .unwrap();
+
+    // Put a canned ACL via CLI
+    let output = server
+        .aws_cli(&[
+            "s3api",
+            "put-object-acl",
+            "--bucket",
+            "obj-acl-bucket",
+            "--key",
+            "acl-test.txt",
+            "--acl",
+            "public-read",
+        ])
+        .await;
+    assert!(
+        output.success(),
+        "put-object-acl failed: {}",
+        output.stderr_text()
+    );
+
+    // Get object ACL via CLI
+    let output = server
+        .aws_cli(&[
+            "s3api",
+            "get-object-acl",
+            "--bucket",
+            "obj-acl-bucket",
+            "--key",
+            "acl-test.txt",
+        ])
+        .await;
+    assert!(
+        output.success(),
+        "get-object-acl failed: {}",
+        output.stderr_text()
+    );
+    let acl = output.stdout_json();
+
+    // Owner should be present
+    assert!(
+        acl["Owner"]["ID"].as_str().is_some(),
+        "Expected Owner ID in ACL response"
+    );
+
+    // public-read should produce a READ grant for AllUsers
+    let grants = acl["Grants"].as_array().expect("Expected Grants array");
+    assert!(
+        grants.len() >= 2,
+        "public-read ACL should have at least 2 grants (owner + AllUsers), got {}",
+        grants.len()
+    );
+    let has_public_read = grants.iter().any(|g| {
+        g["Permission"].as_str() == Some("READ")
+            && g["Grantee"]["URI"]
+                .as_str()
+                .map(|u| u.contains("AllUsers"))
+                .unwrap_or(false)
+    });
+    assert!(
+        has_public_read,
+        "Expected public-read grant for AllUsers, got: {acl}"
+    );
+}
+
+#[tokio::test]
+async fn s3_get_object_attributes() {
+    let server = TestServer::start().await;
+    let client = server.s3_client().await;
+
+    client
+        .create_bucket()
+        .bucket("attrs-bucket")
+        .send()
+        .await
+        .unwrap();
+
+    let data = b"Hello attributes!";
+    let put_resp = client
+        .put_object()
+        .bucket("attrs-bucket")
+        .key("attrs.txt")
+        .body(ByteStream::from_static(data))
+        .send()
+        .await
+        .unwrap();
+    let put_etag = put_resp.e_tag().unwrap().to_string();
+
+    // GetObjectAttributes via CLI requesting ETag, ObjectSize, StorageClass
+    let output = server
+        .aws_cli(&[
+            "s3api",
+            "get-object-attributes",
+            "--bucket",
+            "attrs-bucket",
+            "--key",
+            "attrs.txt",
+            "--object-attributes",
+            "ETag",
+            "ObjectSize",
+            "StorageClass",
+        ])
+        .await;
+    assert!(
+        output.success(),
+        "get-object-attributes failed: {}",
+        output.stderr_text()
+    );
+    let json = output.stdout_json();
+
+    // ETag should match what PutObject returned (without quotes)
+    let etag = json["ETag"].as_str().expect("Expected ETag in response");
+    let expected = put_etag.trim_matches('"');
+    assert_eq!(
+        etag, expected,
+        "ETag mismatch: got {etag}, expected {expected}"
+    );
+
+    // ObjectSize should match data length
+    let size = json["ObjectSize"].as_u64().expect("Expected ObjectSize");
+    assert_eq!(size, data.len() as u64, "ObjectSize mismatch");
+
+    // StorageClass should be STANDARD
+    let sc = json["StorageClass"]
+        .as_str()
+        .expect("Expected StorageClass");
+    assert_eq!(sc, "STANDARD");
+}
+
+#[tokio::test]
+async fn s3_object_retention_put_get() {
+    let server = TestServer::start().await;
+    let s3 = server.s3_client().await;
+
+    // Create bucket with object lock enabled
+    let output = server
+        .aws_cli(&[
+            "s3api",
+            "create-bucket",
+            "--bucket",
+            "retention-bucket",
+            "--object-lock-enabled-for-bucket",
+        ])
+        .await;
+    assert!(
+        output.success(),
+        "create lock bucket failed: {}",
+        output.stderr_text()
+    );
+
+    // Put an object
+    s3.put_object()
+        .bucket("retention-bucket")
+        .key("retained.txt")
+        .body(ByteStream::from_static(b"keep me"))
+        .send()
+        .await
+        .unwrap();
+
+    // Set GOVERNANCE retention 1 day in the future
+    let retain_until = chrono::Utc::now() + chrono::Duration::days(1);
+    let retain_date = retain_until.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let output = server
+        .aws_cli(&[
+            "s3api",
+            "put-object-retention",
+            "--bucket",
+            "retention-bucket",
+            "--key",
+            "retained.txt",
+            "--retention",
+            &format!(r#"{{"Mode":"GOVERNANCE","RetainUntilDate":"{retain_date}"}}"#),
+        ])
+        .await;
+    assert!(
+        output.success(),
+        "put-object-retention failed: {}",
+        output.stderr_text()
+    );
+
+    // Get retention and verify
+    let output = server
+        .aws_cli(&[
+            "s3api",
+            "get-object-retention",
+            "--bucket",
+            "retention-bucket",
+            "--key",
+            "retained.txt",
+        ])
+        .await;
+    assert!(
+        output.success(),
+        "get-object-retention failed: {}",
+        output.stderr_text()
+    );
+    let json = output.stdout_json();
+    let retention = &json["Retention"];
+    assert_eq!(
+        retention["Mode"].as_str().unwrap(),
+        "GOVERNANCE",
+        "Retention mode should be GOVERNANCE"
+    );
+    assert!(
+        retention["RetainUntilDate"].as_str().is_some(),
+        "Expected RetainUntilDate in retention response"
+    );
+}
+
+#[tokio::test]
+async fn s3_object_legal_hold_put_get() {
+    let server = TestServer::start().await;
+    let s3 = server.s3_client().await;
+
+    // Create bucket with object lock enabled
+    let output = server
+        .aws_cli(&[
+            "s3api",
+            "create-bucket",
+            "--bucket",
+            "legal-hold-bucket",
+            "--object-lock-enabled-for-bucket",
+        ])
+        .await;
+    assert!(
+        output.success(),
+        "create lock bucket failed: {}",
+        output.stderr_text()
+    );
+
+    s3.put_object()
+        .bucket("legal-hold-bucket")
+        .key("held.txt")
+        .body(ByteStream::from_static(b"hold me"))
+        .send()
+        .await
+        .unwrap();
+
+    // Put legal hold ON
+    let output = server
+        .aws_cli(&[
+            "s3api",
+            "put-object-legal-hold",
+            "--bucket",
+            "legal-hold-bucket",
+            "--key",
+            "held.txt",
+            "--legal-hold",
+            r#"{"Status":"ON"}"#,
+        ])
+        .await;
+    assert!(
+        output.success(),
+        "put-object-legal-hold ON failed: {}",
+        output.stderr_text()
+    );
+
+    // Get legal hold - should be ON
+    let output = server
+        .aws_cli(&[
+            "s3api",
+            "get-object-legal-hold",
+            "--bucket",
+            "legal-hold-bucket",
+            "--key",
+            "held.txt",
+        ])
+        .await;
+    assert!(
+        output.success(),
+        "get-object-legal-hold failed: {}",
+        output.stderr_text()
+    );
+    let json = output.stdout_json();
+    assert_eq!(
+        json["LegalHold"]["Status"].as_str().unwrap(),
+        "ON",
+        "Legal hold should be ON"
+    );
+
+    // Put legal hold OFF
+    let output = server
+        .aws_cli(&[
+            "s3api",
+            "put-object-legal-hold",
+            "--bucket",
+            "legal-hold-bucket",
+            "--key",
+            "held.txt",
+            "--legal-hold",
+            r#"{"Status":"OFF"}"#,
+        ])
+        .await;
+    assert!(
+        output.success(),
+        "put-object-legal-hold OFF failed: {}",
+        output.stderr_text()
+    );
+
+    // Get legal hold - should be OFF
+    let output = server
+        .aws_cli(&[
+            "s3api",
+            "get-object-legal-hold",
+            "--bucket",
+            "legal-hold-bucket",
+            "--key",
+            "held.txt",
+        ])
+        .await;
+    assert!(
+        output.success(),
+        "get-object-legal-hold (OFF) failed: {}",
+        output.stderr_text()
+    );
+    let json = output.stdout_json();
+    assert_eq!(
+        json["LegalHold"]["Status"].as_str().unwrap(),
+        "OFF",
+        "Legal hold should be OFF after toggling"
+    );
+}
+
+#[tokio::test]
+async fn s3_object_lock_configuration_put_get() {
+    let server = TestServer::start().await;
+
+    // Create bucket with object lock enabled (enables versioning automatically)
+    let output = server
+        .aws_cli(&[
+            "s3api",
+            "create-bucket",
+            "--bucket",
+            "lock-config-bucket",
+            "--object-lock-enabled-for-bucket",
+        ])
+        .await;
+    assert!(
+        output.success(),
+        "create lock bucket failed: {}",
+        output.stderr_text()
+    );
+
+    // Put object lock configuration with default retention
+    let lock_config = r#"{"ObjectLockEnabled":"Enabled","Rule":{"DefaultRetention":{"Mode":"GOVERNANCE","Days":30}}}"#;
+    let output = server
+        .aws_cli(&[
+            "s3api",
+            "put-object-lock-configuration",
+            "--bucket",
+            "lock-config-bucket",
+            "--object-lock-configuration",
+            lock_config,
+        ])
+        .await;
+    assert!(
+        output.success(),
+        "put-object-lock-configuration failed: {}",
+        output.stderr_text()
+    );
+
+    // Get object lock configuration
+    let output = server
+        .aws_cli(&[
+            "s3api",
+            "get-object-lock-configuration",
+            "--bucket",
+            "lock-config-bucket",
+        ])
+        .await;
+    assert!(
+        output.success(),
+        "get-object-lock-configuration failed: {}",
+        output.stderr_text()
+    );
+    let json = output.stdout_json();
+    let config = &json["ObjectLockConfiguration"];
+    assert_eq!(
+        config["ObjectLockEnabled"].as_str().unwrap(),
+        "Enabled",
+        "ObjectLockEnabled should be Enabled"
+    );
+    let default_retention = &config["Rule"]["DefaultRetention"];
+    assert_eq!(
+        default_retention["Mode"].as_str().unwrap(),
+        "GOVERNANCE",
+        "Default retention mode should be GOVERNANCE"
+    );
+    assert_eq!(
+        default_retention["Days"].as_i64().unwrap(),
+        30,
+        "Default retention days should be 30"
+    );
+}
+
+#[tokio::test]
+async fn s3_restore_object() {
+    let server = TestServer::start().await;
+    let client = server.s3_client().await;
+
+    client
+        .create_bucket()
+        .bucket("restore-bucket")
+        .send()
+        .await
+        .unwrap();
+
+    // Put an object with GLACIER storage class using a temp file
+    let tmp = std::env::temp_dir().join("glacier-obj.bin");
+    std::fs::write(&tmp, b"archived data").unwrap();
+    let output = server
+        .aws_cli(&[
+            "s3api",
+            "put-object",
+            "--bucket",
+            "restore-bucket",
+            "--key",
+            "archived.txt",
+            "--body",
+            tmp.to_str().unwrap(),
+            "--storage-class",
+            "GLACIER",
+        ])
+        .await;
+    assert!(
+        output.success(),
+        "put-object with GLACIER class failed: {}",
+        output.stderr_text()
+    );
+
+    // Restore the object
+    let output = server
+        .aws_cli(&[
+            "s3api",
+            "restore-object",
+            "--bucket",
+            "restore-bucket",
+            "--key",
+            "archived.txt",
+            "--restore-request",
+            r#"{"Days":7}"#,
+        ])
+        .await;
+    assert!(
+        output.success(),
+        "restore-object failed: {}",
+        output.stderr_text()
+    );
+
+    // Head the object to verify restore status
+    let head = client
+        .head_object()
+        .bucket("restore-bucket")
+        .key("archived.txt")
+        .send()
+        .await
+        .unwrap();
+    // After restore, the object should have a restore header
+    let restore = head.restore();
+    assert!(
+        restore.is_some(),
+        "Expected x-amz-restore header on restored object"
+    );
+}
+
+#[tokio::test]
+async fn s3_upload_part_copy() {
+    let server = TestServer::start().await;
+    let client = server.s3_client().await;
+
+    client
+        .create_bucket()
+        .bucket("upc-bucket")
+        .send()
+        .await
+        .unwrap();
+
+    // Put a source object
+    let src_data = b"source-data-for-copy-part";
+    client
+        .put_object()
+        .bucket("upc-bucket")
+        .key("source.txt")
+        .body(ByteStream::from_static(src_data))
+        .send()
+        .await
+        .unwrap();
+
+    // Create multipart upload for the destination
+    let create = client
+        .create_multipart_upload()
+        .bucket("upc-bucket")
+        .key("dest.txt")
+        .send()
+        .await
+        .unwrap();
+    let upload_id = create.upload_id().unwrap().to_string();
+
+    // Upload part by copying from source
+    let output = server
+        .aws_cli(&[
+            "s3api",
+            "upload-part-copy",
+            "--bucket",
+            "upc-bucket",
+            "--key",
+            "dest.txt",
+            "--upload-id",
+            &upload_id,
+            "--part-number",
+            "1",
+            "--copy-source",
+            "upc-bucket/source.txt",
+        ])
+        .await;
+    assert!(
+        output.success(),
+        "upload-part-copy failed: {}",
+        output.stderr_text()
+    );
+    let json = output.stdout_json();
+    let copy_result = &json["CopyPartResult"];
+    let etag = copy_result["ETag"]
+        .as_str()
+        .expect("Expected ETag in CopyPartResult");
+    assert!(!etag.is_empty(), "ETag should not be empty");
+
+    // Complete the multipart upload with the copied part via CLI
+    let mp_struct = format!(
+        r#"{{"Parts": [{{"PartNumber": 1, "ETag": {}}}]}}"#,
+        serde_json::Value::String(etag.to_string())
+    );
+    let output = server
+        .aws_cli(&[
+            "s3api",
+            "complete-multipart-upload",
+            "--bucket",
+            "upc-bucket",
+            "--key",
+            "dest.txt",
+            "--upload-id",
+            &upload_id,
+            "--multipart-upload",
+            &mp_struct,
+        ])
+        .await;
+    assert!(
+        output.success(),
+        "complete-multipart-upload failed: {}",
+        output.stderr_text()
+    );
+
+    // Verify the assembled object matches the source
+    let get = client
+        .get_object()
+        .bucket("upc-bucket")
+        .key("dest.txt")
+        .send()
+        .await
+        .unwrap();
+    let body = get.body.collect().await.unwrap().into_bytes();
+    assert_eq!(
+        body.as_ref(),
+        src_data,
+        "Copied part data should match source"
+    );
+}
