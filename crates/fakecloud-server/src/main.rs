@@ -61,12 +61,17 @@ async fn main() {
         )
         .init();
 
-    // Derive endpoint URL from the configured bind address
+    // Derive endpoint URL from the configured bind address.
+    // Use rsplit to handle IPv6 addresses (e.g., "[::1]:4566").
     let endpoint_url = {
         let addr = &cli.addr;
-        let host = addr.split(':').next().unwrap_or("0.0.0.0");
-        let host = if host == "0.0.0.0" { "localhost" } else { host };
-        let port = addr.split(':').nth(1).unwrap_or("4566");
+        let port = addr.rsplit(':').next().unwrap_or("4566");
+        let host = addr.rsplit_once(':').map(|(h, _)| h).unwrap_or("0.0.0.0");
+        let host = if host == "0.0.0.0" || host == "[::]" {
+            "localhost"
+        } else {
+            host
+        };
         format!("http://{host}:{port}")
     };
 
