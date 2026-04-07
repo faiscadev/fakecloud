@@ -4275,4 +4275,621 @@ mod tests {
         let result = svc.tag_resource(&req);
         assert!(result.is_err(), "Should return error for missing key");
     }
+
+    #[test]
+    fn cancel_key_deletion_re_enables_key() {
+        let svc = make_service();
+        let key_id = create_key(&svc);
+
+        // Schedule deletion
+        let req = make_request(
+            "ScheduleKeyDeletion",
+            json!({ "KeyId": key_id, "PendingWindowInDays": 7 }),
+        );
+        let resp = svc.schedule_key_deletion(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["KeyState"].as_str().unwrap(), "PendingDeletion");
+
+        // Verify key is pending deletion
+        {
+            let state = svc.state.read();
+            let key = state.keys.get(&key_id).unwrap();
+            assert_eq!(key.key_state, "PendingDeletion");
+            assert!(!key.enabled);
+            assert!(key.deletion_date.is_some());
+        }
+
+        // Cancel deletion
+        let req = make_request("CancelKeyDeletion", json!({ "KeyId": key_id }));
+        let resp = svc.cancel_key_deletion(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["KeyId"].as_str().unwrap(), key_id);
+
+        // Key should be disabled (not enabled) with no deletion date
+        {
+            let state = svc.state.read();
+            let key = state.keys.get(&key_id).unwrap();
+            assert_eq!(key.key_state, "Disabled");
+            assert!(key.deletion_date.is_none());
+        }
+
+        // Re-enable the key
+        let req = make_request("EnableKey", json!({ "KeyId": key_id }));
+        svc.enable_key(&req).unwrap();
+
+        {
+            let state = svc.state.read();
+            let key = state.keys.get(&key_id).unwrap();
+            assert!(key.enabled);
+            assert_eq!(key.key_state, "Enabled");
+        }
+    }
+
+    #[test]
+    fn key_rotation_lifecycle() {
+        let svc = make_service();
+        let key_id = create_key(&svc);
+
+        // Initially rotation is disabled
+        let req = make_request("GetKeyRotationStatus", json!({ "KeyId": key_id }));
+        let resp = svc.get_key_rotation_status(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert!(!body["KeyRotationEnabled"].as_bool().unwrap());
+
+        // Enable rotation
+        let req = make_request("EnableKeyRotation", json!({ "KeyId": key_id }));
+        svc.enable_key_rotation(&req).unwrap();
+
+        let req = make_request("GetKeyRotationStatus", json!({ "KeyId": key_id }));
+        let resp = svc.get_key_rotation_status(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert!(body["KeyRotationEnabled"].as_bool().unwrap());
+
+        // Disable rotation
+        let req = make_request("DisableKeyRotation", json!({ "KeyId": key_id }));
+        svc.disable_key_rotation(&req).unwrap();
+
+        let req = make_request("GetKeyRotationStatus", json!({ "KeyId": key_id }));
+        let resp = svc.get_key_rotation_status(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert!(!body["KeyRotationEnabled"].as_bool().unwrap());
+    }
+
+    #[test]
+    fn rotate_key_on_demand_and_list_rotations() {
+        let svc = make_service();
+        let key_id = create_key(&svc);
+
+        // No rotations initially
+        let req = make_request("ListKeyRotations", json!({ "KeyId": key_id }));
+        let resp = svc.list_key_rotations(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert!(body["Rotations"].as_array().unwrap().is_empty());
+
+        // Rotate on demand
+        let req = make_request("RotateKeyOnDemand", json!({ "KeyId": key_id }));
+        let resp = svc.rotate_key_on_demand(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["KeyId"].as_str().unwrap(), key_id);
+
+        // Rotate again
+        let req = make_request("RotateKeyOnDemand", json!({ "KeyId": key_id }));
+        svc.rotate_key_on_demand(&req).unwrap();
+
+        // List rotations
+        let req = make_request("ListKeyRotations", json!({ "KeyId": key_id }));
+        let resp = svc.list_key_rotations(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let rotations = body["Rotations"].as_array().unwrap();
+        assert_eq!(rotations.len(), 2);
+        assert_eq!(rotations[0]["RotationType"].as_str().unwrap(), "ON_DEMAND");
+        assert_eq!(rotations[0]["KeyId"].as_str().unwrap(), key_id);
+        assert!(rotations[0]["RotationDate"].as_f64().is_some());
+    }
+
+    #[test]
+    fn key_policy_get_put_list() {
+        let svc = make_service();
+        let key_id = create_key(&svc);
+
+        // Get default policy
+        let req = make_request("GetKeyPolicy", json!({ "KeyId": key_id }));
+        let resp = svc.get_key_policy(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let policy_str = body["Policy"].as_str().unwrap();
+        assert!(policy_str.contains("Enable IAM User Permissions"));
+
+        // Put custom policy
+        let custom_policy = r#"{"Version":"2012-10-17","Statement":[]}"#;
+        let req = make_request(
+            "PutKeyPolicy",
+            json!({ "KeyId": key_id, "Policy": custom_policy }),
+        );
+        svc.put_key_policy(&req).unwrap();
+
+        // Get updated policy
+        let req = make_request("GetKeyPolicy", json!({ "KeyId": key_id }));
+        let resp = svc.get_key_policy(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["Policy"].as_str().unwrap(), custom_policy);
+
+        // List key policies always returns ["default"]
+        let req = make_request("ListKeyPolicies", json!({ "KeyId": key_id }));
+        let resp = svc.list_key_policies(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let names = body["PolicyNames"].as_array().unwrap();
+        assert_eq!(names.len(), 1);
+        assert_eq!(names[0].as_str().unwrap(), "default");
+    }
+
+    #[test]
+    fn grant_create_list_revoke() {
+        let svc = make_service();
+        let key_id = create_key(&svc);
+
+        // Create a grant
+        let req = make_request(
+            "CreateGrant",
+            json!({
+                "KeyId": key_id,
+                "GranteePrincipal": "arn:aws:iam::123456789012:user/alice",
+                "Operations": ["Encrypt", "Decrypt"],
+                "Name": "test-grant"
+            }),
+        );
+        let resp = svc.create_grant(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let grant_id = body["GrantId"].as_str().unwrap().to_string();
+        let grant_token = body["GrantToken"].as_str().unwrap().to_string();
+        assert!(!grant_id.is_empty());
+        assert!(!grant_token.is_empty());
+
+        // List grants
+        let req = make_request("ListGrants", json!({ "KeyId": key_id }));
+        let resp = svc.list_grants(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let grants = body["Grants"].as_array().unwrap();
+        assert_eq!(grants.len(), 1);
+        assert_eq!(grants[0]["GrantId"].as_str().unwrap(), grant_id);
+        assert_eq!(
+            grants[0]["GranteePrincipal"].as_str().unwrap(),
+            "arn:aws:iam::123456789012:user/alice"
+        );
+        assert_eq!(grants[0]["Operations"].as_array().unwrap().len(), 2);
+
+        // Revoke the grant
+        let req = make_request(
+            "RevokeGrant",
+            json!({ "KeyId": key_id, "GrantId": grant_id }),
+        );
+        svc.revoke_grant(&req).unwrap();
+
+        // List grants should be empty
+        let req = make_request("ListGrants", json!({ "KeyId": key_id }));
+        let resp = svc.list_grants(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert!(body["Grants"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn grant_retire_by_token() {
+        let svc = make_service();
+        let key_id = create_key(&svc);
+
+        let req = make_request(
+            "CreateGrant",
+            json!({
+                "KeyId": key_id,
+                "GranteePrincipal": "arn:aws:iam::123456789012:user/bob",
+                "RetiringPrincipal": "arn:aws:iam::123456789012:user/admin",
+                "Operations": ["Encrypt"]
+            }),
+        );
+        let resp = svc.create_grant(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let grant_token = body["GrantToken"].as_str().unwrap().to_string();
+
+        // Retire by token
+        let req = make_request("RetireGrant", json!({ "GrantToken": grant_token }));
+        svc.retire_grant(&req).unwrap();
+
+        // Verify grant is gone
+        let req = make_request("ListGrants", json!({ "KeyId": key_id }));
+        let resp = svc.list_grants(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert!(body["Grants"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn grant_retire_by_key_and_grant_id() {
+        let svc = make_service();
+        let key_id = create_key(&svc);
+
+        let req = make_request(
+            "CreateGrant",
+            json!({
+                "KeyId": key_id,
+                "GranteePrincipal": "arn:aws:iam::123456789012:user/charlie",
+                "Operations": ["Decrypt"]
+            }),
+        );
+        let resp = svc.create_grant(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let grant_id = body["GrantId"].as_str().unwrap().to_string();
+
+        // Retire by key ID + grant ID
+        let req = make_request(
+            "RetireGrant",
+            json!({ "KeyId": key_id, "GrantId": grant_id }),
+        );
+        svc.retire_grant(&req).unwrap();
+
+        // Verify grant is gone
+        let req = make_request("ListGrants", json!({ "KeyId": key_id }));
+        let resp = svc.list_grants(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert!(body["Grants"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn sign_verify_roundtrip() {
+        let svc = make_service();
+        let key_id = create_key_with_opts(
+            &svc,
+            json!({ "KeyUsage": "SIGN_VERIFY", "KeySpec": "RSA_2048" }),
+        );
+
+        let message = b"data to sign";
+        let message_b64 = base64::engine::general_purpose::STANDARD.encode(message);
+
+        // Sign
+        let req = make_request(
+            "Sign",
+            json!({
+                "KeyId": key_id,
+                "Message": message_b64,
+                "SigningAlgorithm": "RSASSA_PKCS1_V1_5_SHA_256"
+            }),
+        );
+        let resp = svc.sign(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let signature = body["Signature"].as_str().unwrap().to_string();
+        assert!(!signature.is_empty());
+        assert_eq!(
+            body["SigningAlgorithm"].as_str().unwrap(),
+            "RSASSA_PKCS1_V1_5_SHA_256"
+        );
+
+        // Verify with correct signature
+        let req = make_request(
+            "Verify",
+            json!({
+                "KeyId": key_id,
+                "Message": message_b64,
+                "Signature": signature,
+                "SigningAlgorithm": "RSASSA_PKCS1_V1_5_SHA_256"
+            }),
+        );
+        let resp = svc.verify(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert!(body["SignatureValid"].as_bool().unwrap());
+
+        // Verify with wrong signature should return false
+        let wrong_sig = base64::engine::general_purpose::STANDARD.encode(b"wrong-signature-data");
+        let req = make_request(
+            "Verify",
+            json!({
+                "KeyId": key_id,
+                "Message": message_b64,
+                "Signature": wrong_sig,
+                "SigningAlgorithm": "RSASSA_PKCS1_V1_5_SHA_256"
+            }),
+        );
+        let resp = svc.verify(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert!(!body["SignatureValid"].as_bool().unwrap());
+    }
+
+    #[test]
+    fn sign_with_ecc_key() {
+        let svc = make_service();
+        let key_id = create_key_with_opts(
+            &svc,
+            json!({ "KeyUsage": "SIGN_VERIFY", "KeySpec": "ECC_NIST_P256" }),
+        );
+
+        let message_b64 = base64::engine::general_purpose::STANDARD.encode(b"ecc data");
+        let req = make_request(
+            "Sign",
+            json!({
+                "KeyId": key_id,
+                "Message": message_b64,
+                "SigningAlgorithm": "ECDSA_SHA_256"
+            }),
+        );
+        let resp = svc.sign(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert!(body["Signature"].as_str().is_some());
+        assert_eq!(body["SigningAlgorithm"].as_str().unwrap(), "ECDSA_SHA_256");
+    }
+
+    #[test]
+    fn sign_wrong_key_usage_fails() {
+        let svc = make_service();
+        let key_id = create_key(&svc); // ENCRYPT_DECRYPT
+
+        let message_b64 = base64::engine::general_purpose::STANDARD.encode(b"test");
+        let req = make_request(
+            "Sign",
+            json!({
+                "KeyId": key_id,
+                "Message": message_b64,
+                "SigningAlgorithm": "RSASSA_PKCS1_V1_5_SHA_256"
+            }),
+        );
+        assert!(svc.sign(&req).is_err());
+    }
+
+    #[test]
+    fn generate_random_various_lengths() {
+        let svc = make_service();
+
+        for num_bytes in [1, 16, 32, 64, 256, 1024] {
+            let req = make_request("GenerateRandom", json!({ "NumberOfBytes": num_bytes }));
+            let resp = svc.generate_random(&req).unwrap();
+            let body: Value = serde_json::from_slice(&resp.body).unwrap();
+            let b64 = body["Plaintext"].as_str().unwrap();
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(b64)
+                .unwrap();
+            assert_eq!(
+                decoded.len(),
+                num_bytes as usize,
+                "GenerateRandom({num_bytes}) returned wrong length"
+            );
+        }
+    }
+
+    #[test]
+    fn generate_random_zero_bytes_fails() {
+        let svc = make_service();
+        let req = make_request("GenerateRandom", json!({ "NumberOfBytes": 0 }));
+        assert!(svc.generate_random(&req).is_err());
+    }
+
+    #[test]
+    fn generate_random_too_many_bytes_fails() {
+        let svc = make_service();
+        let req = make_request("GenerateRandom", json!({ "NumberOfBytes": 1025 }));
+        assert!(svc.generate_random(&req).is_err());
+    }
+
+    #[test]
+    fn generate_mac_verify_mac_roundtrip() {
+        let svc = make_service();
+        let key_id = create_key_with_opts(
+            &svc,
+            json!({ "KeyUsage": "GENERATE_VERIFY_MAC", "KeySpec": "HMAC_256" }),
+        );
+
+        let message_b64 = base64::engine::general_purpose::STANDARD.encode(b"mac message");
+
+        // Generate MAC
+        let req = make_request(
+            "GenerateMac",
+            json!({
+                "KeyId": key_id,
+                "Message": message_b64,
+                "MacAlgorithm": "HMAC_SHA_256"
+            }),
+        );
+        let resp = svc.generate_mac(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let mac = body["Mac"].as_str().unwrap().to_string();
+        assert!(!mac.is_empty());
+
+        // Verify MAC
+        let req = make_request(
+            "VerifyMac",
+            json!({
+                "KeyId": key_id,
+                "Message": message_b64,
+                "Mac": mac,
+                "MacAlgorithm": "HMAC_SHA_256"
+            }),
+        );
+        let resp = svc.verify_mac(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert!(body["MacValid"].as_bool().unwrap());
+    }
+
+    #[test]
+    fn verify_mac_wrong_mac_fails() {
+        let svc = make_service();
+        let key_id = create_key_with_opts(
+            &svc,
+            json!({ "KeyUsage": "GENERATE_VERIFY_MAC", "KeySpec": "HMAC_256" }),
+        );
+
+        let message_b64 = base64::engine::general_purpose::STANDARD.encode(b"msg");
+        let wrong_mac = base64::engine::general_purpose::STANDARD.encode(b"wrong-mac");
+
+        let req = make_request(
+            "VerifyMac",
+            json!({
+                "KeyId": key_id,
+                "Message": message_b64,
+                "Mac": wrong_mac,
+                "MacAlgorithm": "HMAC_SHA_256"
+            }),
+        );
+        assert!(svc.verify_mac(&req).is_err());
+    }
+
+    #[test]
+    fn generate_mac_wrong_key_usage_fails() {
+        let svc = make_service();
+        let key_id = create_key(&svc); // ENCRYPT_DECRYPT
+
+        let message_b64 = base64::engine::general_purpose::STANDARD.encode(b"msg");
+        let req = make_request(
+            "GenerateMac",
+            json!({
+                "KeyId": key_id,
+                "Message": message_b64,
+                "MacAlgorithm": "HMAC_SHA_256"
+            }),
+        );
+        assert!(svc.generate_mac(&req).is_err());
+    }
+
+    #[test]
+    fn re_encrypt_between_keys() {
+        let svc = make_service();
+        let key_a = create_key(&svc);
+        let key_b = create_key(&svc);
+
+        // Encrypt with key A
+        let plaintext = b"re-encrypt test data";
+        let plaintext_b64 = base64::engine::general_purpose::STANDARD.encode(plaintext);
+        let req = make_request(
+            "Encrypt",
+            json!({ "KeyId": key_a, "Plaintext": plaintext_b64 }),
+        );
+        let resp = svc.encrypt(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let ciphertext_a = body["CiphertextBlob"].as_str().unwrap().to_string();
+
+        // Re-encrypt from key A to key B
+        let req = make_request(
+            "ReEncrypt",
+            json!({
+                "CiphertextBlob": ciphertext_a,
+                "DestinationKeyId": key_b
+            }),
+        );
+        let resp = svc.re_encrypt(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let ciphertext_b = body["CiphertextBlob"].as_str().unwrap().to_string();
+        assert_ne!(ciphertext_a, ciphertext_b);
+        assert!(body["KeyId"].as_str().unwrap().contains(&key_b));
+        assert!(body["SourceKeyId"].as_str().unwrap().contains(&key_a));
+
+        // Decrypt with key B (the ciphertext is self-describing in fakecloud)
+        let req = make_request("Decrypt", json!({ "CiphertextBlob": ciphertext_b }));
+        let resp = svc.decrypt(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let decrypted_b64 = body["Plaintext"].as_str().unwrap();
+        let decrypted = base64::engine::general_purpose::STANDARD
+            .decode(decrypted_b64)
+            .unwrap();
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn update_alias_points_to_different_key() {
+        let svc = make_service();
+        let key_a = create_key(&svc);
+        let key_b = create_key(&svc);
+
+        // Create alias pointing to key A
+        let req = make_request(
+            "CreateAlias",
+            json!({ "AliasName": "alias/switchable", "TargetKeyId": key_a }),
+        );
+        svc.create_alias(&req).unwrap();
+
+        // Verify alias points to key A
+        {
+            let state = svc.state.read();
+            let alias = state.aliases.get("alias/switchable").unwrap();
+            assert_eq!(alias.target_key_id, key_a);
+        }
+
+        // Update alias to point to key B
+        let req = make_request(
+            "UpdateAlias",
+            json!({ "AliasName": "alias/switchable", "TargetKeyId": key_b }),
+        );
+        svc.update_alias(&req).unwrap();
+
+        // Verify alias now points to key B
+        {
+            let state = svc.state.read();
+            let alias = state.aliases.get("alias/switchable").unwrap();
+            assert_eq!(alias.target_key_id, key_b);
+        }
+    }
+
+    #[test]
+    fn update_key_description_changes_description() {
+        let svc = make_service();
+        let key_id = create_key(&svc);
+
+        // Initially empty description
+        {
+            let state = svc.state.read();
+            let key = state.keys.get(&key_id).unwrap();
+            assert_eq!(key.description, "");
+        }
+
+        // Update description
+        let req = make_request(
+            "UpdateKeyDescription",
+            json!({ "KeyId": key_id, "Description": "new description" }),
+        );
+        svc.update_key_description(&req).unwrap();
+
+        {
+            let state = svc.state.read();
+            let key = state.keys.get(&key_id).unwrap();
+            assert_eq!(key.description, "new description");
+        }
+
+        // Update again
+        let req = make_request(
+            "UpdateKeyDescription",
+            json!({ "KeyId": key_id, "Description": "updated again" }),
+        );
+        svc.update_key_description(&req).unwrap();
+
+        {
+            let state = svc.state.read();
+            let key = state.keys.get(&key_id).unwrap();
+            assert_eq!(key.description, "updated again");
+        }
+    }
+
+    #[test]
+    fn get_public_key_for_asymmetric_key() {
+        let svc = make_service();
+
+        // RSA signing key
+        let key_id = create_key_with_opts(
+            &svc,
+            json!({ "KeyUsage": "SIGN_VERIFY", "KeySpec": "RSA_2048" }),
+        );
+
+        let req = make_request("GetPublicKey", json!({ "KeyId": key_id }));
+        let resp = svc.get_public_key(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+
+        assert!(body["PublicKey"].as_str().is_some());
+        assert_eq!(body["KeySpec"].as_str().unwrap(), "RSA_2048");
+        assert_eq!(body["KeyUsage"].as_str().unwrap(), "SIGN_VERIFY");
+        assert!(body["SigningAlgorithms"].as_array().is_some());
+        assert!(body["KeyId"].as_str().unwrap().contains(":key/"));
+
+        // ECC key
+        let ecc_key_id = create_key_with_opts(
+            &svc,
+            json!({ "KeyUsage": "SIGN_VERIFY", "KeySpec": "ECC_NIST_P256" }),
+        );
+
+        let req = make_request("GetPublicKey", json!({ "KeyId": ecc_key_id }));
+        let resp = svc.get_public_key(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert!(body["PublicKey"].as_str().is_some());
+        assert_eq!(body["KeySpec"].as_str().unwrap(), "ECC_NIST_P256");
+    }
 }

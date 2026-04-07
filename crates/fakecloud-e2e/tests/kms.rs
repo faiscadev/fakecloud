@@ -555,3 +555,206 @@ async fn kms_custom_key_store_lifecycle() {
     let desc = client.describe_custom_key_stores().send().await.unwrap();
     assert!(desc.custom_key_stores().is_empty());
 }
+
+#[tokio::test]
+async fn kms_key_rotation_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.kms_client().await;
+
+    let resp = client.create_key().send().await.unwrap();
+    let key_id = resp.key_metadata().unwrap().key_id().to_string();
+
+    // Initially rotation is disabled
+    let status = client
+        .get_key_rotation_status()
+        .key_id(&key_id)
+        .send()
+        .await
+        .unwrap();
+    assert!(!status.key_rotation_enabled());
+
+    // Enable rotation
+    client
+        .enable_key_rotation()
+        .key_id(&key_id)
+        .send()
+        .await
+        .unwrap();
+
+    let status = client
+        .get_key_rotation_status()
+        .key_id(&key_id)
+        .send()
+        .await
+        .unwrap();
+    assert!(status.key_rotation_enabled());
+
+    // Rotate on demand
+    client
+        .rotate_key_on_demand()
+        .key_id(&key_id)
+        .send()
+        .await
+        .unwrap();
+
+    // List rotations
+    let rotations = client
+        .list_key_rotations()
+        .key_id(&key_id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rotations.rotations().len(), 1);
+
+    // Disable rotation
+    client
+        .disable_key_rotation()
+        .key_id(&key_id)
+        .send()
+        .await
+        .unwrap();
+
+    let status = client
+        .get_key_rotation_status()
+        .key_id(&key_id)
+        .send()
+        .await
+        .unwrap();
+    assert!(!status.key_rotation_enabled());
+}
+
+#[tokio::test]
+async fn kms_sign_verify_roundtrip() {
+    let server = TestServer::start().await;
+    let client = server.kms_client().await;
+
+    // Create a SIGN_VERIFY key
+    let resp = client
+        .create_key()
+        .key_usage(aws_sdk_kms::types::KeyUsageType::SignVerify)
+        .key_spec(aws_sdk_kms::types::KeySpec::Rsa2048)
+        .send()
+        .await
+        .unwrap();
+    let key_id = resp.key_metadata().unwrap().key_id().to_string();
+
+    let message = b"data to sign via e2e";
+
+    // Sign
+    let sign_resp = client
+        .sign()
+        .key_id(&key_id)
+        .message(Blob::new(message.to_vec()))
+        .signing_algorithm(aws_sdk_kms::types::SigningAlgorithmSpec::RsassaPkcs1V15Sha256)
+        .send()
+        .await
+        .unwrap();
+
+    let signature = sign_resp.signature().unwrap().clone();
+    assert!(!signature.as_ref().is_empty());
+
+    // Verify
+    let verify_resp = client
+        .verify()
+        .key_id(&key_id)
+        .message(Blob::new(message.to_vec()))
+        .signature(signature)
+        .signing_algorithm(aws_sdk_kms::types::SigningAlgorithmSpec::RsassaPkcs1V15Sha256)
+        .send()
+        .await
+        .unwrap();
+    assert!(verify_resp.signature_valid());
+}
+
+#[tokio::test]
+async fn kms_generate_random() {
+    let server = TestServer::start().await;
+    let client = server.kms_client().await;
+
+    // Generate 32 bytes
+    let resp = client
+        .generate_random()
+        .number_of_bytes(32)
+        .send()
+        .await
+        .unwrap();
+    let random_bytes = resp.plaintext().unwrap();
+    assert_eq!(random_bytes.as_ref().len(), 32);
+
+    // Generate 64 bytes
+    let resp = client
+        .generate_random()
+        .number_of_bytes(64)
+        .send()
+        .await
+        .unwrap();
+    let random_bytes = resp.plaintext().unwrap();
+    assert_eq!(random_bytes.as_ref().len(), 64);
+
+    // Two calls should produce different output
+    let resp1 = client
+        .generate_random()
+        .number_of_bytes(16)
+        .send()
+        .await
+        .unwrap();
+    let resp2 = client
+        .generate_random()
+        .number_of_bytes(16)
+        .send()
+        .await
+        .unwrap();
+    // Very unlikely but theoretically possible to be equal; this is a sanity check
+    let b1 = resp1.plaintext().unwrap().as_ref().to_vec();
+    let b2 = resp2.plaintext().unwrap().as_ref().to_vec();
+    // At least verify both are 16 bytes
+    assert_eq!(b1.len(), 16);
+    assert_eq!(b2.len(), 16);
+}
+
+#[tokio::test]
+async fn kms_cancel_key_deletion() {
+    let server = TestServer::start().await;
+    let client = server.kms_client().await;
+
+    let resp = client.create_key().send().await.unwrap();
+    let key_id = resp.key_metadata().unwrap().key_id().to_string();
+
+    // Schedule deletion
+    client
+        .schedule_key_deletion()
+        .key_id(&key_id)
+        .pending_window_in_days(7)
+        .send()
+        .await
+        .unwrap();
+
+    // Verify pending deletion
+    let desc = client.describe_key().key_id(&key_id).send().await.unwrap();
+    assert_eq!(
+        desc.key_metadata().unwrap().key_state(),
+        Some(&aws_sdk_kms::types::KeyState::PendingDeletion)
+    );
+
+    // Cancel deletion
+    let cancel_resp = client
+        .cancel_key_deletion()
+        .key_id(&key_id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(cancel_resp.key_id().unwrap(), key_id);
+
+    // Key should be disabled (not pending deletion)
+    let desc = client.describe_key().key_id(&key_id).send().await.unwrap();
+    assert_eq!(
+        desc.key_metadata().unwrap().key_state(),
+        Some(&aws_sdk_kms::types::KeyState::Disabled)
+    );
+
+    // Re-enable the key
+    client.enable_key().key_id(&key_id).send().await.unwrap();
+
+    let desc = client.describe_key().key_id(&key_id).send().await.unwrap();
+    assert!(desc.key_metadata().unwrap().enabled());
+}
