@@ -4,7 +4,7 @@
 
 ## Overview
 
-fakecloud emulates 12 AWS services locally for integration testing and development. It is a single Rust binary — no Docker required, no signup, starts in under 100ms. Point any AWS SDK or the AWS CLI at `http://localhost:4566` with dummy credentials.
+fakecloud emulates 14 AWS services locally for integration testing and development. It is a single Rust binary — no Docker required, no signup, starts in under 100ms. Point any AWS SDK or the AWS CLI at `http://localhost:4566` with dummy credentials.
 
 Key design principles:
 - **Correctness over coverage**: Every implemented service targets 100% behavioral parity with real AWS, verified by automated conformance tests against AWS Smithy models
@@ -70,7 +70,7 @@ fakecloud listens at `http://localhost:4566`.
 ### Health check
 ```sh
 curl http://localhost:4566/_fakecloud/health
-# Returns: {"status":"ok","version":"0.1.0","services":["cloudformation","dynamodb","sqs","sns","events","iam","sts","ssm","lambda","secretsmanager","logs","kms","s3"]}
+# Returns: {"status":"ok","version":"0.3.0","services":["cloudformation","dynamodb","sqs","sns","events","iam","sts","ssm","lambda","secretsmanager","logs","kms","s3","ses"]}
 ```
 
 ## Using with AWS SDKs
@@ -160,7 +160,7 @@ Features: SQS fan-out delivery, HTTP/HTTPS endpoint delivery, subscription filte
 
 Protocol: Query (form-encoded body, `Action` parameter, XML responses)
 
-### EventBridge (41 actions)
+### EventBridge (57 actions)
 
 **Event Buses:** CreateEventBus, DeleteEventBus, ListEventBuses, DescribeEventBus
 **Rules:** PutRule, DeleteRule, ListRules, DescribeRule, EnableRule, DisableRule, ListRuleNamesByTarget
@@ -194,7 +194,7 @@ Protocol: JSON (JSON body, `X-Amz-Target` header, JSON responses)
 
 Protocol: Query (form-encoded body, `Action` parameter, XML responses)
 
-### SSM (46 actions)
+### SSM (146 actions)
 
 **Parameters:** PutParameter, GetParameter, GetParameters, GetParametersByPath, DeleteParameter, DeleteParameters, DescribeParameters, GetParameterHistory, LabelParameterVersion, UnlabelParameterVersion
 **Tags:** AddTagsToResource, RemoveTagsFromResource, ListTagsForResource
@@ -225,35 +225,35 @@ Table and item operations with support for key schemas, secondary indexes, and s
 
 Protocol: JSON (JSON body, `X-Amz-Target` header, JSON responses)
 
-### Lambda (10 actions, stub)
+### Lambda (10 actions)
 
 CreateFunction, GetFunction, DeleteFunction, ListFunctions, Invoke, PublishVersion, CreateEventSourceMapping, ListEventSourceMappings, GetEventSourceMapping, DeleteEventSourceMapping
 
-Note: Invoke returns a canned response — it does not execute function code.
+Features: real code execution via Docker containers (13 runtimes supported), event source mappings for SQS polling.
 
 Protocol: REST (HTTP method + path-based routing, JSON responses)
 
-### Secrets Manager (11 actions)
+### Secrets Manager (23 actions)
 
-CreateSecret, GetSecretValue, PutSecretValue, UpdateSecret, DeleteSecret, RestoreSecret, DescribeSecret, ListSecrets, TagResource, UntagResource, ListSecretVersionIds
+Full secret lifecycle with versioning, soft delete, rotation with Lambda, replication, and resource policies.
 
-Features: secret versioning with AWSCURRENT/AWSPREVIOUS stage tracking, soft delete with configurable recovery window, secret restoration.
-
-Protocol: JSON (JSON body, `X-Amz-Target` header, JSON responses)
-
-### CloudWatch Logs (14 actions)
-
-CreateLogGroup, DeleteLogGroup, DescribeLogGroups, CreateLogStream, DeleteLogStream, DescribeLogStreams, PutLogEvents, GetLogEvents, FilterLogEvents, TagLogGroup, UntagLogGroup, ListTagsLogGroup, PutRetentionPolicy, DeleteRetentionPolicy
-
-Features: log groups with log streams, event storage and retrieval, simple substring filter pattern matching, retention policies.
+Features: secret versioning with AWSCURRENT/AWSPREVIOUS stage tracking, soft delete with configurable recovery window, secret restoration, rotation via Lambda invocation.
 
 Protocol: JSON (JSON body, `X-Amz-Target` header, JSON responses)
 
-### KMS (16 actions)
+### CloudWatch Logs (113 actions)
 
-CreateKey, DescribeKey, ListKeys, EnableKey, DisableKey, ScheduleKeyDeletion, Encrypt, Decrypt, GenerateDataKey, GenerateDataKeyWithoutPlaintext, CreateAlias, DeleteAlias, ListAliases, TagResource, UntagResource, ListResourceTags
+Full log management with groups, streams, filtering, deliveries, transformers, query language, and anomaly detection.
 
-Features: fake envelope encryption (base64-encoded with key ID prefix), key enable/disable/deletion scheduling, alias resolution.
+Features: log groups with log streams, event storage and retrieval, filter pattern matching, retention policies, metric filters, subscription filters, deliveries, transformers, anomaly detection.
+
+Protocol: JSON (JSON body, `X-Amz-Target` header, JSON responses)
+
+### KMS (53 actions)
+
+Full key management with encryption, aliases, grants, real ECDH, and key import.
+
+Features: real envelope encryption, key enable/disable/deletion scheduling, alias resolution, grants, custom key stores, key import, ECDH key agreement.
 
 Protocol: JSON (JSON body, `X-Amz-Target` header, JSON responses)
 
@@ -267,6 +267,14 @@ Supported resource types: AWS::SQS::Queue, AWS::SNS::Topic, AWS::SNS::Subscripti
 
 Protocol: Query (form-encoded body, `Action` parameter, XML responses)
 
+### SES (111 actions)
+
+**SES v2** (97 actions, REST protocol): identities, templates, configuration sets, contact lists, contacts, send email, tagging, suppression list, event destinations, identity policies, DKIM/feedback/mail-from attributes, config set options, custom verification email templates, template rendering, dedicated IP pools and IPs, multi-region endpoints, account settings, import/export jobs.
+
+**SES v1 inbound** (14 actions, Query protocol): CreateReceiptRuleSet, DescribeReceiptRuleSet, DeleteReceiptRuleSet, ListReceiptRuleSets, SetActiveReceiptRuleSet, CreateReceiptRule, DescribeReceiptRule, UpdateReceiptRule, DeleteReceiptRule, ReorderReceiptRule, CreateReceiptFilter, DescribeReceiptFilter, DeleteReceiptFilter, ListReceiptFilters.
+
+Features: email event fanout to SNS topics and EventBridge buses via configured event destinations, mailbox simulator (bounce@simulator.amazonses.com, complaint@, suppressionlist@), inbound email pipeline via /_fakecloud/ses/inbound endpoint that evaluates receipt rules and executes S3/SNS/Lambda actions.
+
 ## Cross-Service Integration
 
 fakecloud implements real cross-service message delivery:
@@ -276,15 +284,17 @@ fakecloud implements real cross-service message delivery:
 - **SNS -> HTTP/HTTPS**: Publishing to an SNS topic delivers to HTTP endpoints
 - **EventBridge -> SNS/SQS**: PutEvents and scheduled rules deliver to SNS and SQS targets
 - **S3 Lifecycle**: Background processor expires objects and transitions storage classes based on lifecycle rules
+- **SES -> SNS/EventBridge**: Email event fanout (send, delivery, bounce, complaint) via configured event destinations
+- **SES Inbound -> S3/SNS/Lambda**: Receipt rules evaluate inbound email and execute S3, SNS, and Lambda actions
 - **EventBridge Scheduler**: Cron and rate-based rules fire on schedule
 
 ## Protocol Notes
 
 fakecloud handles three AWS protocol families:
 
-- **Query protocol** (SQS, SNS, IAM, STS, CloudFormation): form-encoded body with `Action` parameter, XML responses
+- **Query protocol** (SQS, SNS, IAM, STS, CloudFormation, SES v1): form-encoded body with `Action` parameter, XML responses
 - **JSON protocol** (SSM, EventBridge, DynamoDB, Secrets Manager, CloudWatch Logs, KMS): JSON body, `X-Amz-Target` header, JSON responses
-- **REST protocol** (S3, Lambda): HTTP method + path-based routing, XML or JSON responses
+- **REST protocol** (S3, Lambda, SES v2): HTTP method + path-based routing, XML or JSON responses
 
 SigV4 signatures are parsed for service routing but never validated. Use any dummy credentials.
 

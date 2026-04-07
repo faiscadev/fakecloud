@@ -33,7 +33,7 @@ alternatives have emerged since then. Here's how they compare:
 | Language | Rust | Python | Java (Quarkus Native) | Python |
 | Auth required | No | Yes (account + token) | No | No |
 | Commercial use | Free | Paid plans only | Free | Free |
-| AWS services | 13 | 80+ | 25 | 38 |
+| AWS services | 14 | 80+ | 25 | 38 |
 | Cross-service delivery | Yes | Yes | Yes | Yes |
 | Scheduled rules fire | Yes | Yes | -- | -- |
 
@@ -96,7 +96,7 @@ fakecloud is now listening at `http://localhost:4566`.
 
 ## Supported Services
 
-13 AWS services, 751 API operations:
+14 AWS services, 842 API operations:
 
 | Service | Actions | Highlights |
 |---|---|---|
@@ -113,7 +113,7 @@ fakecloud is now listening at `http://localhost:4566`.
 | **CloudWatch Logs** | 113 | Groups, streams, filtering, deliveries, transformers, query language, anomaly detection |
 | **KMS** | 53 | Encryption, key management, aliases, grants, real ECDH and key import |
 | **CloudFormation** | 8 | Template parsing, resource provisioning, custom resources via Lambda |
-| **SES v2** | 97 | Identities, templates, configuration sets, contact lists, contacts, send email, tagging, suppression list, event destinations, identity policies, DKIM/feedback/mail-from attributes, config set options, custom verification email templates, template rendering, dedicated IP pools & IPs, multi-region endpoints, account settings, import/export jobs, tenants, reputation entities, metrics, event fanout (SNS/EventBridge), mailbox simulator |
+| **SES** | 111 | **v2** (97 ops): identities, templates, configuration sets, contact lists, send email, suppression list, event destinations, DKIM/feedback/mail-from attributes, dedicated IP pools, account settings, import/export jobs, event fanout (SNS/EventBridge), mailbox simulator. **v1 inbound** (14 ops): receipt rule sets, receipt rules, receipt filters, inbound email pipeline with S3/SNS/Lambda actions |
 
 ### Cross-Service Integration
 
@@ -126,6 +126,7 @@ integration tests:
 - **SQS -> Lambda**: Event source mapping polls and invokes
 - **SecretsManager -> Lambda**: Rotation invokes Lambda for all 4 steps
 - **SES -> SNS/EventBridge**: Email event fanout (send, delivery, bounce, complaint) via configured event destinations
+- **SES Inbound -> S3/SNS/Lambda**: Receipt rules evaluate inbound email and execute S3, SNS, and Lambda actions
 - **CloudFormation -> Lambda**: Custom resources invoke via ServiceToken
 - **S3 Lifecycle**: Background expiration and storage class transitions
 - **EventBridge Scheduler**: Cron and rate-based rules fire on schedule
@@ -158,7 +159,7 @@ curl http://localhost:4566/_fakecloud/health
 {
   "status": "ok",
   "version": "0.3.0",
-  "services": ["cloudformation", "dynamodb", "sqs", "sns", "events", "iam", "sts", "ssm", "lambda", "secretsmanager", "logs", "kms", "s3"]
+  "services": ["cloudformation", "dynamodb", "sqs", "sns", "events", "iam", "sts", "ssm", "lambda", "secretsmanager", "logs", "kms", "s3", "ses"]
 }
 ```
 
@@ -183,12 +184,14 @@ fakecloud is organized as a Cargo workspace:
 | `fakecloud-logs` | CloudWatch Logs implementation |
 | `fakecloud-kms` | KMS implementation |
 | `fakecloud-cloudformation` | CloudFormation implementation |
+| `fakecloud-ses` | SES implementation (v2 REST + v1 inbound Query) |
 | `fakecloud-e2e` | End-to-end tests using aws-sdk-rust |
 
 Protocol handling:
-- **Query protocol** (SQS, SNS, IAM, STS, CloudFormation): form-encoded body, `Action` parameter, XML responses
+- **Query protocol** (SQS, SNS, IAM, STS, CloudFormation, SES v1): form-encoded body, `Action` parameter, XML responses
 - **JSON protocol** (SSM, EventBridge, DynamoDB, Secrets Manager, CloudWatch Logs, KMS): JSON body, `X-Amz-Target` header, JSON responses
 - **REST protocol** (S3, Lambda, SES v2): HTTP method + path-based routing, XML/JSON responses
+- **SES v1 inbound** uses Query protocol for receipt rule/filter operations
 - SigV4 signatures are parsed for service routing but never validated
 
 ## Testing
@@ -225,7 +228,7 @@ EC2, RDS, ECS, Elastic Load Balancing, CloudWatch Metrics, Route 53, API Gateway
 **fakecloud is** a free, open-source local AWS emulator for integration testing and
 local development. For every service it implements, the goal is 100% behavioral
 parity with real AWS — verified by 34,000+ automated conformance test variants
-against official AWS Smithy models across all 983 API operations. 13 services,
+against official AWS Smithy models across all API operations. 14 services,
 100% conformance.
 
 **fakecloud is not** a production-ready cloud replacement. It's not designed to

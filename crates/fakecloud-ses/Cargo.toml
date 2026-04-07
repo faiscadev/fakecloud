@@ -1,6 +1,6 @@
 [package]
 name = "fakecloud-ses"
-description = "SES v2 implementation for FakeCloud"
+description = "SES implementation for FakeCloud (v2 REST + v1 inbound Query)"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
