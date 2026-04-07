@@ -50,15 +50,13 @@ impl LogsService {
             })?
             .iter()
             .map(|v| {
-                v.as_str()
-                    .map(|s| s.to_string())
-                    .ok_or_else(|| {
-                        AwsServiceError::aws_error(
-                            StatusCode::BAD_REQUEST,
-                            "InvalidParameterException",
-                            "logGroupArnList elements must be strings",
-                        )
-                    })
+                v.as_str().map(|s| s.to_string()).ok_or_else(|| {
+                    AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "InvalidParameterException",
+                        "logGroupArnList elements must be strings",
+                    )
+                })
             })
             .collect::<Result<Vec<_>, _>>()?;
 
