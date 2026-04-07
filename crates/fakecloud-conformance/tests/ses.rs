@@ -1464,7 +1464,7 @@ async fn ses_put_account_vdm_attributes() {
 
 // -- Import Jobs --
 
-#[test_action("ses", "CreateImportJob", checksum = "da456fd3")]
+#[test_action("ses", "CreateImportJob", checksum = "89515044")]
 #[test_action("ses", "GetImportJob", checksum = "8cf312dd")]
 #[test_action("ses", "ListImportJobs", checksum = "d277d8ad")]
 #[tokio::test]

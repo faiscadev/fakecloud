@@ -4393,20 +4393,20 @@ impl fakecloud_core::service::AwsService for SesV2Service {
             "ListTenantResources" => self.list_tenant_resources(&req),
             "ListResourceTenants" => self.list_resource_tenants(&req),
             "GetReputationEntity" => {
-                self.get_reputation_entity(res, extra.as_deref().unwrap_or(""))
+                self.get_reputation_entity(res, sub)
             }
             "ListReputationEntities" => self.list_reputation_entities(&req),
             "UpdateReputationEntityCustomerManagedStatus" => {
                 self.update_reputation_entity_customer_managed_status(
                     res,
-                    extra.as_deref().unwrap_or(""),
+                    sub,
                     &req,
                 )
             }
             "UpdateReputationEntityPolicy" => {
                 self.update_reputation_entity_policy(
                     res,
-                    extra.as_deref().unwrap_or(""),
+                    sub,
                     &req,
                 )
             }
