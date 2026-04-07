@@ -134,9 +134,7 @@ impl LogsService {
         let filters: Vec<Value> = group
             .subscription_filters
             .iter()
-            .filter(|f| {
-                filter_name_prefix.is_none_or(|prefix| f.filter_name.starts_with(prefix))
-            })
+            .filter(|f| filter_name_prefix.is_none_or(|prefix| f.filter_name.starts_with(prefix)))
             .map(|f| {
                 let mut obj = json!({
                     "filterName": f.filter_name,
