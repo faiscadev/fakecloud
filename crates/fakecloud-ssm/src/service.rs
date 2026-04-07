@@ -10031,4 +10031,531 @@ mod tests {
             .unwrap()
             .is_empty());
     }
+
+    // ── Parameter Labels ─────────────────────────────────────────
+
+    fn put_param(svc: &SsmService, name: &str, value: &str) -> i64 {
+        let req = make_request(
+            "PutParameter",
+            json!({
+                "Name": name,
+                "Value": value,
+                "Type": "String",
+                "Overwrite": true,
+            }),
+        );
+        let resp = svc.put_parameter(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        body["Version"].as_i64().unwrap()
+    }
+
+    #[test]
+    fn label_and_unlabel_parameter_version() {
+        let svc = make_service();
+
+        // Create parameter with two versions
+        put_param(&svc, "/label/test", "v1");
+        put_param(&svc, "/label/test", "v2");
+
+        // Label version 1
+        let req = make_request(
+            "LabelParameterVersion",
+            json!({
+                "Name": "/label/test",
+                "ParameterVersion": 1,
+                "Labels": ["prod", "stable"],
+            }),
+        );
+        let resp = svc.label_parameter_version(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert!(body["InvalidLabels"].as_array().unwrap().is_empty());
+        assert_eq!(body["ParameterVersion"].as_i64().unwrap(), 1);
+
+        // Get parameter history — version 1 should have labels
+        let req = make_request("GetParameterHistory", json!({ "Name": "/label/test" }));
+        let resp = svc.get_parameter_history(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let params = body["Parameters"].as_array().unwrap();
+        let v1 = params
+            .iter()
+            .find(|p| p["Version"].as_i64() == Some(1))
+            .unwrap();
+        let labels = v1["Labels"].as_array().unwrap();
+        assert!(labels.iter().any(|l| l.as_str() == Some("prod")));
+        assert!(labels.iter().any(|l| l.as_str() == Some("stable")));
+
+        // Unlabel version 1
+        let req = make_request(
+            "UnlabelParameterVersion",
+            json!({
+                "Name": "/label/test",
+                "ParameterVersion": 1,
+                "Labels": ["prod"],
+            }),
+        );
+        let resp = svc.unlabel_parameter_version(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert!(body["InvalidLabels"].as_array().unwrap().is_empty());
+        let removed = body["RemovedLabels"].as_array().unwrap();
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].as_str().unwrap(), "prod");
+    }
+
+    #[test]
+    fn label_parameter_version_defaults_to_latest() {
+        let svc = make_service();
+        put_param(&svc, "/label/default", "v1");
+        put_param(&svc, "/label/default", "v2");
+
+        // Label without specifying version — should target latest (2)
+        let req = make_request(
+            "LabelParameterVersion",
+            json!({
+                "Name": "/label/default",
+                "Labels": ["latest-label"],
+            }),
+        );
+        let resp = svc.label_parameter_version(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["ParameterVersion"].as_i64().unwrap(), 2);
+    }
+
+    #[test]
+    fn label_parameter_version_invalid_labels() {
+        let svc = make_service();
+        put_param(&svc, "/label/invalid", "v1");
+
+        // Labels starting with aws/ssm or containing / are invalid
+        let req = make_request(
+            "LabelParameterVersion",
+            json!({
+                "Name": "/label/invalid",
+                "Labels": ["aws-reserved", "valid-label"],
+            }),
+        );
+        let resp = svc.label_parameter_version(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let invalid = body["InvalidLabels"].as_array().unwrap();
+        assert_eq!(invalid.len(), 1);
+        assert_eq!(invalid[0].as_str().unwrap(), "aws-reserved");
+    }
+
+    #[test]
+    fn label_parameter_version_not_found() {
+        let svc = make_service();
+        put_param(&svc, "/label/notfound", "v1");
+
+        let req = make_request(
+            "LabelParameterVersion",
+            json!({
+                "Name": "/label/notfound",
+                "ParameterVersion": 999,
+                "Labels": ["test"],
+            }),
+        );
+        let result = svc.label_parameter_version(&req);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn unlabel_parameter_version_returns_invalid_for_missing_labels() {
+        let svc = make_service();
+        put_param(&svc, "/label/missing", "v1");
+
+        let req = make_request(
+            "UnlabelParameterVersion",
+            json!({
+                "Name": "/label/missing",
+                "ParameterVersion": 1,
+                "Labels": ["nonexistent"],
+            }),
+        );
+        let resp = svc.unlabel_parameter_version(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let invalid = body["InvalidLabels"].as_array().unwrap();
+        assert_eq!(invalid.len(), 1);
+        assert_eq!(invalid[0].as_str().unwrap(), "nonexistent");
+    }
+
+    // ── Document Operations ──────────────────────────────────────
+
+    fn create_doc(svc: &SsmService, name: &str) {
+        let req = make_request(
+            "CreateDocument",
+            json!({
+                "Name": name,
+                "Content": r#"{"schemaVersion":"2.2","mainSteps":[]}"#,
+                "DocumentType": "Command",
+            }),
+        );
+        svc.create_document(&req).unwrap();
+    }
+
+    #[test]
+    fn update_document_and_default_version() {
+        let svc = make_service();
+        create_doc(&svc, "TestDoc");
+
+        // Update document (creates version 2)
+        let req = make_request(
+            "UpdateDocument",
+            json!({
+                "Name": "TestDoc",
+                "Content": r#"{"schemaVersion":"2.2","description":"v2","mainSteps":[]}"#,
+                "VersionName": "release-2",
+            }),
+        );
+        let resp = svc.update_document(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let desc = &body["DocumentDescription"];
+        assert_eq!(desc["DocumentVersion"].as_str().unwrap(), "2");
+        assert_eq!(desc["VersionName"].as_str().unwrap(), "release-2");
+
+        // List document versions
+        let req = make_request("ListDocumentVersions", json!({ "Name": "TestDoc" }));
+        let resp = svc.list_document_versions(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["DocumentVersions"].as_array().unwrap().len(), 2);
+
+        // Update default version to 2
+        let req = make_request(
+            "UpdateDocumentDefaultVersion",
+            json!({
+                "Name": "TestDoc",
+                "DocumentVersion": "2",
+            }),
+        );
+        let resp = svc.update_document_default_version(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["Description"]["DefaultVersion"].as_str().unwrap(), "2");
+
+        // Verify describe_document now shows version 2 as default
+        let req = make_request("DescribeDocument", json!({ "Name": "TestDoc" }));
+        let resp = svc.describe_document(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["Document"]["DefaultVersion"].as_str().unwrap(), "2");
+    }
+
+    #[test]
+    fn update_document_duplicate_content_fails() {
+        let svc = make_service();
+        create_doc(&svc, "DupDoc");
+
+        // Try to update with same content
+        let req = make_request(
+            "UpdateDocument",
+            json!({
+                "Name": "DupDoc",
+                "Content": r#"{"schemaVersion":"2.2","mainSteps":[]}"#,
+            }),
+        );
+        let result = svc.update_document(&req);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn document_permissions_modify_and_describe() {
+        let svc = make_service();
+        create_doc(&svc, "PermDoc");
+
+        // Add permission
+        let req = make_request(
+            "ModifyDocumentPermission",
+            json!({
+                "Name": "PermDoc",
+                "PermissionType": "Share",
+                "AccountIdsToAdd": ["111111111111", "222222222222"],
+            }),
+        );
+        svc.modify_document_permission(&req).unwrap();
+
+        // Describe permission
+        let req = make_request(
+            "DescribeDocumentPermission",
+            json!({
+                "Name": "PermDoc",
+                "PermissionType": "Share",
+            }),
+        );
+        let resp = svc.describe_document_permission(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let ids = body["AccountIds"].as_array().unwrap();
+        assert_eq!(ids.len(), 2);
+
+        // Remove one permission
+        let req = make_request(
+            "ModifyDocumentPermission",
+            json!({
+                "Name": "PermDoc",
+                "PermissionType": "Share",
+                "AccountIdsToRemove": ["111111111111"],
+            }),
+        );
+        svc.modify_document_permission(&req).unwrap();
+
+        // Verify only one remains
+        let req = make_request(
+            "DescribeDocumentPermission",
+            json!({
+                "Name": "PermDoc",
+                "PermissionType": "Share",
+            }),
+        );
+        let resp = svc.describe_document_permission(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let ids = body["AccountIds"].as_array().unwrap();
+        assert_eq!(ids.len(), 1);
+        assert_eq!(ids[0].as_str().unwrap(), "222222222222");
+    }
+
+    #[test]
+    fn modify_document_permission_invalid_type() {
+        let svc = make_service();
+        create_doc(&svc, "PermDoc2");
+
+        let req = make_request(
+            "ModifyDocumentPermission",
+            json!({
+                "Name": "PermDoc2",
+                "PermissionType": "Invalid",
+                "AccountIdsToAdd": ["111111111111"],
+            }),
+        );
+        let result = svc.modify_document_permission(&req);
+        assert!(result.is_err());
+    }
+
+    // ── Maintenance Window Targets and Tasks ─────────────────────
+
+    #[test]
+    fn describe_maintenance_window_targets_and_tasks() {
+        let svc = make_service();
+        let (window_id, _target_id, _task_id) = create_mw_with_target_and_task(&svc);
+
+        // Describe targets
+        let req = make_request(
+            "DescribeMaintenanceWindowTargets",
+            json!({ "WindowId": window_id }),
+        );
+        let resp = svc.describe_maintenance_window_targets(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let targets = body["Targets"].as_array().unwrap();
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0]["Name"].as_str().unwrap(), "test-target");
+
+        // Describe tasks
+        let req = make_request(
+            "DescribeMaintenanceWindowTasks",
+            json!({ "WindowId": window_id }),
+        );
+        let resp = svc.describe_maintenance_window_tasks(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let tasks = body["Tasks"].as_array().unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0]["TaskArn"].as_str().unwrap(), "AWS-RunShellScript");
+        assert_eq!(tasks[0]["Name"].as_str().unwrap(), "test-task");
+    }
+
+    // ── Patch Baselines ──────────────────────────────────────────
+
+    fn create_baseline(svc: &SsmService, name: &str) -> String {
+        let req = make_request(
+            "CreatePatchBaseline",
+            json!({
+                "Name": name,
+                "OperatingSystem": "AMAZON_LINUX_2",
+                "Description": "test baseline",
+            }),
+        );
+        let resp = svc.create_patch_baseline(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        body["BaselineId"].as_str().unwrap().to_string()
+    }
+
+    #[test]
+    fn patch_baseline_get_and_delete() {
+        let svc = make_service();
+        let baseline_id = create_baseline(&svc, "get-del-baseline");
+
+        // Get
+        let req = make_request("GetPatchBaseline", json!({ "BaselineId": baseline_id }));
+        let resp = svc.get_patch_baseline(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["Name"].as_str().unwrap(), "get-del-baseline");
+        assert_eq!(body["OperatingSystem"].as_str().unwrap(), "AMAZON_LINUX_2");
+        assert_eq!(body["Description"].as_str().unwrap(), "test baseline");
+
+        // Delete
+        let req = make_request("DeletePatchBaseline", json!({ "BaselineId": baseline_id }));
+        svc.delete_patch_baseline(&req).unwrap();
+
+        // Get should fail
+        let req = make_request("GetPatchBaseline", json!({ "BaselineId": baseline_id }));
+        let result = svc.get_patch_baseline(&req);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn describe_patch_baselines_with_filter() {
+        let svc = make_service();
+        create_baseline(&svc, "alpha-baseline");
+        create_baseline(&svc, "beta-baseline");
+
+        // Filter by NAME_PREFIX
+        let req = make_request(
+            "DescribePatchBaselines",
+            json!({
+                "Filters": [{"Key": "NAME_PREFIX", "Values": ["alpha"]}],
+            }),
+        );
+        let resp = svc.describe_patch_baselines(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let baselines = body["BaselineIdentities"].as_array().unwrap();
+        assert_eq!(baselines.len(), 1);
+        assert_eq!(
+            baselines[0]["BaselineName"].as_str().unwrap(),
+            "alpha-baseline"
+        );
+    }
+
+    #[test]
+    fn patch_group_register_and_deregister() {
+        let svc = make_service();
+        let baseline_id = create_baseline(&svc, "pg-baseline");
+
+        // Register patch group
+        let req = make_request(
+            "RegisterPatchBaselineForPatchGroup",
+            json!({
+                "BaselineId": baseline_id,
+                "PatchGroup": "production",
+            }),
+        );
+        let resp = svc.register_patch_baseline_for_patch_group(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["PatchGroup"].as_str().unwrap(), "production");
+
+        // Get patch baseline for group
+        let req = make_request(
+            "GetPatchBaselineForPatchGroup",
+            json!({
+                "PatchGroup": "production",
+                "OperatingSystem": "AMAZON_LINUX_2",
+            }),
+        );
+        let resp = svc.get_patch_baseline_for_patch_group(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["BaselineId"].as_str().unwrap(), baseline_id);
+
+        // Describe patch groups
+        let req = make_request("DescribePatchGroups", json!({}));
+        let resp = svc.describe_patch_groups(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let mappings = body["Mappings"].as_array().unwrap();
+        assert_eq!(mappings.len(), 1);
+        assert_eq!(mappings[0]["PatchGroup"].as_str().unwrap(), "production");
+
+        // Deregister
+        let req = make_request(
+            "DeregisterPatchBaselineForPatchGroup",
+            json!({
+                "BaselineId": baseline_id,
+                "PatchGroup": "production",
+            }),
+        );
+        svc.deregister_patch_baseline_for_patch_group(&req).unwrap();
+
+        // Verify removed
+        let req = make_request("DescribePatchGroups", json!({}));
+        let resp = svc.describe_patch_groups(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert!(body["Mappings"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn delete_patch_baseline_removes_patch_groups() {
+        let svc = make_service();
+        let baseline_id = create_baseline(&svc, "del-pg-baseline");
+
+        // Register a patch group
+        let req = make_request(
+            "RegisterPatchBaselineForPatchGroup",
+            json!({
+                "BaselineId": baseline_id,
+                "PatchGroup": "staging",
+            }),
+        );
+        svc.register_patch_baseline_for_patch_group(&req).unwrap();
+
+        // Delete baseline
+        let req = make_request("DeletePatchBaseline", json!({ "BaselineId": baseline_id }));
+        svc.delete_patch_baseline(&req).unwrap();
+
+        // Patch groups should be cleaned up
+        let req = make_request("DescribePatchGroups", json!({}));
+        let resp = svc.describe_patch_groups(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert!(body["Mappings"].as_array().unwrap().is_empty());
+    }
+
+    // ── Command Details ──────────────────────────────────────────
+
+    #[test]
+    fn get_command_invocation_success() {
+        let svc = make_service();
+        let cmd_id = send_command(&svc, "AWS-RunShellScript");
+
+        let req = make_request(
+            "GetCommandInvocation",
+            json!({
+                "CommandId": cmd_id,
+                "InstanceId": "i-1234567890abcdef0",
+            }),
+        );
+        let resp = svc.get_command_invocation(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["CommandId"].as_str().unwrap(), cmd_id);
+        assert_eq!(body["InstanceId"].as_str().unwrap(), "i-1234567890abcdef0");
+        assert_eq!(body["Status"].as_str().unwrap(), "Success");
+    }
+
+    #[test]
+    fn get_command_invocation_wrong_instance_fails() {
+        let svc = make_service();
+        let cmd_id = send_command(&svc, "AWS-RunShellScript");
+
+        let req = make_request(
+            "GetCommandInvocation",
+            json!({
+                "CommandId": cmd_id,
+                "InstanceId": "i-0000000000000000f",
+            }),
+        );
+        let result = svc.get_command_invocation(&req);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn list_command_invocations() {
+        let svc = make_service();
+        let cmd_id = send_command(&svc, "AWS-RunShellScript");
+
+        // List all invocations
+        let req = make_request("ListCommandInvocations", json!({}));
+        let resp = svc.list_command_invocations(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let invocations = body["CommandInvocations"].as_array().unwrap();
+        assert!(!invocations.is_empty());
+        assert_eq!(invocations[0]["CommandId"].as_str().unwrap(), cmd_id);
+        assert_eq!(
+            invocations[0]["InstanceId"].as_str().unwrap(),
+            "i-1234567890abcdef0"
+        );
+
+        // Filter by CommandId
+        let req = make_request("ListCommandInvocations", json!({ "CommandId": cmd_id }));
+        let resp = svc.list_command_invocations(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["CommandInvocations"].as_array().unwrap().len(), 1);
+    }
 }
