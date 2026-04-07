@@ -78,7 +78,7 @@ async fn cognito_update_user_pool() {
         .unwrap();
     assert_eq!(
         resp.user_pool().unwrap().mfa_configuration(),
-        Some(aws_sdk_cognitoidentityprovider::types::UserPoolMfaType::On),
+        Some(&aws_sdk_cognitoidentityprovider::types::UserPoolMfaType::On),
     );
 }
 
