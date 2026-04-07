@@ -117,7 +117,10 @@ pub fn validate_policy_document(doc: &str) -> Result<(), String> {
 
     // First pass: check for legacy Effect casing
     for stmt in &statements {
-        let stmt_obj = stmt.as_object().unwrap();
+        let stmt_obj = match stmt.as_object() {
+            Some(o) => o,
+            None => return Err("Syntax errors in policy.".to_string()),
+        };
         if let Some(effect_val) = stmt_obj.get("Effect") {
             if let Some(effect_str) = effect_val.as_str() {
                 if effect_str != "Allow" && effect_str != "Deny" {
@@ -132,7 +135,10 @@ pub fn validate_policy_document(doc: &str) -> Result<(), String> {
 
     // Validate each statement
     for stmt in &statements {
-        let stmt_obj = stmt.as_object().unwrap();
+        let stmt_obj = match stmt.as_object() {
+            Some(o) => o,
+            None => return Err("Syntax errors in policy.".to_string()),
+        };
         validate_statement(stmt_obj, &mut seen_sids)?;
     }
 
@@ -221,7 +227,10 @@ fn validate_statement(
             } else {
                 "NotResource"
             };
-            let rval = stmt_obj.get(rkey).unwrap();
+            let rval = match stmt_obj.get(rkey) {
+                Some(v) => v,
+                None => return Err("Policy statement must contain actions.".to_string()),
+            };
             // Check for legacy resource format issues
             validate_resource_strings_legacy_only(rval)?;
         }
@@ -230,7 +239,10 @@ fn validate_statement(
 
     // Validate action type/structure first (not format — type errors are syntax errors)
     let action_key = if has_action { "Action" } else { "NotAction" };
-    let action_val = stmt_obj.get(action_key).unwrap();
+    let action_val = match stmt_obj.get(action_key) {
+        Some(v) => v,
+        None => return Err("Policy statement must contain actions.".to_string()),
+    };
     validate_action_type(action_val)?;
 
     // Missing resource
@@ -246,7 +258,10 @@ fn validate_statement(
     } else {
         "NotResource"
     };
-    let resource_val = stmt_obj.get(resource_key).unwrap();
+    let resource_val = match stmt_obj.get(resource_key) {
+        Some(v) => v,
+        None => return Err("Policy statement must contain resources.".to_string()),
+    };
     validate_resource_type(resource_val)?;
 
     // Check for empty resources
@@ -455,7 +470,16 @@ fn validate_single_resource(resource: &str) -> Result<(), String> {
     if colon_count >= 3 {
         // Reconstruct as ARN-like and check partition
         // e.g., "aws:s3:::example_bucket" -> check partition = s3
-        let after_first = &resource[resource.find(':').unwrap() + 1..];
+        let colon_pos = match resource.find(':') {
+            Some(pos) => pos,
+            None => {
+                return Err(format!(
+                    "Resource {} must be in ARN format or \"*\".",
+                    resource
+                ))
+            }
+        };
+        let after_first = &resource[colon_pos + 1..];
         let recon = format!("arn:{}", after_first);
         let recon_parts: Vec<&str> = recon.splitn(6, ':').collect();
         if recon_parts.len() >= 2 {
@@ -627,10 +651,11 @@ fn validate_date_condition_values(val: &Value) -> Result<(), String> {
                 }
                 Value::Number(n) => {
                     // Check if the number is too large (> i64::MAX)
-                    if n.as_i64().is_none() && n.as_f64().is_some() {
-                        let f = n.as_f64().unwrap();
-                        if f > i64::MAX as f64 {
-                            return Err("The policy failed legacy parsing".to_string());
+                    if n.as_i64().is_none() {
+                        if let Some(f) = n.as_f64() {
+                            if f > i64::MAX as f64 {
+                                return Err("The policy failed legacy parsing".to_string());
+                            }
                         }
                     }
                     if let Some(s) = n.as_u64() {
@@ -731,14 +756,14 @@ fn is_valid_date_part(s: &str) -> bool {
     if parts[0].parse::<i32>().is_err() {
         return false;
     }
-    if parts[1].parse::<u32>().is_err() {
-        return false;
-    }
-    if parts[2].parse::<u32>().is_err() {
-        return false;
-    }
-    let month = parts[1].parse::<u32>().unwrap();
-    let day = parts[2].parse::<u32>().unwrap();
+    let month = match parts[1].parse::<u32>() {
+        Ok(m) => m,
+        Err(_) => return false,
+    };
+    let day = match parts[2].parse::<u32>() {
+        Ok(d) => d,
+        Err(_) => return false,
+    };
     if !(1..=12).contains(&month) {
         return false;
     }
