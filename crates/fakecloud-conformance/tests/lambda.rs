@@ -134,11 +134,10 @@ async fn lambda_invoke() {
     match result {
         Ok(resp) => assert_eq!(resp.status_code(), 200),
         Err(e) => {
-            // Lambda invoke requires Docker networking; accept container startup failures
+            // Lambda invoke requires Docker; only accept container startup failures
             let msg = format!("{e:?}");
             assert!(
-                msg.contains("container failed to start")
-                    || msg.contains("Lambda execution failed"),
+                msg.contains("container failed to start"),
                 "unexpected invoke error: {msg}"
             );
         }

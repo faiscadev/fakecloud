@@ -23,6 +23,9 @@ jobs:
       - name: Build server
         run: cargo build --bin fakecloud
 
+      - name: Run conformance integration tests
+        run: cargo test -p fakecloud-conformance --tests
+
       - name: Build conformance tool
         run: cargo build -p fakecloud-conformance
 
