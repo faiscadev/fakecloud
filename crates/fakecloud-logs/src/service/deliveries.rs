@@ -671,14 +671,25 @@ impl LogsService {
             ));
         }
 
-        // Determine destination type from ARN
-        let dest_type = if delivery_destination_arn.contains(":s3:") {
-            "S3"
-        } else if delivery_destination_arn.contains(":firehose:") {
-            "FH"
-        } else {
-            "CWL"
-        };
+        // Determine destination type from the actual resource ARN stored in the destination
+        let dest_type = state
+            .delivery_destinations
+            .values()
+            .find(|dd| dd.arn == delivery_destination_arn)
+            .and_then(|dd| {
+                dd.delivery_destination_configuration
+                    .get("destinationResourceArn")
+            })
+            .map(|dest_arn: &String| {
+                if dest_arn.contains(":s3:") || dest_arn.starts_with("arn:aws:s3:::") {
+                    "S3"
+                } else if dest_arn.contains(":firehose:") {
+                    "FH"
+                } else {
+                    "CWL"
+                }
+            })
+            .unwrap_or("CWL");
 
         let delivery_id = uuid::Uuid::new_v4().to_string();
         let arn = format!(

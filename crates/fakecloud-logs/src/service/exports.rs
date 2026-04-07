@@ -72,7 +72,7 @@ impl LogsService {
                 "Completed successfully".to_string(),
             )
         } else {
-            ("active".to_string(), "Task is active".to_string())
+            ("RUNNING".to_string(), "Task is running".to_string())
         };
 
         // Collect matching events and write to export storage

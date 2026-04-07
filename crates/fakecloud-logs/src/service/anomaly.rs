@@ -49,8 +49,18 @@ impl LogsService {
                 )
             })?
             .iter()
-            .filter_map(|v| v.as_str().map(|s| s.to_string()))
-            .collect::<Vec<_>>();
+            .map(|v| {
+                v.as_str()
+                    .map(|s| s.to_string())
+                    .ok_or_else(|| {
+                        AwsServiceError::aws_error(
+                            StatusCode::BAD_REQUEST,
+                            "InvalidParameterException",
+                            "logGroupArnList elements must be strings",
+                        )
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
 
         let detector_name = body["detectorName"].as_str().unwrap_or("").to_string();
         let evaluation_frequency = body["evaluationFrequency"].as_str().map(|s| s.to_string());
@@ -219,6 +229,18 @@ impl LogsService {
                 "anomalyDetectorArn is required",
             )
         })?;
+        validate_optional_enum_value(
+            "evaluationFrequency",
+            &body["evaluationFrequency"],
+            &[
+                "ONE_MIN",
+                "FIVE_MIN",
+                "TEN_MIN",
+                "FIFTEEN_MIN",
+                "THIRTY_MIN",
+                "ONE_HOUR",
+            ],
+        )?;
         let enabled = body["enabled"].as_bool().unwrap_or(true);
 
         let mut state = self.state.write();
