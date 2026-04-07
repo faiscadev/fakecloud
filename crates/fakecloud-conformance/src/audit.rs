@@ -21,6 +21,7 @@ fn service_source_files(project_root: &Path) -> Vec<(String, Vec<PathBuf>)> {
         ("kms", "kms", &["service.rs"]),
         ("cloudformation", "cloudformation", &["service.rs"]),
         ("ses", "ses", &["service.rs"]),
+        ("cognito-idp", "cognito", &["service.rs"]),
     ];
 
     mappings
