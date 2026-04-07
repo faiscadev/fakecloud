@@ -917,8 +917,6 @@ impl SqsService {
         } else {
             Some(md5_of_message_attributes(&message_attributes))
         };
-        let sha256_body = sha256_hex(&message_body);
-
         // Validate delay seconds range before acquiring lock
         let raw_delay = val_as_i64(&body["DelaySeconds"]);
         if let Some(d) = raw_delay {
@@ -988,7 +986,7 @@ impl SqsService {
                         .map(|v| v.as_str())
                         == Some("true")
                     {
-                        Some(sha256_body.clone())
+                        Some(sha256_hex(&message_body))
                     } else {
                         None
                     }
