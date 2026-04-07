@@ -130,9 +130,13 @@ impl LogsService {
             )
         })?;
 
+        let filter_name_prefix = body["filterNamePrefix"].as_str();
         let filters: Vec<Value> = group
             .subscription_filters
             .iter()
+            .filter(|f| {
+                filter_name_prefix.is_none_or(|prefix| f.filter_name.starts_with(prefix))
+            })
             .map(|f| {
                 let mut obj = json!({
                     "filterName": f.filter_name,
@@ -252,7 +256,14 @@ impl LogsService {
             )
         })?;
 
-        // Validate max 1 transformation
+        // Validate transformation list length (exactly 1 required)
+        if transformations_json.is_empty() {
+            return Err(validation_error(
+                "metricTransformations",
+                "0",
+                "Member must have length greater than or equal to 1",
+            ));
+        }
         if transformations_json.len() > 1 {
             return Err(validation_error(
                 "metricTransformations",
