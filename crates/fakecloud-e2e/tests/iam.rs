@@ -1573,3 +1573,1071 @@ async fn iam_list_virtual_mfa_excludes_hardware() {
         "expected virtual MFA serial containing 'my-virtual-mfa', got: {serial}"
     );
 }
+
+// ---- Policy Version Tests ----
+
+#[tokio::test]
+async fn iam_policy_version_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.iam_client().await;
+
+    let policy_doc = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:GetObject","Resource":"*"}]}"#;
+
+    let policy = client
+        .create_policy()
+        .policy_name("ver-test-pol")
+        .policy_document(policy_doc)
+        .send()
+        .await
+        .unwrap();
+    let policy_arn = policy.policy().unwrap().arn().unwrap().to_string();
+
+    // Create v2 (non-default)
+    let v2_doc = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:GetObject","s3:PutObject"],"Resource":"*"}]}"#;
+    let ver = client
+        .create_policy_version()
+        .policy_arn(&policy_arn)
+        .policy_document(v2_doc)
+        .set_as_default(false)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ver.policy_version().unwrap().version_id().unwrap(), "v2");
+    assert!(!ver.policy_version().unwrap().is_default_version());
+
+    // Create v3 as default
+    let ver = client
+        .create_policy_version()
+        .policy_arn(&policy_arn)
+        .policy_document(v2_doc)
+        .set_as_default(true)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ver.policy_version().unwrap().version_id().unwrap(), "v3");
+    assert!(ver.policy_version().unwrap().is_default_version());
+
+    // GetPolicyVersion for v2
+    let get = client
+        .get_policy_version()
+        .policy_arn(&policy_arn)
+        .version_id("v2")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get.policy_version().unwrap().version_id().unwrap(), "v2");
+
+    // ListPolicyVersions
+    let list = client
+        .list_policy_versions()
+        .policy_arn(&policy_arn)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(list.versions().len(), 3);
+
+    // SetDefaultPolicyVersion to v2
+    client
+        .set_default_policy_version()
+        .policy_arn(&policy_arn)
+        .version_id("v2")
+        .send()
+        .await
+        .unwrap();
+
+    // Verify v2 is now default
+    let get = client
+        .get_policy_version()
+        .policy_arn(&policy_arn)
+        .version_id("v2")
+        .send()
+        .await
+        .unwrap();
+    assert!(get.policy_version().unwrap().is_default_version());
+
+    // DeletePolicyVersion v1 (non-default)
+    client
+        .delete_policy_version()
+        .policy_arn(&policy_arn)
+        .version_id("v1")
+        .send()
+        .await
+        .unwrap();
+
+    // Deleting default version should fail
+    let result = client
+        .delete_policy_version()
+        .policy_arn(&policy_arn)
+        .version_id("v2")
+        .send()
+        .await;
+    assert!(result.is_err(), "deleting default version should fail");
+
+    let list = client
+        .list_policy_versions()
+        .policy_arn(&policy_arn)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(list.versions().len(), 2);
+}
+
+// ---- Server Certificate Tests (CLI) ----
+
+#[tokio::test]
+async fn iam_server_certificate_lifecycle() {
+    let server = TestServer::start().await;
+
+    // Upload
+    let output = server
+        .aws_cli(&[
+            "iam",
+            "upload-server-certificate",
+            "--server-certificate-name",
+            "test-cert",
+            "--certificate-body",
+            "-----BEGIN CERTIFICATE-----\nMIIBxTCCAW4=\n-----END CERTIFICATE-----",
+            "--private-key",
+            "-----BEGIN RSA PRIVATE KEY-----\ntest\n-----END RSA PRIVATE KEY-----",
+        ])
+        .await;
+    assert!(
+        output.success(),
+        "upload-server-certificate failed: {}",
+        output.stderr_text()
+    );
+    let json = output.stdout_json();
+    assert_eq!(
+        json["ServerCertificateMetadata"]["ServerCertificateName"],
+        "test-cert"
+    );
+
+    // Get
+    let output = server
+        .aws_cli(&[
+            "iam",
+            "get-server-certificate",
+            "--server-certificate-name",
+            "test-cert",
+        ])
+        .await;
+    assert!(output.success(), "get failed: {}", output.stderr_text());
+    let json = output.stdout_json();
+    assert_eq!(
+        json["ServerCertificate"]["ServerCertificateMetadata"]["ServerCertificateName"],
+        "test-cert"
+    );
+
+    // List
+    let output = server.aws_cli(&["iam", "list-server-certificates"]).await;
+    assert!(output.success(), "list failed: {}", output.stderr_text());
+    let json = output.stdout_json();
+    assert_eq!(
+        json["ServerCertificateMetadataList"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+
+    // Delete
+    let output = server
+        .aws_cli(&[
+            "iam",
+            "delete-server-certificate",
+            "--server-certificate-name",
+            "test-cert",
+        ])
+        .await;
+    assert!(output.success(), "delete failed: {}", output.stderr_text());
+
+    // Verify deleted
+    let output = server
+        .aws_cli(&[
+            "iam",
+            "get-server-certificate",
+            "--server-certificate-name",
+            "test-cert",
+        ])
+        .await;
+    assert!(!output.success(), "get should fail after delete");
+}
+
+// ---- SSH Public Key Tests (CLI) ----
+
+#[tokio::test]
+async fn iam_ssh_public_key_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.iam_client().await;
+
+    client
+        .create_user()
+        .user_name("ssh-user")
+        .send()
+        .await
+        .unwrap();
+
+    // Upload via CLI
+    let output = server
+        .aws_cli(&[
+            "iam",
+            "upload-ssh-public-key",
+            "--user-name",
+            "ssh-user",
+            "--ssh-public-key-body",
+            "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQ test@example",
+        ])
+        .await;
+    assert!(
+        output.success(),
+        "upload-ssh-public-key failed: {}",
+        output.stderr_text()
+    );
+    let json = output.stdout_json();
+    let key_id = json["SSHPublicKey"]["SSHPublicKeyId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(json["SSHPublicKey"]["Status"], "Active");
+
+    // List
+    let output = server
+        .aws_cli(&["iam", "list-ssh-public-keys", "--user-name", "ssh-user"])
+        .await;
+    assert!(output.success(), "list failed: {}", output.stderr_text());
+    let json = output.stdout_json();
+    assert_eq!(json["SSHPublicKeys"].as_array().unwrap().len(), 1);
+
+    // Update status
+    let output = server
+        .aws_cli(&[
+            "iam",
+            "update-ssh-public-key",
+            "--user-name",
+            "ssh-user",
+            "--ssh-public-key-id",
+            &key_id,
+            "--status",
+            "Inactive",
+        ])
+        .await;
+    assert!(output.success(), "update failed: {}", output.stderr_text());
+
+    // Get and verify status
+    let output = server
+        .aws_cli(&[
+            "iam",
+            "get-ssh-public-key",
+            "--user-name",
+            "ssh-user",
+            "--ssh-public-key-id",
+            &key_id,
+            "--encoding",
+            "SSH",
+        ])
+        .await;
+    assert!(output.success(), "get failed: {}", output.stderr_text());
+    let json = output.stdout_json();
+    assert_eq!(json["SSHPublicKey"]["Status"], "Inactive");
+
+    // Delete
+    let output = server
+        .aws_cli(&[
+            "iam",
+            "delete-ssh-public-key",
+            "--user-name",
+            "ssh-user",
+            "--ssh-public-key-id",
+            &key_id,
+        ])
+        .await;
+    assert!(output.success(), "delete failed: {}", output.stderr_text());
+}
+
+// ---- Signing Certificate Tests (CLI) ----
+
+#[tokio::test]
+async fn iam_signing_certificate_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.iam_client().await;
+
+    client
+        .create_user()
+        .user_name("sign-user")
+        .send()
+        .await
+        .unwrap();
+
+    let pem = "-----BEGIN CERTIFICATE-----\nMIIBxTCCAW4=\n-----END CERTIFICATE-----";
+
+    // Upload
+    let output = server
+        .aws_cli(&[
+            "iam",
+            "upload-signing-certificate",
+            "--user-name",
+            "sign-user",
+            "--certificate-body",
+            pem,
+        ])
+        .await;
+    assert!(
+        output.success(),
+        "upload-signing-certificate failed: {}",
+        output.stderr_text()
+    );
+    let json = output.stdout_json();
+    let cert_id = json["Certificate"]["CertificateId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(json["Certificate"]["Status"], "Active");
+
+    // List
+    let output = server
+        .aws_cli(&[
+            "iam",
+            "list-signing-certificates",
+            "--user-name",
+            "sign-user",
+        ])
+        .await;
+    assert!(output.success(), "list failed: {}", output.stderr_text());
+    let json = output.stdout_json();
+    assert_eq!(json["Certificates"].as_array().unwrap().len(), 1);
+
+    // Update to Inactive
+    let output = server
+        .aws_cli(&[
+            "iam",
+            "update-signing-certificate",
+            "--user-name",
+            "sign-user",
+            "--certificate-id",
+            &cert_id,
+            "--status",
+            "Inactive",
+        ])
+        .await;
+    assert!(output.success(), "update failed: {}", output.stderr_text());
+
+    // Delete
+    let output = server
+        .aws_cli(&[
+            "iam",
+            "delete-signing-certificate",
+            "--user-name",
+            "sign-user",
+            "--certificate-id",
+            &cert_id,
+        ])
+        .await;
+    assert!(output.success(), "delete failed: {}", output.stderr_text());
+}
+
+// ---- Credential Report Tests (CLI) ----
+
+#[tokio::test]
+async fn iam_credential_report() {
+    let server = TestServer::start().await;
+
+    // Generate
+    let output = server.aws_cli(&["iam", "generate-credential-report"]).await;
+    assert!(
+        output.success(),
+        "generate-credential-report failed: {}",
+        output.stderr_text()
+    );
+    let json = output.stdout_json();
+    let state = json["State"].as_str().unwrap();
+    assert!(
+        state == "STARTED" || state == "COMPLETE",
+        "unexpected state: {state}"
+    );
+
+    // Generate again to ensure COMPLETE
+    let output = server.aws_cli(&["iam", "generate-credential-report"]).await;
+    assert!(output.success());
+    let json = output.stdout_json();
+    assert_eq!(json["State"], "COMPLETE");
+
+    // Get
+    let output = server.aws_cli(&["iam", "get-credential-report"]).await;
+    assert!(
+        output.success(),
+        "get-credential-report failed: {}",
+        output.stderr_text()
+    );
+    let json = output.stdout_json();
+    assert_eq!(json["ReportFormat"], "text/csv");
+    assert!(json["Content"].as_str().is_some());
+}
+
+// ---- Service Linked Role Tests ----
+
+#[tokio::test]
+async fn iam_service_linked_role_lifecycle() {
+    let server = TestServer::start().await;
+
+    // Create
+    let output = server
+        .aws_cli(&[
+            "iam",
+            "create-service-linked-role",
+            "--aws-service-name",
+            "autoscaling.amazonaws.com",
+        ])
+        .await;
+    assert!(
+        output.success(),
+        "create-service-linked-role failed: {}",
+        output.stderr_text()
+    );
+    let json = output.stdout_json();
+    let role_name = json["Role"]["RoleName"].as_str().unwrap();
+    assert!(
+        role_name.contains("AWSServiceRoleFor"),
+        "role name should contain AWSServiceRoleFor, got: {role_name}"
+    );
+    let path = json["Role"]["Path"].as_str().unwrap();
+    assert!(path.contains("/aws-service-role/"));
+
+    // Delete
+    let output = server
+        .aws_cli(&[
+            "iam",
+            "delete-service-linked-role",
+            "--role-name",
+            role_name,
+        ])
+        .await;
+    assert!(
+        output.success(),
+        "delete-service-linked-role failed: {}",
+        output.stderr_text()
+    );
+    let json = output.stdout_json();
+    let task_id = json["DeletionTaskId"].as_str().unwrap();
+
+    // Get deletion status
+    let output = server
+        .aws_cli(&[
+            "iam",
+            "get-service-linked-role-deletion-status",
+            "--deletion-task-id",
+            task_id,
+        ])
+        .await;
+    assert!(
+        output.success(),
+        "get-service-linked-role-deletion-status failed: {}",
+        output.stderr_text()
+    );
+    let json = output.stdout_json();
+    assert_eq!(json["Status"], "SUCCEEDED");
+}
+
+// ---- Permission Boundary Tests ----
+
+#[tokio::test]
+async fn iam_role_permissions_boundary() {
+    let server = TestServer::start().await;
+    let client = server.iam_client().await;
+
+    let trust = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ec2.amazonaws.com"},"Action":"sts:AssumeRole"}]}"#;
+    client
+        .create_role()
+        .role_name("boundary-role")
+        .assume_role_policy_document(trust)
+        .send()
+        .await
+        .unwrap();
+
+    let policy_doc = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:*","Resource":"*"}]}"#;
+    let policy = client
+        .create_policy()
+        .policy_name("boundary-pol")
+        .policy_document(policy_doc)
+        .send()
+        .await
+        .unwrap();
+    let boundary_arn = policy.policy().unwrap().arn().unwrap().to_string();
+
+    // Put boundary
+    client
+        .put_role_permissions_boundary()
+        .role_name("boundary-role")
+        .permissions_boundary(&boundary_arn)
+        .send()
+        .await
+        .unwrap();
+
+    // Get and check
+    let role = client
+        .get_role()
+        .role_name("boundary-role")
+        .send()
+        .await
+        .unwrap();
+    let pb = role
+        .role()
+        .unwrap()
+        .permissions_boundary()
+        .expect("boundary should be set");
+    assert_eq!(pb.permissions_boundary_arn().unwrap(), boundary_arn);
+
+    // Delete boundary
+    client
+        .delete_role_permissions_boundary()
+        .role_name("boundary-role")
+        .send()
+        .await
+        .unwrap();
+
+    let role = client
+        .get_role()
+        .role_name("boundary-role")
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        role.role().unwrap().permissions_boundary().is_none(),
+        "boundary should be removed"
+    );
+}
+
+// ---- Tag Role Tests ----
+
+#[tokio::test]
+async fn iam_tag_role() {
+    let server = TestServer::start().await;
+    let client = server.iam_client().await;
+
+    let trust = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ec2.amazonaws.com"},"Action":"sts:AssumeRole"}]}"#;
+    client
+        .create_role()
+        .role_name("tag-test-role")
+        .assume_role_policy_document(trust)
+        .send()
+        .await
+        .unwrap();
+
+    use aws_sdk_iam::types::Tag;
+    client
+        .tag_role()
+        .role_name("tag-test-role")
+        .tags(Tag::builder().key("env").value("prod").build().unwrap())
+        .send()
+        .await
+        .unwrap();
+
+    let tags = client
+        .list_role_tags()
+        .role_name("tag-test-role")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(tags.tags().len(), 1);
+    assert_eq!(tags.tags()[0].key(), "env");
+    assert_eq!(tags.tags()[0].value(), "prod");
+
+    client
+        .untag_role()
+        .role_name("tag-test-role")
+        .tag_keys("env")
+        .send()
+        .await
+        .unwrap();
+
+    let tags = client
+        .list_role_tags()
+        .role_name("tag-test-role")
+        .send()
+        .await
+        .unwrap();
+    assert!(tags.tags().is_empty());
+}
+
+// ---- Tag Policy Tests ----
+
+#[tokio::test]
+async fn iam_tag_policy() {
+    let server = TestServer::start().await;
+    let client = server.iam_client().await;
+
+    let policy_doc = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:*","Resource":"*"}]}"#;
+    let policy = client
+        .create_policy()
+        .policy_name("tag-test-pol")
+        .policy_document(policy_doc)
+        .send()
+        .await
+        .unwrap();
+    let policy_arn = policy.policy().unwrap().arn().unwrap().to_string();
+
+    use aws_sdk_iam::types::Tag;
+    client
+        .tag_policy()
+        .policy_arn(&policy_arn)
+        .tags(Tag::builder().key("team").value("infra").build().unwrap())
+        .send()
+        .await
+        .unwrap();
+
+    let tags = client
+        .list_policy_tags()
+        .policy_arn(&policy_arn)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(tags.tags().len(), 1);
+    assert_eq!(tags.tags()[0].key(), "team");
+
+    client
+        .untag_policy()
+        .policy_arn(&policy_arn)
+        .tag_keys("team")
+        .send()
+        .await
+        .unwrap();
+
+    let tags = client
+        .list_policy_tags()
+        .policy_arn(&policy_arn)
+        .send()
+        .await
+        .unwrap();
+    assert!(tags.tags().is_empty());
+}
+
+// ---- Tag Instance Profile Tests ----
+
+#[tokio::test]
+async fn iam_tag_instance_profile() {
+    let server = TestServer::start().await;
+    let client = server.iam_client().await;
+
+    client
+        .create_instance_profile()
+        .instance_profile_name("tag-test-ip")
+        .send()
+        .await
+        .unwrap();
+
+    use aws_sdk_iam::types::Tag;
+    client
+        .tag_instance_profile()
+        .instance_profile_name("tag-test-ip")
+        .tags(Tag::builder().key("zone").value("us-east").build().unwrap())
+        .send()
+        .await
+        .unwrap();
+
+    let tags = client
+        .list_instance_profile_tags()
+        .instance_profile_name("tag-test-ip")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(tags.tags().len(), 1);
+    assert_eq!(tags.tags()[0].key(), "zone");
+
+    client
+        .untag_instance_profile()
+        .instance_profile_name("tag-test-ip")
+        .tag_keys("zone")
+        .send()
+        .await
+        .unwrap();
+
+    let tags = client
+        .list_instance_profile_tags()
+        .instance_profile_name("tag-test-ip")
+        .send()
+        .await
+        .unwrap();
+    assert!(tags.tags().is_empty());
+}
+
+// ---- Tag OIDC Provider Tests ----
+
+#[tokio::test]
+async fn iam_tag_oidc_provider() {
+    let server = TestServer::start().await;
+    let client = server.iam_client().await;
+
+    let resp = client
+        .create_open_id_connect_provider()
+        .url("https://tag-oidc.example.com")
+        .thumbprint_list("abcdef1234567890abcdef1234567890abcdef12")
+        .send()
+        .await
+        .unwrap();
+    let oidc_arn = resp.open_id_connect_provider_arn().unwrap().to_string();
+
+    use aws_sdk_iam::types::Tag;
+    client
+        .tag_open_id_connect_provider()
+        .open_id_connect_provider_arn(&oidc_arn)
+        .tags(Tag::builder().key("stage").value("dev").build().unwrap())
+        .send()
+        .await
+        .unwrap();
+
+    let tags = client
+        .list_open_id_connect_provider_tags()
+        .open_id_connect_provider_arn(&oidc_arn)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(tags.tags().len(), 1);
+    assert_eq!(tags.tags()[0].key(), "stage");
+
+    client
+        .untag_open_id_connect_provider()
+        .open_id_connect_provider_arn(&oidc_arn)
+        .tag_keys("stage")
+        .send()
+        .await
+        .unwrap();
+
+    let tags = client
+        .list_open_id_connect_provider_tags()
+        .open_id_connect_provider_arn(&oidc_arn)
+        .send()
+        .await
+        .unwrap();
+    assert!(tags.tags().is_empty());
+}
+
+// ---- Update Role / UpdateRoleDescription / UpdateAssumeRolePolicy Tests ----
+
+#[tokio::test]
+async fn iam_update_role_and_assume_role_policy() {
+    let server = TestServer::start().await;
+    let client = server.iam_client().await;
+
+    let trust = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ec2.amazonaws.com"},"Action":"sts:AssumeRole"}]}"#;
+    client
+        .create_role()
+        .role_name("upd-role")
+        .assume_role_policy_document(trust)
+        .send()
+        .await
+        .unwrap();
+
+    // UpdateRole: set description and max session duration
+    client
+        .update_role()
+        .role_name("upd-role")
+        .description("updated description")
+        .max_session_duration(7200)
+        .send()
+        .await
+        .unwrap();
+
+    let role = client
+        .get_role()
+        .role_name("upd-role")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        role.role().unwrap().description().unwrap(),
+        "updated description"
+    );
+    assert_eq!(role.role().unwrap().max_session_duration().unwrap(), 7200);
+
+    // UpdateRoleDescription
+    let resp = client
+        .update_role_description()
+        .role_name("upd-role")
+        .description("new desc")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.role().unwrap().description().unwrap(), "new desc");
+
+    // UpdateAssumeRolePolicy
+    let new_trust = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"lambda.amazonaws.com"},"Action":"sts:AssumeRole"}]}"#;
+    client
+        .update_assume_role_policy()
+        .role_name("upd-role")
+        .policy_document(new_trust)
+        .send()
+        .await
+        .unwrap();
+
+    let role = client
+        .get_role()
+        .role_name("upd-role")
+        .send()
+        .await
+        .unwrap();
+    let doc = role.role().unwrap().assume_role_policy_document().unwrap();
+    assert!(
+        doc.contains("lambda.amazonaws.com"),
+        "trust policy should be updated"
+    );
+}
+
+// ---- UpdateGroup Tests ----
+
+#[tokio::test]
+async fn iam_update_group() {
+    let server = TestServer::start().await;
+    let client = server.iam_client().await;
+
+    client
+        .create_group()
+        .group_name("old-group")
+        .send()
+        .await
+        .unwrap();
+
+    // Rename
+    client
+        .update_group()
+        .group_name("old-group")
+        .new_group_name("new-group")
+        .send()
+        .await
+        .unwrap();
+
+    // Old name should fail
+    let result = client.get_group().group_name("old-group").send().await;
+    assert!(result.is_err());
+
+    // New name should work
+    let resp = client
+        .get_group()
+        .group_name("new-group")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.group().unwrap().group_name(), "new-group");
+}
+
+// ---- UpdateUser Tests ----
+
+#[tokio::test]
+async fn iam_update_user() {
+    let server = TestServer::start().await;
+    let client = server.iam_client().await;
+
+    client
+        .create_user()
+        .user_name("rename-me")
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .update_user()
+        .user_name("rename-me")
+        .new_user_name("renamed-user")
+        .send()
+        .await
+        .unwrap();
+
+    let result = client.get_user().user_name("rename-me").send().await;
+    assert!(result.is_err());
+
+    let resp = client
+        .get_user()
+        .user_name("renamed-user")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.user().unwrap().user_name(), "renamed-user");
+}
+
+// ---- Account Password Policy Tests ----
+
+#[tokio::test]
+async fn iam_account_password_policy() {
+    let server = TestServer::start().await;
+
+    // Get before set should fail
+    let output = server
+        .aws_cli(&["iam", "get-account-password-policy"])
+        .await;
+    assert!(!output.success());
+
+    // Update
+    let output = server
+        .aws_cli(&[
+            "iam",
+            "update-account-password-policy",
+            "--minimum-password-length",
+            "14",
+            "--require-symbols",
+        ])
+        .await;
+    assert!(
+        output.success(),
+        "update-account-password-policy failed: {}",
+        output.stderr_text()
+    );
+
+    // Get
+    let output = server
+        .aws_cli(&["iam", "get-account-password-policy"])
+        .await;
+    assert!(output.success(), "get failed: {}", output.stderr_text());
+    let json = output.stdout_json();
+    assert_eq!(json["PasswordPolicy"]["MinimumPasswordLength"], 14);
+    assert_eq!(json["PasswordPolicy"]["RequireSymbols"], true);
+
+    // Delete
+    let output = server
+        .aws_cli(&["iam", "delete-account-password-policy"])
+        .await;
+    assert!(output.success(), "delete failed: {}", output.stderr_text());
+
+    // Should be gone
+    let output = server
+        .aws_cli(&["iam", "get-account-password-policy"])
+        .await;
+    assert!(!output.success());
+}
+
+// ---- GetAccountAuthorizationDetails Tests ----
+
+#[tokio::test]
+async fn iam_get_account_authorization_details() {
+    let server = TestServer::start().await;
+    let client = server.iam_client().await;
+
+    client
+        .create_user()
+        .user_name("authz-user")
+        .send()
+        .await
+        .unwrap();
+
+    let trust = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ec2.amazonaws.com"},"Action":"sts:AssumeRole"}]}"#;
+    client
+        .create_role()
+        .role_name("authz-role")
+        .assume_role_policy_document(trust)
+        .send()
+        .await
+        .unwrap();
+
+    let output = server
+        .aws_cli(&["iam", "get-account-authorization-details"])
+        .await;
+    assert!(
+        output.success(),
+        "get-account-authorization-details failed: {}",
+        output.stderr_text()
+    );
+    let json = output.stdout_json();
+
+    let users = json["UserDetailList"].as_array().unwrap();
+    assert!(
+        users.iter().any(|u| u["UserName"] == "authz-user"),
+        "should contain authz-user"
+    );
+
+    let roles = json["RoleDetailList"].as_array().unwrap();
+    assert!(
+        roles.iter().any(|r| r["RoleName"] == "authz-role"),
+        "should contain authz-role"
+    );
+}
+
+// ---- ListEntitiesForPolicy Tests ----
+
+#[tokio::test]
+async fn iam_list_entities_for_policy() {
+    let server = TestServer::start().await;
+    let client = server.iam_client().await;
+
+    let policy_doc = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:*","Resource":"*"}]}"#;
+    let policy = client
+        .create_policy()
+        .policy_name("entities-pol")
+        .policy_document(policy_doc)
+        .send()
+        .await
+        .unwrap();
+    let policy_arn = policy.policy().unwrap().arn().unwrap().to_string();
+
+    // Create and attach to role
+    let trust = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ec2.amazonaws.com"},"Action":"sts:AssumeRole"}]}"#;
+    client
+        .create_role()
+        .role_name("ent-test-role")
+        .assume_role_policy_document(trust)
+        .send()
+        .await
+        .unwrap();
+    client
+        .attach_role_policy()
+        .role_name("ent-test-role")
+        .policy_arn(&policy_arn)
+        .send()
+        .await
+        .unwrap();
+
+    let output = server
+        .aws_cli(&[
+            "iam",
+            "list-entities-for-policy",
+            "--policy-arn",
+            &policy_arn,
+        ])
+        .await;
+    assert!(
+        output.success(),
+        "list-entities-for-policy failed: {}",
+        output.stderr_text()
+    );
+    let json = output.stdout_json();
+    let roles = json["PolicyRoles"].as_array().unwrap();
+    assert!(
+        roles.iter().any(|r| r["RoleName"] == "ent-test-role"),
+        "should list attached role"
+    );
+}
+
+// ---- GetAccessKeyLastUsed Tests ----
+
+#[tokio::test]
+async fn iam_get_access_key_last_used() {
+    let server = TestServer::start().await;
+    let client = server.iam_client().await;
+
+    client
+        .create_user()
+        .user_name("lastused-user")
+        .send()
+        .await
+        .unwrap();
+
+    let key = client
+        .create_access_key()
+        .user_name("lastused-user")
+        .send()
+        .await
+        .unwrap();
+    let key_id = key.access_key().unwrap().access_key_id().to_string();
+
+    let output = server
+        .aws_cli(&[
+            "iam",
+            "get-access-key-last-used",
+            "--access-key-id",
+            &key_id,
+        ])
+        .await;
+    assert!(
+        output.success(),
+        "get-access-key-last-used failed: {}",
+        output.stderr_text()
+    );
+    let json = output.stdout_json();
+    assert_eq!(json["UserName"], "lastused-user");
+}
