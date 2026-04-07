@@ -725,3 +725,61 @@ async fn sns_binary_message_attribute_delivery() {
     let attr = msg_attrs.get("binData").unwrap();
     assert_eq!(attr.data_type(), "Binary");
 }
+
+#[tokio::test]
+async fn sns_publish_message_structure_json_invalid_json() {
+    let server = TestServer::start().await;
+    let client = server.sns_client().await;
+
+    let topic = client
+        .create_topic()
+        .name("json-validate")
+        .send()
+        .await
+        .unwrap();
+    let topic_arn = topic.topic_arn().unwrap();
+
+    let err = client
+        .publish()
+        .topic_arn(topic_arn)
+        .message("not valid json")
+        .message_structure("json")
+        .send()
+        .await
+        .unwrap_err();
+
+    let service_err = err.into_service_error();
+    assert!(
+        format!("{service_err:?}").contains("InvalidParameter"),
+        "expected InvalidParameter, got: {service_err:?}"
+    );
+}
+
+#[tokio::test]
+async fn sns_publish_message_structure_json_missing_default_key() {
+    let server = TestServer::start().await;
+    let client = server.sns_client().await;
+
+    let topic = client
+        .create_topic()
+        .name("json-validate-default")
+        .send()
+        .await
+        .unwrap();
+    let topic_arn = topic.topic_arn().unwrap();
+
+    let err = client
+        .publish()
+        .topic_arn(topic_arn)
+        .message(r#"{"sqs": "hello"}"#)
+        .message_structure("json")
+        .send()
+        .await
+        .unwrap_err();
+
+    let service_err = err.into_service_error();
+    assert!(
+        format!("{service_err:?}").contains("InvalidParameter"),
+        "expected InvalidParameter, got: {service_err:?}"
+    );
+}

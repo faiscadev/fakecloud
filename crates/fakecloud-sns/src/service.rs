@@ -191,6 +191,24 @@ fn required(req: &AwsRequest, name: &str) -> Result<String, AwsServiceError> {
     })
 }
 
+fn validate_message_structure_json(message: &str) -> Result<(), AwsServiceError> {
+    let parsed: Value = serde_json::from_str(message).map_err(|_| {
+        AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidParameter",
+            "Invalid parameter: Message Structure - No JSON message body is parseable",
+        )
+    })?;
+    if parsed.get("default").is_none() {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidParameter",
+            "Invalid parameter: Message Structure - No default entry in JSON message body",
+        ));
+    }
+    Ok(())
+}
+
 fn not_found(entity: &str) -> AwsServiceError {
     AwsServiceError::aws_error(
         StatusCode::NOT_FOUND,
@@ -753,6 +771,11 @@ impl SnsService {
             ));
         }
 
+        // Validate MessageStructure=json
+        if message_structure.as_deref() == Some("json") {
+            validate_message_structure_json(&message)?;
+        }
+
         // Parse MessageAttributes from query params
         let message_attributes = parse_message_attributes(req);
 
@@ -876,8 +899,9 @@ impl SnsService {
         });
 
         // Resolve the actual message per protocol for MessageStructure=json
+        // Validation already happened above, so unwrap is safe here
         let parsed_structure: Option<Value> = if message_structure.as_deref() == Some("json") {
-            serde_json::from_str(&message).ok()
+            Some(serde_json::from_str(&message).expect("already validated"))
         } else {
             None
         };
@@ -1243,6 +1267,11 @@ impl SnsService {
             // Parse per-entry message attributes
             let batch_attrs = parse_batch_message_attributes(req, idx + 1);
 
+            // Validate MessageStructure=json
+            if structure.as_deref() == Some("json") {
+                validate_message_structure_json(message)?;
+            }
+
             let msg_id = uuid::Uuid::new_v4().to_string();
             let mut state = self.state.write();
             state.published.push(PublishedMessage {
@@ -1257,8 +1286,9 @@ impl SnsService {
             });
 
             // Resolve message for SQS via MessageStructure=json
+            // Validation already happened above, so unwrap is safe here
             let parsed_structure: Option<Value> = if structure.as_deref() == Some("json") {
-                serde_json::from_str(message).ok()
+                Some(serde_json::from_str(message).expect("already validated"))
             } else {
                 None
             };
@@ -3463,6 +3493,34 @@ fn validate_numeric_filter(arr: &[Value]) -> Result<(), AwsServiceError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validate_message_structure_json_rejects_invalid_json() {
+        let result = validate_message_structure_json("not valid json");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("No JSON message body is parseable"), "{msg}");
+    }
+
+    #[test]
+    fn validate_message_structure_json_rejects_missing_default_key() {
+        let result = validate_message_structure_json(r#"{"sqs": "hello"}"#);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("No default entry in JSON message body"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn validate_message_structure_json_accepts_valid() {
+        let result =
+            validate_message_structure_json(r#"{"default": "hello", "sqs": "hello from sqs"}"#);
+        assert!(result.is_ok());
+    }
 
     #[test]
     fn build_sns_lambda_event_uses_real_subscription_arn() {
