@@ -105,13 +105,7 @@ pub fn s3_xml_error_response_with_fields(
     (status, "application/xml".to_string(), Bytes::from(buffer))
 }
 
-fn xml_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&apos;")
-}
+use crate::xml::xml_escape;
 
 #[cfg(test)]
 mod tests {

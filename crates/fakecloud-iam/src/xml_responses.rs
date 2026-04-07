@@ -2,12 +2,7 @@ use base64::Engine;
 
 use crate::state::{IamAccessKey, IamPolicy, IamRole, IamUser};
 
-fn xml_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-}
+use fakecloud_aws::xml::xml_escape;
 
 /// URL-encode a policy document for XML embedding (like AWS does).
 fn url_encode_policy(s: &str) -> String {
