@@ -6,6 +6,7 @@ use std::collections::HashMap;
 
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
+use crate::fanout::SesDeliveryContext;
 use crate::state::{
     AccountDetails, ConfigurationSet, Contact, ContactList, CustomVerificationEmailTemplate,
     DedicatedIp, DedicatedIpPool, EmailIdentity, EmailTemplate, EventDestination, ExportJob,
@@ -15,11 +16,21 @@ use crate::state::{
 
 pub struct SesV2Service {
     state: SharedSesState,
+    delivery_ctx: Option<SesDeliveryContext>,
 }
 
 impl SesV2Service {
     pub fn new(state: SharedSesState) -> Self {
-        Self { state }
+        Self {
+            state,
+            delivery_ctx: None,
+        }
+    }
+
+    /// Attach a delivery context for cross-service event fanout.
+    pub fn with_delivery(mut self, ctx: SesDeliveryContext) -> Self {
+        self.delivery_ctx = Some(ctx);
+        self
     }
 
     /// Determine the action from the HTTP method and path segments.
@@ -1090,6 +1101,8 @@ impl SesV2Service {
         let cc = extract_string_array(&body["Destination"]["CcAddresses"]);
         let bcc = extract_string_array(&body["Destination"]["BccAddresses"]);
 
+        let config_set_name = body["ConfigurationSetName"].as_str().map(|s| s.to_string());
+
         let (subject, html_body, text_body, raw_data, template_name, template_data) =
             if body["Content"]["Simple"].is_object() {
                 let simple = &body["Content"]["Simple"];
@@ -1131,6 +1144,11 @@ impl SesV2Service {
             template_data,
             timestamp: Utc::now(),
         };
+
+        // Event fanout: check suppression list, generate events, deliver to destinations
+        if let Some(ref ctx) = self.delivery_ctx {
+            crate::fanout::process_send_events(ctx, &sent, config_set_name.as_deref());
+        }
 
         self.state.write().sent_emails.push(sent);
 
@@ -2809,6 +2827,7 @@ impl SesV2Service {
         let body: Value = Self::parse_body(req)?;
 
         let from = body["FromEmailAddress"].as_str().unwrap_or("").to_string();
+        let config_set_name = body["ConfigurationSetName"].as_str().map(|s| s.to_string());
 
         let entries = match body["BulkEmailEntries"].as_array() {
             Some(arr) if !arr.is_empty() => arr.clone(),
@@ -2853,6 +2872,11 @@ impl SesV2Service {
                 template_data,
                 timestamp: Utc::now(),
             };
+
+            // Event fanout for each bulk entry
+            if let Some(ref ctx) = self.delivery_ctx {
+                crate::fanout::process_send_events(ctx, &sent, config_set_name.as_deref());
+            }
 
             self.state.write().sent_emails.push(sent);
 

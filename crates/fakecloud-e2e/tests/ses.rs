@@ -3,12 +3,12 @@ mod helpers;
 use aws_sdk_sesv2::types::{
     BatchGetMetricDataQuery, BehaviorOnMxFailure, Body, Content, DataFormat, Destination,
     DkimSigningAttributes, DkimSigningAttributesOrigin, EmailContent, EmailTemplateContent,
-    EventDestinationDefinition, EventType, ExportDataSource, ExportDestination, ExportMetric,
-    FeatureStatus, HttpsPolicy, ImportDataSource, ImportDestination, MailType, Message, Metric,
-    MetricDimensionName, MetricNamespace, MetricsDataSource, RawMessage, ReputationEntityType,
-    RouteDetails, ScalingMode, SendingStatus, SnsDestination, SubscriptionStatus,
-    SuppressionListDestination, SuppressionListImportAction, SuppressionListReason, Tag, Template,
-    TlsPolicy, Topic, TopicPreference, VdmAttributes,
+    EventBridgeDestination, EventDestinationDefinition, EventType, ExportDataSource,
+    ExportDestination, ExportMetric, FeatureStatus, HttpsPolicy, ImportDataSource,
+    ImportDestination, MailType, Message, Metric, MetricDimensionName, MetricNamespace,
+    MetricsDataSource, RawMessage, ReputationEntityType, RouteDetails, ScalingMode, SendingStatus,
+    SnsDestination, SubscriptionStatus, SuppressionListDestination, SuppressionListImportAction,
+    SuppressionListReason, Tag, Template, TlsPolicy, Topic, TopicPreference, VdmAttributes,
 };
 use helpers::TestServer;
 
@@ -2257,4 +2257,494 @@ async fn ses_batch_get_metric_data() {
     assert_eq!(resp.results().len(), 1);
     assert_eq!(resp.results()[0].id().unwrap(), "q1");
     assert!(resp.errors().is_empty());
+}
+
+// ── Event Fanout Tests ──────────────────────────────────────────────────
+
+/// Send an email with an SNS event destination → verify the SNS topic
+/// received the event notification by subscribing an SQS queue and
+/// checking messages.
+#[tokio::test]
+async fn ses_event_fanout_sns_destination() {
+    let server = TestServer::start().await;
+    let ses = server.sesv2_client().await;
+    let sns = server.sns_client().await;
+    let sqs = server.sqs_client().await;
+
+    // 1. Create SNS topic
+    let topic = sns.create_topic().name("ses-events").send().await.unwrap();
+    let topic_arn = topic.topic_arn().unwrap().to_string();
+
+    // 2. Create SQS queue and subscribe it to the SNS topic
+    let queue = sqs
+        .create_queue()
+        .queue_name("ses-event-sink")
+        .send()
+        .await
+        .unwrap();
+    let queue_url = queue.queue_url().unwrap().to_string();
+    let queue_attrs = sqs
+        .get_queue_attributes()
+        .queue_url(&queue_url)
+        .attribute_names(aws_sdk_sqs::types::QueueAttributeName::QueueArn)
+        .send()
+        .await
+        .unwrap();
+    let queue_arn = queue_attrs
+        .attributes()
+        .unwrap()
+        .get(&aws_sdk_sqs::types::QueueAttributeName::QueueArn)
+        .unwrap()
+        .to_string();
+
+    sns.subscribe()
+        .topic_arn(&topic_arn)
+        .protocol("sqs")
+        .endpoint(&queue_arn)
+        .send()
+        .await
+        .unwrap();
+
+    // 3. Create config set + SNS event destination
+    ses.create_configuration_set()
+        .configuration_set_name("fanout-test")
+        .send()
+        .await
+        .unwrap();
+
+    ses.create_configuration_set_event_destination()
+        .configuration_set_name("fanout-test")
+        .event_destination_name("sns-dest")
+        .event_destination(
+            EventDestinationDefinition::builder()
+                .enabled(true)
+                .matching_event_types(EventType::Send)
+                .matching_event_types(EventType::Delivery)
+                .sns_destination(
+                    SnsDestination::builder()
+                        .topic_arn(&topic_arn)
+                        .build()
+                        .unwrap(),
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    // 4. Create identity + send email with ConfigurationSetName
+    ses.create_email_identity()
+        .email_identity("sender@example.com")
+        .send()
+        .await
+        .unwrap();
+
+    ses.send_email()
+        .from_email_address("sender@example.com")
+        .destination(
+            Destination::builder()
+                .to_addresses("recipient@example.com")
+                .build(),
+        )
+        .content(
+            EmailContent::builder()
+                .simple(
+                    Message::builder()
+                        .subject(Content::builder().data("Test fanout").build().unwrap())
+                        .body(
+                            Body::builder()
+                                .text(Content::builder().data("Hello!").build().unwrap())
+                                .build(),
+                        )
+                        .build(),
+                )
+                .build(),
+        )
+        .configuration_set_name("fanout-test")
+        .send()
+        .await
+        .unwrap();
+
+    // 5. Receive messages from SQS — should have at least 2 (Send + Delivery)
+    // Give a tiny delay for delivery
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let msgs = sqs
+        .receive_message()
+        .queue_url(&queue_url)
+        .max_number_of_messages(10)
+        .send()
+        .await
+        .unwrap();
+
+    // We expect 2 messages: one for Send, one for Delivery
+    assert!(
+        msgs.messages().len() >= 2,
+        "Expected at least 2 SNS notifications (Send + Delivery), got {}",
+        msgs.messages().len()
+    );
+
+    // Parse SNS envelopes and check the event payloads
+    let mut event_types: Vec<String> = Vec::new();
+    for msg in msgs.messages() {
+        let envelope: serde_json::Value = serde_json::from_str(msg.body().unwrap()).unwrap();
+        let inner: serde_json::Value =
+            serde_json::from_str(envelope["Message"].as_str().unwrap()).unwrap();
+        event_types.push(inner["eventType"].as_str().unwrap().to_string());
+        // Verify mail metadata
+        assert_eq!(inner["mail"]["source"], "sender@example.com");
+        assert!(inner["mail"]["messageId"].is_string());
+    }
+    event_types.sort();
+    assert!(event_types.contains(&"Delivery".to_string()));
+    assert!(event_types.contains(&"Send".to_string()));
+}
+
+/// Send to bounce@simulator.amazonses.com → verify Bounce event is
+/// published to configured SNS topic.
+#[tokio::test]
+async fn ses_event_fanout_bounce_simulator() {
+    let server = TestServer::start().await;
+    let ses = server.sesv2_client().await;
+    let sns = server.sns_client().await;
+    let sqs = server.sqs_client().await;
+
+    // Set up SNS topic + SQS subscriber
+    let topic = sns
+        .create_topic()
+        .name("ses-bounce-events")
+        .send()
+        .await
+        .unwrap();
+    let topic_arn = topic.topic_arn().unwrap().to_string();
+
+    let queue = sqs
+        .create_queue()
+        .queue_name("ses-bounce-sink")
+        .send()
+        .await
+        .unwrap();
+    let queue_url = queue.queue_url().unwrap().to_string();
+    let queue_attrs = sqs
+        .get_queue_attributes()
+        .queue_url(&queue_url)
+        .attribute_names(aws_sdk_sqs::types::QueueAttributeName::QueueArn)
+        .send()
+        .await
+        .unwrap();
+    let queue_arn = queue_attrs
+        .attributes()
+        .unwrap()
+        .get(&aws_sdk_sqs::types::QueueAttributeName::QueueArn)
+        .unwrap()
+        .to_string();
+
+    sns.subscribe()
+        .topic_arn(&topic_arn)
+        .protocol("sqs")
+        .endpoint(&queue_arn)
+        .send()
+        .await
+        .unwrap();
+
+    // Config set with BOUNCE event type
+    ses.create_configuration_set()
+        .configuration_set_name("bounce-test")
+        .send()
+        .await
+        .unwrap();
+
+    ses.create_configuration_set_event_destination()
+        .configuration_set_name("bounce-test")
+        .event_destination_name("bounce-sns")
+        .event_destination(
+            EventDestinationDefinition::builder()
+                .enabled(true)
+                .matching_event_types(EventType::Send)
+                .matching_event_types(EventType::Bounce)
+                .sns_destination(
+                    SnsDestination::builder()
+                        .topic_arn(&topic_arn)
+                        .build()
+                        .unwrap(),
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    ses.create_email_identity()
+        .email_identity("sender@example.com")
+        .send()
+        .await
+        .unwrap();
+
+    // Send to bounce simulator address
+    ses.send_email()
+        .from_email_address("sender@example.com")
+        .destination(
+            Destination::builder()
+                .to_addresses("bounce@simulator.amazonses.com")
+                .build(),
+        )
+        .content(
+            EmailContent::builder()
+                .simple(
+                    Message::builder()
+                        .subject(Content::builder().data("Bounce test").build().unwrap())
+                        .body(
+                            Body::builder()
+                                .text(Content::builder().data("Will bounce").build().unwrap())
+                                .build(),
+                        )
+                        .build(),
+                )
+                .build(),
+        )
+        .configuration_set_name("bounce-test")
+        .send()
+        .await
+        .unwrap();
+
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let msgs = sqs
+        .receive_message()
+        .queue_url(&queue_url)
+        .max_number_of_messages(10)
+        .send()
+        .await
+        .unwrap();
+
+    // Should have Send + Bounce events
+    assert!(
+        msgs.messages().len() >= 2,
+        "Expected at least 2 messages (Send + Bounce), got {}",
+        msgs.messages().len()
+    );
+
+    let mut event_types: Vec<String> = Vec::new();
+    for msg in msgs.messages() {
+        let envelope: serde_json::Value = serde_json::from_str(msg.body().unwrap()).unwrap();
+        let inner: serde_json::Value =
+            serde_json::from_str(envelope["Message"].as_str().unwrap()).unwrap();
+        event_types.push(inner["eventType"].as_str().unwrap().to_string());
+    }
+    assert!(event_types.contains(&"Bounce".to_string()));
+    assert!(event_types.contains(&"Send".to_string()));
+
+    // Verify the bounce event has correct structure
+    for msg in msgs.messages() {
+        let envelope: serde_json::Value = serde_json::from_str(msg.body().unwrap()).unwrap();
+        let inner: serde_json::Value =
+            serde_json::from_str(envelope["Message"].as_str().unwrap()).unwrap();
+        if inner["eventType"] == "Bounce" {
+            assert_eq!(inner["bounce"]["bounceType"], "Permanent");
+            assert!(inner["bounce"]["bouncedRecipients"].is_array());
+        }
+    }
+}
+
+/// Send to suppressionlist@simulator → verify address gets added to
+/// suppression list, then sending to it again generates a Bounce.
+#[tokio::test]
+async fn ses_event_fanout_suppression_list_simulator() {
+    let server = TestServer::start().await;
+    let ses = server.sesv2_client().await;
+
+    ses.create_email_identity()
+        .email_identity("sender@example.com")
+        .send()
+        .await
+        .unwrap();
+
+    ses.create_configuration_set()
+        .configuration_set_name("suppress-test")
+        .send()
+        .await
+        .unwrap();
+
+    // No event destination needed — we just verify the suppression list behavior
+
+    // Send to suppressionlist simulator
+    ses.send_email()
+        .from_email_address("sender@example.com")
+        .destination(
+            Destination::builder()
+                .to_addresses("suppressionlist@simulator.amazonses.com")
+                .build(),
+        )
+        .content(
+            EmailContent::builder()
+                .simple(
+                    Message::builder()
+                        .subject(Content::builder().data("Suppress test").build().unwrap())
+                        .body(
+                            Body::builder()
+                                .text(Content::builder().data("Will suppress").build().unwrap())
+                                .build(),
+                        )
+                        .build(),
+                )
+                .build(),
+        )
+        .configuration_set_name("suppress-test")
+        .send()
+        .await
+        .unwrap();
+
+    // Verify the address was added to suppression list
+    let suppressed = ses
+        .get_suppressed_destination()
+        .email_address("suppressionlist@simulator.amazonses.com")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        suppressed.suppressed_destination().unwrap().reason(),
+        &SuppressionListReason::Bounce
+    );
+}
+
+/// EventBridge destination: verify events land on the default event bus.
+#[tokio::test]
+async fn ses_event_fanout_eventbridge_destination() {
+    let server = TestServer::start().await;
+    let ses = server.sesv2_client().await;
+    let eb = server.eventbridge_client().await;
+    let sqs = server.sqs_client().await;
+
+    // Create SQS queue for EventBridge target
+    let queue = sqs
+        .create_queue()
+        .queue_name("ses-eb-sink")
+        .send()
+        .await
+        .unwrap();
+    let queue_url = queue.queue_url().unwrap().to_string();
+    let queue_attrs = sqs
+        .get_queue_attributes()
+        .queue_url(&queue_url)
+        .attribute_names(aws_sdk_sqs::types::QueueAttributeName::QueueArn)
+        .send()
+        .await
+        .unwrap();
+    let queue_arn = queue_attrs
+        .attributes()
+        .unwrap()
+        .get(&aws_sdk_sqs::types::QueueAttributeName::QueueArn)
+        .unwrap()
+        .to_string();
+
+    // Create EventBridge rule matching aws.ses events on default bus
+    eb.put_rule()
+        .name("ses-events-rule")
+        .event_bus_name("default")
+        .event_pattern(r#"{"source":["aws.ses"]}"#)
+        .send()
+        .await
+        .unwrap();
+
+    eb.put_targets()
+        .rule("ses-events-rule")
+        .event_bus_name("default")
+        .targets(
+            aws_sdk_eventbridge::types::Target::builder()
+                .id("sqs-target")
+                .arn(&queue_arn)
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    // Create SES config set with EventBridge destination
+    ses.create_configuration_set()
+        .configuration_set_name("eb-fanout-test")
+        .send()
+        .await
+        .unwrap();
+
+    ses.create_configuration_set_event_destination()
+        .configuration_set_name("eb-fanout-test")
+        .event_destination_name("eb-dest")
+        .event_destination(
+            EventDestinationDefinition::builder()
+                .enabled(true)
+                .matching_event_types(EventType::Send)
+                .matching_event_types(EventType::Delivery)
+                .event_bridge_destination(
+                    EventBridgeDestination::builder()
+                        .event_bus_arn("arn:aws:events:us-east-1:123456789012:event-bus/default")
+                        .build()
+                        .unwrap(),
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    ses.create_email_identity()
+        .email_identity("sender@example.com")
+        .send()
+        .await
+        .unwrap();
+
+    // Send email
+    ses.send_email()
+        .from_email_address("sender@example.com")
+        .destination(
+            Destination::builder()
+                .to_addresses("recipient@example.com")
+                .build(),
+        )
+        .content(
+            EmailContent::builder()
+                .simple(
+                    Message::builder()
+                        .subject(Content::builder().data("EB fanout").build().unwrap())
+                        .body(
+                            Body::builder()
+                                .text(Content::builder().data("Hello via EB").build().unwrap())
+                                .build(),
+                        )
+                        .build(),
+                )
+                .build(),
+        )
+        .configuration_set_name("eb-fanout-test")
+        .send()
+        .await
+        .unwrap();
+
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    // Check SQS for EventBridge-delivered events
+    let msgs = sqs
+        .receive_message()
+        .queue_url(&queue_url)
+        .max_number_of_messages(10)
+        .send()
+        .await
+        .unwrap();
+
+    assert!(
+        msgs.messages().len() >= 2,
+        "Expected at least 2 EventBridge->SQS messages, got {}",
+        msgs.messages().len()
+    );
+
+    // Verify the event structure
+    for msg in msgs.messages() {
+        let event: serde_json::Value = serde_json::from_str(msg.body().unwrap()).unwrap();
+        assert_eq!(event["source"], "aws.ses");
+        assert_eq!(event["detail-type"], "SES Email Sending");
+        // detail is already a JSON object in the EventBridge event envelope
+        let detail = &event["detail"];
+        assert!(detail["eventType"].is_string());
+        assert_eq!(detail["mail"]["source"], "sender@example.com");
+    }
 }
