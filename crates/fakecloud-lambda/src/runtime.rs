@@ -182,7 +182,7 @@ impl ContainerRuntime {
         let mut cmd = tokio::process::Command::new(&self.cli);
         cmd.arg("create")
             .arg("-p")
-            .arg("0:8080")
+            .arg(":8080")
             .arg("--label")
             .arg(format!("fakecloud-lambda={}", func.function_name))
             .arg("--label")
