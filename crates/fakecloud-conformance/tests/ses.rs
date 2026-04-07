@@ -1,10 +1,13 @@
 mod helpers;
 
 use aws_sdk_sesv2::types::{
-    BehaviorOnMxFailure, Body, Content, Destination, DkimSigningAttributes,
-    DkimSigningAttributesOrigin, EmailContent, EmailTemplateContent, EventDestinationDefinition,
-    EventType, FeatureStatus, HttpsPolicy, MailType, Message, RouteDetails, ScalingMode,
-    SnsDestination, SubscriptionStatus, SuppressionListReason, Tag, Template, TlsPolicy, Topic,
+    BatchGetMetricDataQuery, BehaviorOnMxFailure, Body, Content, DataFormat, Destination,
+    DkimSigningAttributes, DkimSigningAttributesOrigin, EmailContent, EmailTemplateContent,
+    EventDestinationDefinition, EventType, ExportDataSource, ExportDestination, ExportMetric,
+    FeatureStatus, HttpsPolicy, ImportDataSource, ImportDestination, MailType, Message, Metric,
+    MetricDimensionName, MetricNamespace, MetricsDataSource, ReputationEntityType, RouteDetails,
+    ScalingMode, SendingStatus, SnsDestination, SubscriptionStatus, SuppressionListDestination,
+    SuppressionListImportAction, SuppressionListReason, Tag, Template, TlsPolicy, Topic,
     TopicPreference, VdmAttributes,
 };
 use fakecloud_conformance_macros::test_action;
@@ -1457,4 +1460,295 @@ async fn ses_put_account_vdm_attributes() {
     let acct = client.get_account().send().await.unwrap();
     let vdm = acct.vdm_attributes().unwrap();
     assert_eq!(vdm.vdm_enabled().as_str(), "ENABLED");
+}
+
+// -- Import Jobs --
+
+#[test_action("ses", "CreateImportJob", checksum = "89515044")]
+#[test_action("ses", "GetImportJob", checksum = "8cf312dd")]
+#[test_action("ses", "ListImportJobs", checksum = "d277d8ad")]
+#[tokio::test]
+async fn ses_import_job_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.sesv2_client().await;
+
+    // Create
+    let resp = client
+        .create_import_job()
+        .import_destination(
+            ImportDestination::builder()
+                .suppression_list_destination(
+                    SuppressionListDestination::builder()
+                        .suppression_list_import_action(SuppressionListImportAction::Put)
+                        .build()
+                        .unwrap(),
+                )
+                .build(),
+        )
+        .import_data_source(
+            ImportDataSource::builder()
+                .s3_url("s3://test-bucket/import.csv")
+                .data_format(DataFormat::Csv)
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let job_id = resp.job_id().unwrap().to_string();
+
+    // Get
+    let get = client
+        .get_import_job()
+        .job_id(&job_id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get.job_id().unwrap(), job_id);
+    assert_eq!(get.job_status().unwrap().as_str(), "COMPLETED");
+
+    // List
+    let list = client.list_import_jobs().send().await.unwrap();
+    assert!(!list.import_jobs().is_empty());
+}
+
+// -- Export Jobs --
+
+#[test_action("ses", "CreateExportJob", checksum = "c875d427")]
+#[test_action("ses", "GetExportJob", checksum = "06ce323e")]
+#[test_action("ses", "ListExportJobs", checksum = "b5f292ff")]
+#[test_action("ses", "CancelExportJob", checksum = "09901f78")]
+#[tokio::test]
+async fn ses_export_job_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.sesv2_client().await;
+
+    let now = aws_smithy_types::DateTime::from_secs(1704067200);
+
+    // Create
+    let resp = client
+        .create_export_job()
+        .export_data_source(
+            ExportDataSource::builder()
+                .metrics_data_source(
+                    MetricsDataSource::builder()
+                        .namespace(MetricNamespace::Vdm)
+                        .metrics(ExportMetric::builder().name(Metric::Send).build())
+                        .dimensions(MetricDimensionName::Isp, vec!["*".to_string()])
+                        .start_date(now)
+                        .end_date(now)
+                        .build()
+                        .unwrap(),
+                )
+                .build(),
+        )
+        .export_destination(
+            ExportDestination::builder()
+                .data_format(DataFormat::Csv)
+                .s3_url("s3://test-bucket/export")
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let job_id = resp.job_id().unwrap().to_string();
+
+    // Get
+    let get = client
+        .get_export_job()
+        .job_id(&job_id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get.job_id().unwrap(), job_id);
+    assert_eq!(get.job_status().unwrap().as_str(), "COMPLETED");
+
+    // List
+    let list = client.list_export_jobs().send().await.unwrap();
+    assert!(!list.export_jobs().is_empty());
+
+    // Cancel (should fail — already COMPLETED)
+    let err = client
+        .cancel_export_job()
+        .job_id(&job_id)
+        .send()
+        .await
+        .unwrap_err();
+    assert_eq!(err.raw_response().unwrap().status().as_u16(), 409);
+}
+
+// -- Tenants --
+
+#[test_action("ses", "CreateTenant", checksum = "931dc927")]
+#[test_action("ses", "GetTenant", checksum = "4562e96b")]
+#[test_action("ses", "ListTenants", checksum = "75f62d1f")]
+#[test_action("ses", "DeleteTenant", checksum = "c7010419")]
+#[test_action("ses", "CreateTenantResourceAssociation", checksum = "d10a9bd3")]
+#[test_action("ses", "DeleteTenantResourceAssociation", checksum = "586fc271")]
+#[test_action("ses", "ListTenantResources", checksum = "790c9ab9")]
+#[test_action("ses", "ListResourceTenants", checksum = "53388a9d")]
+#[tokio::test]
+async fn ses_tenant_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.sesv2_client().await;
+
+    // Create
+    let resp = client
+        .create_tenant()
+        .tenant_name("conf-tenant")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.tenant_name().unwrap(), "conf-tenant");
+    assert!(resp.tenant_id().is_some());
+    assert_eq!(resp.sending_status().unwrap().as_str(), "ENABLED");
+
+    // Get
+    let get = client
+        .get_tenant()
+        .tenant_name("conf-tenant")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get.tenant().unwrap().tenant_name().unwrap(), "conf-tenant");
+
+    // List
+    let list = client.list_tenants().send().await.unwrap();
+    assert_eq!(list.tenants().len(), 1);
+
+    // Create resource association
+    client
+        .create_tenant_resource_association()
+        .tenant_name("conf-tenant")
+        .resource_arn("arn:aws:ses:us-east-1:123456789012:identity/test@example.com")
+        .send()
+        .await
+        .unwrap();
+
+    // List tenant resources
+    let resources = client
+        .list_tenant_resources()
+        .tenant_name("conf-tenant")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resources.tenant_resources().len(), 1);
+
+    // List resource tenants
+    let tenants = client
+        .list_resource_tenants()
+        .resource_arn("arn:aws:ses:us-east-1:123456789012:identity/test@example.com")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(tenants.resource_tenants().len(), 1);
+
+    // Delete association
+    client
+        .delete_tenant_resource_association()
+        .tenant_name("conf-tenant")
+        .resource_arn("arn:aws:ses:us-east-1:123456789012:identity/test@example.com")
+        .send()
+        .await
+        .unwrap();
+
+    // Delete tenant
+    client
+        .delete_tenant()
+        .tenant_name("conf-tenant")
+        .send()
+        .await
+        .unwrap();
+
+    let list = client.list_tenants().send().await.unwrap();
+    assert!(list.tenants().is_empty());
+}
+
+// -- Reputation Entities --
+
+#[test_action("ses", "GetReputationEntity", checksum = "a524d120")]
+#[test_action("ses", "ListReputationEntities", checksum = "d6d0a271")]
+#[test_action(
+    "ses",
+    "UpdateReputationEntityCustomerManagedStatus",
+    checksum = "3294b64e"
+)]
+#[test_action("ses", "UpdateReputationEntityPolicy", checksum = "3322b083")]
+#[tokio::test]
+async fn ses_reputation_entity() {
+    let server = TestServer::start().await;
+    let client = server.sesv2_client().await;
+
+    // Get default entity
+    let get = client
+        .get_reputation_entity()
+        .reputation_entity_type(ReputationEntityType::Resource)
+        .reputation_entity_reference("arn:aws:ses:us-east-1:123456789012:identity/test@example.com")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        get.reputation_entity()
+            .unwrap()
+            .sending_status_aggregate()
+            .unwrap()
+            .as_str(),
+        "ENABLED"
+    );
+
+    // Update customer managed status
+    client
+        .update_reputation_entity_customer_managed_status()
+        .reputation_entity_type(ReputationEntityType::Resource)
+        .reputation_entity_reference("arn:aws:ses:us-east-1:123456789012:identity/test@example.com")
+        .sending_status(SendingStatus::Disabled)
+        .send()
+        .await
+        .unwrap();
+
+    // Update policy
+    client
+        .update_reputation_entity_policy()
+        .reputation_entity_type(ReputationEntityType::Resource)
+        .reputation_entity_reference("arn:aws:ses:us-east-1:123456789012:identity/test@example.com")
+        .reputation_entity_policy("arn:aws:ses:us-east-1:123456789012:policy/my-policy")
+        .send()
+        .await
+        .unwrap();
+
+    // List
+    let list = client.list_reputation_entities().send().await.unwrap();
+    assert_eq!(list.reputation_entities().len(), 1);
+}
+
+// -- Metrics --
+
+#[test_action("ses", "BatchGetMetricData", checksum = "944d6cf0")]
+#[tokio::test]
+async fn ses_batch_get_metric_data() {
+    let server = TestServer::start().await;
+    let client = server.sesv2_client().await;
+
+    let start = aws_smithy_types::DateTime::from_secs(1704067200);
+    let end = aws_smithy_types::DateTime::from_secs(1704153600);
+
+    let resp = client
+        .batch_get_metric_data()
+        .queries(
+            BatchGetMetricDataQuery::builder()
+                .id("q1")
+                .namespace(MetricNamespace::Vdm)
+                .metric(Metric::Send)
+                .start_date(start)
+                .end_date(end)
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.results().len(), 1);
+    assert_eq!(resp.results()[0].id().unwrap(), "q1");
+    assert!(resp.errors().is_empty());
 }

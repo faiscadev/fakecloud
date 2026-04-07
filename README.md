@@ -96,7 +96,7 @@ fakecloud is now listening at `http://localhost:4566`.
 
 ## Supported Services
 
-13 AWS services, 731 API operations:
+13 AWS services, 751 API operations:
 
 | Service | Actions | Highlights |
 |---|---|---|
@@ -113,7 +113,7 @@ fakecloud is now listening at `http://localhost:4566`.
 | **CloudWatch Logs** | 113 | Groups, streams, filtering, deliveries, transformers, query language, anomaly detection |
 | **KMS** | 53 | Encryption, key management, aliases, grants, real ECDH and key import |
 | **CloudFormation** | 8 | Template parsing, resource provisioning, custom resources via Lambda |
-| **SES v2** | 77 | Identities, templates, configuration sets, contact lists, contacts, send email, tagging, suppression list, event destinations, identity policies, DKIM/feedback/mail-from attributes, config set options, custom verification email templates, template rendering, dedicated IP pools & IPs, multi-region endpoints, account settings |
+| **SES v2** | 97 | Identities, templates, configuration sets, contact lists, contacts, send email, tagging, suppression list, event destinations, identity policies, DKIM/feedback/mail-from attributes, config set options, custom verification email templates, template rendering, dedicated IP pools & IPs, multi-region endpoints, account settings, import/export jobs, tenants, reputation entities, metrics |
 
 ### Cross-Service Integration
 

@@ -182,6 +182,54 @@ pub struct AccountSettings {
     pub details: Option<AccountDetails>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct ImportJob {
+    pub job_id: String,
+    pub import_destination: serde_json::Value,
+    pub import_data_source: serde_json::Value,
+    pub job_status: String,
+    pub created_timestamp: DateTime<Utc>,
+    pub completed_timestamp: Option<DateTime<Utc>>,
+    pub processed_records_count: i32,
+    pub failed_records_count: i32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ExportJob {
+    pub job_id: String,
+    pub export_source_type: String,
+    pub export_destination: serde_json::Value,
+    pub export_data_source: serde_json::Value,
+    pub job_status: String,
+    pub created_timestamp: DateTime<Utc>,
+    pub completed_timestamp: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Tenant {
+    pub tenant_name: String,
+    pub tenant_id: String,
+    pub tenant_arn: String,
+    pub created_timestamp: DateTime<Utc>,
+    pub sending_status: String,
+    pub tags: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TenantResourceAssociation {
+    pub resource_arn: String,
+    pub associated_timestamp: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ReputationEntityState {
+    pub reputation_entity_reference: String,
+    pub reputation_entity_type: String,
+    pub reputation_management_policy: Option<String>,
+    pub customer_managed_status: String,
+    pub sending_status_aggregate: String,
+}
+
 pub struct SesState {
     pub account_id: String,
     pub region: String,
@@ -209,6 +257,16 @@ pub struct SesState {
     pub multi_region_endpoints: HashMap<String, MultiRegionEndpoint>,
     /// Account-level settings (sending, suppression, VDM, details).
     pub account_settings: AccountSettings,
+    /// Import jobs: job_id → ImportJob.
+    pub import_jobs: HashMap<String, ImportJob>,
+    /// Export jobs: job_id → ExportJob.
+    pub export_jobs: HashMap<String, ExportJob>,
+    /// Tenants: tenant_name → Tenant.
+    pub tenants: HashMap<String, Tenant>,
+    /// Tenant resource associations: tenant_name → Vec<resource_arn>.
+    pub tenant_resource_associations: HashMap<String, Vec<TenantResourceAssociation>>,
+    /// Reputation entities: "type/reference" → ReputationEntity.
+    pub reputation_entities: HashMap<String, ReputationEntityState>,
 }
 
 impl SesState {
@@ -237,6 +295,11 @@ impl SesState {
                 vdm_attributes: None,
                 details: None,
             },
+            import_jobs: HashMap::new(),
+            export_jobs: HashMap::new(),
+            tenants: HashMap::new(),
+            tenant_resource_associations: HashMap::new(),
+            reputation_entities: HashMap::new(),
         }
     }
 
@@ -262,6 +325,11 @@ impl SesState {
             vdm_attributes: None,
             details: None,
         };
+        self.import_jobs.clear();
+        self.export_jobs.clear();
+        self.tenants.clear();
+        self.tenant_resource_associations.clear();
+        self.reputation_entities.clear();
     }
 }
 

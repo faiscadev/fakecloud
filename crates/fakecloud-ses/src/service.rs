@@ -8,8 +8,9 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use crate::state::{
     AccountDetails, ConfigurationSet, Contact, ContactList, CustomVerificationEmailTemplate,
-    DedicatedIp, DedicatedIpPool, EmailIdentity, EmailTemplate, EventDestination,
-    MultiRegionEndpoint, SentEmail, SharedSesState, SuppressedDestination, Topic, TopicPreference,
+    DedicatedIp, DedicatedIpPool, EmailIdentity, EmailTemplate, EventDestination, ExportJob,
+    ImportJob, MultiRegionEndpoint, ReputationEntityState, SentEmail, SharedSesState,
+    SuppressedDestination, Tenant, TenantResourceAssociation, Topic, TopicPreference,
 };
 
 pub struct SesV2Service {
@@ -83,6 +84,26 @@ impl SesV2Service {
     ///   DELETE /v2/email/custom-verification-email-templates/{name}     -> DeleteCustomVerificationEmailTemplate
     ///   POST   /v2/email/outbound-custom-verification-emails            -> SendCustomVerificationEmail
     ///   POST   /v2/email/templates/{name}/render                        -> TestRenderEmailTemplate
+    ///   POST   /v2/email/import-jobs                                     -> CreateImportJob
+    ///   POST   /v2/email/import-jobs/list                                -> ListImportJobs
+    ///   GET    /v2/email/import-jobs/{id}                                -> GetImportJob
+    ///   POST   /v2/email/export-jobs                                     -> CreateExportJob
+    ///   POST   /v2/email/list-export-jobs                                -> ListExportJobs
+    ///   PUT    /v2/email/export-jobs/{id}/cancel                         -> CancelExportJob
+    ///   GET    /v2/email/export-jobs/{id}                                -> GetExportJob
+    ///   POST   /v2/email/tenants                                         -> CreateTenant
+    ///   POST   /v2/email/tenants/list                                    -> ListTenants
+    ///   POST   /v2/email/tenants/get                                     -> GetTenant
+    ///   POST   /v2/email/tenants/delete                                  -> DeleteTenant
+    ///   POST   /v2/email/tenants/resources                               -> CreateTenantResourceAssociation
+    ///   POST   /v2/email/tenants/resources/delete                        -> DeleteTenantResourceAssociation
+    ///   POST   /v2/email/tenants/resources/list                          -> ListTenantResources
+    ///   POST   /v2/email/resources/tenants/list                          -> ListResourceTenants
+    ///   POST   /v2/email/reputation/entities                             -> ListReputationEntities
+    ///   PUT    /v2/email/reputation/entities/{type}/{ref}/customer-managed-status -> UpdateReputationEntityCustomerManagedStatus
+    ///   PUT    /v2/email/reputation/entities/{type}/{ref}/policy          -> UpdateReputationEntityPolicy
+    ///   GET    /v2/email/reputation/entities/{type}/{ref}                 -> GetReputationEntity
+    ///   POST   /v2/email/metrics/batch                                   -> BatchGetMetricData
     fn resolve_action(req: &AwsRequest) -> Option<(&str, Option<String>, Option<String>)> {
         let segs = &req.path_segments;
 
@@ -432,6 +453,103 @@ impl SesV2Service {
             }
             (Method::DELETE, 4) if segs[2] == "multi-region-endpoints" => {
                 Some(("DeleteMultiRegionEndpoint", resource, None))
+            }
+
+            // /v2/email/import-jobs
+            (Method::POST, 3) if segs[2] == "import-jobs" => Some(("CreateImportJob", None, None)),
+            // /v2/email/import-jobs/list (SDK sends POST for ListImportJobs)
+            (Method::POST, 4) if segs[2] == "import-jobs" && segs[3] == "list" => {
+                Some(("ListImportJobs", None, None))
+            }
+            // /v2/email/import-jobs/{id}
+            (Method::GET, 4) if segs[2] == "import-jobs" => Some(("GetImportJob", resource, None)),
+
+            // /v2/email/export-jobs
+            (Method::POST, 3) if segs[2] == "export-jobs" => Some(("CreateExportJob", None, None)),
+            // /v2/email/list-export-jobs (SDK sends POST for ListExportJobs)
+            (Method::POST, 3) if segs[2] == "list-export-jobs" => {
+                Some(("ListExportJobs", None, None))
+            }
+            // /v2/email/export-jobs/{id}/cancel
+            (Method::PUT, 5) if segs[2] == "export-jobs" && segs[4] == "cancel" => {
+                Some(("CancelExportJob", resource, None))
+            }
+            // /v2/email/export-jobs/{id}
+            (Method::GET, 4) if segs[2] == "export-jobs" => Some(("GetExportJob", resource, None)),
+
+            // /v2/email/tenants
+            (Method::POST, 3) if segs[2] == "tenants" => Some(("CreateTenant", None, None)),
+            // /v2/email/tenants/list
+            (Method::POST, 4) if segs[2] == "tenants" && segs[3] == "list" => {
+                Some(("ListTenants", None, None))
+            }
+            // /v2/email/tenants/get
+            (Method::POST, 4) if segs[2] == "tenants" && segs[3] == "get" => {
+                Some(("GetTenant", None, None))
+            }
+            // /v2/email/tenants/delete
+            (Method::POST, 4) if segs[2] == "tenants" && segs[3] == "delete" => {
+                Some(("DeleteTenant", None, None))
+            }
+            // /v2/email/tenants/resources (CreateTenantResourceAssociation)
+            (Method::POST, 4) if segs[2] == "tenants" && segs[3] == "resources" => {
+                Some(("CreateTenantResourceAssociation", None, None))
+            }
+            // /v2/email/tenants/resources/delete (DeleteTenantResourceAssociation)
+            (Method::POST, 5)
+                if segs[2] == "tenants" && segs[3] == "resources" && segs[4] == "delete" =>
+            {
+                Some(("DeleteTenantResourceAssociation", None, None))
+            }
+            // /v2/email/tenants/resources/list (ListTenantResources)
+            (Method::POST, 5)
+                if segs[2] == "tenants" && segs[3] == "resources" && segs[4] == "list" =>
+            {
+                Some(("ListTenantResources", None, None))
+            }
+            // /v2/email/resources/tenants/list (ListResourceTenants)
+            (Method::POST, 5)
+                if segs[2] == "resources" && segs[3] == "tenants" && segs[4] == "list" =>
+            {
+                Some(("ListResourceTenants", None, None))
+            }
+
+            // /v2/email/reputation/entities (ListReputationEntities)
+            (Method::POST, 4) if segs[2] == "reputation" && segs[3] == "entities" => {
+                Some(("ListReputationEntities", None, None))
+            }
+            // /v2/email/reputation/entities/{type}/{ref}/customer-managed-status
+            (Method::PUT, 7)
+                if segs[2] == "reputation"
+                    && segs[3] == "entities"
+                    && segs[6] == "customer-managed-status" =>
+            {
+                Some((
+                    "UpdateReputationEntityCustomerManagedStatus",
+                    Some(decode(&segs[4])),
+                    Some(decode(&segs[5])),
+                ))
+            }
+            // /v2/email/reputation/entities/{type}/{ref}/policy
+            (Method::PUT, 7)
+                if segs[2] == "reputation" && segs[3] == "entities" && segs[6] == "policy" =>
+            {
+                Some((
+                    "UpdateReputationEntityPolicy",
+                    Some(decode(&segs[4])),
+                    Some(decode(&segs[5])),
+                ))
+            }
+            // /v2/email/reputation/entities/{type}/{ref}
+            (Method::GET, 6) if segs[2] == "reputation" && segs[3] == "entities" => Some((
+                "GetReputationEntity",
+                Some(decode(&segs[4])),
+                Some(decode(&segs[5])),
+            )),
+
+            // /v2/email/metrics/batch
+            (Method::POST, 4) if segs[2] == "metrics" && segs[3] == "batch" => {
+                Some(("BatchGetMetricData", None, None))
             }
 
             _ => None,
@@ -3250,6 +3368,756 @@ impl SesV2Service {
         self.state.write().account_settings.vdm_attributes = Some(vdm);
         Ok(AwsResponse::json(StatusCode::OK, "{}"))
     }
+
+    // --- Import Job operations ---
+
+    fn create_import_job(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body: Value = Self::parse_body(req)?;
+
+        let import_destination = match body.get("ImportDestination") {
+            Some(v) if v.is_object() => v.clone(),
+            _ => {
+                return Ok(Self::json_error(
+                    StatusCode::BAD_REQUEST,
+                    "BadRequestException",
+                    "ImportDestination is required",
+                ));
+            }
+        };
+
+        let import_data_source = match body.get("ImportDataSource") {
+            Some(v) if v.is_object() => v.clone(),
+            _ => {
+                return Ok(Self::json_error(
+                    StatusCode::BAD_REQUEST,
+                    "BadRequestException",
+                    "ImportDataSource is required",
+                ));
+            }
+        };
+
+        let job_id = uuid::Uuid::new_v4().to_string();
+        let now = Utc::now();
+
+        let job = ImportJob {
+            job_id: job_id.clone(),
+            import_destination,
+            import_data_source,
+            job_status: "COMPLETED".to_string(),
+            created_timestamp: now,
+            completed_timestamp: Some(now),
+            processed_records_count: 0,
+            failed_records_count: 0,
+        };
+
+        self.state.write().import_jobs.insert(job_id.clone(), job);
+
+        let response = json!({ "JobId": job_id });
+        Ok(AwsResponse::json(StatusCode::OK, response.to_string()))
+    }
+
+    fn get_import_job(&self, job_id: &str) -> Result<AwsResponse, AwsServiceError> {
+        let state = self.state.read();
+        let job = match state.import_jobs.get(job_id) {
+            Some(j) => j,
+            None => {
+                return Ok(Self::json_error(
+                    StatusCode::NOT_FOUND,
+                    "NotFoundException",
+                    &format!("Import job {} does not exist", job_id),
+                ));
+            }
+        };
+
+        let mut response = json!({
+            "JobId": job.job_id,
+            "ImportDestination": job.import_destination,
+            "ImportDataSource": job.import_data_source,
+            "JobStatus": job.job_status,
+            "CreatedTimestamp": job.created_timestamp.timestamp() as f64,
+            "ProcessedRecordsCount": job.processed_records_count,
+            "FailedRecordsCount": job.failed_records_count,
+        });
+        if let Some(ref ts) = job.completed_timestamp {
+            response["CompletedTimestamp"] = json!(ts.timestamp() as f64);
+        }
+
+        Ok(AwsResponse::json(StatusCode::OK, response.to_string()))
+    }
+
+    fn list_import_jobs(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body: Value = serde_json::from_slice(&req.body).unwrap_or(json!({}));
+        let filter_type = body["ImportDestinationType"].as_str();
+
+        let state = self.state.read();
+        let jobs: Vec<Value> = state
+            .import_jobs
+            .values()
+            .filter(|j| {
+                if let Some(ft) = filter_type {
+                    // Check if import destination matches
+                    if j.import_destination
+                        .get("SuppressionListDestination")
+                        .is_some()
+                        && ft == "SUPPRESSION_LIST"
+                    {
+                        return true;
+                    }
+                    if j.import_destination.get("ContactListDestination").is_some()
+                        && ft == "CONTACT_LIST"
+                    {
+                        return true;
+                    }
+                    return false;
+                }
+                true
+            })
+            .map(|j| {
+                let mut obj = json!({
+                    "JobId": j.job_id,
+                    "ImportDestination": j.import_destination,
+                    "JobStatus": j.job_status,
+                    "CreatedTimestamp": j.created_timestamp.timestamp() as f64,
+                });
+                if j.processed_records_count > 0 {
+                    obj["ProcessedRecordsCount"] = json!(j.processed_records_count);
+                }
+                if j.failed_records_count > 0 {
+                    obj["FailedRecordsCount"] = json!(j.failed_records_count);
+                }
+                obj
+            })
+            .collect();
+
+        let response = json!({ "ImportJobs": jobs });
+        Ok(AwsResponse::json(StatusCode::OK, response.to_string()))
+    }
+
+    // --- Export Job operations ---
+
+    fn create_export_job(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body: Value = Self::parse_body(req)?;
+
+        let export_data_source = match body.get("ExportDataSource") {
+            Some(v) if v.is_object() => v.clone(),
+            _ => {
+                return Ok(Self::json_error(
+                    StatusCode::BAD_REQUEST,
+                    "BadRequestException",
+                    "ExportDataSource is required",
+                ));
+            }
+        };
+
+        let export_destination = match body.get("ExportDestination") {
+            Some(v) if v.is_object() => v.clone(),
+            _ => {
+                return Ok(Self::json_error(
+                    StatusCode::BAD_REQUEST,
+                    "BadRequestException",
+                    "ExportDestination is required",
+                ));
+            }
+        };
+
+        // Determine export source type from the data source
+        let export_source_type = if export_data_source.get("MetricsDataSource").is_some() {
+            "METRICS_DATA"
+        } else {
+            "MESSAGE_INSIGHTS"
+        };
+
+        let job_id = uuid::Uuid::new_v4().to_string();
+        let now = Utc::now();
+
+        let job = ExportJob {
+            job_id: job_id.clone(),
+            export_source_type: export_source_type.to_string(),
+            export_destination,
+            export_data_source,
+            job_status: "COMPLETED".to_string(),
+            created_timestamp: now,
+            completed_timestamp: Some(now),
+        };
+
+        self.state.write().export_jobs.insert(job_id.clone(), job);
+
+        let response = json!({ "JobId": job_id });
+        Ok(AwsResponse::json(StatusCode::OK, response.to_string()))
+    }
+
+    fn get_export_job(&self, job_id: &str) -> Result<AwsResponse, AwsServiceError> {
+        let state = self.state.read();
+        let job = match state.export_jobs.get(job_id) {
+            Some(j) => j,
+            None => {
+                return Ok(Self::json_error(
+                    StatusCode::NOT_FOUND,
+                    "NotFoundException",
+                    &format!("Export job {} does not exist", job_id),
+                ));
+            }
+        };
+
+        let mut response = json!({
+            "JobId": job.job_id,
+            "ExportSourceType": job.export_source_type,
+            "JobStatus": job.job_status,
+            "ExportDestination": job.export_destination,
+            "ExportDataSource": job.export_data_source,
+            "CreatedTimestamp": job.created_timestamp.timestamp() as f64,
+            "Statistics": {
+                "ProcessedRecordsCount": 0,
+                "ExportedRecordsCount": 0,
+            },
+        });
+        if let Some(ref ts) = job.completed_timestamp {
+            response["CompletedTimestamp"] = json!(ts.timestamp() as f64);
+        }
+
+        Ok(AwsResponse::json(StatusCode::OK, response.to_string()))
+    }
+
+    fn list_export_jobs(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body: Value = serde_json::from_slice(&req.body).unwrap_or(json!({}));
+        let filter_status = body["JobStatus"].as_str();
+        let filter_type = body["ExportSourceType"].as_str();
+
+        let state = self.state.read();
+        let jobs: Vec<Value> = state
+            .export_jobs
+            .values()
+            .filter(|j| {
+                if let Some(s) = filter_status {
+                    if j.job_status != s {
+                        return false;
+                    }
+                }
+                if let Some(t) = filter_type {
+                    if j.export_source_type != t {
+                        return false;
+                    }
+                }
+                true
+            })
+            .map(|j| {
+                let mut obj = json!({
+                    "JobId": j.job_id,
+                    "ExportSourceType": j.export_source_type,
+                    "JobStatus": j.job_status,
+                    "CreatedTimestamp": j.created_timestamp.timestamp() as f64,
+                });
+                if let Some(ref ts) = j.completed_timestamp {
+                    obj["CompletedTimestamp"] = json!(ts.timestamp() as f64);
+                }
+                obj
+            })
+            .collect();
+
+        let response = json!({ "ExportJobs": jobs });
+        Ok(AwsResponse::json(StatusCode::OK, response.to_string()))
+    }
+
+    fn cancel_export_job(&self, job_id: &str) -> Result<AwsResponse, AwsServiceError> {
+        let mut state = self.state.write();
+        let job = match state.export_jobs.get_mut(job_id) {
+            Some(j) => j,
+            None => {
+                return Ok(Self::json_error(
+                    StatusCode::NOT_FOUND,
+                    "NotFoundException",
+                    &format!("Export job {} does not exist", job_id),
+                ));
+            }
+        };
+
+        if job.job_status == "COMPLETED" || job.job_status == "CANCELLED" {
+            return Ok(Self::json_error(
+                StatusCode::CONFLICT,
+                "ConflictException",
+                &format!("Export job {} is already {}", job_id, job.job_status),
+            ));
+        }
+
+        job.job_status = "CANCELLED".to_string();
+        Ok(AwsResponse::json(StatusCode::OK, "{}"))
+    }
+
+    // --- Tenant operations ---
+
+    fn create_tenant(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body: Value = Self::parse_body(req)?;
+        let tenant_name = match body["TenantName"].as_str() {
+            Some(n) => n.to_string(),
+            None => {
+                return Ok(Self::json_error(
+                    StatusCode::BAD_REQUEST,
+                    "BadRequestException",
+                    "TenantName is required",
+                ));
+            }
+        };
+
+        let mut state = self.state.write();
+
+        if state.tenants.contains_key(&tenant_name) {
+            return Ok(Self::json_error(
+                StatusCode::CONFLICT,
+                "AlreadyExistsException",
+                &format!("Tenant {} already exists", tenant_name),
+            ));
+        }
+
+        let tenant_id = uuid::Uuid::new_v4().to_string();
+        let tenant_arn = format!(
+            "arn:aws:ses:{}:{}:tenant/{}",
+            req.region, req.account_id, tenant_id
+        );
+        let now = Utc::now();
+
+        let tags = body
+            .get("Tags")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        let tenant = Tenant {
+            tenant_name: tenant_name.clone(),
+            tenant_id: tenant_id.clone(),
+            tenant_arn: tenant_arn.clone(),
+            created_timestamp: now,
+            sending_status: "ENABLED".to_string(),
+            tags: tags.clone(),
+        };
+
+        state.tenants.insert(tenant_name.clone(), tenant);
+
+        let response = json!({
+            "TenantName": tenant_name,
+            "TenantId": tenant_id,
+            "TenantArn": tenant_arn,
+            "CreatedTimestamp": now.timestamp() as f64,
+            "SendingStatus": "ENABLED",
+            "Tags": tags,
+        });
+        Ok(AwsResponse::json(StatusCode::OK, response.to_string()))
+    }
+
+    fn get_tenant(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body: Value = Self::parse_body(req)?;
+        let tenant_name = match body["TenantName"].as_str() {
+            Some(n) => n,
+            None => {
+                return Ok(Self::json_error(
+                    StatusCode::BAD_REQUEST,
+                    "BadRequestException",
+                    "TenantName is required",
+                ));
+            }
+        };
+
+        let state = self.state.read();
+        let tenant = match state.tenants.get(tenant_name) {
+            Some(t) => t,
+            None => {
+                return Ok(Self::json_error(
+                    StatusCode::NOT_FOUND,
+                    "NotFoundException",
+                    &format!("Tenant {} does not exist", tenant_name),
+                ));
+            }
+        };
+
+        let response = json!({
+            "Tenant": {
+                "TenantName": tenant.tenant_name,
+                "TenantId": tenant.tenant_id,
+                "TenantArn": tenant.tenant_arn,
+                "CreatedTimestamp": tenant.created_timestamp.timestamp() as f64,
+                "SendingStatus": tenant.sending_status,
+                "Tags": tenant.tags,
+            }
+        });
+        Ok(AwsResponse::json(StatusCode::OK, response.to_string()))
+    }
+
+    fn list_tenants(&self, _req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let state = self.state.read();
+        let tenants: Vec<Value> = state
+            .tenants
+            .values()
+            .map(|t| {
+                json!({
+                    "TenantName": t.tenant_name,
+                    "TenantId": t.tenant_id,
+                    "TenantArn": t.tenant_arn,
+                    "CreatedTimestamp": t.created_timestamp.timestamp() as f64,
+                })
+            })
+            .collect();
+
+        let response = json!({ "Tenants": tenants });
+        Ok(AwsResponse::json(StatusCode::OK, response.to_string()))
+    }
+
+    fn delete_tenant(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body: Value = Self::parse_body(req)?;
+        let tenant_name = match body["TenantName"].as_str() {
+            Some(n) => n,
+            None => {
+                return Ok(Self::json_error(
+                    StatusCode::BAD_REQUEST,
+                    "BadRequestException",
+                    "TenantName is required",
+                ));
+            }
+        };
+
+        let mut state = self.state.write();
+
+        if state.tenants.remove(tenant_name).is_none() {
+            return Ok(Self::json_error(
+                StatusCode::NOT_FOUND,
+                "NotFoundException",
+                &format!("Tenant {} does not exist", tenant_name),
+            ));
+        }
+
+        state.tenant_resource_associations.remove(tenant_name);
+
+        Ok(AwsResponse::json(StatusCode::OK, "{}"))
+    }
+
+    fn create_tenant_resource_association(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body: Value = Self::parse_body(req)?;
+        let tenant_name = match body["TenantName"].as_str() {
+            Some(n) => n.to_string(),
+            None => {
+                return Ok(Self::json_error(
+                    StatusCode::BAD_REQUEST,
+                    "BadRequestException",
+                    "TenantName is required",
+                ));
+            }
+        };
+        let resource_arn = match body["ResourceArn"].as_str() {
+            Some(a) => a.to_string(),
+            None => {
+                return Ok(Self::json_error(
+                    StatusCode::BAD_REQUEST,
+                    "BadRequestException",
+                    "ResourceArn is required",
+                ));
+            }
+        };
+
+        let mut state = self.state.write();
+
+        if !state.tenants.contains_key(&tenant_name) {
+            return Ok(Self::json_error(
+                StatusCode::NOT_FOUND,
+                "NotFoundException",
+                &format!("Tenant {} does not exist", tenant_name),
+            ));
+        }
+
+        let assoc = TenantResourceAssociation {
+            resource_arn,
+            associated_timestamp: Utc::now(),
+        };
+
+        state
+            .tenant_resource_associations
+            .entry(tenant_name)
+            .or_default()
+            .push(assoc);
+
+        Ok(AwsResponse::json(StatusCode::OK, "{}"))
+    }
+
+    fn delete_tenant_resource_association(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body: Value = Self::parse_body(req)?;
+        let tenant_name = match body["TenantName"].as_str() {
+            Some(n) => n,
+            None => {
+                return Ok(Self::json_error(
+                    StatusCode::BAD_REQUEST,
+                    "BadRequestException",
+                    "TenantName is required",
+                ));
+            }
+        };
+        let resource_arn = match body["ResourceArn"].as_str() {
+            Some(a) => a,
+            None => {
+                return Ok(Self::json_error(
+                    StatusCode::BAD_REQUEST,
+                    "BadRequestException",
+                    "ResourceArn is required",
+                ));
+            }
+        };
+
+        let mut state = self.state.write();
+
+        if let Some(assocs) = state.tenant_resource_associations.get_mut(tenant_name) {
+            let before = assocs.len();
+            assocs.retain(|a| a.resource_arn != resource_arn);
+            if assocs.len() == before {
+                return Ok(Self::json_error(
+                    StatusCode::NOT_FOUND,
+                    "NotFoundException",
+                    "Resource association not found",
+                ));
+            }
+        } else {
+            return Ok(Self::json_error(
+                StatusCode::NOT_FOUND,
+                "NotFoundException",
+                "Resource association not found",
+            ));
+        }
+
+        Ok(AwsResponse::json(StatusCode::OK, "{}"))
+    }
+
+    fn list_tenant_resources(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body: Value = Self::parse_body(req)?;
+        let tenant_name = match body["TenantName"].as_str() {
+            Some(n) => n,
+            None => {
+                return Ok(Self::json_error(
+                    StatusCode::BAD_REQUEST,
+                    "BadRequestException",
+                    "TenantName is required",
+                ));
+            }
+        };
+
+        let state = self.state.read();
+
+        if !state.tenants.contains_key(tenant_name) {
+            return Ok(Self::json_error(
+                StatusCode::NOT_FOUND,
+                "NotFoundException",
+                &format!("Tenant {} does not exist", tenant_name),
+            ));
+        }
+
+        let resources: Vec<Value> = state
+            .tenant_resource_associations
+            .get(tenant_name)
+            .map(|assocs| {
+                assocs
+                    .iter()
+                    .map(|a| {
+                        json!({
+                            "ResourceType": "RESOURCE",
+                            "ResourceArn": a.resource_arn,
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let response = json!({ "TenantResources": resources });
+        Ok(AwsResponse::json(StatusCode::OK, response.to_string()))
+    }
+
+    fn list_resource_tenants(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body: Value = Self::parse_body(req)?;
+        let resource_arn = match body["ResourceArn"].as_str() {
+            Some(a) => a,
+            None => {
+                return Ok(Self::json_error(
+                    StatusCode::BAD_REQUEST,
+                    "BadRequestException",
+                    "ResourceArn is required",
+                ));
+            }
+        };
+
+        let state = self.state.read();
+        let mut resource_tenants: Vec<Value> = Vec::new();
+
+        for (tenant_name, assocs) in &state.tenant_resource_associations {
+            for assoc in assocs {
+                if assoc.resource_arn == resource_arn {
+                    if let Some(tenant) = state.tenants.get(tenant_name) {
+                        resource_tenants.push(json!({
+                            "TenantName": tenant.tenant_name,
+                            "TenantId": tenant.tenant_id,
+                            "ResourceArn": assoc.resource_arn,
+                            "AssociatedTimestamp": assoc.associated_timestamp.timestamp() as f64,
+                        }));
+                    }
+                }
+            }
+        }
+
+        let response = json!({ "ResourceTenants": resource_tenants });
+        Ok(AwsResponse::json(StatusCode::OK, response.to_string()))
+    }
+
+    // --- Reputation Entity operations ---
+
+    fn get_reputation_entity(
+        &self,
+        entity_type: &str,
+        entity_ref: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let key = format!("{}/{}", entity_type, entity_ref);
+        let state = self.state.read();
+
+        let entity = match state.reputation_entities.get(&key) {
+            Some(e) => e,
+            None => {
+                // Return a default entity for any reference
+                let response = json!({
+                    "ReputationEntity": {
+                        "ReputationEntityReference": entity_ref,
+                        "ReputationEntityType": entity_type,
+                        "SendingStatusAggregate": "ENABLED",
+                        "CustomerManagedStatus": {
+                            "SendingStatus": "ENABLED",
+                        },
+                        "AwsSesManagedStatus": {
+                            "SendingStatus": "ENABLED",
+                        },
+                    }
+                });
+                return Ok(AwsResponse::json(StatusCode::OK, response.to_string()));
+            }
+        };
+
+        let response = json!({
+            "ReputationEntity": {
+                "ReputationEntityReference": entity.reputation_entity_reference,
+                "ReputationEntityType": entity.reputation_entity_type,
+                "ReputationManagementPolicy": entity.reputation_management_policy,
+                "SendingStatusAggregate": entity.sending_status_aggregate,
+                "CustomerManagedStatus": {
+                    "SendingStatus": entity.customer_managed_status,
+                },
+                "AwsSesManagedStatus": {
+                    "SendingStatus": "ENABLED",
+                },
+            }
+        });
+        Ok(AwsResponse::json(StatusCode::OK, response.to_string()))
+    }
+
+    fn list_reputation_entities(&self, _req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let state = self.state.read();
+        let entities: Vec<Value> = state
+            .reputation_entities
+            .values()
+            .map(|e| {
+                json!({
+                    "ReputationEntityReference": e.reputation_entity_reference,
+                    "ReputationEntityType": e.reputation_entity_type,
+                    "SendingStatusAggregate": e.sending_status_aggregate,
+                })
+            })
+            .collect();
+
+        let response = json!({ "ReputationEntities": entities });
+        Ok(AwsResponse::json(StatusCode::OK, response.to_string()))
+    }
+
+    fn update_reputation_entity_customer_managed_status(
+        &self,
+        entity_type: &str,
+        entity_ref: &str,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body: Value = Self::parse_body(req)?;
+        let sending_status = body["SendingStatus"]
+            .as_str()
+            .unwrap_or("ENABLED")
+            .to_string();
+
+        let key = format!("{}/{}", entity_type, entity_ref);
+        let mut state = self.state.write();
+
+        let entity =
+            state
+                .reputation_entities
+                .entry(key)
+                .or_insert_with(|| ReputationEntityState {
+                    reputation_entity_reference: entity_ref.to_string(),
+                    reputation_entity_type: entity_type.to_string(),
+                    reputation_management_policy: None,
+                    customer_managed_status: "ENABLED".to_string(),
+                    sending_status_aggregate: "ENABLED".to_string(),
+                });
+
+        entity.customer_managed_status = sending_status;
+
+        Ok(AwsResponse::json(StatusCode::OK, "{}"))
+    }
+
+    fn update_reputation_entity_policy(
+        &self,
+        entity_type: &str,
+        entity_ref: &str,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body: Value = Self::parse_body(req)?;
+        let policy = body["ReputationEntityPolicy"]
+            .as_str()
+            .map(|s| s.to_string());
+
+        let key = format!("{}/{}", entity_type, entity_ref);
+        let mut state = self.state.write();
+
+        let entity =
+            state
+                .reputation_entities
+                .entry(key)
+                .or_insert_with(|| ReputationEntityState {
+                    reputation_entity_reference: entity_ref.to_string(),
+                    reputation_entity_type: entity_type.to_string(),
+                    reputation_management_policy: None,
+                    customer_managed_status: "ENABLED".to_string(),
+                    sending_status_aggregate: "ENABLED".to_string(),
+                });
+
+        entity.reputation_management_policy = policy;
+
+        Ok(AwsResponse::json(StatusCode::OK, "{}"))
+    }
+
+    // --- Metrics ---
+
+    fn batch_get_metric_data(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body: Value = Self::parse_body(req)?;
+        let queries = body["Queries"].as_array().cloned().unwrap_or_default();
+
+        let results: Vec<Value> = queries
+            .iter()
+            .filter_map(|q| {
+                let id = q["Id"].as_str()?;
+                Some(json!({
+                    "Id": id,
+                    "Timestamps": [],
+                    "Values": [],
+                }))
+            })
+            .collect();
+
+        let response = json!({
+            "Results": results,
+            "Errors": [],
+        });
+        Ok(AwsResponse::json(StatusCode::OK, response.to_string()))
+    }
 }
 
 fn parse_topics(value: &Value) -> Vec<Topic> {
@@ -3505,6 +4373,28 @@ impl fakecloud_core::service::AwsService for SesV2Service {
             "PutAccountSendingAttributes" => self.put_account_sending_attributes(&req),
             "PutAccountSuppressionAttributes" => self.put_account_suppression_attributes(&req),
             "PutAccountVdmAttributes" => self.put_account_vdm_attributes(&req),
+            "CreateImportJob" => self.create_import_job(&req),
+            "GetImportJob" => self.get_import_job(res),
+            "ListImportJobs" => self.list_import_jobs(&req),
+            "CreateExportJob" => self.create_export_job(&req),
+            "GetExportJob" => self.get_export_job(res),
+            "ListExportJobs" => self.list_export_jobs(&req),
+            "CancelExportJob" => self.cancel_export_job(res),
+            "CreateTenant" => self.create_tenant(&req),
+            "GetTenant" => self.get_tenant(&req),
+            "ListTenants" => self.list_tenants(&req),
+            "DeleteTenant" => self.delete_tenant(&req),
+            "CreateTenantResourceAssociation" => self.create_tenant_resource_association(&req),
+            "DeleteTenantResourceAssociation" => self.delete_tenant_resource_association(&req),
+            "ListTenantResources" => self.list_tenant_resources(&req),
+            "ListResourceTenants" => self.list_resource_tenants(&req),
+            "GetReputationEntity" => self.get_reputation_entity(res, sub),
+            "ListReputationEntities" => self.list_reputation_entities(&req),
+            "UpdateReputationEntityCustomerManagedStatus" => {
+                self.update_reputation_entity_customer_managed_status(res, sub, &req)
+            }
+            "UpdateReputationEntityPolicy" => self.update_reputation_entity_policy(res, sub, &req),
+            "BatchGetMetricData" => self.batch_get_metric_data(&req),
             _ => Err(AwsServiceError::action_not_implemented("ses", action)),
         }
     }
@@ -3588,6 +4478,26 @@ impl fakecloud_core::service::AwsService for SesV2Service {
             "PutAccountSendingAttributes",
             "PutAccountSuppressionAttributes",
             "PutAccountVdmAttributes",
+            "CreateImportJob",
+            "GetImportJob",
+            "ListImportJobs",
+            "CreateExportJob",
+            "GetExportJob",
+            "ListExportJobs",
+            "CancelExportJob",
+            "CreateTenant",
+            "GetTenant",
+            "ListTenants",
+            "DeleteTenant",
+            "CreateTenantResourceAssociation",
+            "DeleteTenantResourceAssociation",
+            "ListTenantResources",
+            "ListResourceTenants",
+            "GetReputationEntity",
+            "ListReputationEntities",
+            "UpdateReputationEntityCustomerManagedStatus",
+            "UpdateReputationEntityPolicy",
+            "BatchGetMetricData",
         ]
     }
 }
@@ -6199,5 +7109,324 @@ mod tests {
         let resp = svc.handle(req).await.unwrap();
         let body: Value = serde_json::from_slice(&resp.body).unwrap();
         assert_eq!(body["VdmAttributes"]["VdmEnabled"], "ENABLED");
+    }
+
+    #[tokio::test]
+    async fn test_import_job_lifecycle() {
+        let state = make_state();
+        let svc = SesV2Service::new(state);
+
+        // Create import job
+        let req = make_request(
+            Method::POST,
+            "/v2/email/import-jobs",
+            r#"{
+                "ImportDestination": {
+                    "SuppressionListDestination": {"SuppressionListImportAction": "PUT"}
+                },
+                "ImportDataSource": {
+                    "S3Url": "s3://bucket/file.csv",
+                    "DataFormat": "CSV"
+                }
+            }"#,
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let job_id = body["JobId"].as_str().unwrap().to_string();
+
+        // Get import job
+        let req = make_request(
+            Method::GET,
+            &format!("/v2/email/import-jobs/{}", job_id),
+            "",
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["JobId"], job_id);
+        assert_eq!(body["JobStatus"], "COMPLETED");
+
+        // List import jobs
+        let req = make_request(Method::POST, "/v2/email/import-jobs/list", "{}");
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["ImportJobs"].as_array().unwrap().len(), 1);
+
+        // Get non-existent job
+        let req = make_request(Method::GET, "/v2/email/import-jobs/nonexistent", "");
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_export_job_lifecycle() {
+        let state = make_state();
+        let svc = SesV2Service::new(state);
+
+        // Create export job
+        let req = make_request(
+            Method::POST,
+            "/v2/email/export-jobs",
+            r#"{
+                "ExportDataSource": {
+                    "MetricsDataSource": {
+                        "Dimensions": {},
+                        "Namespace": "VDM",
+                        "Metrics": []
+                    }
+                },
+                "ExportDestination": {
+                    "DataFormat": "CSV",
+                    "S3Url": "s3://bucket/export"
+                }
+            }"#,
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let job_id = body["JobId"].as_str().unwrap().to_string();
+
+        // Get export job
+        let req = make_request(
+            Method::GET,
+            &format!("/v2/email/export-jobs/{}", job_id),
+            "",
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["JobId"], job_id);
+        assert_eq!(body["JobStatus"], "COMPLETED");
+        assert_eq!(body["ExportSourceType"], "METRICS_DATA");
+
+        // List export jobs
+        let req = make_request(Method::POST, "/v2/email/list-export-jobs", "{}");
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["ExportJobs"].as_array().unwrap().len(), 1);
+
+        // Cancel — should fail since already COMPLETED
+        let req = make_request(
+            Method::PUT,
+            &format!("/v2/email/export-jobs/{}/cancel", job_id),
+            "",
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn test_tenant_lifecycle() {
+        let state = make_state();
+        let svc = SesV2Service::new(state);
+
+        // Create tenant
+        let req = make_request(
+            Method::POST,
+            "/v2/email/tenants",
+            r#"{"TenantName": "my-tenant"}"#,
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["TenantName"], "my-tenant");
+        assert!(body["TenantId"].as_str().is_some());
+        assert_eq!(body["SendingStatus"], "ENABLED");
+
+        // Get tenant
+        let req = make_request(
+            Method::POST,
+            "/v2/email/tenants/get",
+            r#"{"TenantName": "my-tenant"}"#,
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["Tenant"]["TenantName"], "my-tenant");
+
+        // List tenants
+        let req = make_request(Method::POST, "/v2/email/tenants/list", "{}");
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["Tenants"].as_array().unwrap().len(), 1);
+
+        // Create resource association
+        let req = make_request(
+            Method::POST,
+            "/v2/email/tenants/resources",
+            r#"{"TenantName": "my-tenant", "ResourceArn": "arn:aws:ses:us-east-1:123456789012:identity/test@example.com"}"#,
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+
+        // List tenant resources
+        let req = make_request(
+            Method::POST,
+            "/v2/email/tenants/resources/list",
+            r#"{"TenantName": "my-tenant"}"#,
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["TenantResources"].as_array().unwrap().len(), 1);
+
+        // List resource tenants
+        let req = make_request(
+            Method::POST,
+            "/v2/email/resources/tenants/list",
+            r#"{"ResourceArn": "arn:aws:ses:us-east-1:123456789012:identity/test@example.com"}"#,
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["ResourceTenants"].as_array().unwrap().len(), 1);
+
+        // Delete resource association
+        let req = make_request(
+            Method::POST,
+            "/v2/email/tenants/resources/delete",
+            r#"{"TenantName": "my-tenant", "ResourceArn": "arn:aws:ses:us-east-1:123456789012:identity/test@example.com"}"#,
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+
+        // Verify association is gone
+        let req = make_request(
+            Method::POST,
+            "/v2/email/tenants/resources/list",
+            r#"{"TenantName": "my-tenant"}"#,
+        );
+        let resp = svc.handle(req).await.unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert!(body["TenantResources"].as_array().unwrap().is_empty());
+
+        // Delete tenant
+        let req = make_request(
+            Method::POST,
+            "/v2/email/tenants/delete",
+            r#"{"TenantName": "my-tenant"}"#,
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+
+        // Verify deleted
+        let req = make_request(
+            Method::POST,
+            "/v2/email/tenants/get",
+            r#"{"TenantName": "my-tenant"}"#,
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_reputation_entity() {
+        let state = make_state();
+        let svc = SesV2Service::new(state);
+
+        // Get default reputation entity (auto-created)
+        let req = make_request(
+            Method::GET,
+            "/v2/email/reputation/entities/RESOURCE/arn%3Aaws%3Ases%3Aus-east-1%3A123456789012%3Aidentity%2Ftest%40example.com",
+            "",
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(
+            body["ReputationEntity"]["SendingStatusAggregate"],
+            "ENABLED"
+        );
+
+        // Update customer managed status
+        let req = make_request(
+            Method::PUT,
+            "/v2/email/reputation/entities/RESOURCE/arn%3Aaws%3Ases%3Aus-east-1%3A123456789012%3Aidentity%2Ftest%40example.com/customer-managed-status",
+            r#"{"SendingStatus": "DISABLED"}"#,
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+
+        // Update policy
+        let req = make_request(
+            Method::PUT,
+            "/v2/email/reputation/entities/RESOURCE/arn%3Aaws%3Ases%3Aus-east-1%3A123456789012%3Aidentity%2Ftest%40example.com/policy",
+            r#"{"ReputationEntityPolicy": "arn:aws:ses:us-east-1:123456789012:policy/my-policy"}"#,
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+
+        // Verify via get
+        let req = make_request(
+            Method::GET,
+            "/v2/email/reputation/entities/RESOURCE/arn%3Aaws%3Ases%3Aus-east-1%3A123456789012%3Aidentity%2Ftest%40example.com",
+            "",
+        );
+        let resp = svc.handle(req).await.unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(
+            body["ReputationEntity"]["CustomerManagedStatus"]["SendingStatus"],
+            "DISABLED"
+        );
+
+        // List reputation entities
+        let req = make_request(Method::POST, "/v2/email/reputation/entities", "{}");
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["ReputationEntities"].as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_batch_get_metric_data() {
+        let state = make_state();
+        let svc = SesV2Service::new(state);
+
+        let req = make_request(
+            Method::POST,
+            "/v2/email/metrics/batch",
+            r#"{
+                "Queries": [
+                    {
+                        "Id": "q1",
+                        "Namespace": "VDM",
+                        "Metric": "SEND",
+                        "StartDate": "2024-01-01T00:00:00Z",
+                        "EndDate": "2024-01-02T00:00:00Z"
+                    }
+                ]
+            }"#,
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["Results"].as_array().unwrap().len(), 1);
+        assert_eq!(body["Results"][0]["Id"], "q1");
+        assert!(body["Errors"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_duplicate_tenant() {
+        let state = make_state();
+        let svc = SesV2Service::new(state);
+
+        let req = make_request(
+            Method::POST,
+            "/v2/email/tenants",
+            r#"{"TenantName": "dup"}"#,
+        );
+        svc.handle(req).await.unwrap();
+
+        let req = make_request(
+            Method::POST,
+            "/v2/email/tenants",
+            r#"{"TenantName": "dup"}"#,
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::CONFLICT);
     }
 }
