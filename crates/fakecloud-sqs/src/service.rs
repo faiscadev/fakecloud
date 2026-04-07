@@ -890,6 +890,7 @@ impl SqsService {
     }
 
     fn send_message(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        // --- Parse and validate request body WITHOUT holding any lock ---
         let body = parse_body(req);
         let queue_url = body["QueueUrl"]
             .as_str()
@@ -906,124 +907,21 @@ impl SqsService {
             .map(|s| s.to_string());
 
         let message_attributes = parse_message_attributes(&body);
-
-        // Validate message attributes
         validate_message_attributes(&message_attributes)?;
-
-        // Parse MessageSystemAttributes (e.g., AWSTraceHeader)
         let system_attributes = parse_message_system_attributes(&body);
 
-        let mut state = self.state.write();
-        let resolved_url = resolve_queue_url(&queue_url, &state).ok_or_else(queue_not_found)?;
-        let queue = state
-            .queues
-            .get_mut(&resolved_url)
-            .ok_or_else(queue_not_found)?;
-
-        // FIFO delay validation - FIFO queues don't support per-message delays
-        if queue.is_fifo {
-            let delay = val_as_i64(&body["DelaySeconds"]).unwrap_or(0);
-            if delay != 0 {
-                return Err(AwsServiceError::aws_error(
-                    StatusCode::BAD_REQUEST,
-                    "InvalidParameterValue",
-                    format!("Value {} for parameter DelaySeconds is invalid. Reason: The request include parameter that is not valid for this queue type.", delay),
-                ));
-            }
-        }
-
-        // FIFO validations
-        if queue.is_fifo {
-            if message_group_id.is_none() {
-                return Err(AwsServiceError::aws_error(
-                    StatusCode::BAD_REQUEST,
-                    "MissingParameter",
-                    "The request must contain the parameter MessageGroupId.",
-                ));
-            }
-            if message_dedup_id.is_none()
-                && queue
-                    .attributes
-                    .get("ContentBasedDeduplication")
-                    .map(|v| v.as_str())
-                    != Some("true")
-            {
-                return Err(AwsServiceError::aws_error(
-                    StatusCode::BAD_REQUEST,
-                    "InvalidParameterValue",
-                    "The queue should either have ContentBasedDeduplication enabled or MessageDeduplicationId provided explicitly",
-                ));
-            }
-        }
-
-        // FIFO dedup - use content-based dedup if no explicit ID
-        let effective_dedup_id = if queue.is_fifo {
-            message_dedup_id.clone().or_else(|| {
-                if queue
-                    .attributes
-                    .get("ContentBasedDeduplication")
-                    .map(|v| v.as_str())
-                    == Some("true")
-                {
-                    // Use SHA-256 of message body as dedup ID
-                    Some(sha256_hex(&message_body))
-                } else {
-                    None
-                }
-            })
-        } else {
+        // Pre-compute hashes outside the lock to avoid holding it during CPU work
+        let md5_of_body = md5_hex(&message_body);
+        let md5_of_attrs = if message_attributes.is_empty() {
             None
+        } else {
+            Some(md5_of_message_attributes(&message_attributes))
         };
+        let sha256_body = sha256_hex(&message_body);
 
-        if queue.is_fifo {
-            if let Some(ref dedup_id) = effective_dedup_id {
-                let now = Utc::now();
-                queue.dedup_cache.retain(|_, expiry| *expiry > now);
-                if queue.dedup_cache.contains_key(dedup_id) {
-                    let msg_id = uuid::Uuid::new_v4().to_string();
-                    let seq = queue.next_sequence_number;
-                    queue.next_sequence_number += 1;
-                    let mut resp = json!({
-                        "MessageId": msg_id,
-                        "MD5OfMessageBody": md5_hex(&message_body),
-                        "SequenceNumber": seq.to_string(),
-                    });
-                    if !message_attributes.is_empty() {
-                        resp["MD5OfMessageAttributes"] =
-                            json!(md5_of_message_attributes(&message_attributes));
-                    }
-                    return Ok(sqs_response(
-                        "SendMessage",
-                        resp,
-                        &req.request_id,
-                        req.is_query_protocol,
-                    ));
-                }
-                queue
-                    .dedup_cache
-                    .insert(dedup_id.clone(), now + chrono::Duration::minutes(5));
-            }
-        }
-
-        // MaximumMessageSize validation
-        let max_message_size: usize = queue
-            .attributes
-            .get("MaximumMessageSize")
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(262144);
-        if message_body.len() > max_message_size {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "InvalidParameterValue",
-                format!(
-                    "One or more parameters are invalid. Reason: Message must be shorter than {} bytes.",
-                    max_message_size
-                ),
-            ));
-        }
-
-        // Validate delay seconds (0–900 inclusive)
-        if let Some(d) = val_as_i64(&body["DelaySeconds"]) {
+        // Validate delay seconds range before acquiring lock
+        let raw_delay = val_as_i64(&body["DelaySeconds"]);
+        if let Some(d) = raw_delay {
             if !(0..=900).contains(&d) {
                 return Err(AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
@@ -1033,54 +931,163 @@ impl SqsService {
             }
         }
 
-        let delay: i64 = val_as_i64(&body["DelaySeconds"])
-            .or_else(|| {
-                queue
-                    .attributes
-                    .get("DelaySeconds")
-                    .and_then(|s| s.parse().ok())
-            })
-            .unwrap_or(0);
-        let now = Utc::now();
-        let visible_at = if delay > 0 {
-            Some(now + chrono::Duration::seconds(delay))
-        } else {
-            None
-        };
+        let request_id = req.request_id.clone();
+        let is_query = req.is_query_protocol;
 
-        let sequence_number = if queue.is_fifo {
-            let seq = queue.next_sequence_number;
-            queue.next_sequence_number += 1;
-            Some(seq.to_string())
-        } else {
-            None
-        };
+        // --- Acquire write lock ONLY for queue validation + mutation ---
+        let (message_id, sequence_number) = {
+            let mut state = self.state.write();
+            let resolved_url =
+                resolve_queue_url(&queue_url, &state).ok_or_else(queue_not_found)?;
+            let queue = state
+                .queues
+                .get_mut(&resolved_url)
+                .ok_or_else(queue_not_found)?;
 
-        let md5_of_attrs = if message_attributes.is_empty() {
-            None
-        } else {
-            Some(md5_of_message_attributes(&message_attributes))
-        };
+            // FIFO delay validation
+            if queue.is_fifo {
+                let delay = raw_delay.unwrap_or(0);
+                if delay != 0 {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "InvalidParameterValue",
+                        format!("Value {} for parameter DelaySeconds is invalid. Reason: The request include parameter that is not valid for this queue type.", delay),
+                    ));
+                }
+            }
 
-        let msg = SqsMessage {
-            message_id: uuid::Uuid::new_v4().to_string(),
-            receipt_handle: None,
-            md5_of_body: md5_hex(&message_body),
-            body: message_body,
-            sent_timestamp: now.timestamp_millis(),
-            attributes: system_attributes,
-            message_attributes,
-            visible_at,
-            receive_count: 0,
-            message_group_id,
-            message_dedup_id: effective_dedup_id,
-            created_at: now,
-            sequence_number: sequence_number.clone(),
+            // FIFO validations
+            if queue.is_fifo {
+                if message_group_id.is_none() {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "MissingParameter",
+                        "The request must contain the parameter MessageGroupId.",
+                    ));
+                }
+                if message_dedup_id.is_none()
+                    && queue
+                        .attributes
+                        .get("ContentBasedDeduplication")
+                        .map(|v| v.as_str())
+                        != Some("true")
+                {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "InvalidParameterValue",
+                        "The queue should either have ContentBasedDeduplication enabled or MessageDeduplicationId provided explicitly",
+                    ));
+                }
+            }
+
+            // FIFO dedup
+            let effective_dedup_id = if queue.is_fifo {
+                message_dedup_id.clone().or_else(|| {
+                    if queue
+                        .attributes
+                        .get("ContentBasedDeduplication")
+                        .map(|v| v.as_str())
+                        == Some("true")
+                    {
+                        Some(sha256_body.clone())
+                    } else {
+                        None
+                    }
+                })
+            } else {
+                None
+            };
+
+            if queue.is_fifo {
+                if let Some(ref dedup_id) = effective_dedup_id {
+                    let now = Utc::now();
+                    queue.dedup_cache.retain(|_, expiry| *expiry > now);
+                    if queue.dedup_cache.contains_key(dedup_id) {
+                        let msg_id = uuid::Uuid::new_v4().to_string();
+                        let seq = queue.next_sequence_number;
+                        queue.next_sequence_number += 1;
+                        let mut resp = json!({
+                            "MessageId": msg_id,
+                            "MD5OfMessageBody": &md5_of_body,
+                            "SequenceNumber": seq.to_string(),
+                        });
+                        if let Some(ref md5) = md5_of_attrs {
+                            resp["MD5OfMessageAttributes"] = json!(md5);
+                        }
+                        return Ok(sqs_response("SendMessage", resp, &request_id, is_query));
+                    }
+                    queue
+                        .dedup_cache
+                        .insert(dedup_id.clone(), now + chrono::Duration::minutes(5));
+                }
+            }
+
+            // MaximumMessageSize validation
+            let max_message_size: usize = queue
+                .attributes
+                .get("MaximumMessageSize")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(262144);
+            if message_body.len() > max_message_size {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterValue",
+                    format!(
+                        "One or more parameters are invalid. Reason: Message must be shorter than {} bytes.",
+                        max_message_size
+                    ),
+                ));
+            }
+
+            let delay: i64 = raw_delay
+                .or_else(|| {
+                    queue
+                        .attributes
+                        .get("DelaySeconds")
+                        .and_then(|s| s.parse().ok())
+                })
+                .unwrap_or(0);
+            let now = Utc::now();
+            let visible_at = if delay > 0 {
+                Some(now + chrono::Duration::seconds(delay))
+            } else {
+                None
+            };
+
+            let sequence_number = if queue.is_fifo {
+                let seq = queue.next_sequence_number;
+                queue.next_sequence_number += 1;
+                Some(seq.to_string())
+            } else {
+                None
+            };
+
+            let msg = SqsMessage {
+                message_id: uuid::Uuid::new_v4().to_string(),
+                receipt_handle: None,
+                md5_of_body: md5_of_body.clone(),
+                body: message_body,
+                sent_timestamp: now.timestamp_millis(),
+                attributes: system_attributes,
+                message_attributes,
+                visible_at,
+                receive_count: 0,
+                message_group_id,
+                message_dedup_id: effective_dedup_id,
+                created_at: now,
+                sequence_number: sequence_number.clone(),
+            };
+
+            let message_id = msg.message_id.clone();
+            queue.messages.push_back(msg);
+
+            (message_id, sequence_number)
         };
+        // --- Write lock released, build response ---
 
         let mut resp = json!({
-            "MessageId": msg.message_id,
-            "MD5OfMessageBody": msg.md5_of_body,
+            "MessageId": message_id,
+            "MD5OfMessageBody": md5_of_body,
         });
         if let Some(seq) = &sequence_number {
             resp["SequenceNumber"] = json!(seq);
@@ -1088,14 +1095,8 @@ impl SqsService {
         if let Some(md5) = &md5_of_attrs {
             resp["MD5OfMessageAttributes"] = json!(md5);
         }
-        queue.messages.push_back(msg);
 
-        Ok(sqs_response(
-            "SendMessage",
-            resp,
-            &req.request_id,
-            req.is_query_protocol,
-        ))
+        Ok(sqs_response("SendMessage", resp, &request_id, is_query))
     }
 
     async fn receive_message(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
