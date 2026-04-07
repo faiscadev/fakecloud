@@ -137,8 +137,8 @@ impl SsmService {
 
 pub(super) fn get_default_service_setting(setting_id: &str) -> String {
     match setting_id {
-        s if s.contains("parameter-store") && s.contains("throughput") => "standard".to_string(),
         s if s.contains("parameter-store") && s.contains("high-throughput") => "false".to_string(),
+        s if s.contains("parameter-store") && s.contains("throughput") => "standard".to_string(),
         s if s.contains("session-manager") => "".to_string(),
         s if s.contains("managed-instance") => "".to_string(),
         _ => "".to_string(),

@@ -97,6 +97,16 @@ impl SesV2Service {
         }
     }
 
+    fn parse_body(req: &AwsRequest) -> Result<Value, AwsServiceError> {
+        serde_json::from_slice(&req.body).map_err(|_| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "BadRequestException",
+                "Invalid JSON in request body",
+            )
+        })
+    }
+
     fn json_error(status: StatusCode, code: &str, message: &str) -> AwsResponse {
         let body = json!({
             "__type": code,
@@ -122,7 +132,7 @@ impl SesV2Service {
     }
 
     fn create_email_identity(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
+        let body: Value = Self::parse_body(req)?;
         let identity_name = match body["EmailIdentity"].as_str() {
             Some(name) => name.to_string(),
             None => {
@@ -249,7 +259,7 @@ impl SesV2Service {
     }
 
     fn create_configuration_set(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
+        let body: Value = Self::parse_body(req)?;
         let name = match body["ConfigurationSetName"].as_str() {
             Some(n) => n.to_string(),
             None => {
@@ -337,7 +347,7 @@ impl SesV2Service {
     }
 
     fn create_email_template(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
+        let body: Value = Self::parse_body(req)?;
         let template_name = match body["TemplateName"].as_str() {
             Some(n) => n.to_string(),
             None => {
@@ -427,7 +437,7 @@ impl SesV2Service {
         name: &str,
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
+        let body: Value = Self::parse_body(req)?;
         let mut state = self.state.write();
 
         let template = match state.templates.get_mut(name) {
@@ -469,7 +479,7 @@ impl SesV2Service {
     }
 
     fn send_email(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
+        let body: Value = Self::parse_body(req)?;
 
         let from = body["FromEmailAddress"].as_str().unwrap_or("").to_string();
 
@@ -529,7 +539,7 @@ impl SesV2Service {
     }
 
     fn send_bulk_email(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
+        let body: Value = Self::parse_body(req)?;
 
         let from = body["FromEmailAddress"].as_str().unwrap_or("").to_string();
 
