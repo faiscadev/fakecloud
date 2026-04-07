@@ -7,8 +7,9 @@ use std::collections::HashMap;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use crate::state::{
-    ConfigurationSet, Contact, ContactList, EmailIdentity, EmailTemplate, EventDestination,
-    SentEmail, SharedSesState, SuppressedDestination, Topic, TopicPreference,
+    ConfigurationSet, Contact, ContactList, CustomVerificationEmailTemplate, EmailIdentity,
+    EmailTemplate, EventDestination, SentEmail, SharedSesState, SuppressedDestination, Topic,
+    TopicPreference,
 };
 
 pub struct SesV2Service {
@@ -63,6 +64,25 @@ impl SesV2Service {
     ///   GET    /v2/email/identities/{id}/policies         -> GetEmailIdentityPolicies
     ///   PUT    /v2/email/identities/{id}/policies/{policy} -> UpdateEmailIdentityPolicy
     ///   DELETE /v2/email/identities/{id}/policies/{policy} -> DeleteEmailIdentityPolicy
+    ///   PUT    /v2/email/identities/{id}/dkim              -> PutEmailIdentityDkimAttributes
+    ///   PUT    /v2/email/identities/{id}/dkim/signing      -> PutEmailIdentityDkimSigningAttributes
+    ///   PUT    /v2/email/identities/{id}/feedback          -> PutEmailIdentityFeedbackAttributes
+    ///   PUT    /v2/email/identities/{id}/mail-from         -> PutEmailIdentityMailFromAttributes
+    ///   PUT    /v2/email/identities/{id}/configuration-set -> PutEmailIdentityConfigurationSetAttributes
+    ///   PUT    /v2/email/configuration-sets/{name}/sending             -> PutConfigurationSetSendingOptions
+    ///   PUT    /v2/email/configuration-sets/{name}/delivery-options    -> PutConfigurationSetDeliveryOptions
+    ///   PUT    /v2/email/configuration-sets/{name}/tracking-options    -> PutConfigurationSetTrackingOptions
+    ///   PUT    /v2/email/configuration-sets/{name}/suppression-options -> PutConfigurationSetSuppressionOptions
+    ///   PUT    /v2/email/configuration-sets/{name}/reputation-options  -> PutConfigurationSetReputationOptions
+    ///   PUT    /v2/email/configuration-sets/{name}/vdm-options         -> PutConfigurationSetVdmOptions
+    ///   PUT    /v2/email/configuration-sets/{name}/archiving-options   -> PutConfigurationSetArchivingOptions
+    ///   POST   /v2/email/custom-verification-email-templates           -> CreateCustomVerificationEmailTemplate
+    ///   GET    /v2/email/custom-verification-email-templates            -> ListCustomVerificationEmailTemplates
+    ///   GET    /v2/email/custom-verification-email-templates/{name}     -> GetCustomVerificationEmailTemplate
+    ///   PUT    /v2/email/custom-verification-email-templates/{name}     -> UpdateCustomVerificationEmailTemplate
+    ///   DELETE /v2/email/custom-verification-email-templates/{name}     -> DeleteCustomVerificationEmailTemplate
+    ///   POST   /v2/email/outbound-custom-verification-emails            -> SendCustomVerificationEmail
+    ///   POST   /v2/email/templates/{name}/render                        -> TestRenderEmailTemplate
     fn resolve_action(req: &AwsRequest) -> Option<(&str, Option<String>, Option<String>)> {
         let segs = &req.path_segments;
 
@@ -250,6 +270,97 @@ impl SesV2Service {
                 Some(decode(&segs[5])),
             )),
 
+            // /v2/email/identities/{id}/dkim/signing (6 segments, must come before dkim at 5)
+            (Method::PUT, 6)
+                if segs[2] == "identities" && segs[4] == "dkim" && segs[5] == "signing" =>
+            {
+                Some(("PutEmailIdentityDkimSigningAttributes", resource, None))
+            }
+
+            // /v2/email/identities/{id}/dkim
+            (Method::PUT, 5) if segs[2] == "identities" && segs[4] == "dkim" => {
+                Some(("PutEmailIdentityDkimAttributes", resource, None))
+            }
+            // /v2/email/identities/{id}/feedback
+            (Method::PUT, 5) if segs[2] == "identities" && segs[4] == "feedback" => {
+                Some(("PutEmailIdentityFeedbackAttributes", resource, None))
+            }
+            // /v2/email/identities/{id}/mail-from
+            (Method::PUT, 5) if segs[2] == "identities" && segs[4] == "mail-from" => {
+                Some(("PutEmailIdentityMailFromAttributes", resource, None))
+            }
+            // /v2/email/identities/{id}/configuration-set
+            (Method::PUT, 5) if segs[2] == "identities" && segs[4] == "configuration-set" => {
+                Some(("PutEmailIdentityConfigurationSetAttributes", resource, None))
+            }
+
+            // /v2/email/configuration-sets/{name}/sending
+            (Method::PUT, 5) if segs[2] == "configuration-sets" && segs[4] == "sending" => {
+                Some(("PutConfigurationSetSendingOptions", resource, None))
+            }
+            // /v2/email/configuration-sets/{name}/delivery-options
+            (Method::PUT, 5)
+                if segs[2] == "configuration-sets" && segs[4] == "delivery-options" =>
+            {
+                Some(("PutConfigurationSetDeliveryOptions", resource, None))
+            }
+            // /v2/email/configuration-sets/{name}/tracking-options
+            (Method::PUT, 5)
+                if segs[2] == "configuration-sets" && segs[4] == "tracking-options" =>
+            {
+                Some(("PutConfigurationSetTrackingOptions", resource, None))
+            }
+            // /v2/email/configuration-sets/{name}/suppression-options
+            (Method::PUT, 5)
+                if segs[2] == "configuration-sets" && segs[4] == "suppression-options" =>
+            {
+                Some(("PutConfigurationSetSuppressionOptions", resource, None))
+            }
+            // /v2/email/configuration-sets/{name}/reputation-options
+            (Method::PUT, 5)
+                if segs[2] == "configuration-sets" && segs[4] == "reputation-options" =>
+            {
+                Some(("PutConfigurationSetReputationOptions", resource, None))
+            }
+            // /v2/email/configuration-sets/{name}/vdm-options
+            (Method::PUT, 5) if segs[2] == "configuration-sets" && segs[4] == "vdm-options" => {
+                Some(("PutConfigurationSetVdmOptions", resource, None))
+            }
+            // /v2/email/configuration-sets/{name}/archiving-options
+            (Method::PUT, 5)
+                if segs[2] == "configuration-sets" && segs[4] == "archiving-options" =>
+            {
+                Some(("PutConfigurationSetArchivingOptions", resource, None))
+            }
+
+            // /v2/email/custom-verification-email-templates
+            (Method::POST, 3) if segs[2] == "custom-verification-email-templates" => {
+                Some(("CreateCustomVerificationEmailTemplate", None, None))
+            }
+            (Method::GET, 3) if segs[2] == "custom-verification-email-templates" => {
+                Some(("ListCustomVerificationEmailTemplates", None, None))
+            }
+            // /v2/email/custom-verification-email-templates/{name}
+            (Method::GET, 4) if segs[2] == "custom-verification-email-templates" => {
+                Some(("GetCustomVerificationEmailTemplate", resource, None))
+            }
+            (Method::PUT, 4) if segs[2] == "custom-verification-email-templates" => {
+                Some(("UpdateCustomVerificationEmailTemplate", resource, None))
+            }
+            (Method::DELETE, 4) if segs[2] == "custom-verification-email-templates" => {
+                Some(("DeleteCustomVerificationEmailTemplate", resource, None))
+            }
+
+            // /v2/email/outbound-custom-verification-emails
+            (Method::POST, 3) if segs[2] == "outbound-custom-verification-emails" => {
+                Some(("SendCustomVerificationEmail", None, None))
+            }
+
+            // /v2/email/templates/{name}/render
+            (Method::POST, 5) if segs[2] == "templates" && segs[4] == "render" => {
+                Some(("TestRenderEmailTemplate", resource, None))
+            }
+
             _ => None,
         }
     }
@@ -324,6 +435,15 @@ impl SesV2Service {
             identity_type: identity_type.to_string(),
             verified: true,
             created_at: Utc::now(),
+            dkim_signing_enabled: true,
+            dkim_signing_attributes_origin: "AWS_SES".to_string(),
+            dkim_domain_signing_private_key: None,
+            dkim_domain_signing_selector: None,
+            dkim_next_signing_key_length: None,
+            email_forwarding_enabled: true,
+            mail_from_domain: None,
+            mail_from_behavior_on_mx_failure: "USE_DEFAULT_VALUE".to_string(),
+            configuration_set_name: None,
         };
 
         state.identities.insert(identity_name, identity);
@@ -368,7 +488,7 @@ impl SesV2Service {
 
     fn get_email_identity(&self, identity_name: &str) -> Result<AwsResponse, AwsServiceError> {
         let state = self.state.read();
-        let _identity = match state.identities.get(identity_name) {
+        let identity = match state.identities.get(identity_name) {
             Some(id) => id,
             None => {
                 return Ok(Self::json_error(
@@ -379,13 +499,21 @@ impl SesV2Service {
             }
         };
 
-        let response = json!({
-            "IdentityType": _identity.identity_type,
+        let mail_from_domain = identity.mail_from_domain.as_deref().unwrap_or("");
+        let mail_from_status = if mail_from_domain.is_empty() {
+            "FAILED"
+        } else {
+            "SUCCESS"
+        };
+
+        let mut response = json!({
+            "IdentityType": identity.identity_type,
             "VerifiedForSendingStatus": true,
-            "FeedbackForwardingStatus": true,
+            "FeedbackForwardingStatus": identity.email_forwarding_enabled,
             "DkimAttributes": {
-                "SigningEnabled": true,
+                "SigningEnabled": identity.dkim_signing_enabled,
                 "Status": "SUCCESS",
+                "SigningAttributesOrigin": identity.dkim_signing_attributes_origin,
                 "Tokens": [
                     "token1",
                     "token2",
@@ -393,12 +521,16 @@ impl SesV2Service {
                 ],
             },
             "MailFromAttributes": {
-                "MailFromDomain": "",
-                "MailFromDomainStatus": "FAILED",
-                "BehaviorOnMxFailure": "USE_DEFAULT_VALUE",
+                "MailFromDomain": mail_from_domain,
+                "MailFromDomainStatus": mail_from_status,
+                "BehaviorOnMxFailure": identity.mail_from_behavior_on_mx_failure,
             },
             "Tags": [],
         });
+
+        if let Some(ref cs) = identity.configuration_set_name {
+            response["ConfigurationSetName"] = json!(cs);
+        }
 
         Ok(AwsResponse::json(StatusCode::OK, response.to_string()))
     }
@@ -454,9 +586,21 @@ impl SesV2Service {
             ));
         }
 
-        state
-            .configuration_sets
-            .insert(name.clone(), ConfigurationSet { name });
+        state.configuration_sets.insert(
+            name.clone(),
+            ConfigurationSet {
+                name,
+                sending_enabled: true,
+                tls_policy: "OPTIONAL".to_string(),
+                sending_pool_name: None,
+                custom_redirect_domain: None,
+                https_policy: None,
+                suppressed_reasons: Vec::new(),
+                reputation_metrics_enabled: false,
+                vdm_options: None,
+                archive_arn: None,
+            },
+        );
 
         Ok(AwsResponse::json(StatusCode::OK, "{}"))
     }
@@ -479,28 +623,60 @@ impl SesV2Service {
     fn get_configuration_set(&self, name: &str) -> Result<AwsResponse, AwsServiceError> {
         let state = self.state.read();
 
-        if !state.configuration_sets.contains_key(name) {
-            return Ok(Self::json_error(
-                StatusCode::NOT_FOUND,
-                "NotFoundException",
-                &format!("Configuration set {} does not exist", name),
-            ));
+        let cs = match state.configuration_sets.get(name) {
+            Some(cs) => cs,
+            None => {
+                return Ok(Self::json_error(
+                    StatusCode::NOT_FOUND,
+                    "NotFoundException",
+                    &format!("Configuration set {} does not exist", name),
+                ));
+            }
+        };
+
+        let mut delivery_options = json!({
+            "TlsPolicy": cs.tls_policy,
+        });
+        if let Some(ref pool) = cs.sending_pool_name {
+            delivery_options["SendingPoolName"] = json!(pool);
         }
 
-        let response = json!({
+        let mut tracking_options = json!({});
+        if let Some(ref domain) = cs.custom_redirect_domain {
+            tracking_options["CustomRedirectDomain"] = json!(domain);
+        }
+        if let Some(ref policy) = cs.https_policy {
+            tracking_options["HttpsPolicy"] = json!(policy);
+        }
+
+        let mut response = json!({
             "ConfigurationSetName": name,
-            "DeliveryOptions": {
-                "TlsPolicy": "OPTIONAL",
-            },
+            "DeliveryOptions": delivery_options,
             "ReputationOptions": {
-                "ReputationMetricsEnabled": false,
+                "ReputationMetricsEnabled": cs.reputation_metrics_enabled,
             },
             "SendingOptions": {
-                "SendingEnabled": true,
+                "SendingEnabled": cs.sending_enabled,
             },
             "Tags": [],
-            "TrackingOptions": {},
+            "TrackingOptions": tracking_options,
         });
+
+        if !cs.suppressed_reasons.is_empty() {
+            response["SuppressionOptions"] = json!({
+                "SuppressedReasons": cs.suppressed_reasons,
+            });
+        }
+
+        if let Some(ref vdm) = cs.vdm_options {
+            response["VdmOptions"] = vdm.clone();
+        }
+
+        if let Some(ref arn) = cs.archive_arn {
+            response["ArchivingOptions"] = json!({
+                "ArchiveArn": arn,
+            });
+        }
 
         Ok(AwsResponse::json(StatusCode::OK, response.to_string()))
     }
@@ -1714,6 +1890,694 @@ impl SesV2Service {
         Ok(AwsResponse::json(StatusCode::OK, "{}"))
     }
 
+    // --- Identity Attribute operations ---
+
+    fn put_email_identity_dkim_attributes(
+        &self,
+        identity_name: &str,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body: Value = Self::parse_body(req)?;
+        let mut state = self.state.write();
+
+        let identity = match state.identities.get_mut(identity_name) {
+            Some(id) => id,
+            None => {
+                return Ok(Self::json_error(
+                    StatusCode::NOT_FOUND,
+                    "NotFoundException",
+                    &format!("Identity {} does not exist", identity_name),
+                ));
+            }
+        };
+
+        if let Some(enabled) = body["SigningEnabled"].as_bool() {
+            identity.dkim_signing_enabled = enabled;
+        }
+
+        Ok(AwsResponse::json(StatusCode::OK, "{}"))
+    }
+
+    fn put_email_identity_dkim_signing_attributes(
+        &self,
+        identity_name: &str,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body: Value = Self::parse_body(req)?;
+        let mut state = self.state.write();
+
+        let identity = match state.identities.get_mut(identity_name) {
+            Some(id) => id,
+            None => {
+                return Ok(Self::json_error(
+                    StatusCode::NOT_FOUND,
+                    "NotFoundException",
+                    &format!("Identity {} does not exist", identity_name),
+                ));
+            }
+        };
+
+        if let Some(origin) = body["SigningAttributesOrigin"].as_str() {
+            identity.dkim_signing_attributes_origin = origin.to_string();
+        }
+
+        if let Some(attrs) = body.get("SigningAttributes") {
+            if let Some(key) = attrs["DomainSigningPrivateKey"].as_str() {
+                identity.dkim_domain_signing_private_key = Some(key.to_string());
+            }
+            if let Some(selector) = attrs["DomainSigningSelector"].as_str() {
+                identity.dkim_domain_signing_selector = Some(selector.to_string());
+            }
+            if let Some(length) = attrs["NextSigningKeyLength"].as_str() {
+                identity.dkim_next_signing_key_length = Some(length.to_string());
+            }
+        }
+
+        let response = json!({
+            "DkimStatus": "SUCCESS",
+            "DkimTokens": ["token1", "token2", "token3"],
+        });
+
+        Ok(AwsResponse::json(StatusCode::OK, response.to_string()))
+    }
+
+    fn put_email_identity_feedback_attributes(
+        &self,
+        identity_name: &str,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body: Value = Self::parse_body(req)?;
+        let mut state = self.state.write();
+
+        let identity = match state.identities.get_mut(identity_name) {
+            Some(id) => id,
+            None => {
+                return Ok(Self::json_error(
+                    StatusCode::NOT_FOUND,
+                    "NotFoundException",
+                    &format!("Identity {} does not exist", identity_name),
+                ));
+            }
+        };
+
+        if let Some(enabled) = body["EmailForwardingEnabled"].as_bool() {
+            identity.email_forwarding_enabled = enabled;
+        }
+
+        Ok(AwsResponse::json(StatusCode::OK, "{}"))
+    }
+
+    fn put_email_identity_mail_from_attributes(
+        &self,
+        identity_name: &str,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body: Value = Self::parse_body(req)?;
+        let mut state = self.state.write();
+
+        let identity = match state.identities.get_mut(identity_name) {
+            Some(id) => id,
+            None => {
+                return Ok(Self::json_error(
+                    StatusCode::NOT_FOUND,
+                    "NotFoundException",
+                    &format!("Identity {} does not exist", identity_name),
+                ));
+            }
+        };
+
+        if let Some(domain) = body["MailFromDomain"].as_str() {
+            identity.mail_from_domain = Some(domain.to_string());
+        }
+        if let Some(behavior) = body["BehaviorOnMxFailure"].as_str() {
+            identity.mail_from_behavior_on_mx_failure = behavior.to_string();
+        }
+
+        Ok(AwsResponse::json(StatusCode::OK, "{}"))
+    }
+
+    fn put_email_identity_configuration_set_attributes(
+        &self,
+        identity_name: &str,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body: Value = Self::parse_body(req)?;
+        let mut state = self.state.write();
+
+        let identity = match state.identities.get_mut(identity_name) {
+            Some(id) => id,
+            None => {
+                return Ok(Self::json_error(
+                    StatusCode::NOT_FOUND,
+                    "NotFoundException",
+                    &format!("Identity {} does not exist", identity_name),
+                ));
+            }
+        };
+
+        identity.configuration_set_name =
+            body["ConfigurationSetName"].as_str().map(|s| s.to_string());
+
+        Ok(AwsResponse::json(StatusCode::OK, "{}"))
+    }
+
+    // --- Configuration Set Options ---
+
+    fn put_configuration_set_sending_options(
+        &self,
+        name: &str,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body: Value = Self::parse_body(req)?;
+        let mut state = self.state.write();
+
+        let cs = match state.configuration_sets.get_mut(name) {
+            Some(cs) => cs,
+            None => {
+                return Ok(Self::json_error(
+                    StatusCode::NOT_FOUND,
+                    "NotFoundException",
+                    &format!("Configuration set {} does not exist", name),
+                ));
+            }
+        };
+
+        if let Some(enabled) = body["SendingEnabled"].as_bool() {
+            cs.sending_enabled = enabled;
+        }
+
+        Ok(AwsResponse::json(StatusCode::OK, "{}"))
+    }
+
+    fn put_configuration_set_delivery_options(
+        &self,
+        name: &str,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body: Value = Self::parse_body(req)?;
+        let mut state = self.state.write();
+
+        let cs = match state.configuration_sets.get_mut(name) {
+            Some(cs) => cs,
+            None => {
+                return Ok(Self::json_error(
+                    StatusCode::NOT_FOUND,
+                    "NotFoundException",
+                    &format!("Configuration set {} does not exist", name),
+                ));
+            }
+        };
+
+        if let Some(policy) = body["TlsPolicy"].as_str() {
+            cs.tls_policy = policy.to_string();
+        }
+        if let Some(pool) = body["SendingPoolName"].as_str() {
+            cs.sending_pool_name = Some(pool.to_string());
+        }
+
+        Ok(AwsResponse::json(StatusCode::OK, "{}"))
+    }
+
+    fn put_configuration_set_tracking_options(
+        &self,
+        name: &str,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body: Value = Self::parse_body(req)?;
+        let mut state = self.state.write();
+
+        let cs = match state.configuration_sets.get_mut(name) {
+            Some(cs) => cs,
+            None => {
+                return Ok(Self::json_error(
+                    StatusCode::NOT_FOUND,
+                    "NotFoundException",
+                    &format!("Configuration set {} does not exist", name),
+                ));
+            }
+        };
+
+        if let Some(domain) = body["CustomRedirectDomain"].as_str() {
+            cs.custom_redirect_domain = Some(domain.to_string());
+        }
+        if let Some(policy) = body["HttpsPolicy"].as_str() {
+            cs.https_policy = Some(policy.to_string());
+        }
+
+        Ok(AwsResponse::json(StatusCode::OK, "{}"))
+    }
+
+    fn put_configuration_set_suppression_options(
+        &self,
+        name: &str,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body: Value = Self::parse_body(req)?;
+        let mut state = self.state.write();
+
+        let cs = match state.configuration_sets.get_mut(name) {
+            Some(cs) => cs,
+            None => {
+                return Ok(Self::json_error(
+                    StatusCode::NOT_FOUND,
+                    "NotFoundException",
+                    &format!("Configuration set {} does not exist", name),
+                ));
+            }
+        };
+
+        cs.suppressed_reasons = extract_string_array(&body["SuppressedReasons"]);
+
+        Ok(AwsResponse::json(StatusCode::OK, "{}"))
+    }
+
+    fn put_configuration_set_reputation_options(
+        &self,
+        name: &str,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body: Value = Self::parse_body(req)?;
+        let mut state = self.state.write();
+
+        let cs = match state.configuration_sets.get_mut(name) {
+            Some(cs) => cs,
+            None => {
+                return Ok(Self::json_error(
+                    StatusCode::NOT_FOUND,
+                    "NotFoundException",
+                    &format!("Configuration set {} does not exist", name),
+                ));
+            }
+        };
+
+        if let Some(enabled) = body["ReputationMetricsEnabled"].as_bool() {
+            cs.reputation_metrics_enabled = enabled;
+        }
+
+        Ok(AwsResponse::json(StatusCode::OK, "{}"))
+    }
+
+    fn put_configuration_set_vdm_options(
+        &self,
+        name: &str,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body: Value = Self::parse_body(req)?;
+        let mut state = self.state.write();
+
+        let cs = match state.configuration_sets.get_mut(name) {
+            Some(cs) => cs,
+            None => {
+                return Ok(Self::json_error(
+                    StatusCode::NOT_FOUND,
+                    "NotFoundException",
+                    &format!("Configuration set {} does not exist", name),
+                ));
+            }
+        };
+
+        cs.vdm_options = Some(body);
+
+        Ok(AwsResponse::json(StatusCode::OK, "{}"))
+    }
+
+    fn put_configuration_set_archiving_options(
+        &self,
+        name: &str,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body: Value = Self::parse_body(req)?;
+        let mut state = self.state.write();
+
+        let cs = match state.configuration_sets.get_mut(name) {
+            Some(cs) => cs,
+            None => {
+                return Ok(Self::json_error(
+                    StatusCode::NOT_FOUND,
+                    "NotFoundException",
+                    &format!("Configuration set {} does not exist", name),
+                ));
+            }
+        };
+
+        cs.archive_arn = body["ArchiveArn"].as_str().map(|s| s.to_string());
+
+        Ok(AwsResponse::json(StatusCode::OK, "{}"))
+    }
+
+    // --- Custom Verification Email Template operations ---
+
+    fn create_custom_verification_email_template(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body: Value = Self::parse_body(req)?;
+
+        let template_name = match body["TemplateName"].as_str() {
+            Some(n) => n.to_string(),
+            None => {
+                return Ok(Self::json_error(
+                    StatusCode::BAD_REQUEST,
+                    "BadRequestException",
+                    "TemplateName is required",
+                ));
+            }
+        };
+
+        let from_email = body["FromEmailAddress"].as_str().unwrap_or("").to_string();
+        let subject = body["TemplateSubject"].as_str().unwrap_or("").to_string();
+        let content = body["TemplateContent"].as_str().unwrap_or("").to_string();
+        let success_url = body["SuccessRedirectionURL"]
+            .as_str()
+            .unwrap_or("")
+            .to_string();
+        let failure_url = body["FailureRedirectionURL"]
+            .as_str()
+            .unwrap_or("")
+            .to_string();
+
+        let mut state = self.state.write();
+
+        if state
+            .custom_verification_email_templates
+            .contains_key(&template_name)
+        {
+            return Ok(Self::json_error(
+                StatusCode::CONFLICT,
+                "AlreadyExistsException",
+                &format!(
+                    "Custom verification email template {} already exists",
+                    template_name
+                ),
+            ));
+        }
+
+        state.custom_verification_email_templates.insert(
+            template_name.clone(),
+            CustomVerificationEmailTemplate {
+                template_name,
+                from_email_address: from_email,
+                template_subject: subject,
+                template_content: content,
+                success_redirection_url: success_url,
+                failure_redirection_url: failure_url,
+                created_at: Utc::now(),
+            },
+        );
+
+        Ok(AwsResponse::json(StatusCode::OK, "{}"))
+    }
+
+    fn get_custom_verification_email_template(
+        &self,
+        name: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let state = self.state.read();
+        let tmpl = match state.custom_verification_email_templates.get(name) {
+            Some(t) => t,
+            None => {
+                return Ok(Self::json_error(
+                    StatusCode::NOT_FOUND,
+                    "NotFoundException",
+                    &format!("Custom verification email template {} does not exist", name),
+                ));
+            }
+        };
+
+        let response = json!({
+            "TemplateName": tmpl.template_name,
+            "FromEmailAddress": tmpl.from_email_address,
+            "TemplateSubject": tmpl.template_subject,
+            "TemplateContent": tmpl.template_content,
+            "SuccessRedirectionURL": tmpl.success_redirection_url,
+            "FailureRedirectionURL": tmpl.failure_redirection_url,
+        });
+
+        Ok(AwsResponse::json(StatusCode::OK, response.to_string()))
+    }
+
+    fn list_custom_verification_email_templates(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let state = self.state.read();
+
+        let page_size: usize = req
+            .query_params
+            .get("PageSize")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(20);
+
+        let mut templates: Vec<&CustomVerificationEmailTemplate> =
+            state.custom_verification_email_templates.values().collect();
+        templates.sort_by(|a, b| a.template_name.cmp(&b.template_name));
+
+        let next_token = req.query_params.get("NextToken");
+        let start_idx = if let Some(token) = next_token {
+            templates
+                .iter()
+                .position(|t| t.template_name == *token)
+                .unwrap_or(0)
+        } else {
+            0
+        };
+
+        let page: Vec<Value> = templates
+            .iter()
+            .skip(start_idx)
+            .take(page_size)
+            .map(|t| {
+                json!({
+                    "TemplateName": t.template_name,
+                    "FromEmailAddress": t.from_email_address,
+                    "TemplateSubject": t.template_subject,
+                    "SuccessRedirectionURL": t.success_redirection_url,
+                    "FailureRedirectionURL": t.failure_redirection_url,
+                })
+            })
+            .collect();
+
+        let mut response = json!({
+            "CustomVerificationEmailTemplates": page,
+        });
+
+        // Set NextToken if there are more results
+        if start_idx + page_size < templates.len() {
+            if let Some(next) = templates.get(start_idx + page_size) {
+                response["NextToken"] = json!(next.template_name);
+            }
+        }
+
+        Ok(AwsResponse::json(StatusCode::OK, response.to_string()))
+    }
+
+    fn update_custom_verification_email_template(
+        &self,
+        name: &str,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body: Value = Self::parse_body(req)?;
+        let mut state = self.state.write();
+
+        let tmpl = match state.custom_verification_email_templates.get_mut(name) {
+            Some(t) => t,
+            None => {
+                return Ok(Self::json_error(
+                    StatusCode::NOT_FOUND,
+                    "NotFoundException",
+                    &format!("Custom verification email template {} does not exist", name),
+                ));
+            }
+        };
+
+        if let Some(from) = body["FromEmailAddress"].as_str() {
+            tmpl.from_email_address = from.to_string();
+        }
+        if let Some(subject) = body["TemplateSubject"].as_str() {
+            tmpl.template_subject = subject.to_string();
+        }
+        if let Some(content) = body["TemplateContent"].as_str() {
+            tmpl.template_content = content.to_string();
+        }
+        if let Some(url) = body["SuccessRedirectionURL"].as_str() {
+            tmpl.success_redirection_url = url.to_string();
+        }
+        if let Some(url) = body["FailureRedirectionURL"].as_str() {
+            tmpl.failure_redirection_url = url.to_string();
+        }
+
+        Ok(AwsResponse::json(StatusCode::OK, "{}"))
+    }
+
+    fn delete_custom_verification_email_template(
+        &self,
+        name: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let mut state = self.state.write();
+
+        if state
+            .custom_verification_email_templates
+            .remove(name)
+            .is_none()
+        {
+            return Ok(Self::json_error(
+                StatusCode::NOT_FOUND,
+                "NotFoundException",
+                &format!("Custom verification email template {} does not exist", name),
+            ));
+        }
+
+        Ok(AwsResponse::json(StatusCode::OK, "{}"))
+    }
+
+    fn send_custom_verification_email(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body: Value = Self::parse_body(req)?;
+
+        let email_address = match body["EmailAddress"].as_str() {
+            Some(e) => e.to_string(),
+            None => {
+                return Ok(Self::json_error(
+                    StatusCode::BAD_REQUEST,
+                    "BadRequestException",
+                    "EmailAddress is required",
+                ));
+            }
+        };
+
+        let template_name = match body["TemplateName"].as_str() {
+            Some(n) => n.to_string(),
+            None => {
+                return Ok(Self::json_error(
+                    StatusCode::BAD_REQUEST,
+                    "BadRequestException",
+                    "TemplateName is required",
+                ));
+            }
+        };
+
+        // Verify template exists
+        {
+            let state = self.state.read();
+            if !state
+                .custom_verification_email_templates
+                .contains_key(&template_name)
+            {
+                return Ok(Self::json_error(
+                    StatusCode::NOT_FOUND,
+                    "NotFoundException",
+                    &format!(
+                        "Custom verification email template {} does not exist",
+                        template_name
+                    ),
+                ));
+            }
+        }
+
+        let message_id = uuid::Uuid::new_v4().to_string();
+
+        // Store as a sent email for introspection
+        let sent = SentEmail {
+            message_id: message_id.clone(),
+            from: String::new(),
+            to: vec![email_address],
+            cc: Vec::new(),
+            bcc: Vec::new(),
+            subject: Some(format!("Custom verification: {}", template_name)),
+            html_body: None,
+            text_body: None,
+            raw_data: None,
+            template_name: Some(template_name),
+            template_data: None,
+            timestamp: Utc::now(),
+        };
+
+        self.state.write().sent_emails.push(sent);
+
+        let response = json!({
+            "MessageId": message_id,
+        });
+
+        Ok(AwsResponse::json(StatusCode::OK, response.to_string()))
+    }
+
+    // --- TestRenderEmailTemplate ---
+
+    fn test_render_email_template(
+        &self,
+        template_name: &str,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body: Value = Self::parse_body(req)?;
+
+        let template_data_str = match body["TemplateData"].as_str() {
+            Some(d) => d.to_string(),
+            None => {
+                return Ok(Self::json_error(
+                    StatusCode::BAD_REQUEST,
+                    "BadRequestException",
+                    "TemplateData is required",
+                ));
+            }
+        };
+
+        let state = self.state.read();
+        let template = match state.templates.get(template_name) {
+            Some(t) => t,
+            None => {
+                return Ok(Self::json_error(
+                    StatusCode::NOT_FOUND,
+                    "NotFoundException",
+                    &format!("Template {} does not exist", template_name),
+                ));
+            }
+        };
+
+        // Parse template data JSON
+        let data: HashMap<String, Value> =
+            serde_json::from_str(&template_data_str).unwrap_or_default();
+
+        let substitute = |text: &str| -> String {
+            let mut result = text.to_string();
+            for (key, value) in &data {
+                let placeholder = format!("{{{{{}}}}}", key);
+                let replacement = match value {
+                    Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                };
+                result = result.replace(&placeholder, &replacement);
+            }
+            result
+        };
+
+        let rendered_subject = template
+            .subject
+            .as_deref()
+            .map(&substitute)
+            .unwrap_or_default();
+        let rendered_html = template.html_body.as_deref().map(&substitute);
+        let rendered_text = template.text_body.as_deref().map(&substitute);
+
+        // Build a simplified MIME message
+        let mut mime = format!("Subject: {}\r\n", rendered_subject);
+        mime.push_str("MIME-Version: 1.0\r\n");
+        mime.push_str("Content-Type: text/html; charset=UTF-8\r\n");
+        mime.push_str("\r\n");
+        if let Some(ref html) = rendered_html {
+            mime.push_str(html);
+        } else if let Some(ref text) = rendered_text {
+            mime.push_str(text);
+        }
+
+        let response = json!({
+            "RenderedTemplate": mime,
+        });
+
+        Ok(AwsResponse::json(StatusCode::OK, response.to_string()))
+    }
+
     fn send_bulk_email(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body: Value = Self::parse_body(req)?;
 
@@ -1962,6 +2826,55 @@ impl fakecloud_core::service::AwsService for SesV2Service {
             "GetEmailIdentityPolicies" => self.get_email_identity_policies(res),
             "UpdateEmailIdentityPolicy" => self.update_email_identity_policy(res, sub, &req),
             "DeleteEmailIdentityPolicy" => self.delete_email_identity_policy(res, sub),
+            "PutEmailIdentityDkimAttributes" => self.put_email_identity_dkim_attributes(res, &req),
+            "PutEmailIdentityDkimSigningAttributes" => {
+                self.put_email_identity_dkim_signing_attributes(res, &req)
+            }
+            "PutEmailIdentityFeedbackAttributes" => {
+                self.put_email_identity_feedback_attributes(res, &req)
+            }
+            "PutEmailIdentityMailFromAttributes" => {
+                self.put_email_identity_mail_from_attributes(res, &req)
+            }
+            "PutEmailIdentityConfigurationSetAttributes" => {
+                self.put_email_identity_configuration_set_attributes(res, &req)
+            }
+            "PutConfigurationSetSendingOptions" => {
+                self.put_configuration_set_sending_options(res, &req)
+            }
+            "PutConfigurationSetDeliveryOptions" => {
+                self.put_configuration_set_delivery_options(res, &req)
+            }
+            "PutConfigurationSetTrackingOptions" => {
+                self.put_configuration_set_tracking_options(res, &req)
+            }
+            "PutConfigurationSetSuppressionOptions" => {
+                self.put_configuration_set_suppression_options(res, &req)
+            }
+            "PutConfigurationSetReputationOptions" => {
+                self.put_configuration_set_reputation_options(res, &req)
+            }
+            "PutConfigurationSetVdmOptions" => self.put_configuration_set_vdm_options(res, &req),
+            "PutConfigurationSetArchivingOptions" => {
+                self.put_configuration_set_archiving_options(res, &req)
+            }
+            "CreateCustomVerificationEmailTemplate" => {
+                self.create_custom_verification_email_template(&req)
+            }
+            "GetCustomVerificationEmailTemplate" => {
+                self.get_custom_verification_email_template(res)
+            }
+            "ListCustomVerificationEmailTemplates" => {
+                self.list_custom_verification_email_templates(&req)
+            }
+            "UpdateCustomVerificationEmailTemplate" => {
+                self.update_custom_verification_email_template(res, &req)
+            }
+            "DeleteCustomVerificationEmailTemplate" => {
+                self.delete_custom_verification_email_template(res)
+            }
+            "SendCustomVerificationEmail" => self.send_custom_verification_email(&req),
+            "TestRenderEmailTemplate" => self.test_render_email_template(res, &req),
             _ => Err(AwsServiceError::action_not_implemented("ses", action)),
         }
     }
@@ -2009,6 +2922,25 @@ impl fakecloud_core::service::AwsService for SesV2Service {
             "GetEmailIdentityPolicies",
             "UpdateEmailIdentityPolicy",
             "DeleteEmailIdentityPolicy",
+            "PutEmailIdentityDkimAttributes",
+            "PutEmailIdentityDkimSigningAttributes",
+            "PutEmailIdentityFeedbackAttributes",
+            "PutEmailIdentityMailFromAttributes",
+            "PutEmailIdentityConfigurationSetAttributes",
+            "PutConfigurationSetSendingOptions",
+            "PutConfigurationSetDeliveryOptions",
+            "PutConfigurationSetTrackingOptions",
+            "PutConfigurationSetSuppressionOptions",
+            "PutConfigurationSetReputationOptions",
+            "PutConfigurationSetVdmOptions",
+            "PutConfigurationSetArchivingOptions",
+            "CreateCustomVerificationEmailTemplate",
+            "GetCustomVerificationEmailTemplate",
+            "ListCustomVerificationEmailTemplates",
+            "UpdateCustomVerificationEmailTemplate",
+            "DeleteCustomVerificationEmailTemplate",
+            "SendCustomVerificationEmail",
+            "TestRenderEmailTemplate",
         ]
     }
 }
@@ -3644,5 +4576,626 @@ mod tests {
 
         let s = state.read();
         assert!(!s.identity_policies.contains_key("test@example.com"));
+    }
+
+    // --- Identity Attribute tests ---
+
+    #[tokio::test]
+    async fn test_put_email_identity_dkim_attributes() {
+        let state = make_state();
+        let svc = SesV2Service::new(state.clone());
+
+        // Create identity first
+        let req = make_request(
+            Method::POST,
+            "/v2/email/identities",
+            r#"{"EmailIdentity": "example.com"}"#,
+        );
+        svc.handle(req).await.unwrap();
+
+        // Disable DKIM signing
+        let req = make_request(
+            Method::PUT,
+            "/v2/email/identities/example.com/dkim",
+            r#"{"SigningEnabled": false}"#,
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+
+        // Verify via GetEmailIdentity
+        let req = make_request(Method::GET, "/v2/email/identities/example.com", "");
+        let resp = svc.handle(req).await.unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["DkimAttributes"]["SigningEnabled"], false);
+    }
+
+    #[tokio::test]
+    async fn test_put_email_identity_dkim_attributes_not_found() {
+        let state = make_state();
+        let svc = SesV2Service::new(state);
+
+        let req = make_request(
+            Method::PUT,
+            "/v2/email/identities/nonexistent.com/dkim",
+            r#"{"SigningEnabled": false}"#,
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_put_email_identity_dkim_signing_attributes() {
+        let state = make_state();
+        let svc = SesV2Service::new(state.clone());
+
+        let req = make_request(
+            Method::POST,
+            "/v2/email/identities",
+            r#"{"EmailIdentity": "example.com"}"#,
+        );
+        svc.handle(req).await.unwrap();
+
+        let req = make_request(
+            Method::PUT,
+            "/v2/email/identities/example.com/dkim/signing",
+            r#"{"SigningAttributesOrigin": "EXTERNAL", "SigningAttributes": {"DomainSigningPrivateKey": "key123", "DomainSigningSelector": "sel1"}}"#,
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["DkimStatus"], "SUCCESS");
+        assert!(!body["DkimTokens"].as_array().unwrap().is_empty());
+
+        // Verify stored
+        let req = make_request(Method::GET, "/v2/email/identities/example.com", "");
+        let resp = svc.handle(req).await.unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(
+            body["DkimAttributes"]["SigningAttributesOrigin"],
+            "EXTERNAL"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_put_email_identity_feedback_attributes() {
+        let state = make_state();
+        let svc = SesV2Service::new(state.clone());
+
+        let req = make_request(
+            Method::POST,
+            "/v2/email/identities",
+            r#"{"EmailIdentity": "test@example.com"}"#,
+        );
+        svc.handle(req).await.unwrap();
+
+        let req = make_request(
+            Method::PUT,
+            "/v2/email/identities/test%40example.com/feedback",
+            r#"{"EmailForwardingEnabled": false}"#,
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+
+        let req = make_request(Method::GET, "/v2/email/identities/test%40example.com", "");
+        let resp = svc.handle(req).await.unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["FeedbackForwardingStatus"], false);
+    }
+
+    #[tokio::test]
+    async fn test_put_email_identity_mail_from_attributes() {
+        let state = make_state();
+        let svc = SesV2Service::new(state.clone());
+
+        let req = make_request(
+            Method::POST,
+            "/v2/email/identities",
+            r#"{"EmailIdentity": "example.com"}"#,
+        );
+        svc.handle(req).await.unwrap();
+
+        let req = make_request(
+            Method::PUT,
+            "/v2/email/identities/example.com/mail-from",
+            r#"{"MailFromDomain": "mail.example.com", "BehaviorOnMxFailure": "REJECT_MESSAGE"}"#,
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+
+        let req = make_request(Method::GET, "/v2/email/identities/example.com", "");
+        let resp = svc.handle(req).await.unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(
+            body["MailFromAttributes"]["MailFromDomain"],
+            "mail.example.com"
+        );
+        assert_eq!(
+            body["MailFromAttributes"]["BehaviorOnMxFailure"],
+            "REJECT_MESSAGE"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_put_email_identity_configuration_set_attributes() {
+        let state = make_state();
+        let svc = SesV2Service::new(state.clone());
+
+        let req = make_request(
+            Method::POST,
+            "/v2/email/identities",
+            r#"{"EmailIdentity": "example.com"}"#,
+        );
+        svc.handle(req).await.unwrap();
+
+        let req = make_request(
+            Method::PUT,
+            "/v2/email/identities/example.com/configuration-set",
+            r#"{"ConfigurationSetName": "my-config"}"#,
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+
+        let req = make_request(Method::GET, "/v2/email/identities/example.com", "");
+        let resp = svc.handle(req).await.unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["ConfigurationSetName"], "my-config");
+    }
+
+    // --- Configuration Set Options tests ---
+
+    #[tokio::test]
+    async fn test_put_configuration_set_sending_options() {
+        let state = make_state();
+        let svc = SesV2Service::new(state);
+
+        // Create config set
+        let req = make_request(
+            Method::POST,
+            "/v2/email/configuration-sets",
+            r#"{"ConfigurationSetName": "test-config"}"#,
+        );
+        svc.handle(req).await.unwrap();
+
+        // Disable sending
+        let req = make_request(
+            Method::PUT,
+            "/v2/email/configuration-sets/test-config/sending",
+            r#"{"SendingEnabled": false}"#,
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+
+        // Verify
+        let req = make_request(Method::GET, "/v2/email/configuration-sets/test-config", "");
+        let resp = svc.handle(req).await.unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["SendingOptions"]["SendingEnabled"], false);
+    }
+
+    #[tokio::test]
+    async fn test_put_configuration_set_sending_options_not_found() {
+        let state = make_state();
+        let svc = SesV2Service::new(state);
+
+        let req = make_request(
+            Method::PUT,
+            "/v2/email/configuration-sets/nonexistent/sending",
+            r#"{"SendingEnabled": false}"#,
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_put_configuration_set_delivery_options() {
+        let state = make_state();
+        let svc = SesV2Service::new(state);
+
+        let req = make_request(
+            Method::POST,
+            "/v2/email/configuration-sets",
+            r#"{"ConfigurationSetName": "test-config"}"#,
+        );
+        svc.handle(req).await.unwrap();
+
+        let req = make_request(
+            Method::PUT,
+            "/v2/email/configuration-sets/test-config/delivery-options",
+            r#"{"TlsPolicy": "REQUIRE", "SendingPoolName": "my-pool"}"#,
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+
+        let req = make_request(Method::GET, "/v2/email/configuration-sets/test-config", "");
+        let resp = svc.handle(req).await.unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["DeliveryOptions"]["TlsPolicy"], "REQUIRE");
+        assert_eq!(body["DeliveryOptions"]["SendingPoolName"], "my-pool");
+    }
+
+    #[tokio::test]
+    async fn test_put_configuration_set_tracking_options() {
+        let state = make_state();
+        let svc = SesV2Service::new(state);
+
+        let req = make_request(
+            Method::POST,
+            "/v2/email/configuration-sets",
+            r#"{"ConfigurationSetName": "test-config"}"#,
+        );
+        svc.handle(req).await.unwrap();
+
+        let req = make_request(
+            Method::PUT,
+            "/v2/email/configuration-sets/test-config/tracking-options",
+            r#"{"CustomRedirectDomain": "track.example.com", "HttpsPolicy": "REQUIRE"}"#,
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+
+        let req = make_request(Method::GET, "/v2/email/configuration-sets/test-config", "");
+        let resp = svc.handle(req).await.unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(
+            body["TrackingOptions"]["CustomRedirectDomain"],
+            "track.example.com"
+        );
+        assert_eq!(body["TrackingOptions"]["HttpsPolicy"], "REQUIRE");
+    }
+
+    #[tokio::test]
+    async fn test_put_configuration_set_suppression_options() {
+        let state = make_state();
+        let svc = SesV2Service::new(state);
+
+        let req = make_request(
+            Method::POST,
+            "/v2/email/configuration-sets",
+            r#"{"ConfigurationSetName": "test-config"}"#,
+        );
+        svc.handle(req).await.unwrap();
+
+        let req = make_request(
+            Method::PUT,
+            "/v2/email/configuration-sets/test-config/suppression-options",
+            r#"{"SuppressedReasons": ["BOUNCE", "COMPLAINT"]}"#,
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+
+        let req = make_request(Method::GET, "/v2/email/configuration-sets/test-config", "");
+        let resp = svc.handle(req).await.unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let reasons = body["SuppressionOptions"]["SuppressedReasons"]
+            .as_array()
+            .unwrap();
+        assert_eq!(reasons.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_put_configuration_set_reputation_options() {
+        let state = make_state();
+        let svc = SesV2Service::new(state);
+
+        let req = make_request(
+            Method::POST,
+            "/v2/email/configuration-sets",
+            r#"{"ConfigurationSetName": "test-config"}"#,
+        );
+        svc.handle(req).await.unwrap();
+
+        let req = make_request(
+            Method::PUT,
+            "/v2/email/configuration-sets/test-config/reputation-options",
+            r#"{"ReputationMetricsEnabled": true}"#,
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+
+        let req = make_request(Method::GET, "/v2/email/configuration-sets/test-config", "");
+        let resp = svc.handle(req).await.unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["ReputationOptions"]["ReputationMetricsEnabled"], true);
+    }
+
+    #[tokio::test]
+    async fn test_put_configuration_set_vdm_options() {
+        let state = make_state();
+        let svc = SesV2Service::new(state);
+
+        let req = make_request(
+            Method::POST,
+            "/v2/email/configuration-sets",
+            r#"{"ConfigurationSetName": "test-config"}"#,
+        );
+        svc.handle(req).await.unwrap();
+
+        let req = make_request(
+            Method::PUT,
+            "/v2/email/configuration-sets/test-config/vdm-options",
+            r#"{"DashboardOptions": {"EngagementMetrics": "ENABLED"}, "GuardianOptions": {"OptimizedSharedDelivery": "ENABLED"}}"#,
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+
+        let req = make_request(Method::GET, "/v2/email/configuration-sets/test-config", "");
+        let resp = svc.handle(req).await.unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(
+            body["VdmOptions"]["DashboardOptions"]["EngagementMetrics"],
+            "ENABLED"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_put_configuration_set_archiving_options() {
+        let state = make_state();
+        let svc = SesV2Service::new(state);
+
+        let req = make_request(
+            Method::POST,
+            "/v2/email/configuration-sets",
+            r#"{"ConfigurationSetName": "test-config"}"#,
+        );
+        svc.handle(req).await.unwrap();
+
+        let req = make_request(
+            Method::PUT,
+            "/v2/email/configuration-sets/test-config/archiving-options",
+            r#"{"ArchiveArn": "arn:aws:ses:us-east-1:123456789012:mailmanager-archive/my-archive"}"#,
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+
+        let req = make_request(Method::GET, "/v2/email/configuration-sets/test-config", "");
+        let resp = svc.handle(req).await.unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert!(body["ArchivingOptions"]["ArchiveArn"]
+            .as_str()
+            .unwrap()
+            .contains("my-archive"));
+    }
+
+    // --- Custom Verification Email Template tests ---
+
+    #[tokio::test]
+    async fn test_custom_verification_email_template_lifecycle() {
+        let state = make_state();
+        let svc = SesV2Service::new(state);
+
+        // Create
+        let req = make_request(
+            Method::POST,
+            "/v2/email/custom-verification-email-templates",
+            r#"{
+                "TemplateName": "my-verification",
+                "FromEmailAddress": "noreply@example.com",
+                "TemplateSubject": "Verify your email",
+                "TemplateContent": "<h1>Please verify</h1>",
+                "SuccessRedirectionURL": "https://example.com/success",
+                "FailureRedirectionURL": "https://example.com/failure"
+            }"#,
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+
+        // Get
+        let req = make_request(
+            Method::GET,
+            "/v2/email/custom-verification-email-templates/my-verification",
+            "",
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["TemplateName"], "my-verification");
+        assert_eq!(body["FromEmailAddress"], "noreply@example.com");
+        assert_eq!(body["TemplateSubject"], "Verify your email");
+        assert_eq!(body["TemplateContent"], "<h1>Please verify</h1>");
+        assert_eq!(body["SuccessRedirectionURL"], "https://example.com/success");
+        assert_eq!(body["FailureRedirectionURL"], "https://example.com/failure");
+
+        // List
+        let req = make_request(
+            Method::GET,
+            "/v2/email/custom-verification-email-templates",
+            "",
+        );
+        let resp = svc.handle(req).await.unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(
+            body["CustomVerificationEmailTemplates"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+
+        // Update
+        let req = make_request(
+            Method::PUT,
+            "/v2/email/custom-verification-email-templates/my-verification",
+            r#"{"TemplateSubject": "Updated subject"}"#,
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+
+        // Verify update
+        let req = make_request(
+            Method::GET,
+            "/v2/email/custom-verification-email-templates/my-verification",
+            "",
+        );
+        let resp = svc.handle(req).await.unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["TemplateSubject"], "Updated subject");
+
+        // Delete
+        let req = make_request(
+            Method::DELETE,
+            "/v2/email/custom-verification-email-templates/my-verification",
+            "",
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+
+        // Verify deleted
+        let req = make_request(
+            Method::GET,
+            "/v2/email/custom-verification-email-templates/my-verification",
+            "",
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_duplicate_custom_verification_template() {
+        let state = make_state();
+        let svc = SesV2Service::new(state);
+
+        let body = r#"{
+            "TemplateName": "dup-tmpl",
+            "FromEmailAddress": "a@b.com",
+            "TemplateSubject": "s",
+            "TemplateContent": "c",
+            "SuccessRedirectionURL": "https://ok",
+            "FailureRedirectionURL": "https://fail"
+        }"#;
+
+        let req = make_request(
+            Method::POST,
+            "/v2/email/custom-verification-email-templates",
+            body,
+        );
+        svc.handle(req).await.unwrap();
+
+        let req = make_request(
+            Method::POST,
+            "/v2/email/custom-verification-email-templates",
+            body,
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn test_send_custom_verification_email() {
+        let state = make_state();
+        let svc = SesV2Service::new(state.clone());
+
+        // Create template first
+        let req = make_request(
+            Method::POST,
+            "/v2/email/custom-verification-email-templates",
+            r#"{
+                "TemplateName": "verify",
+                "FromEmailAddress": "a@b.com",
+                "TemplateSubject": "Verify",
+                "TemplateContent": "content",
+                "SuccessRedirectionURL": "https://ok",
+                "FailureRedirectionURL": "https://fail"
+            }"#,
+        );
+        svc.handle(req).await.unwrap();
+
+        // Send
+        let req = make_request(
+            Method::POST,
+            "/v2/email/outbound-custom-verification-emails",
+            r#"{"EmailAddress": "user@example.com", "TemplateName": "verify"}"#,
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert!(body["MessageId"].as_str().is_some());
+
+        // Verify stored in sent_emails
+        let s = state.read();
+        assert_eq!(s.sent_emails.len(), 1);
+        assert_eq!(s.sent_emails[0].to, vec!["user@example.com"]);
+    }
+
+    #[tokio::test]
+    async fn test_send_custom_verification_email_template_not_found() {
+        let state = make_state();
+        let svc = SesV2Service::new(state);
+
+        let req = make_request(
+            Method::POST,
+            "/v2/email/outbound-custom-verification-emails",
+            r#"{"EmailAddress": "user@example.com", "TemplateName": "nonexistent"}"#,
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::NOT_FOUND);
+    }
+
+    // --- TestRenderEmailTemplate tests ---
+
+    #[tokio::test]
+    async fn test_render_email_template() {
+        let state = make_state();
+        let svc = SesV2Service::new(state);
+
+        // Create template
+        let req = make_request(
+            Method::POST,
+            "/v2/email/templates",
+            r#"{
+                "TemplateName": "greet",
+                "TemplateContent": {
+                    "Subject": "Hello {{name}}",
+                    "Html": "<h1>Welcome, {{name}}!</h1><p>Your code is {{code}}.</p>",
+                    "Text": "Welcome, {{name}}! Your code is {{code}}."
+                }
+            }"#,
+        );
+        svc.handle(req).await.unwrap();
+
+        // Render
+        let req = make_request(
+            Method::POST,
+            "/v2/email/templates/greet/render",
+            r#"{"TemplateData": "{\"name\": \"Alice\", \"code\": \"1234\"}"}"#,
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let rendered = body["RenderedTemplate"].as_str().unwrap();
+        assert!(rendered.contains("Subject: Hello Alice"));
+        assert!(rendered.contains("Welcome, Alice!"));
+        assert!(rendered.contains("Your code is 1234."));
+    }
+
+    #[tokio::test]
+    async fn test_render_email_template_not_found() {
+        let state = make_state();
+        let svc = SesV2Service::new(state);
+
+        let req = make_request(
+            Method::POST,
+            "/v2/email/templates/nonexistent/render",
+            r#"{"TemplateData": "{}"}"#,
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_render_email_template_missing_data() {
+        let state = make_state();
+        let svc = SesV2Service::new(state);
+
+        // Create template
+        let req = make_request(
+            Method::POST,
+            "/v2/email/templates",
+            r#"{"TemplateName": "t1", "TemplateContent": {"Subject": "Hi"}}"#,
+        );
+        svc.handle(req).await.unwrap();
+
+        let req = make_request(Method::POST, "/v2/email/templates/t1/render", r#"{}"#);
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::BAD_REQUEST);
     }
 }

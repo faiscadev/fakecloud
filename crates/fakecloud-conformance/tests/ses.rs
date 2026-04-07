@@ -1,9 +1,10 @@
 mod helpers;
 
 use aws_sdk_sesv2::types::{
-    Body, Content, Destination, EmailContent, EmailTemplateContent, EventDestinationDefinition,
-    EventType, Message, SnsDestination, SubscriptionStatus, SuppressionListReason, Tag, Template,
-    Topic, TopicPreference,
+    BehaviorOnMxFailure, Body, Content, Destination, DkimSigningAttributes,
+    DkimSigningAttributesOrigin, EmailContent, EmailTemplateContent, EventDestinationDefinition,
+    EventType, HttpsPolicy, Message, SnsDestination, SubscriptionStatus, SuppressionListReason,
+    Tag, Template, TlsPolicy, Topic, TopicPreference,
 };
 use fakecloud_conformance_macros::test_action;
 use helpers::TestServer;
@@ -811,4 +812,387 @@ async fn ses_identity_policy_lifecycle() {
         .await
         .unwrap();
     assert!(get.policies().unwrap().is_empty());
+}
+
+// -- DKIM & Identity Attributes --
+
+#[test_action("ses", "PutEmailIdentityDkimAttributes", checksum = "e21fbf7e")]
+#[test_action("ses", "PutEmailIdentityDkimSigningAttributes", checksum = "9127433a")]
+#[test_action("ses", "PutEmailIdentityFeedbackAttributes", checksum = "8d28daf6")]
+#[test_action("ses", "PutEmailIdentityMailFromAttributes", checksum = "c31d8e2b")]
+#[test_action(
+    "ses",
+    "PutEmailIdentityConfigurationSetAttributes",
+    checksum = "332e93ce"
+)]
+#[tokio::test]
+async fn ses_identity_attributes() {
+    let server = TestServer::start().await;
+    let client = server.sesv2_client().await;
+
+    client
+        .create_email_identity()
+        .email_identity("attrs.com")
+        .send()
+        .await
+        .unwrap();
+
+    // DKIM attributes
+    client
+        .put_email_identity_dkim_attributes()
+        .email_identity("attrs.com")
+        .signing_enabled(false)
+        .send()
+        .await
+        .unwrap();
+
+    let get = client
+        .get_email_identity()
+        .email_identity("attrs.com")
+        .send()
+        .await
+        .unwrap();
+    assert!(!get.dkim_attributes().unwrap().signing_enabled());
+
+    // DKIM signing attributes
+    let resp = client
+        .put_email_identity_dkim_signing_attributes()
+        .email_identity("attrs.com")
+        .signing_attributes_origin(DkimSigningAttributesOrigin::External)
+        .signing_attributes(
+            DkimSigningAttributes::builder()
+                .domain_signing_private_key("key")
+                .domain_signing_selector("sel")
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.dkim_status().unwrap().as_str(), "SUCCESS");
+
+    // Feedback attributes
+    client
+        .put_email_identity_feedback_attributes()
+        .email_identity("attrs.com")
+        .email_forwarding_enabled(false)
+        .send()
+        .await
+        .unwrap();
+
+    let get = client
+        .get_email_identity()
+        .email_identity("attrs.com")
+        .send()
+        .await
+        .unwrap();
+    assert!(!get.feedback_forwarding_status());
+
+    // Mail-from attributes
+    client
+        .put_email_identity_mail_from_attributes()
+        .email_identity("attrs.com")
+        .mail_from_domain("mail.attrs.com")
+        .behavior_on_mx_failure(BehaviorOnMxFailure::RejectMessage)
+        .send()
+        .await
+        .unwrap();
+
+    let get = client
+        .get_email_identity()
+        .email_identity("attrs.com")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        get.mail_from_attributes().unwrap().mail_from_domain(),
+        "mail.attrs.com"
+    );
+
+    // Configuration set attributes
+    client
+        .put_email_identity_configuration_set_attributes()
+        .email_identity("attrs.com")
+        .configuration_set_name("my-cs")
+        .send()
+        .await
+        .unwrap();
+
+    let get = client
+        .get_email_identity()
+        .email_identity("attrs.com")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get.configuration_set_name().unwrap(), "my-cs");
+}
+
+// -- Configuration Set Options --
+
+#[test_action("ses", "PutConfigurationSetSendingOptions", checksum = "e420c1ea")]
+#[test_action("ses", "PutConfigurationSetDeliveryOptions", checksum = "554afc97")]
+#[test_action("ses", "PutConfigurationSetTrackingOptions", checksum = "10410773")]
+#[test_action("ses", "PutConfigurationSetSuppressionOptions", checksum = "8330b701")]
+#[test_action("ses", "PutConfigurationSetReputationOptions", checksum = "eeda6d26")]
+#[test_action("ses", "PutConfigurationSetVdmOptions", checksum = "b745e5c2")]
+#[test_action("ses", "PutConfigurationSetArchivingOptions", checksum = "c5730f19")]
+#[tokio::test]
+async fn ses_configuration_set_options() {
+    let server = TestServer::start().await;
+    let client = server.sesv2_client().await;
+
+    client
+        .create_configuration_set()
+        .configuration_set_name("cs-opts")
+        .send()
+        .await
+        .unwrap();
+
+    // Sending
+    client
+        .put_configuration_set_sending_options()
+        .configuration_set_name("cs-opts")
+        .sending_enabled(false)
+        .send()
+        .await
+        .unwrap();
+
+    let get = client
+        .get_configuration_set()
+        .configuration_set_name("cs-opts")
+        .send()
+        .await
+        .unwrap();
+    assert!(!get.sending_options().unwrap().sending_enabled());
+
+    // Delivery
+    client
+        .put_configuration_set_delivery_options()
+        .configuration_set_name("cs-opts")
+        .tls_policy(TlsPolicy::Require)
+        .send()
+        .await
+        .unwrap();
+
+    let get = client
+        .get_configuration_set()
+        .configuration_set_name("cs-opts")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        get.delivery_options()
+            .unwrap()
+            .tls_policy()
+            .unwrap()
+            .as_str(),
+        "REQUIRE"
+    );
+
+    // Tracking
+    client
+        .put_configuration_set_tracking_options()
+        .configuration_set_name("cs-opts")
+        .custom_redirect_domain("t.example.com")
+        .https_policy(HttpsPolicy::Require)
+        .send()
+        .await
+        .unwrap();
+
+    let get = client
+        .get_configuration_set()
+        .configuration_set_name("cs-opts")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        get.tracking_options().unwrap().custom_redirect_domain(),
+        "t.example.com"
+    );
+
+    // Suppression
+    client
+        .put_configuration_set_suppression_options()
+        .configuration_set_name("cs-opts")
+        .suppressed_reasons(SuppressionListReason::Bounce)
+        .send()
+        .await
+        .unwrap();
+
+    let get = client
+        .get_configuration_set()
+        .configuration_set_name("cs-opts")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        get.suppression_options()
+            .unwrap()
+            .suppressed_reasons()
+            .len(),
+        1
+    );
+
+    // Reputation
+    client
+        .put_configuration_set_reputation_options()
+        .configuration_set_name("cs-opts")
+        .reputation_metrics_enabled(true)
+        .send()
+        .await
+        .unwrap();
+
+    let get = client
+        .get_configuration_set()
+        .configuration_set_name("cs-opts")
+        .send()
+        .await
+        .unwrap();
+    assert!(get
+        .reputation_options()
+        .unwrap()
+        .reputation_metrics_enabled());
+
+    // VDM options (just test it doesn't error)
+    client
+        .put_configuration_set_vdm_options()
+        .configuration_set_name("cs-opts")
+        .send()
+        .await
+        .unwrap();
+
+    // Archiving options
+    client
+        .put_configuration_set_archiving_options()
+        .configuration_set_name("cs-opts")
+        .archive_arn("arn:aws:ses:us-east-1:123456789012:mailmanager-archive/a")
+        .send()
+        .await
+        .unwrap();
+}
+
+// -- Custom Verification Email Templates --
+
+#[test_action("ses", "CreateCustomVerificationEmailTemplate", checksum = "31179503")]
+#[test_action("ses", "GetCustomVerificationEmailTemplate", checksum = "10932ab0")]
+#[test_action("ses", "ListCustomVerificationEmailTemplates", checksum = "4c8404df")]
+#[test_action("ses", "UpdateCustomVerificationEmailTemplate", checksum = "0086fd07")]
+#[test_action("ses", "DeleteCustomVerificationEmailTemplate", checksum = "e78b69af")]
+#[test_action("ses", "SendCustomVerificationEmail", checksum = "873cbcd3")]
+#[tokio::test]
+async fn ses_custom_verification_email_templates() {
+    let server = TestServer::start().await;
+    let client = server.sesv2_client().await;
+
+    // Create
+    client
+        .create_custom_verification_email_template()
+        .template_name("cv-tmpl")
+        .from_email_address("noreply@example.com")
+        .template_subject("Verify")
+        .template_content("<h1>Verify</h1>")
+        .success_redirection_url("https://ok.example.com")
+        .failure_redirection_url("https://fail.example.com")
+        .send()
+        .await
+        .unwrap();
+
+    // Get
+    let get = client
+        .get_custom_verification_email_template()
+        .template_name("cv-tmpl")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get.template_name().unwrap(), "cv-tmpl");
+    assert_eq!(get.template_subject().unwrap(), "Verify");
+
+    // List
+    let list = client
+        .list_custom_verification_email_templates()
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(list.custom_verification_email_templates().len(), 1);
+
+    // Update
+    client
+        .update_custom_verification_email_template()
+        .template_name("cv-tmpl")
+        .from_email_address("noreply@example.com")
+        .template_subject("Updated verify")
+        .template_content("<h1>Updated</h1>")
+        .success_redirection_url("https://ok.example.com")
+        .failure_redirection_url("https://fail.example.com")
+        .send()
+        .await
+        .unwrap();
+
+    let get = client
+        .get_custom_verification_email_template()
+        .template_name("cv-tmpl")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get.template_subject().unwrap(), "Updated verify");
+
+    // Send custom verification email
+    let resp = client
+        .send_custom_verification_email()
+        .email_address("user@example.com")
+        .template_name("cv-tmpl")
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.message_id().is_some());
+
+    // Delete
+    client
+        .delete_custom_verification_email_template()
+        .template_name("cv-tmpl")
+        .send()
+        .await
+        .unwrap();
+
+    let err = client
+        .get_custom_verification_email_template()
+        .template_name("cv-tmpl")
+        .send()
+        .await;
+    assert!(err.is_err());
+}
+
+// -- TestRenderEmailTemplate --
+
+#[test_action("ses", "TestRenderEmailTemplate", checksum = "77a61db8")]
+#[tokio::test]
+async fn ses_test_render_email_template() {
+    let server = TestServer::start().await;
+    let client = server.sesv2_client().await;
+
+    client
+        .create_email_template()
+        .template_name("render-tmpl")
+        .template_content(
+            EmailTemplateContent::builder()
+                .subject("Hi {{name}}")
+                .html("<p>Hello {{name}}, code={{code}}</p>")
+                .text("Hello {{name}}, code={{code}}")
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .test_render_email_template()
+        .template_name("render-tmpl")
+        .template_data(r#"{"name": "Bob", "code": "42"}"#)
+        .send()
+        .await
+        .unwrap();
+
+    let rendered = resp.rendered_template();
+    assert!(rendered.contains("Subject: Hi Bob"));
+    assert!(rendered.contains("Hello Bob"));
+    assert!(rendered.contains("code=42"));
 }

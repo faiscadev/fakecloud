@@ -1,9 +1,10 @@
 mod helpers;
 
 use aws_sdk_sesv2::types::{
-    Body, Content, Destination, EmailContent, EmailTemplateContent, EventDestinationDefinition,
-    EventType, Message, RawMessage, SnsDestination, SubscriptionStatus, SuppressionListReason, Tag,
-    Template, Topic, TopicPreference,
+    BehaviorOnMxFailure, Body, Content, Destination, DkimSigningAttributes,
+    DkimSigningAttributesOrigin, EmailContent, EmailTemplateContent, EventDestinationDefinition,
+    EventType, HttpsPolicy, Message, RawMessage, SnsDestination, SubscriptionStatus,
+    SuppressionListReason, Tag, Template, TlsPolicy, Topic, TopicPreference,
 };
 use helpers::TestServer;
 
@@ -1105,4 +1106,531 @@ async fn ses_identity_policy_lifecycle() {
         .await
         .unwrap();
     assert!(get.policies().unwrap().is_empty());
+}
+
+// --- Group 1: DKIM & Identity Attributes ---
+
+#[tokio::test]
+async fn ses_identity_dkim_attributes() {
+    let server = TestServer::start().await;
+    let client = server.sesv2_client().await;
+
+    // Create domain identity
+    client
+        .create_email_identity()
+        .email_identity("dkim-test.com")
+        .send()
+        .await
+        .unwrap();
+
+    // Disable DKIM signing
+    client
+        .put_email_identity_dkim_attributes()
+        .email_identity("dkim-test.com")
+        .signing_enabled(false)
+        .send()
+        .await
+        .unwrap();
+
+    // Verify via get
+    let get = client
+        .get_email_identity()
+        .email_identity("dkim-test.com")
+        .send()
+        .await
+        .unwrap();
+    assert!(!get.dkim_attributes().unwrap().signing_enabled());
+
+    // Re-enable
+    client
+        .put_email_identity_dkim_attributes()
+        .email_identity("dkim-test.com")
+        .signing_enabled(true)
+        .send()
+        .await
+        .unwrap();
+
+    let get = client
+        .get_email_identity()
+        .email_identity("dkim-test.com")
+        .send()
+        .await
+        .unwrap();
+    assert!(get.dkim_attributes().unwrap().signing_enabled());
+}
+
+#[tokio::test]
+async fn ses_identity_dkim_signing_attributes() {
+    let server = TestServer::start().await;
+    let client = server.sesv2_client().await;
+
+    client
+        .create_email_identity()
+        .email_identity("dkim-signing.com")
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .put_email_identity_dkim_signing_attributes()
+        .email_identity("dkim-signing.com")
+        .signing_attributes_origin(DkimSigningAttributesOrigin::External)
+        .signing_attributes(
+            DkimSigningAttributes::builder()
+                .domain_signing_private_key("private-key-data")
+                .domain_signing_selector("selector1")
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.dkim_status().unwrap().as_str(), "SUCCESS");
+    assert!(!resp.dkim_tokens().is_empty());
+
+    // Verify the origin changed
+    let get = client
+        .get_email_identity()
+        .email_identity("dkim-signing.com")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        get.dkim_attributes()
+            .unwrap()
+            .signing_attributes_origin()
+            .unwrap()
+            .as_str(),
+        "EXTERNAL"
+    );
+}
+
+#[tokio::test]
+async fn ses_identity_feedback_attributes() {
+    let server = TestServer::start().await;
+    let client = server.sesv2_client().await;
+
+    client
+        .create_email_identity()
+        .email_identity("feedback@example.com")
+        .send()
+        .await
+        .unwrap();
+
+    // Disable feedback forwarding
+    client
+        .put_email_identity_feedback_attributes()
+        .email_identity("feedback@example.com")
+        .email_forwarding_enabled(false)
+        .send()
+        .await
+        .unwrap();
+
+    let get = client
+        .get_email_identity()
+        .email_identity("feedback@example.com")
+        .send()
+        .await
+        .unwrap();
+    assert!(!get.feedback_forwarding_status());
+}
+
+#[tokio::test]
+async fn ses_identity_mail_from_attributes() {
+    let server = TestServer::start().await;
+    let client = server.sesv2_client().await;
+
+    client
+        .create_email_identity()
+        .email_identity("mailfrom.com")
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .put_email_identity_mail_from_attributes()
+        .email_identity("mailfrom.com")
+        .mail_from_domain("mail.mailfrom.com")
+        .behavior_on_mx_failure(BehaviorOnMxFailure::RejectMessage)
+        .send()
+        .await
+        .unwrap();
+
+    let get = client
+        .get_email_identity()
+        .email_identity("mailfrom.com")
+        .send()
+        .await
+        .unwrap();
+    let mf = get.mail_from_attributes().unwrap();
+    assert_eq!(mf.mail_from_domain(), "mail.mailfrom.com");
+    assert_eq!(mf.behavior_on_mx_failure().as_str(), "REJECT_MESSAGE");
+}
+
+#[tokio::test]
+async fn ses_identity_configuration_set_attributes() {
+    let server = TestServer::start().await;
+    let client = server.sesv2_client().await;
+
+    client
+        .create_email_identity()
+        .email_identity("cs-assoc.com")
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .put_email_identity_configuration_set_attributes()
+        .email_identity("cs-assoc.com")
+        .configuration_set_name("my-config-set")
+        .send()
+        .await
+        .unwrap();
+
+    let get = client
+        .get_email_identity()
+        .email_identity("cs-assoc.com")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get.configuration_set_name().unwrap(), "my-config-set");
+}
+
+// --- Group 2: Configuration Set Options ---
+
+#[tokio::test]
+async fn ses_configuration_set_options() {
+    let server = TestServer::start().await;
+    let client = server.sesv2_client().await;
+
+    // Create config set
+    client
+        .create_configuration_set()
+        .configuration_set_name("opts-test")
+        .send()
+        .await
+        .unwrap();
+
+    // Sending options
+    client
+        .put_configuration_set_sending_options()
+        .configuration_set_name("opts-test")
+        .sending_enabled(false)
+        .send()
+        .await
+        .unwrap();
+
+    let get = client
+        .get_configuration_set()
+        .configuration_set_name("opts-test")
+        .send()
+        .await
+        .unwrap();
+    assert!(!get.sending_options().unwrap().sending_enabled());
+
+    // Delivery options
+    client
+        .put_configuration_set_delivery_options()
+        .configuration_set_name("opts-test")
+        .tls_policy(TlsPolicy::Require)
+        .sending_pool_name("pool-1")
+        .send()
+        .await
+        .unwrap();
+
+    let get = client
+        .get_configuration_set()
+        .configuration_set_name("opts-test")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        get.delivery_options()
+            .unwrap()
+            .tls_policy()
+            .unwrap()
+            .as_str(),
+        "REQUIRE"
+    );
+    assert_eq!(
+        get.delivery_options().unwrap().sending_pool_name().unwrap(),
+        "pool-1"
+    );
+
+    // Tracking options
+    client
+        .put_configuration_set_tracking_options()
+        .configuration_set_name("opts-test")
+        .custom_redirect_domain("track.example.com")
+        .https_policy(HttpsPolicy::Require)
+        .send()
+        .await
+        .unwrap();
+
+    let get = client
+        .get_configuration_set()
+        .configuration_set_name("opts-test")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        get.tracking_options().unwrap().custom_redirect_domain(),
+        "track.example.com"
+    );
+    assert_eq!(
+        get.tracking_options()
+            .unwrap()
+            .https_policy()
+            .unwrap()
+            .as_str(),
+        "REQUIRE"
+    );
+
+    // Suppression options
+    client
+        .put_configuration_set_suppression_options()
+        .configuration_set_name("opts-test")
+        .suppressed_reasons(SuppressionListReason::Bounce)
+        .suppressed_reasons(SuppressionListReason::Complaint)
+        .send()
+        .await
+        .unwrap();
+
+    let get = client
+        .get_configuration_set()
+        .configuration_set_name("opts-test")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        get.suppression_options()
+            .unwrap()
+            .suppressed_reasons()
+            .len(),
+        2
+    );
+
+    // Reputation options
+    client
+        .put_configuration_set_reputation_options()
+        .configuration_set_name("opts-test")
+        .reputation_metrics_enabled(true)
+        .send()
+        .await
+        .unwrap();
+
+    let get = client
+        .get_configuration_set()
+        .configuration_set_name("opts-test")
+        .send()
+        .await
+        .unwrap();
+    assert!(get
+        .reputation_options()
+        .unwrap()
+        .reputation_metrics_enabled());
+
+    // Archiving options
+    client
+        .put_configuration_set_archiving_options()
+        .configuration_set_name("opts-test")
+        .archive_arn("arn:aws:ses:us-east-1:123456789012:mailmanager-archive/test")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn ses_configuration_set_options_not_found() {
+    let server = TestServer::start().await;
+    let client = server.sesv2_client().await;
+
+    let err = client
+        .put_configuration_set_sending_options()
+        .configuration_set_name("no-such-set")
+        .sending_enabled(false)
+        .send()
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{:?}", err).contains("NotFoundException"),
+        "Expected NotFoundException"
+    );
+}
+
+// --- Group 3: Custom Verification Email Templates ---
+
+#[tokio::test]
+async fn ses_custom_verification_email_template_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.sesv2_client().await;
+
+    // Create
+    client
+        .create_custom_verification_email_template()
+        .template_name("verify-tmpl")
+        .from_email_address("noreply@example.com")
+        .template_subject("Please verify")
+        .template_content("<h1>Verify your email</h1>")
+        .success_redirection_url("https://example.com/ok")
+        .failure_redirection_url("https://example.com/fail")
+        .send()
+        .await
+        .unwrap();
+
+    // Get
+    let get = client
+        .get_custom_verification_email_template()
+        .template_name("verify-tmpl")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get.template_name().unwrap(), "verify-tmpl");
+    assert_eq!(get.from_email_address().unwrap(), "noreply@example.com");
+    assert_eq!(get.template_subject().unwrap(), "Please verify");
+    assert_eq!(
+        get.template_content().unwrap(),
+        "<h1>Verify your email</h1>"
+    );
+    assert_eq!(
+        get.success_redirection_url().unwrap(),
+        "https://example.com/ok"
+    );
+    assert_eq!(
+        get.failure_redirection_url().unwrap(),
+        "https://example.com/fail"
+    );
+
+    // List
+    let list = client
+        .list_custom_verification_email_templates()
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(list.custom_verification_email_templates().len(), 1);
+
+    // Update
+    client
+        .update_custom_verification_email_template()
+        .template_name("verify-tmpl")
+        .from_email_address("noreply@example.com")
+        .template_subject("Updated subject")
+        .template_content("<h1>Updated</h1>")
+        .success_redirection_url("https://example.com/ok")
+        .failure_redirection_url("https://example.com/fail")
+        .send()
+        .await
+        .unwrap();
+
+    let get = client
+        .get_custom_verification_email_template()
+        .template_name("verify-tmpl")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get.template_subject().unwrap(), "Updated subject");
+
+    // Delete
+    client
+        .delete_custom_verification_email_template()
+        .template_name("verify-tmpl")
+        .send()
+        .await
+        .unwrap();
+
+    // Verify deleted
+    let err = client
+        .get_custom_verification_email_template()
+        .template_name("verify-tmpl")
+        .send()
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{:?}", err).contains("NotFoundException"),
+        "Expected NotFoundException"
+    );
+}
+
+#[tokio::test]
+async fn ses_send_custom_verification_email() {
+    let server = TestServer::start().await;
+    let client = server.sesv2_client().await;
+
+    // Create template first
+    client
+        .create_custom_verification_email_template()
+        .template_name("send-verify")
+        .from_email_address("noreply@example.com")
+        .template_subject("Verify")
+        .template_content("content")
+        .success_redirection_url("https://ok")
+        .failure_redirection_url("https://fail")
+        .send()
+        .await
+        .unwrap();
+
+    // Send
+    let resp = client
+        .send_custom_verification_email()
+        .email_address("user@example.com")
+        .template_name("send-verify")
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.message_id().is_some());
+}
+
+// --- Group 4: TestRenderEmailTemplate ---
+
+#[tokio::test]
+async fn ses_test_render_email_template() {
+    let server = TestServer::start().await;
+    let client = server.sesv2_client().await;
+
+    // Create template
+    client
+        .create_email_template()
+        .template_name("render-test")
+        .template_content(
+            EmailTemplateContent::builder()
+                .subject("Hello {{name}}")
+                .html("<p>Welcome, {{name}}! Code: {{code}}</p>")
+                .text("Welcome, {{name}}! Code: {{code}}")
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    // Render
+    let resp = client
+        .test_render_email_template()
+        .template_name("render-test")
+        .template_data(r#"{"name": "Alice", "code": "5678"}"#)
+        .send()
+        .await
+        .unwrap();
+
+    let rendered = resp.rendered_template();
+    assert!(rendered.contains("Subject: Hello Alice"));
+    assert!(rendered.contains("Welcome, Alice!"));
+    assert!(rendered.contains("Code: 5678"));
+}
+
+#[tokio::test]
+async fn ses_test_render_email_template_not_found() {
+    let server = TestServer::start().await;
+    let client = server.sesv2_client().await;
+
+    let err = client
+        .test_render_email_template()
+        .template_name("nonexistent")
+        .template_data("{}")
+        .send()
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{:?}", err).contains("NotFoundException"),
+        "Expected NotFoundException"
+    );
 }

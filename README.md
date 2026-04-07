@@ -113,7 +113,7 @@ fakecloud is now listening at `http://localhost:4566`.
 | **CloudWatch Logs** | 113 | Groups, streams, filtering, deliveries, transformers, query language, anomaly detection |
 | **KMS** | 53 | Encryption, key management, aliases, grants, real ECDH and key import |
 | **CloudFormation** | 8 | Template parsing, resource provisioning, custom resources via Lambda |
-| **SES v2** | 41 | Identities, templates, configuration sets, contact lists, contacts, send email, tagging, suppression list, event destinations, identity policies |
+| **SES v2** | 60 | Identities, templates, configuration sets, contact lists, contacts, send email, tagging, suppression list, event destinations, identity policies, DKIM/feedback/mail-from attributes, config set options, custom verification email templates, template rendering |
 
 ### Cross-Service Integration
 

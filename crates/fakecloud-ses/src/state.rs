@@ -10,6 +10,19 @@ pub struct EmailIdentity {
     pub identity_type: String,
     pub verified: bool,
     pub created_at: DateTime<Utc>,
+    // DKIM attributes
+    pub dkim_signing_enabled: bool,
+    pub dkim_signing_attributes_origin: String,
+    pub dkim_domain_signing_private_key: Option<String>,
+    pub dkim_domain_signing_selector: Option<String>,
+    pub dkim_next_signing_key_length: Option<String>,
+    // Feedback attributes
+    pub email_forwarding_enabled: bool,
+    // Mail-from attributes
+    pub mail_from_domain: Option<String>,
+    pub mail_from_behavior_on_mx_failure: String,
+    // Configuration set association
+    pub configuration_set_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -24,6 +37,33 @@ pub struct EmailTemplate {
 #[derive(Debug, Clone, Serialize)]
 pub struct ConfigurationSet {
     pub name: String,
+    // Sending options
+    pub sending_enabled: bool,
+    // Delivery options
+    pub tls_policy: String,
+    pub sending_pool_name: Option<String>,
+    // Tracking options
+    pub custom_redirect_domain: Option<String>,
+    pub https_policy: Option<String>,
+    // Suppression options
+    pub suppressed_reasons: Vec<String>,
+    // Reputation options
+    pub reputation_metrics_enabled: bool,
+    // VDM options
+    pub vdm_options: Option<serde_json::Value>,
+    // Archiving options
+    pub archive_arn: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CustomVerificationEmailTemplate {
+    pub template_name: String,
+    pub from_email_address: String,
+    pub template_subject: String,
+    pub template_content: String,
+    pub success_redirection_url: String,
+    pub failure_redirection_url: String,
+    pub created_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -116,6 +156,8 @@ pub struct SesState {
     pub event_destinations: HashMap<String, Vec<EventDestination>>,
     /// Identity policies: identity name → policy name → policy JSON document.
     pub identity_policies: HashMap<String, HashMap<String, String>>,
+    /// Custom verification email templates: template name → template.
+    pub custom_verification_email_templates: HashMap<String, CustomVerificationEmailTemplate>,
 }
 
 impl SesState {
@@ -133,6 +175,7 @@ impl SesState {
             suppressed_destinations: HashMap::new(),
             event_destinations: HashMap::new(),
             identity_policies: HashMap::new(),
+            custom_verification_email_templates: HashMap::new(),
         }
     }
 
@@ -147,6 +190,7 @@ impl SesState {
         self.suppressed_destinations.clear();
         self.event_destinations.clear();
         self.identity_policies.clear();
+        self.custom_verification_email_templates.clear();
     }
 }
 
