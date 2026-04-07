@@ -834,7 +834,13 @@ impl SnsService {
             ));
         }
 
-        let topic_arn = topic_arn.unwrap();
+        let topic_arn = topic_arn.ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameter",
+                "TopicArn or TargetArn is required",
+            )
+        })?;
 
         // Check if it's a platform endpoint ARN
         if topic_arn.contains(":endpoint/") {
@@ -1863,9 +1869,15 @@ impl SnsService {
             .cloned()
             .unwrap_or_else(|| default_policy(&topic_arn, &account_id));
 
-        let mut policy: Value = serde_json::from_str(&policy_str).unwrap_or_else(|_| {
-            serde_json::from_str(&default_policy(&topic_arn, &account_id)).unwrap()
-        });
+        let mut policy: Value = serde_json::from_str(&policy_str)
+            .or_else(|_| serde_json::from_str(&default_policy(&topic_arn, &account_id)))
+            .map_err(|_| {
+                AwsServiceError::aws_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "InternalError",
+                    "Failed to parse topic policy",
+                )
+            })?;
 
         // Check if statement with this label already exists
         if let Some(statements) = policy["Statement"].as_array() {
@@ -3617,6 +3629,71 @@ mod tests {
         assert!(
             unsub_url.starts_with("http://custom:9999/"),
             "UnsubscribeUrl should use configured endpoint, got: {unsub_url}"
+        );
+    }
+
+    #[test]
+    fn add_permission_with_invalid_policy_returns_error_not_panic() {
+        use fakecloud_core::delivery::DeliveryBus;
+        use parking_lot::RwLock;
+        use std::sync::Arc;
+
+        let state = Arc::new(RwLock::new(crate::state::SnsState::new(
+            "123456789012",
+            "us-east-1",
+            "http://localhost:4566",
+        )));
+        let delivery = Arc::new(DeliveryBus::new());
+        let svc = SnsService::new(state.clone(), delivery);
+
+        // Create a topic first
+        let topic_arn = "arn:aws:sns:us-east-1:123456789012:test-topic";
+        {
+            let mut s = state.write();
+            s.topics.insert(
+                topic_arn.to_string(),
+                crate::state::SnsTopic {
+                    topic_arn: topic_arn.to_string(),
+                    name: "test-topic".to_string(),
+                    attributes: {
+                        let mut m = std::collections::HashMap::new();
+                        // Set an intentionally broken JSON policy
+                        m.insert("Policy".to_string(), "not valid json {{{".to_string());
+                        m
+                    },
+                    is_fifo: false,
+                    tags: vec![],
+                    created_at: Utc::now(),
+                },
+            );
+        }
+
+        // Build an AddPermission request
+        let body = format!(
+            "Action=AddPermission&TopicArn={}&Label=TestLabel&ActionName.member.1=Publish&AWSAccountId.member.1=111111111111",
+            topic_arn
+        );
+        let req = fakecloud_core::service::AwsRequest {
+            service: "sns".to_string(),
+            action: "AddPermission".to_string(),
+            region: "us-east-1".to_string(),
+            account_id: "123456789012".to_string(),
+            request_id: "test-req".to_string(),
+            headers: http::HeaderMap::new(),
+            query_params: std::collections::HashMap::new(),
+            body: body.into(),
+            path_segments: vec![],
+            raw_path: "/".to_string(),
+            method: http::Method::POST,
+            is_query_protocol: true,
+            access_key_id: None,
+        };
+
+        // This should return an error, not panic
+        let result = svc.add_permission(&req);
+        assert!(
+            result.is_err(),
+            "Invalid policy JSON should return error, not panic"
         );
     }
 }
