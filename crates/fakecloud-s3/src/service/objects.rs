@@ -956,6 +956,26 @@ impl S3Service {
                 .get_mut(bucket)
                 .ok_or_else(|| no_such_bucket(bucket))?;
 
+            // Recheck conditional headers under write lock to prevent TOCTOU race
+            if let Some(ref if_match_val) = if_match {
+                match b.objects.get(key) {
+                    Some(existing) => {
+                        let existing_etag = format!("\"{}\"", existing.etag);
+                        if !etag_matches(if_match_val, &existing_etag) {
+                            return Err(precondition_failed("If-Match"));
+                        }
+                    }
+                    None => {
+                        return Err(no_such_key(key));
+                    }
+                }
+            }
+            if let Some(ref inm) = if_none_match {
+                if inm.trim() == "*" && b.objects.contains_key(key) {
+                    return Err(precondition_failed("If-None-Match"));
+                }
+            }
+
             if versioning_enabled {
                 let versions = b.object_versions.entry(key.to_string()).or_default();
                 // If the existing current object is a pre-versioning object (no version_id)
