@@ -7690,4 +7690,777 @@ mod tests {
         assert!(data.contains("delivered event 1"));
         assert!(data.contains("delivered event 2"));
     }
+
+    // ---- Subscription filters ----
+
+    #[test]
+    fn subscription_filter_lifecycle() {
+        let svc = make_service();
+        create_group(&svc, "sub-grp");
+
+        let req = make_request(
+            "PutSubscriptionFilter",
+            json!({
+                "logGroupName": "sub-grp",
+                "filterName": "my-filter",
+                "filterPattern": "ERROR",
+                "destinationArn": "arn:aws:lambda:us-east-1:123456789012:function:my-fn",
+            }),
+        );
+        svc.put_subscription_filter(&req).unwrap();
+
+        let req = make_request(
+            "DescribeSubscriptionFilters",
+            json!({ "logGroupName": "sub-grp" }),
+        );
+        let resp = svc.describe_subscription_filters(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let filters = body["subscriptionFilters"].as_array().unwrap();
+        assert_eq!(filters.len(), 1);
+        assert_eq!(filters[0]["filterName"], "my-filter");
+        assert_eq!(filters[0]["filterPattern"], "ERROR");
+        assert_eq!(
+            filters[0]["destinationArn"],
+            "arn:aws:lambda:us-east-1:123456789012:function:my-fn"
+        );
+        assert_eq!(filters[0]["distribution"], "ByLogStream");
+
+        // Delete
+        let req = make_request(
+            "DeleteSubscriptionFilter",
+            json!({ "logGroupName": "sub-grp", "filterName": "my-filter" }),
+        );
+        svc.delete_subscription_filter(&req).unwrap();
+
+        let req = make_request(
+            "DescribeSubscriptionFilters",
+            json!({ "logGroupName": "sub-grp" }),
+        );
+        let resp = svc.describe_subscription_filters(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert!(body["subscriptionFilters"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn subscription_filter_update_existing() {
+        let svc = make_service();
+        create_group(&svc, "sub-upd");
+
+        let req = make_request(
+            "PutSubscriptionFilter",
+            json!({
+                "logGroupName": "sub-upd",
+                "filterName": "f1",
+                "filterPattern": "",
+                "destinationArn": "arn:aws:lambda:us-east-1:123456789012:function:old",
+            }),
+        );
+        svc.put_subscription_filter(&req).unwrap();
+
+        // Update the same filter
+        let req = make_request(
+            "PutSubscriptionFilter",
+            json!({
+                "logGroupName": "sub-upd",
+                "filterName": "f1",
+                "filterPattern": "WARN",
+                "destinationArn": "arn:aws:lambda:us-east-1:123456789012:function:new",
+            }),
+        );
+        svc.put_subscription_filter(&req).unwrap();
+
+        let req = make_request(
+            "DescribeSubscriptionFilters",
+            json!({ "logGroupName": "sub-upd" }),
+        );
+        let resp = svc.describe_subscription_filters(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let filters = body["subscriptionFilters"].as_array().unwrap();
+        assert_eq!(filters.len(), 1);
+        assert_eq!(filters[0]["filterPattern"], "WARN");
+    }
+
+    #[test]
+    fn subscription_filter_limit_exceeded() {
+        let svc = make_service();
+        create_group(&svc, "sub-limit");
+
+        for i in 0..2 {
+            let req = make_request(
+                "PutSubscriptionFilter",
+                json!({
+                    "logGroupName": "sub-limit",
+                    "filterName": format!("f{i}"),
+                    "filterPattern": "",
+                    "destinationArn": "arn:aws:lambda:us-east-1:123456789012:function:fn",
+                }),
+            );
+            svc.put_subscription_filter(&req).unwrap();
+        }
+
+        // Third should fail
+        let req = make_request(
+            "PutSubscriptionFilter",
+            json!({
+                "logGroupName": "sub-limit",
+                "filterName": "f2",
+                "filterPattern": "",
+                "destinationArn": "arn:aws:lambda:us-east-1:123456789012:function:fn",
+            }),
+        );
+        assert!(svc.put_subscription_filter(&req).is_err());
+    }
+
+    #[test]
+    fn delete_subscription_filter_nonexistent_errors() {
+        let svc = make_service();
+        create_group(&svc, "sub-del");
+
+        let req = make_request(
+            "DeleteSubscriptionFilter",
+            json!({ "logGroupName": "sub-del", "filterName": "nope" }),
+        );
+        assert!(svc.delete_subscription_filter(&req).is_err());
+    }
+
+    // ---- Metric filters ----
+
+    #[test]
+    fn metric_filter_lifecycle() {
+        let svc = make_service();
+        create_group(&svc, "mf-grp");
+
+        let req = make_request(
+            "PutMetricFilter",
+            json!({
+                "logGroupName": "mf-grp",
+                "filterName": "err-count",
+                "filterPattern": "ERROR",
+                "metricTransformations": [{
+                    "metricName": "ErrorCount",
+                    "metricNamespace": "MyApp",
+                    "metricValue": "1",
+                }],
+            }),
+        );
+        svc.put_metric_filter(&req).unwrap();
+
+        // Describe by log group
+        let req = make_request("DescribeMetricFilters", json!({ "logGroupName": "mf-grp" }));
+        let resp = svc.describe_metric_filters(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let filters = body["metricFilters"].as_array().unwrap();
+        assert_eq!(filters.len(), 1);
+        assert_eq!(filters[0]["filterName"], "err-count");
+        assert_eq!(
+            filters[0]["metricTransformations"][0]["metricName"],
+            "ErrorCount"
+        );
+
+        // Describe by metric name
+        let req = make_request(
+            "DescribeMetricFilters",
+            json!({ "metricName": "ErrorCount", "metricNamespace": "MyApp" }),
+        );
+        let resp = svc.describe_metric_filters(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["metricFilters"].as_array().unwrap().len(), 1);
+
+        // Delete
+        let req = make_request(
+            "DeleteMetricFilter",
+            json!({ "logGroupName": "mf-grp", "filterName": "err-count" }),
+        );
+        svc.delete_metric_filter(&req).unwrap();
+
+        let req = make_request("DescribeMetricFilters", json!({ "logGroupName": "mf-grp" }));
+        let resp = svc.describe_metric_filters(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert!(body["metricFilters"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn metric_filter_update_existing() {
+        let svc = make_service();
+        create_group(&svc, "mf-upd");
+
+        let req = make_request(
+            "PutMetricFilter",
+            json!({
+                "logGroupName": "mf-upd",
+                "filterName": "mf1",
+                "filterPattern": "ERROR",
+                "metricTransformations": [{
+                    "metricName": "M1",
+                    "metricNamespace": "NS",
+                    "metricValue": "1",
+                }],
+            }),
+        );
+        svc.put_metric_filter(&req).unwrap();
+
+        // Update same filter
+        let req = make_request(
+            "PutMetricFilter",
+            json!({
+                "logGroupName": "mf-upd",
+                "filterName": "mf1",
+                "filterPattern": "WARN",
+                "metricTransformations": [{
+                    "metricName": "M1",
+                    "metricNamespace": "NS",
+                    "metricValue": "1",
+                    "defaultValue": 0.0,
+                }],
+            }),
+        );
+        svc.put_metric_filter(&req).unwrap();
+
+        let req = make_request("DescribeMetricFilters", json!({ "logGroupName": "mf-upd" }));
+        let resp = svc.describe_metric_filters(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let filters = body["metricFilters"].as_array().unwrap();
+        assert_eq!(filters.len(), 1);
+        assert_eq!(filters[0]["filterPattern"], "WARN");
+        assert_eq!(filters[0]["metricTransformations"][0]["defaultValue"], 0.0);
+    }
+
+    // ---- Destinations ----
+
+    #[test]
+    fn destination_lifecycle() {
+        let svc = make_service();
+
+        let req = make_request(
+            "PutDestination",
+            json!({
+                "destinationName": "my-dest",
+                "targetArn": "arn:aws:kinesis:us-east-1:123456789012:stream/my-stream",
+                "roleArn": "arn:aws:iam::123456789012:role/logs-role",
+            }),
+        );
+        let resp = svc.put_destination(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["destination"]["destinationName"], "my-dest");
+        assert!(body["destination"]["arn"]
+            .as_str()
+            .unwrap()
+            .contains("my-dest"));
+
+        // Set access policy
+        let req = make_request(
+            "PutDestinationPolicy",
+            json!({
+                "destinationName": "my-dest",
+                "accessPolicy": "{\"Version\":\"2012-10-17\"}",
+            }),
+        );
+        svc.put_destination_policy(&req).unwrap();
+
+        // Describe
+        let req = make_request("DescribeDestinations", json!({}));
+        let resp = svc.describe_destinations(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let dests = body["destinations"].as_array().unwrap();
+        assert_eq!(dests.len(), 1);
+        assert_eq!(dests[0]["accessPolicy"], "{\"Version\":\"2012-10-17\"}");
+
+        // Delete
+        let req = make_request("DeleteDestination", json!({ "destinationName": "my-dest" }));
+        svc.delete_destination(&req).unwrap();
+
+        let req = make_request("DescribeDestinations", json!({}));
+        let resp = svc.describe_destinations(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert!(body["destinations"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn delete_destination_nonexistent_errors() {
+        let svc = make_service();
+        let req = make_request("DeleteDestination", json!({ "destinationName": "nope" }));
+        assert!(svc.delete_destination(&req).is_err());
+    }
+
+    #[test]
+    fn put_destination_policy_nonexistent_errors() {
+        let svc = make_service();
+        let req = make_request(
+            "PutDestinationPolicy",
+            json!({
+                "destinationName": "nope",
+                "accessPolicy": "{}",
+            }),
+        );
+        assert!(svc.put_destination_policy(&req).is_err());
+    }
+
+    // ---- Resource policies ----
+
+    #[test]
+    fn resource_policy_lifecycle() {
+        let svc = make_service();
+
+        let req = make_request(
+            "PutResourcePolicy",
+            json!({
+                "policyName": "my-policy",
+                "policyDocument": "{\"Version\":\"2012-10-17\",\"Statement\":[]}",
+            }),
+        );
+        let resp = svc.put_resource_policy(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["resourcePolicy"]["policyName"], "my-policy");
+
+        // Describe
+        let req = make_request("DescribeResourcePolicies", json!({}));
+        let resp = svc.describe_resource_policies(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let policies = body["resourcePolicies"].as_array().unwrap();
+        assert_eq!(policies.len(), 1);
+        assert_eq!(policies[0]["policyName"], "my-policy");
+
+        // Delete
+        let req = make_request("DeleteResourcePolicy", json!({ "policyName": "my-policy" }));
+        svc.delete_resource_policy(&req).unwrap();
+
+        let req = make_request("DescribeResourcePolicies", json!({}));
+        let resp = svc.describe_resource_policies(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert!(body["resourcePolicies"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn resource_policy_update_existing() {
+        let svc = make_service();
+
+        let req = make_request(
+            "PutResourcePolicy",
+            json!({
+                "policyName": "rp1",
+                "policyDocument": "old-doc",
+            }),
+        );
+        svc.put_resource_policy(&req).unwrap();
+
+        let req = make_request(
+            "PutResourcePolicy",
+            json!({
+                "policyName": "rp1",
+                "policyDocument": "new-doc",
+            }),
+        );
+        svc.put_resource_policy(&req).unwrap();
+
+        let req = make_request("DescribeResourcePolicies", json!({}));
+        let resp = svc.describe_resource_policies(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let policies = body["resourcePolicies"].as_array().unwrap();
+        assert_eq!(policies.len(), 1);
+        assert_eq!(policies[0]["policyDocument"], "new-doc");
+    }
+
+    #[test]
+    fn delete_resource_policy_nonexistent_errors() {
+        let svc = make_service();
+        let req = make_request("DeleteResourcePolicy", json!({ "policyName": "nope" }));
+        assert!(svc.delete_resource_policy(&req).is_err());
+    }
+
+    // ---- Query definitions ----
+
+    #[test]
+    fn query_definition_lifecycle() {
+        let svc = make_service();
+
+        let req = make_request(
+            "PutQueryDefinition",
+            json!({
+                "name": "my-query",
+                "queryString": "fields @timestamp, @message | limit 20",
+                "logGroupNames": ["/app/web"],
+            }),
+        );
+        let resp = svc.put_query_definition(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let qd_id = body["queryDefinitionId"].as_str().unwrap().to_string();
+
+        // Describe
+        let req = make_request("DescribeQueryDefinitions", json!({}));
+        let resp = svc.describe_query_definitions(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let defs = body["queryDefinitions"].as_array().unwrap();
+        assert_eq!(defs.len(), 1);
+        assert_eq!(defs[0]["name"], "my-query");
+        assert_eq!(defs[0]["logGroupNames"].as_array().unwrap().len(), 1);
+
+        // Delete
+        let req = make_request(
+            "DeleteQueryDefinition",
+            json!({ "queryDefinitionId": qd_id }),
+        );
+        let resp = svc.delete_query_definition(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["success"], true);
+
+        // Verify gone
+        let req = make_request("DescribeQueryDefinitions", json!({}));
+        let resp = svc.describe_query_definitions(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert!(body["queryDefinitions"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn delete_query_definition_nonexistent_returns_false() {
+        let svc = make_service();
+        let req = make_request(
+            "DeleteQueryDefinition",
+            json!({ "queryDefinitionId": "nonexistent-id" }),
+        );
+        let resp = svc.delete_query_definition(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["success"], false);
+    }
+
+    // ---- Tagging (new API: TagResource / UntagResource / ListTagsForResource) ----
+
+    #[test]
+    fn tag_resource_lifecycle_on_log_group() {
+        let svc = make_service();
+        create_group(&svc, "tag-grp");
+
+        // Get the ARN
+        let req = make_request(
+            "DescribeLogGroups",
+            json!({ "logGroupNamePrefix": "tag-grp" }),
+        );
+        let resp = svc.describe_log_groups(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let arn = body["logGroups"][0]["arn"].as_str().unwrap().to_string();
+
+        // Tag
+        let req = make_request(
+            "TagResource",
+            json!({
+                "resourceArn": arn,
+                "tags": { "env": "prod", "team": "platform" },
+            }),
+        );
+        svc.tag_resource(&req).unwrap();
+
+        // List tags
+        let req = make_request("ListTagsForResource", json!({ "resourceArn": arn }));
+        let resp = svc.list_tags_for_resource(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["tags"]["env"], "prod");
+        assert_eq!(body["tags"]["team"], "platform");
+
+        // Untag
+        let req = make_request(
+            "UntagResource",
+            json!({
+                "resourceArn": arn,
+                "tagKeys": ["team"],
+            }),
+        );
+        svc.untag_resource(&req).unwrap();
+
+        let req = make_request("ListTagsForResource", json!({ "resourceArn": arn }));
+        let resp = svc.list_tags_for_resource(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["tags"].as_object().unwrap().len(), 1);
+        assert!(body["tags"].get("team").is_none());
+    }
+
+    #[test]
+    fn tag_resource_on_destination() {
+        let svc = make_service();
+
+        let req = make_request(
+            "PutDestination",
+            json!({
+                "destinationName": "tag-dest",
+                "targetArn": "arn:aws:kinesis:us-east-1:123456789012:stream/s",
+                "roleArn": "arn:aws:iam::123456789012:role/r",
+            }),
+        );
+        let resp = svc.put_destination(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let arn = body["destination"]["arn"].as_str().unwrap().to_string();
+
+        let req = make_request(
+            "TagResource",
+            json!({ "resourceArn": arn, "tags": { "key1": "val1" } }),
+        );
+        svc.tag_resource(&req).unwrap();
+
+        let req = make_request("ListTagsForResource", json!({ "resourceArn": arn }));
+        let resp = svc.list_tags_for_resource(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["tags"]["key1"], "val1");
+    }
+
+    #[test]
+    fn tag_resource_nonexistent_errors() {
+        let svc = make_service();
+        let req = make_request(
+            "TagResource",
+            json!({
+                "resourceArn": "arn:aws:logs:us-east-1:123456789012:log-group:nope:*",
+                "tags": { "k": "v" },
+            }),
+        );
+        assert!(svc.tag_resource(&req).is_err());
+    }
+
+    // ---- Delivery sources CRUD ----
+
+    #[test]
+    fn delivery_source_lifecycle() {
+        let svc = make_service();
+        create_group(&svc, "ds-grp");
+
+        let req = make_request(
+            "DescribeLogGroups",
+            json!({ "logGroupNamePrefix": "ds-grp" }),
+        );
+        let resp = svc.describe_log_groups(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let group_arn = body["logGroups"][0]["arn"].as_str().unwrap().to_string();
+
+        // Put
+        let req = make_request(
+            "PutDeliverySource",
+            json!({
+                "name": "src1",
+                "resourceArn": group_arn,
+                "logType": "APPLICATION_LOGS",
+            }),
+        );
+        svc.put_delivery_source(&req).unwrap();
+
+        // Get
+        let req = make_request("GetDeliverySource", json!({ "name": "src1" }));
+        let resp = svc.get_delivery_source(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["deliverySource"]["name"], "src1");
+        assert_eq!(body["deliverySource"]["logType"], "APPLICATION_LOGS");
+
+        // Describe
+        let req = make_request("DescribeDeliverySources", json!({}));
+        let resp = svc.describe_delivery_sources(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["deliverySources"].as_array().unwrap().len(), 1);
+
+        // Delete
+        let req = make_request("DeleteDeliverySource", json!({ "name": "src1" }));
+        svc.delete_delivery_source(&req).unwrap();
+
+        let req = make_request("DescribeDeliverySources", json!({}));
+        let resp = svc.describe_delivery_sources(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert!(body["deliverySources"].as_array().unwrap().is_empty());
+    }
+
+    // ---- Delivery destinations CRUD ----
+
+    #[test]
+    fn delivery_destination_lifecycle() {
+        let svc = make_service();
+
+        let req = make_request(
+            "PutDeliveryDestination",
+            json!({
+                "name": "dd1",
+                "deliveryDestinationConfiguration": {
+                    "destinationResourceArn": "arn:aws:s3:::my-bucket"
+                }
+            }),
+        );
+        svc.put_delivery_destination(&req).unwrap();
+
+        // Get
+        let req = make_request("GetDeliveryDestination", json!({ "name": "dd1" }));
+        let resp = svc.get_delivery_destination(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["deliveryDestination"]["name"], "dd1");
+        let arn = body["deliveryDestination"]["arn"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(!arn.is_empty());
+
+        // Describe
+        let req = make_request("DescribeDeliveryDestinations", json!({}));
+        let resp = svc.describe_delivery_destinations(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["deliveryDestinations"].as_array().unwrap().len(), 1);
+
+        // Delete
+        let req = make_request("DeleteDeliveryDestination", json!({ "name": "dd1" }));
+        svc.delete_delivery_destination(&req).unwrap();
+
+        let req = make_request("DescribeDeliveryDestinations", json!({}));
+        let resp = svc.describe_delivery_destinations(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert!(body["deliveryDestinations"].as_array().unwrap().is_empty());
+    }
+
+    // ---- Delivery (full pipeline CRUD) ----
+
+    #[test]
+    fn delivery_crud_lifecycle() {
+        let svc = make_service();
+        create_group(&svc, "del-grp");
+
+        let req = make_request(
+            "DescribeLogGroups",
+            json!({ "logGroupNamePrefix": "del-grp" }),
+        );
+        let resp = svc.describe_log_groups(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let group_arn = body["logGroups"][0]["arn"].as_str().unwrap().to_string();
+
+        // Source
+        let req = make_request(
+            "PutDeliverySource",
+            json!({
+                "name": "del-src",
+                "resourceArn": group_arn,
+                "logType": "APPLICATION_LOGS",
+            }),
+        );
+        svc.put_delivery_source(&req).unwrap();
+
+        // Destination
+        let req = make_request(
+            "PutDeliveryDestination",
+            json!({
+                "name": "del-dest",
+                "deliveryDestinationConfiguration": {
+                    "destinationResourceArn": "arn:aws:s3:::del-bucket"
+                }
+            }),
+        );
+        svc.put_delivery_destination(&req).unwrap();
+
+        let req = make_request("GetDeliveryDestination", json!({ "name": "del-dest" }));
+        let resp = svc.get_delivery_destination(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let dest_arn = body["deliveryDestination"]["arn"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // Create delivery
+        let req = make_request(
+            "CreateDelivery",
+            json!({
+                "deliverySourceName": "del-src",
+                "deliveryDestinationArn": dest_arn,
+            }),
+        );
+        let resp = svc.create_delivery(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let delivery_id = body["delivery"]["id"].as_str().unwrap().to_string();
+
+        // Get delivery
+        let req = make_request("GetDelivery", json!({ "id": delivery_id }));
+        let resp = svc.get_delivery(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["delivery"]["deliverySourceName"], "del-src");
+
+        // Describe deliveries
+        let req = make_request("DescribeDeliveries", json!({}));
+        let resp = svc.describe_deliveries(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["deliveries"].as_array().unwrap().len(), 1);
+
+        // Delete delivery
+        let req = make_request("DeleteDelivery", json!({ "id": delivery_id }));
+        svc.delete_delivery(&req).unwrap();
+
+        let req = make_request("DescribeDeliveries", json!({}));
+        let resp = svc.describe_deliveries(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert!(body["deliveries"].as_array().unwrap().is_empty());
+    }
+
+    // ---- StopQuery ----
+
+    #[test]
+    fn stop_query_nonexistent_fails() {
+        let svc = make_service();
+        let req = make_request("StopQuery", json!({ "queryId": "nonexistent-query-id" }));
+        // StopQuery on a non-running query should still succeed (returns success: false or noop)
+        // But a completely nonexistent query depends on implementation
+        let result = svc.stop_query(&req);
+        // Either it errors or returns success: false — both are valid
+        if let Ok(resp) = result {
+            let body: Value = serde_json::from_slice(&resp.body).unwrap();
+            // success should be false for a non-running query
+            assert!(!body["success"].as_bool().unwrap_or(true));
+        }
+    }
+
+    // ---- GetLogGroupFields ----
+
+    #[test]
+    fn get_log_group_fields_nonexistent_group_errors() {
+        let svc = make_service();
+        let req = make_request(
+            "GetLogGroupFields",
+            json!({ "logGroupName": "nonexistent" }),
+        );
+        assert!(svc.get_log_group_fields(&req).is_err());
+    }
+
+    // ---- PutLogGroupDeletionProtection ----
+
+    #[test]
+    fn deletion_protection_toggle() {
+        let svc = make_service();
+        create_group(&svc, "dp-toggle");
+
+        // Enable
+        let req = make_request(
+            "PutLogGroupDeletionProtection",
+            json!({
+                "logGroupIdentifier": "dp-toggle",
+                "deletionProtectionEnabled": true,
+            }),
+        );
+        svc.put_log_group_deletion_protection(&req).unwrap();
+
+        let state = svc.state.read();
+        assert!(state.log_groups["dp-toggle"].deletion_protection);
+        drop(state);
+
+        // Disable
+        let req = make_request(
+            "PutLogGroupDeletionProtection",
+            json!({
+                "logGroupIdentifier": "dp-toggle",
+                "deletionProtectionEnabled": false,
+            }),
+        );
+        svc.put_log_group_deletion_protection(&req).unwrap();
+
+        let state = svc.state.read();
+        assert!(!state.log_groups["dp-toggle"].deletion_protection);
+    }
+
+    // ---- GetLogRecord ----
+
+    #[test]
+    fn get_log_record_returns_object() {
+        let svc = make_service();
+        let req = make_request(
+            "GetLogRecord",
+            json!({ "logRecordPointer": "any-pointer-value" }),
+        );
+        let resp = svc.get_log_record(&req).unwrap();
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert!(body["logRecord"].is_object());
+    }
 }
