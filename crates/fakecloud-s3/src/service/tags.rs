@@ -4,7 +4,8 @@ use bytes::Bytes;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use super::{
-    no_such_bucket, no_such_key, no_such_key_with_detail, parse_tagging_xml, s3_xml, xml_escape, S3Service,
+    no_such_bucket, no_such_key, no_such_key_with_detail, parse_tagging_xml, s3_xml, xml_escape,
+    S3Service,
 };
 
 impl S3Service {
@@ -179,5 +180,4 @@ impl S3Service {
             headers: HeaderMap::new(),
         })
     }
-
 }

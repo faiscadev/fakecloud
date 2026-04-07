@@ -27,8 +27,7 @@ mod tags;
 
 // Re-export notification helpers for use in sub-modules
 pub(super) use notifications::{
-    deliver_notifications, normalize_notification_ids, normalize_replication_xml,
-    replicate_object,
+    deliver_notifications, normalize_notification_ids, normalize_replication_xml, replicate_object,
 };
 
 // Used only within this file (parse_cors_config)
@@ -38,7 +37,7 @@ use notifications::extract_all_xml_values;
 #[cfg(test)]
 use notifications::{
     event_matches, key_matches_filters, parse_notification_config, parse_replication_rules,
-    NotificationTarget, NotificationTargetType, ReplicationRule,
+    NotificationTargetType,
 };
 
 pub struct S3Service {
@@ -643,7 +642,10 @@ pub(crate) fn truncate_to_seconds(dt: DateTime<Utc>) -> DateTime<Utc> {
     dt.with_nanosecond(0).unwrap_or(dt)
 }
 
-pub(crate) fn check_get_conditionals(req: &AwsRequest, obj: &S3Object) -> Result<(), AwsServiceError> {
+pub(crate) fn check_get_conditionals(
+    req: &AwsRequest,
+    obj: &S3Object,
+) -> Result<(), AwsServiceError> {
     let obj_etag = format!("\"{}\"", obj.etag);
     let obj_time = truncate_to_seconds(obj.last_modified);
 
@@ -694,7 +696,10 @@ pub(crate) fn check_get_conditionals(req: &AwsRequest, obj: &S3Object) -> Result
     Ok(())
 }
 
-pub(crate) fn check_head_conditionals(req: &AwsRequest, obj: &S3Object) -> Result<(), AwsServiceError> {
+pub(crate) fn check_head_conditionals(
+    req: &AwsRequest,
+    obj: &S3Object,
+) -> Result<(), AwsServiceError> {
     let obj_etag = format!("\"{}\"", obj.etag);
     let obj_time = truncate_to_seconds(obj.last_modified);
 
@@ -1189,7 +1194,9 @@ pub(crate) fn xml_escape(s: &str) -> String {
     out
 }
 
-pub(crate) fn extract_user_metadata(headers: &HeaderMap) -> std::collections::HashMap<String, String> {
+pub(crate) fn extract_user_metadata(
+    headers: &HeaderMap,
+) -> std::collections::HashMap<String, String> {
     let mut meta = std::collections::HashMap::new();
     for (name, value) in headers {
         if let Some(key) = name.as_str().strip_prefix("x-amz-meta-") {
@@ -1712,7 +1719,10 @@ pub(crate) fn find_cors_rule<'a>(
 
 /// Check if an object is locked (retention or legal hold) and should block mutation.
 /// Returns an error string if locked, None if allowed.
-pub(crate) fn check_object_lock_for_overwrite(obj: &S3Object, req: &AwsRequest) -> Option<&'static str> {
+pub(crate) fn check_object_lock_for_overwrite(
+    obj: &S3Object,
+    req: &AwsRequest,
+) -> Option<&'static str> {
     // Legal hold blocks overwrite
     if obj.lock_legal_hold.as_deref() == Some("ON") {
         return Some("AccessDenied");
