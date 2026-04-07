@@ -6,7 +6,7 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AwsProtocol {
     /// Query protocol: form-encoded body, Action param, XML response.
-    /// Used by: SQS, SNS, IAM, STS, SES.
+    /// Used by: SQS, SNS, IAM, STS.
     Query,
     /// JSON protocol: JSON body, X-Amz-Target header, JSON response.
     /// Used by: SSM, EventBridge, DynamoDB, SecretsManager, KMS, CloudWatch Logs.
@@ -14,11 +14,16 @@ pub enum AwsProtocol {
     /// REST protocol: HTTP method + path-based routing, XML responses.
     /// Used by: S3, API Gateway, Route53.
     Rest,
+    /// REST-JSON protocol: HTTP method + path-based routing, JSON responses.
+    /// Used by: Lambda, SES v2.
+    RestJson,
 }
 
-/// Services that use REST protocol (detected from SigV4 credential scope).
-/// Lambda uses REST-style routing (method + path) rather than X-Amz-Target.
-const REST_SERVICES: &[&str] = &["s3", "lambda", "ses"];
+/// Services that use REST protocol with XML responses (detected from SigV4 credential scope).
+const REST_XML_SERVICES: &[&str] = &["s3"];
+
+/// Services that use REST protocol with JSON responses (detected from SigV4 credential scope).
+const REST_JSON_SERVICES: &[&str] = &["lambda", "ses"];
 
 /// Detected service name and action from an incoming HTTP request.
 #[derive(Debug)]
@@ -69,13 +74,13 @@ pub fn detect_service(
         }
     }
 
-    // 4. Fallback: check auth header for REST-style services (S3, etc.)
+    // 4. Fallback: check auth header for REST-style services (S3, Lambda, SES, etc.)
     if let Some(service) = extract_service_from_auth(headers) {
-        if REST_SERVICES.contains(&service.as_str()) {
+        if let Some(protocol) = rest_protocol_for(&service) {
             return Some(DetectedRequest {
                 service,
                 action: String::new(), // REST services determine action from method+path
-                protocol: AwsProtocol::Rest,
+                protocol,
             });
         }
     }
@@ -86,11 +91,11 @@ pub fn detect_service(
         let parts: Vec<&str> = credential.split('/').collect();
         if parts.len() >= 4 {
             let service = parts[3].to_string();
-            if REST_SERVICES.contains(&service.as_str()) {
+            if let Some(protocol) = rest_protocol_for(&service) {
                 return Some(DetectedRequest {
                     service,
                     action: String::new(),
-                    protocol: AwsProtocol::Rest,
+                    protocol,
                 });
             }
         }
@@ -135,6 +140,17 @@ fn parse_amz_target(target: &str) -> Option<DetectedRequest> {
         action: action.to_string(),
         protocol: AwsProtocol::Json,
     })
+}
+
+/// Returns the REST protocol variant for a service, or None if not a REST service.
+fn rest_protocol_for(service: &str) -> Option<AwsProtocol> {
+    if REST_XML_SERVICES.contains(&service) {
+        Some(AwsProtocol::Rest)
+    } else if REST_JSON_SERVICES.contains(&service) {
+        Some(AwsProtocol::RestJson)
+    } else {
+        None
+    }
 }
 
 /// Infer service from the action name when no SigV4 auth is present.

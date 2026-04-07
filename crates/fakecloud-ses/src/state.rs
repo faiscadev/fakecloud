@@ -18,6 +18,7 @@ pub struct EmailTemplate {
     pub subject: Option<String>,
     pub html_body: Option<String>,
     pub text_body: Option<String>,
+    pub created_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize)]

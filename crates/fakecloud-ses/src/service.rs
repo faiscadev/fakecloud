@@ -380,6 +380,7 @@ impl SesV2Service {
             text_body: body["TemplateContent"]["Text"]
                 .as_str()
                 .map(|s| s.to_string()),
+            created_at: Utc::now(),
         };
 
         state.templates.insert(template_name, template);
@@ -395,7 +396,7 @@ impl SesV2Service {
             .map(|t| {
                 json!({
                     "TemplateName": t.template_name,
-                    "CreatedTimestamp": Utc::now().timestamp() as f64,
+                    "CreatedTimestamp": t.created_at.timestamp() as f64,
                 })
             })
             .collect();
@@ -481,6 +482,18 @@ impl SesV2Service {
     fn send_email(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body: Value = Self::parse_body(req)?;
 
+        if !body["Content"].is_object()
+            || (!body["Content"]["Simple"].is_object()
+                && !body["Content"]["Raw"].is_object()
+                && !body["Content"]["Template"].is_object())
+        {
+            return Ok(Self::json_error(
+                StatusCode::BAD_REQUEST,
+                "BadRequestException",
+                "Content is required and must contain Simple, Raw, or Template",
+            ));
+        }
+
         let from = body["FromEmailAddress"].as_str().unwrap_or("").to_string();
 
         let to = extract_string_array(&body["Destination"]["ToAddresses"]);
@@ -543,10 +556,16 @@ impl SesV2Service {
 
         let from = body["FromEmailAddress"].as_str().unwrap_or("").to_string();
 
-        let entries = body["BulkEmailEntries"]
-            .as_array()
-            .cloned()
-            .unwrap_or_default();
+        let entries = match body["BulkEmailEntries"].as_array() {
+            Some(arr) if !arr.is_empty() => arr.clone(),
+            _ => {
+                return Ok(Self::json_error(
+                    StatusCode::BAD_REQUEST,
+                    "BadRequestException",
+                    "BulkEmailEntries is required and must not be empty",
+                ));
+            }
+        };
 
         let mut results = Vec::new();
 

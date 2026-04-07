@@ -233,7 +233,9 @@ fn build_error_response_with_fields(
             request_id,
             extra_fields,
         ),
-        AwsProtocol::Json => fakecloud_aws::error::json_error_response(status, code, message),
+        AwsProtocol::Json | AwsProtocol::RestJson => {
+            fakecloud_aws::error::json_error_response(status, code, message)
+        }
     };
 
     Response::builder()
