@@ -1442,6 +1442,7 @@ dependencies = [
  "aws-sdk-lambda",
  "aws-sdk-s3",
  "aws-sdk-secretsmanager",
+ "aws-sdk-sesv2",
  "aws-sdk-sns",
  "aws-sdk-sqs",
  "aws-sdk-ssm",

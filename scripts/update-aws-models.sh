@@ -34,6 +34,7 @@ SERVICES=(
     [cloudwatch-logs]=cloudwatch-logs
     [kms]=kms
     [cloudformation]=cloudformation
+    [sesv2]=sesv2
 )
 
 # Sparse checkout only the models we need

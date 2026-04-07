@@ -20,6 +20,7 @@ fn service_source_files(project_root: &Path) -> Vec<(String, Vec<PathBuf>)> {
         ("logs", "logs", &["service.rs"]),
         ("kms", "kms", &["service.rs"]),
         ("cloudformation", "cloudformation", &["service.rs"]),
+        ("ses", "ses", &["service.rs"]),
     ];
 
     mappings
