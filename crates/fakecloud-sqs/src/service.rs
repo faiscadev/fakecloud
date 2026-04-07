@@ -226,6 +226,9 @@ fn sqs_response(action: &str, body: Value, request_id: &str, is_query: bool) -> 
                     }
                 }
             }
+            if let Some(token) = body["NextToken"].as_str() {
+                inner.push_str(&format!("<NextToken>{}</NextToken>", xml_escape(token)));
+            }
             AwsResponse::xml(StatusCode::OK, xml_wrap(action, &inner, request_id))
         }
         "SendMessage" => {
@@ -701,16 +704,41 @@ impl SqsService {
         let prefix = body["QueueNamePrefix"].as_str();
         let state = self.state.read();
 
-        let urls: Vec<String> = state
+        let max_results = body["MaxResults"]
+            .as_u64()
+            .or_else(|| body["MaxResults"].as_str().and_then(|s| s.parse().ok()))
+            .map(|n| n.min(1000) as usize)
+            .unwrap_or(1000);
+
+        let offset = body["NextToken"]
+            .as_str()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(0);
+
+        let mut all_urls: Vec<String> = state
             .queues
             .values()
             .filter(|q| prefix.map(|p| q.queue_name.starts_with(p)).unwrap_or(true))
             .map(|q| q.queue_url.clone())
             .collect();
+        all_urls.sort();
+
+        let total = all_urls.len();
+        let page: Vec<String> = all_urls
+            .into_iter()
+            .skip(offset)
+            .take(max_results)
+            .collect();
+        let next_offset = offset + page.len();
+
+        let mut result = json!({ "QueueUrls": page });
+        if next_offset < total {
+            result["NextToken"] = json!(next_offset.to_string());
+        }
 
         Ok(sqs_response(
             "ListQueues",
-            json!({ "QueueUrls": urls }),
+            result,
             &req.request_id,
             req.is_query_protocol,
         ))

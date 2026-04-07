@@ -1001,6 +1001,95 @@ async fn sqs_get_queue_attributes_via_query_protocol() {
     );
 }
 
+#[tokio::test]
+async fn sqs_list_queues_pagination() {
+    let server = TestServer::start().await;
+    let client = server.sqs_client().await;
+
+    // Create 5 queues
+    for i in 0..5 {
+        client
+            .create_queue()
+            .queue_name(format!("page-queue-{i}"))
+            .send()
+            .await
+            .unwrap();
+    }
+
+    // List with MaxResults=2: should return 2 queues and a NextToken
+    let resp = client.list_queues().max_results(2).send().await.unwrap();
+    assert_eq!(resp.queue_urls().len(), 2);
+    let token = resp
+        .next_token()
+        .expect("expected NextToken when more results exist");
+
+    // Use NextToken to get next page
+    let resp2 = client
+        .list_queues()
+        .max_results(2)
+        .next_token(token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp2.queue_urls().len(), 2);
+    let token2 = resp2
+        .next_token()
+        .expect("expected NextToken for third page");
+
+    // Third page: 1 remaining queue, no NextToken
+    let resp3 = client
+        .list_queues()
+        .max_results(2)
+        .next_token(token2)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp3.queue_urls().len(), 1);
+    assert!(
+        resp3.next_token().is_none(),
+        "expected no NextToken on last page"
+    );
+
+    // Collect all URLs across pages and verify all 5 queues are returned
+    let mut all_urls: Vec<String> = Vec::new();
+    all_urls.extend(resp.queue_urls().iter().cloned());
+    all_urls.extend(resp2.queue_urls().iter().cloned());
+    all_urls.extend(resp3.queue_urls().iter().cloned());
+    assert_eq!(all_urls.len(), 5);
+    for i in 0..5 {
+        assert!(
+            all_urls
+                .iter()
+                .any(|u| u.contains(&format!("page-queue-{i}"))),
+            "missing page-queue-{i} in paginated results"
+        );
+    }
+}
+
+#[tokio::test]
+async fn sqs_list_queues_pagination_all_fit_in_one_page() {
+    let server = TestServer::start().await;
+    let client = server.sqs_client().await;
+
+    // Create 2 queues
+    for i in 0..2 {
+        client
+            .create_queue()
+            .queue_name(format!("small-page-{i}"))
+            .send()
+            .await
+            .unwrap();
+    }
+
+    // List with MaxResults=10: all fit, no NextToken
+    let resp = client.list_queues().max_results(10).send().await.unwrap();
+    assert_eq!(resp.queue_urls().len(), 2);
+    assert!(
+        resp.next_token().is_none(),
+        "expected no NextToken when all queues fit in one page"
+    );
+}
+
 /// Regression: CreateQueue with invalid DelaySeconds should return an error.
 #[tokio::test]
 async fn sqs_create_queue_invalid_delay_seconds() {
