@@ -549,7 +549,13 @@ impl KmsService {
         let resolved = self.resolve_required_key(&body)?;
 
         let mut state = self.state.write();
-        let key = state.keys.get_mut(&resolved).unwrap();
+        let key = state.keys.get_mut(&resolved).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "KMSInternalException",
+                "Key state became inconsistent",
+            )
+        })?;
         key.enabled = true;
         key.key_state = "Enabled".to_string();
 
@@ -561,7 +567,13 @@ impl KmsService {
         let resolved = self.resolve_required_key(&body)?;
 
         let mut state = self.state.write();
-        let key = state.keys.get_mut(&resolved).unwrap();
+        let key = state.keys.get_mut(&resolved).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "KMSInternalException",
+                "Key state became inconsistent",
+            )
+        })?;
         key.enabled = false;
         key.key_state = "Disabled".to_string();
 
@@ -574,7 +586,13 @@ impl KmsService {
         let pending_days = body["PendingWindowInDays"].as_i64().unwrap_or(30);
 
         let mut state = self.state.write();
-        let key = state.keys.get_mut(&resolved).unwrap();
+        let key = state.keys.get_mut(&resolved).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "KMSInternalException",
+                "Key state became inconsistent",
+            )
+        })?;
         let deletion_date =
             Utc::now().timestamp() as f64 + (pending_days as f64 * 24.0 * 60.0 * 60.0);
         key.key_state = "PendingDeletion".to_string();
@@ -598,7 +616,13 @@ impl KmsService {
         let resolved = self.resolve_required_key(&body)?;
 
         let mut state = self.state.write();
-        let key = state.keys.get_mut(&resolved).unwrap();
+        let key = state.keys.get_mut(&resolved).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "KMSInternalException",
+                "Key state became inconsistent",
+            )
+        })?;
         key.key_state = "Disabled".to_string();
         key.deletion_date = None;
 
@@ -652,7 +676,13 @@ impl KmsService {
         })?;
 
         let state = self.state.read();
-        let key = state.keys.get(&resolved).unwrap();
+        let key = state.keys.get(&resolved).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "KMSInternalException",
+                "Key state became inconsistent",
+            )
+        })?;
         if !key.enabled {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
@@ -926,7 +956,13 @@ impl KmsService {
                 )
             })?;
 
-        let dest_key = state.keys.get(&dest_resolved).unwrap();
+        let dest_key = state.keys.get(&dest_resolved).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "KMSInternalException",
+                "Key state became inconsistent",
+            )
+        })?;
 
         // Re-encrypt with destination key
         let new_envelope = if let Some(ref material) = dest_key.imported_material_bytes {
@@ -972,7 +1008,13 @@ impl KmsService {
         })?;
 
         let state = self.state.read();
-        let key = state.keys.get(&resolved).unwrap();
+        let key = state.keys.get(&resolved).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "KMSInternalException",
+                "Key state became inconsistent",
+            )
+        })?;
         if !key.enabled {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
@@ -1017,7 +1059,13 @@ impl KmsService {
         })?;
 
         let state = self.state.read();
-        let key = state.keys.get(&resolved).unwrap();
+        let key = state.keys.get(&resolved).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "KMSInternalException",
+                "Key state became inconsistent",
+            )
+        })?;
         if !key.enabled {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
@@ -1323,7 +1371,13 @@ impl KmsService {
         let tags = body["Tags"].as_array();
 
         let mut state = self.state.write();
-        let key = state.keys.get_mut(&resolved).unwrap();
+        let key = state.keys.get_mut(&resolved).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "KMSInternalException",
+                "Key state became inconsistent",
+            )
+        })?;
         if let Some(tags) = tags {
             for tag in tags {
                 if let (Some(k), Some(v)) = (tag["TagKey"].as_str(), tag["TagValue"].as_str()) {
@@ -1350,7 +1404,13 @@ impl KmsService {
         let tag_keys = body["TagKeys"].as_array();
 
         let mut state = self.state.write();
-        let key = state.keys.get_mut(&resolved).unwrap();
+        let key = state.keys.get_mut(&resolved).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "KMSInternalException",
+                "Key state became inconsistent",
+            )
+        })?;
         if let Some(tag_keys) = tag_keys {
             for tag_key in tag_keys {
                 if let Some(k) = tag_key.as_str() {
@@ -1375,7 +1435,13 @@ impl KmsService {
         })?;
 
         let state = self.state.read();
-        let key = state.keys.get(&resolved).unwrap();
+        let key = state.keys.get(&resolved).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "KMSInternalException",
+                "Key state became inconsistent",
+            )
+        })?;
         let mut sorted_tags: Vec<(&String, &String)> = key.tags.iter().collect();
         sorted_tags.sort_by_key(|(k, _)| (*k).clone());
         let tags: Vec<Value> = sorted_tags
@@ -1404,7 +1470,13 @@ impl KmsService {
         let description = body["Description"].as_str().unwrap_or("").to_string();
 
         let mut state = self.state.write();
-        let key = state.keys.get_mut(&resolved).unwrap();
+        let key = state.keys.get_mut(&resolved).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "KMSInternalException",
+                "Key state became inconsistent",
+            )
+        })?;
         key.description = description;
 
         Ok(AwsResponse::json(StatusCode::OK, "{}"))
@@ -1432,7 +1504,13 @@ impl KmsService {
         })?;
 
         let state = self.state.read();
-        let key = state.keys.get(&resolved).unwrap();
+        let key = state.keys.get(&resolved).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "KMSInternalException",
+                "Key state became inconsistent",
+            )
+        })?;
 
         Ok(AwsResponse::json(
             StatusCode::OK,
@@ -1467,7 +1545,13 @@ impl KmsService {
         let policy = body["Policy"].as_str().unwrap_or("").to_string();
 
         let mut state = self.state.write();
-        let key = state.keys.get_mut(&resolved).unwrap();
+        let key = state.keys.get_mut(&resolved).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "KMSInternalException",
+                "Key state became inconsistent",
+            )
+        })?;
         key.policy = policy;
 
         Ok(AwsResponse::json(StatusCode::OK, "{}"))
@@ -1509,7 +1593,13 @@ impl KmsService {
         })?;
 
         let state = self.state.read();
-        let key = state.keys.get(&resolved).unwrap();
+        let key = state.keys.get(&resolved).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "KMSInternalException",
+                "Key state became inconsistent",
+            )
+        })?;
 
         Ok(AwsResponse::json(
             StatusCode::OK,
@@ -1541,7 +1631,13 @@ impl KmsService {
         })?;
 
         let mut state = self.state.write();
-        let key = state.keys.get_mut(&resolved).unwrap();
+        let key = state.keys.get_mut(&resolved).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "KMSInternalException",
+                "Key state became inconsistent",
+            )
+        })?;
         key.key_rotation_enabled = true;
 
         Ok(AwsResponse::json(StatusCode::OK, "{}"))
@@ -1568,7 +1664,13 @@ impl KmsService {
         })?;
 
         let mut state = self.state.write();
-        let key = state.keys.get_mut(&resolved).unwrap();
+        let key = state.keys.get_mut(&resolved).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "KMSInternalException",
+                "Key state became inconsistent",
+            )
+        })?;
         key.key_rotation_enabled = false;
 
         Ok(AwsResponse::json(StatusCode::OK, "{}"))
@@ -1579,7 +1681,13 @@ impl KmsService {
         let resolved = self.resolve_required_key(&body)?;
 
         let mut state = self.state.write();
-        let key = state.keys.get_mut(&resolved).unwrap();
+        let key = state.keys.get_mut(&resolved).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "KMSInternalException",
+                "Key state became inconsistent",
+            )
+        })?;
 
         let rotation = KeyRotation {
             key_id: key.key_id.clone(),
@@ -1605,7 +1713,13 @@ impl KmsService {
         let marker = body["Marker"].as_str();
 
         let state = self.state.read();
-        let key = state.keys.get(&resolved).unwrap();
+        let key = state.keys.get(&resolved).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "KMSInternalException",
+                "Key state became inconsistent",
+            )
+        })?;
 
         let start_index = if let Some(marker) = marker {
             marker.parse::<usize>().unwrap_or(0)
@@ -1673,7 +1787,13 @@ impl KmsService {
         })?;
 
         let state = self.state.read();
-        let key = state.keys.get(&resolved).unwrap();
+        let key = state.keys.get(&resolved).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "KMSInternalException",
+                "Key state became inconsistent",
+            )
+        })?;
 
         // Validate key usage
         if key.key_usage != "SIGN_VERIFY" {
@@ -1767,7 +1887,13 @@ impl KmsService {
         })?;
 
         let state = self.state.read();
-        let key = state.keys.get(&resolved).unwrap();
+        let key = state.keys.get(&resolved).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "KMSInternalException",
+                "Key state became inconsistent",
+            )
+        })?;
 
         // Validate key usage
         if key.key_usage != "SIGN_VERIFY" {
@@ -1836,7 +1962,13 @@ impl KmsService {
         })?;
 
         let state = self.state.read();
-        let key = state.keys.get(&resolved).unwrap();
+        let key = state.keys.get(&resolved).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "KMSInternalException",
+                "Key state became inconsistent",
+            )
+        })?;
 
         // Generate a fake DER-encoded public key
         let fake_public_key = generate_fake_public_key(&key.key_spec);
@@ -2099,7 +2231,13 @@ impl KmsService {
         })?;
 
         let state = self.state.read();
-        let key = state.keys.get(&resolved).unwrap();
+        let key = state.keys.get(&resolved).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "KMSInternalException",
+                "Key state became inconsistent",
+            )
+        })?;
 
         // Validate key usage
         if key.key_usage != "GENERATE_VERIFY_MAC" {
@@ -2153,7 +2291,13 @@ impl KmsService {
         })?;
 
         let state = self.state.read();
-        let key = state.keys.get(&resolved).unwrap();
+        let key = state.keys.get(&resolved).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "KMSInternalException",
+                "Key state became inconsistent",
+            )
+        })?;
 
         // Validate key usage
         if key.key_usage != "GENERATE_VERIFY_MAC" {
@@ -2209,7 +2353,13 @@ impl KmsService {
         let mut state = self.state.write();
 
         // Clone all needed data from source key first to avoid borrow issues
-        let source_key = state.keys.get(&resolved).unwrap();
+        let source_key = state.keys.get(&resolved).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "KMSInternalException",
+                "Key state became inconsistent",
+            )
+        })?;
         let source_key_id = source_key.key_id.clone();
         let source_arn = source_key.arn.clone();
         let source_creation_date = source_key.creation_date;
@@ -2314,7 +2464,13 @@ impl KmsService {
         })?;
 
         let state = self.state.read();
-        let key = state.keys.get(&resolved).unwrap();
+        let key = state.keys.get(&resolved).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "KMSInternalException",
+                "Key state became inconsistent",
+            )
+        })?;
         if !key.enabled {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
@@ -2370,7 +2526,13 @@ impl KmsService {
         })?;
 
         let state = self.state.read();
-        let key = state.keys.get(&resolved).unwrap();
+        let key = state.keys.get(&resolved).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "KMSInternalException",
+                "Key state became inconsistent",
+            )
+        })?;
         if !key.enabled {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
@@ -2428,7 +2590,13 @@ impl KmsService {
         })?;
 
         let state = self.state.read();
-        let key = state.keys.get(&resolved).unwrap();
+        let key = state.keys.get(&resolved).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "KMSInternalException",
+                "Key state became inconsistent",
+            )
+        })?;
 
         if !key.enabled {
             return Err(AwsServiceError::aws_error(
@@ -2489,7 +2657,13 @@ impl KmsService {
         })?;
 
         let state = self.state.read();
-        let key = state.keys.get(&resolved).unwrap();
+        let key = state.keys.get(&resolved).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "KMSInternalException",
+                "Key state became inconsistent",
+            )
+        })?;
 
         if key.origin != "EXTERNAL" {
             return Err(AwsServiceError::aws_error(
@@ -4060,5 +4234,45 @@ mod tests {
         let req = make_request("ListKeys", json!({ "Limit": 1001 }));
         let result = svc.list_keys(&req);
         assert!(result.is_err(), "Limit=1001 should be rejected");
+    }
+
+    #[test]
+    fn enable_key_with_nonexistent_id_returns_error() {
+        let svc = make_service();
+        // Manually insert a resolved key ID into the state, then remove it to simulate
+        // a race condition where resolve_required_key succeeds but get_mut fails
+        let key_id = create_key(&svc);
+
+        // Delete the key from state directly to simulate inconsistency
+        svc.state.write().keys.remove(&key_id);
+
+        let req = make_request("EnableKey", json!({ "KeyId": key_id }));
+        let result = svc.enable_key(&req);
+        assert!(result.is_err(), "Should return error for missing key");
+    }
+
+    #[test]
+    fn disable_key_with_nonexistent_id_returns_error() {
+        let svc = make_service();
+        let key_id = create_key(&svc);
+        svc.state.write().keys.remove(&key_id);
+
+        let req = make_request("DisableKey", json!({ "KeyId": key_id }));
+        let result = svc.disable_key(&req);
+        assert!(result.is_err(), "Should return error for missing key");
+    }
+
+    #[test]
+    fn tag_resource_with_nonexistent_key_returns_error() {
+        let svc = make_service();
+        let key_id = create_key(&svc);
+        svc.state.write().keys.remove(&key_id);
+
+        let req = make_request(
+            "TagResource",
+            json!({ "KeyId": key_id, "Tags": [{"TagKey": "k", "TagValue": "v"}] }),
+        );
+        let result = svc.tag_resource(&req);
+        assert!(result.is_err(), "Should return error for missing key");
     }
 }

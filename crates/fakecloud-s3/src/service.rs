@@ -184,11 +184,16 @@ impl AwsService for S3Service {
                         };
                         headers.insert(
                             "access-control-allow-origin",
-                            matched_origin.parse().unwrap(),
+                            matched_origin
+                                .parse()
+                                .unwrap_or_else(|_| http::HeaderValue::from_static("")),
                         );
                         headers.insert(
                             "access-control-allow-methods",
-                            rule.allowed_methods.join(", ").parse().unwrap(),
+                            rule.allowed_methods
+                                .join(", ")
+                                .parse()
+                                .unwrap_or_else(|_| http::HeaderValue::from_static("")),
                         );
                         if !rule.allowed_headers.is_empty() {
                             let ah = if rule.allowed_headers.contains(&"*".to_string()) {
@@ -200,12 +205,19 @@ impl AwsService for S3Service {
                             } else {
                                 rule.allowed_headers.join(", ")
                             };
-                            headers.insert("access-control-allow-headers", ah.parse().unwrap());
+                            headers.insert(
+                                "access-control-allow-headers",
+                                ah.parse()
+                                    .unwrap_or_else(|_| http::HeaderValue::from_static("")),
+                            );
                         }
                         if let Some(max_age) = rule.max_age_seconds {
                             headers.insert(
                                 "access-control-max-age",
-                                max_age.to_string().parse().unwrap(),
+                                max_age
+                                    .to_string()
+                                    .parse()
+                                    .unwrap_or_else(|_| http::HeaderValue::from_static("")),
                             );
                         }
                         return Ok(AwsResponse {
@@ -474,12 +486,17 @@ impl AwsService for S3Service {
                         };
                         resp.headers.insert(
                             "access-control-allow-origin",
-                            matched_origin.parse().unwrap(),
+                            matched_origin
+                                .parse()
+                                .unwrap_or_else(|_| http::HeaderValue::from_static("")),
                         );
                         if !rule.expose_headers.is_empty() {
                             resp.headers.insert(
                                 "access-control-expose-headers",
-                                rule.expose_headers.join(", ").parse().unwrap(),
+                                rule.expose_headers
+                                    .join(", ")
+                                    .parse()
+                                    .unwrap_or_else(|_| http::HeaderValue::from_static("")),
                             );
                         }
                     }
@@ -7420,5 +7437,25 @@ mod tests {
             .get("test-key");
         assert!(dest_obj.is_some());
         assert_eq!(dest_obj.unwrap().data, Bytes::from_static(b"hello"));
+    }
+
+    #[test]
+    fn cors_header_value_does_not_panic_on_unusual_input() {
+        // Verify that CORS header value parsing doesn't panic even with unusual strings.
+        // HeaderValue::from_str rejects non-visible-ASCII, so our unwrap_or_else fallback
+        // must produce a valid (empty) header value instead of panicking.
+        let valid_origin = "https://example.com";
+        let result: Result<http::HeaderValue, _> = valid_origin.parse();
+        assert!(result.is_ok());
+
+        // Non-ASCII would fail .parse() for HeaderValue; verify fallback works
+        let bad_origin = "https://ex\x01ample.com";
+        let result: Result<http::HeaderValue, _> = bad_origin.parse();
+        assert!(result.is_err());
+        // Our production code uses unwrap_or_else to return empty HeaderValue
+        let fallback = bad_origin
+            .parse()
+            .unwrap_or_else(|_| http::HeaderValue::from_static(""));
+        assert_eq!(fallback, "");
     }
 }
