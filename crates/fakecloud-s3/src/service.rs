@@ -4645,14 +4645,33 @@ impl S3Service {
             }
         }
 
-        // Use parts in submitted order (AWS requires ascending, but we don't enforce)
+        // Validate parts are in ascending order
+        for window in submitted_parts.windows(2) {
+            if window[0].0 >= window[1].0 {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidPartOrder",
+                    "The list of parts was not in ascending order. The parts list must be specified in order by part number.",
+                ));
+            }
+        }
+
         let sorted_parts = submitted_parts;
 
+        // Validate all specified parts exist in the upload
+        for (part_num, _) in &sorted_parts {
+            if !upload.parts.contains_key(part_num) {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidPart",
+                    "One or more of the specified parts could not be found. The part may not have been uploaded, or the specified entity tag may not have matched the part's entity tag.",
+                ));
+            }
+        }
+
         // Validate minimum part size: all non-last parts must be >= 5MB
-        // Use a relaxed threshold for testing compatibility (the decorator
-        // `reduced_min_part_size` in test suites lowers this to 256 bytes).
+        const MIN_PART_SIZE: usize = 5 * 1024 * 1024; // 5MB
         if sorted_parts.len() > 1 {
-            const MIN_PART_SIZE: usize = 256;
             for (i, (part_num, _)) in sorted_parts.iter().enumerate() {
                 if i >= sorted_parts.len() - 1 {
                     break; // skip last part
