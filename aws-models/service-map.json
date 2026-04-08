@@ -47,6 +47,10 @@
     "repo_dir": "kms",
     "service_name": "kms"
   },
+  "kinesis": {
+    "repo_dir": "kinesis",
+    "service_name": "kinesis"
+  },
   "cloudformation": {
     "repo_dir": "cloudformation",
     "service_name": "cloudformation"

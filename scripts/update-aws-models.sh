@@ -18,36 +18,38 @@ git clone --depth 1 --filter=blob:none --sparse \
 
 cd repo
 
-# Service mapping: our_name -> repo directory name
-declare -A SERVICES
+# Service mapping: our_name:repo_dir
 SERVICES=(
-    [sqs]=sqs
-    [sns]=sns
-    [eventbridge]=eventbridge
-    [iam]=iam
-    [sts]=sts
-    [ssm]=ssm
-    [s3]=s3
-    [dynamodb]=dynamodb
-    [lambda]=lambda
-    [secretsmanager]=secrets-manager
-    [cloudwatch-logs]=cloudwatch-logs
-    [kms]=kms
-    [cloudformation]=cloudformation
-    [sesv2]=sesv2
-    [cognito-identity-provider]=cognito-identity-provider
+    "sqs:sqs"
+    "sns:sns"
+    "eventbridge:eventbridge"
+    "iam:iam"
+    "sts:sts"
+    "ssm:ssm"
+    "s3:s3"
+    "dynamodb:dynamodb"
+    "lambda:lambda"
+    "secretsmanager:secrets-manager"
+    "cloudwatch-logs:cloudwatch-logs"
+    "kms:kms"
+    "kinesis:kinesis"
+    "cloudformation:cloudformation"
+    "sesv2:sesv2"
+    "cognito-identity-provider:cognito-identity-provider"
 )
 
 # Sparse checkout only the models we need
 SPARSE_DIRS=()
-for repo_dir in "${SERVICES[@]}"; do
+for mapping in "${SERVICES[@]}"; do
+    repo_dir="${mapping#*:}"
     SPARSE_DIRS+=("models/$repo_dir")
 done
 git sparse-checkout set "${SPARSE_DIRS[@]}"
 
 # Copy each model
-for our_name in "${!SERVICES[@]}"; do
-    repo_dir="${SERVICES[$our_name]}"
+for mapping in "${SERVICES[@]}"; do
+    our_name="${mapping%%:*}"
+    repo_dir="${mapping#*:}"
     json_file=$(find "models/$repo_dir" -name "*.json" -type f | head -1)
     if [ -z "$json_file" ]; then
         echo "WARNING: No model found for $our_name (repo dir: $repo_dir)"

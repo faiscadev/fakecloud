@@ -10,7 +10,11 @@ version.workspace = true
 [dependencies]
 fakecloud-core = { workspace = true }
 async-trait = { workspace = true }
+chrono = { workspace = true }
 http = { workspace = true }
 parking_lot = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+
+[dev-dependencies]
+bytes = { workspace = true }
