@@ -12,8 +12,9 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceErr
 
 use crate::state::{
     default_schema_attributes, AccessTokenData, AccountRecoverySetting, AdminCreateUserConfig,
-    EmailConfiguration, Group, InviteMessageTemplate, PasswordPolicy, PoolPolicies, RecoveryOption,
-    RefreshTokenData, SchemaAttribute, SessionData, SharedCognitoState, SmsConfiguration,
+    EmailConfiguration, Group, InviteMessageTemplate, MfaPreferences, PasswordPolicy, PoolPolicies,
+    RecoveryOption, RefreshTokenData, SchemaAttribute, SessionData, SharedCognitoState,
+    SmsConfiguration, SmsMfaConfiguration, SoftwareTokenMfaConfiguration,
     StringAttributeConstraints, TokenValidityUnits, User, UserAttribute, UserPool, UserPoolClient,
 };
 
@@ -83,6 +84,12 @@ impl AwsService for CognitoService {
             "GetUserAttributeVerificationCode" => self.get_user_attribute_verification_code(&req),
             "VerifyUserAttribute" => self.verify_user_attribute(&req),
             "ResendConfirmationCode" => self.resend_confirmation_code(&req),
+            "SetUserPoolMfaConfig" => self.set_user_pool_mfa_config(&req),
+            "GetUserPoolMfaConfig" => self.get_user_pool_mfa_config(&req),
+            "AdminSetUserMFAPreference" => self.admin_set_user_mfa_preference(&req),
+            "SetUserMFAPreference" => self.set_user_mfa_preference(&req),
+            "AssociateSoftwareToken" => self.associate_software_token(&req),
+            "VerifySoftwareToken" => self.verify_software_token(&req),
             _ => Err(AwsServiceError::action_not_implemented(
                 "cognito-idp",
                 &req.action,
@@ -140,6 +147,12 @@ impl AwsService for CognitoService {
             "GetUserAttributeVerificationCode",
             "VerifyUserAttribute",
             "ResendConfirmationCode",
+            "SetUserPoolMfaConfig",
+            "GetUserPoolMfaConfig",
+            "AdminSetUserMFAPreference",
+            "SetUserMFAPreference",
+            "AssociateSoftwareToken",
+            "VerifySoftwareToken",
         ]
     }
 }
@@ -244,6 +257,8 @@ impl CognitoService {
             account_recovery_setting,
             deletion_protection,
             estimated_number_of_users: 0,
+            software_token_mfa_configuration: None,
+            sms_mfa_configuration: None,
         };
 
         let response = user_pool_to_json(&pool);
@@ -887,6 +902,9 @@ impl CognitoService {
             temporary_password,
             confirmation_code: None,
             attribute_verification_codes: HashMap::new(),
+            mfa_preferences: None,
+            totp_secret: None,
+            totp_verified: false,
         };
 
         let response = user_to_json(&user);
@@ -2010,6 +2028,9 @@ impl CognitoService {
             temporary_password: None,
             confirmation_code: None,
             attribute_verification_codes: HashMap::new(),
+            mfa_preferences: None,
+            totp_secret: None,
+            totp_verified: false,
         };
 
         pool_users.insert(username.to_string(), user);
@@ -3289,6 +3310,371 @@ impl CognitoService {
             }
         })))
     }
+
+    fn set_user_pool_mfa_config(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let pool_id = require_str(&body, "UserPoolId")?;
+
+        let mut state = self.state.write();
+
+        let pool = state.user_pools.get_mut(pool_id).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("User pool {pool_id} does not exist."),
+            )
+        })?;
+
+        if let Some(mfa_config) = body["MfaConfiguration"].as_str() {
+            pool.mfa_configuration = mfa_config.to_string();
+        }
+
+        if !body["SoftwareTokenMfaConfiguration"].is_null() {
+            let enabled = body["SoftwareTokenMfaConfiguration"]["Enabled"]
+                .as_bool()
+                .unwrap_or(false);
+            pool.software_token_mfa_configuration = Some(SoftwareTokenMfaConfiguration { enabled });
+        }
+
+        if !body["SmsMfaConfiguration"].is_null() {
+            let enabled = body["SmsMfaConfiguration"]["Enabled"]
+                .as_bool()
+                .unwrap_or(false);
+            let sms_configuration = if !body["SmsMfaConfiguration"]["SmsConfiguration"].is_null() {
+                Some(SmsConfiguration {
+                    sns_caller_arn: body["SmsMfaConfiguration"]["SmsConfiguration"]["SnsCallerArn"]
+                        .as_str()
+                        .map(|s| s.to_string()),
+                    external_id: body["SmsMfaConfiguration"]["SmsConfiguration"]["ExternalId"]
+                        .as_str()
+                        .map(|s| s.to_string()),
+                    sns_region: body["SmsMfaConfiguration"]["SmsConfiguration"]["SnsRegion"]
+                        .as_str()
+                        .map(|s| s.to_string()),
+                })
+            } else {
+                None
+            };
+            pool.sms_mfa_configuration = Some(SmsMfaConfiguration {
+                enabled,
+                sms_configuration,
+            });
+        }
+
+        pool.last_modified_date = Utc::now();
+
+        let mut response = json!({
+            "MfaConfiguration": pool.mfa_configuration,
+        });
+
+        if let Some(ref stmc) = pool.software_token_mfa_configuration {
+            response["SoftwareTokenMfaConfiguration"] = json!({
+                "Enabled": stmc.enabled,
+            });
+        }
+
+        if let Some(ref smc) = pool.sms_mfa_configuration {
+            let mut sms_json = json!({ "Enabled": smc.enabled });
+            if let Some(ref sc) = smc.sms_configuration {
+                let mut sc_json = json!({});
+                if let Some(ref arn) = sc.sns_caller_arn {
+                    sc_json["SnsCallerArn"] = json!(arn);
+                }
+                if let Some(ref eid) = sc.external_id {
+                    sc_json["ExternalId"] = json!(eid);
+                }
+                if let Some(ref r) = sc.sns_region {
+                    sc_json["SnsRegion"] = json!(r);
+                }
+                sms_json["SmsConfiguration"] = sc_json;
+            }
+            response["SmsMfaConfiguration"] = sms_json;
+        }
+
+        Ok(AwsResponse::ok_json(response))
+    }
+
+    fn get_user_pool_mfa_config(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let pool_id = require_str(&body, "UserPoolId")?;
+
+        let state = self.state.read();
+
+        let pool = state.user_pools.get(pool_id).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("User pool {pool_id} does not exist."),
+            )
+        })?;
+
+        let mut response = json!({
+            "MfaConfiguration": pool.mfa_configuration,
+        });
+
+        if let Some(ref stmc) = pool.software_token_mfa_configuration {
+            response["SoftwareTokenMfaConfiguration"] = json!({
+                "Enabled": stmc.enabled,
+            });
+        }
+
+        if let Some(ref smc) = pool.sms_mfa_configuration {
+            let mut sms_json = json!({ "Enabled": smc.enabled });
+            if let Some(ref sc) = smc.sms_configuration {
+                let mut sc_json = json!({});
+                if let Some(ref arn) = sc.sns_caller_arn {
+                    sc_json["SnsCallerArn"] = json!(arn);
+                }
+                if let Some(ref eid) = sc.external_id {
+                    sc_json["ExternalId"] = json!(eid);
+                }
+                if let Some(ref r) = sc.sns_region {
+                    sc_json["SnsRegion"] = json!(r);
+                }
+                sms_json["SmsConfiguration"] = sc_json;
+            }
+            response["SmsMfaConfiguration"] = sms_json;
+        }
+
+        Ok(AwsResponse::ok_json(response))
+    }
+
+    fn admin_set_user_mfa_preference(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let pool_id = require_str(&body, "UserPoolId")?;
+        let username = require_str(&body, "Username")?;
+
+        let mut state = self.state.write();
+
+        // Verify pool exists
+        if !state.user_pools.contains_key(pool_id) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("User pool {pool_id} does not exist."),
+            ));
+        }
+
+        let user = state
+            .users
+            .get_mut(pool_id)
+            .and_then(|users| users.get_mut(username))
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "UserNotFoundException",
+                    "User does not exist.",
+                )
+            })?;
+
+        let sms_enabled = body["SMSMfaSettings"]["Enabled"].as_bool().unwrap_or(false);
+        let sms_preferred = body["SMSMfaSettings"]["PreferredMfa"]
+            .as_bool()
+            .unwrap_or(false);
+        let software_token_enabled = body["SoftwareTokenMfaSettings"]["Enabled"]
+            .as_bool()
+            .unwrap_or(false);
+        let software_token_preferred = body["SoftwareTokenMfaSettings"]["PreferredMfa"]
+            .as_bool()
+            .unwrap_or(false);
+
+        user.mfa_preferences = Some(MfaPreferences {
+            sms_enabled,
+            sms_preferred,
+            software_token_enabled,
+            software_token_preferred,
+        });
+        user.user_last_modified_date = Utc::now();
+
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    fn set_user_mfa_preference(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let access_token = require_str(&body, "AccessToken")?;
+
+        let mut state = self.state.write();
+
+        let token_data = state.access_tokens.get(access_token).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "NotAuthorizedException",
+                "Invalid access token.",
+            )
+        })?;
+        let pool_id = token_data.user_pool_id.clone();
+        let username = token_data.username.clone();
+
+        let user = state
+            .users
+            .get_mut(&pool_id)
+            .and_then(|users| users.get_mut(&username))
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "NotAuthorizedException",
+                    "Invalid access token.",
+                )
+            })?;
+
+        let sms_enabled = body["SMSMfaSettings"]["Enabled"].as_bool().unwrap_or(false);
+        let sms_preferred = body["SMSMfaSettings"]["PreferredMfa"]
+            .as_bool()
+            .unwrap_or(false);
+        let software_token_enabled = body["SoftwareTokenMfaSettings"]["Enabled"]
+            .as_bool()
+            .unwrap_or(false);
+        let software_token_preferred = body["SoftwareTokenMfaSettings"]["PreferredMfa"]
+            .as_bool()
+            .unwrap_or(false);
+
+        user.mfa_preferences = Some(MfaPreferences {
+            sms_enabled,
+            sms_preferred,
+            software_token_enabled,
+            software_token_preferred,
+        });
+        user.user_last_modified_date = Utc::now();
+
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    fn associate_software_token(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+
+        let mut state = self.state.write();
+
+        // Identify user from access token or session
+        let (pool_id, username) = if let Some(access_token) = body["AccessToken"].as_str() {
+            let token_data = state.access_tokens.get(access_token).ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "NotAuthorizedException",
+                    "Invalid access token.",
+                )
+            })?;
+            (token_data.user_pool_id.clone(), token_data.username.clone())
+        } else if let Some(session) = body["Session"].as_str() {
+            let session_data = state.sessions.get(session).ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "NotAuthorizedException",
+                    "Invalid session.",
+                )
+            })?;
+            (
+                session_data.user_pool_id.clone(),
+                session_data.username.clone(),
+            )
+        } else {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterException",
+                "AccessToken or Session is required",
+            ));
+        };
+
+        let user = state
+            .users
+            .get_mut(&pool_id)
+            .and_then(|users| users.get_mut(&username))
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "NotAuthorizedException",
+                    "Invalid access token.",
+                )
+            })?;
+
+        let secret = generate_totp_secret();
+        user.totp_secret = Some(secret.clone());
+        user.totp_verified = false;
+        user.user_last_modified_date = Utc::now();
+
+        let new_session = Uuid::new_v4().to_string();
+
+        Ok(AwsResponse::ok_json(json!({
+            "SecretCode": secret,
+            "Session": new_session,
+        })))
+    }
+
+    fn verify_software_token(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let user_code = require_str(&body, "UserCode")?;
+
+        // Validate it's a 6-digit code
+        if user_code.len() != 6 || !user_code.chars().all(|c| c.is_ascii_digit()) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "EnableSoftwareTokenMFAException",
+                "Invalid user code.",
+            ));
+        }
+
+        let mut state = self.state.write();
+
+        // Identify user from access token or session
+        let (pool_id, username) = if let Some(access_token) = body["AccessToken"].as_str() {
+            let token_data = state.access_tokens.get(access_token).ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "NotAuthorizedException",
+                    "Invalid access token.",
+                )
+            })?;
+            (token_data.user_pool_id.clone(), token_data.username.clone())
+        } else if let Some(session) = body["Session"].as_str() {
+            let session_data = state.sessions.get(session).ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "NotAuthorizedException",
+                    "Invalid session.",
+                )
+            })?;
+            (
+                session_data.user_pool_id.clone(),
+                session_data.username.clone(),
+            )
+        } else {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterException",
+                "AccessToken or Session is required",
+            ));
+        };
+
+        let user = state
+            .users
+            .get_mut(&pool_id)
+            .and_then(|users| users.get_mut(&username))
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "NotAuthorizedException",
+                    "Invalid access token.",
+                )
+            })?;
+
+        if user.totp_secret.is_none() {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "EnableSoftwareTokenMFAException",
+                "Software token MFA has not been associated.",
+            ));
+        }
+
+        // For local emulator: accept any valid 6-digit code
+        user.totp_verified = true;
+        user.user_last_modified_date = Utc::now();
+
+        Ok(AwsResponse::ok_json(json!({
+            "Status": "SUCCESS",
+        })))
+    }
 }
 
 /// Generate a pool ID in the format `{region}_{9 random alphanumeric chars}`.
@@ -3324,6 +3710,23 @@ fn generate_confirmation_code() -> String {
     let bytes = uuid.as_bytes();
     let num = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
     format!("{:06}", num % 1_000_000)
+}
+
+/// Generate a TOTP secret key: 32 base32 characters (like AWS).
+fn generate_totp_secret() -> String {
+    // Base32 alphabet (RFC 4648)
+    const BASE32_ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+    let mut result = String::with_capacity(32);
+    // Use UUID bytes as random source
+    let mut bytes = Vec::with_capacity(32);
+    for _ in 0..2 {
+        bytes.extend_from_slice(Uuid::new_v4().as_bytes());
+    }
+    for &b in bytes.iter().take(32) {
+        let idx = (b as usize) % BASE32_ALPHABET.len();
+        result.push(BASE32_ALPHABET[idx] as char);
+    }
+    result
 }
 
 /// Generate a client secret: 51 base64 characters (like AWS).
@@ -4348,6 +4751,9 @@ mod tests {
             temporary_password: None,
             confirmation_code: None,
             attribute_verification_codes: HashMap::new(),
+            mfa_preferences: None,
+            totp_secret: None,
+            totp_verified: false,
         };
 
         let filter = parse_filter_expression(r#"username = "testuser""#).unwrap();
@@ -4377,6 +4783,9 @@ mod tests {
             temporary_password: None,
             confirmation_code: None,
             attribute_verification_codes: HashMap::new(),
+            mfa_preferences: None,
+            totp_secret: None,
+            totp_verified: false,
         };
 
         let filter = parse_filter_expression(r#"email = "test@example.com""#).unwrap();
@@ -4403,6 +4812,9 @@ mod tests {
             temporary_password: None,
             confirmation_code: None,
             attribute_verification_codes: HashMap::new(),
+            mfa_preferences: None,
+            totp_secret: None,
+            totp_verified: false,
         };
 
         let filter =
@@ -5361,5 +5773,125 @@ mod tests {
             Err(e) => assert_eq!(e.code(), "CodeMismatchException"),
             Ok(_) => panic!("Expected CodeMismatchException"),
         }
+    }
+
+    #[test]
+    fn totp_secret_format() {
+        let secret = generate_totp_secret();
+        assert_eq!(secret.len(), 32, "TOTP secret should be 32 chars: {secret}");
+        assert!(
+            secret
+                .chars()
+                .all(|c| "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567".contains(c)),
+            "TOTP secret should be base32: {secret}"
+        );
+    }
+
+    #[test]
+    fn totp_secret_uniqueness() {
+        let s1 = generate_totp_secret();
+        let s2 = generate_totp_secret();
+        assert_ne!(s1, s2, "TOTP secrets should be unique");
+    }
+
+    #[test]
+    fn mfa_preference_storage() {
+        use crate::state::CognitoState;
+        use std::sync::Arc;
+
+        let state = Arc::new(parking_lot::RwLock::new(CognitoState::new(
+            "123456789012",
+            "us-east-1",
+        )));
+        let svc = CognitoService::new(state.clone());
+
+        // Create a pool and user first
+        let create_pool_req = AwsRequest {
+            service: "cognito-idp".to_string(),
+            action: "CreateUserPool".to_string(),
+            region: "us-east-1".to_string(),
+            account_id: "123456789012".to_string(),
+            request_id: "test".to_string(),
+            headers: http::HeaderMap::new(),
+            query_params: std::collections::HashMap::new(),
+            body: bytes::Bytes::from(
+                serde_json::to_string(&json!({ "PoolName": "mfa-pool" })).unwrap(),
+            ),
+            path_segments: vec![],
+            raw_path: "/".to_string(),
+            raw_query: String::new(),
+            method: http::Method::POST,
+            is_query_protocol: false,
+            access_key_id: None,
+        };
+        let pool_resp = svc.create_user_pool(&create_pool_req).unwrap();
+        let pool_body: Value = serde_json::from_slice(&pool_resp.body).unwrap();
+        let pool_id = pool_body["UserPool"]["Id"].as_str().unwrap().to_string();
+
+        let create_user_req = AwsRequest {
+            service: "cognito-idp".to_string(),
+            action: "AdminCreateUser".to_string(),
+            region: "us-east-1".to_string(),
+            account_id: "123456789012".to_string(),
+            request_id: "test".to_string(),
+            headers: http::HeaderMap::new(),
+            query_params: std::collections::HashMap::new(),
+            body: bytes::Bytes::from(
+                serde_json::to_string(&json!({
+                    "UserPoolId": pool_id,
+                    "Username": "mfauser"
+                }))
+                .unwrap(),
+            ),
+            path_segments: vec![],
+            raw_path: "/".to_string(),
+            raw_query: String::new(),
+            method: http::Method::POST,
+            is_query_protocol: false,
+            access_key_id: None,
+        };
+        svc.admin_create_user(&create_user_req).unwrap();
+
+        // Set MFA preference via admin
+        let set_pref_req = AwsRequest {
+            service: "cognito-idp".to_string(),
+            action: "AdminSetUserMFAPreference".to_string(),
+            region: "us-east-1".to_string(),
+            account_id: "123456789012".to_string(),
+            request_id: "test".to_string(),
+            headers: http::HeaderMap::new(),
+            query_params: std::collections::HashMap::new(),
+            body: bytes::Bytes::from(
+                serde_json::to_string(&json!({
+                    "UserPoolId": pool_id,
+                    "Username": "mfauser",
+                    "SoftwareTokenMfaSettings": {
+                        "Enabled": true,
+                        "PreferredMfa": true
+                    },
+                    "SMSMfaSettings": {
+                        "Enabled": false,
+                        "PreferredMfa": false
+                    }
+                }))
+                .unwrap(),
+            ),
+            path_segments: vec![],
+            raw_path: "/".to_string(),
+            raw_query: String::new(),
+            method: http::Method::POST,
+            is_query_protocol: false,
+            access_key_id: None,
+        };
+        svc.admin_set_user_mfa_preference(&set_pref_req).unwrap();
+
+        // Verify preferences were stored
+        let st = state.read();
+        let user = st.users.get(&pool_id).unwrap().get("mfauser").unwrap();
+        let prefs = user.mfa_preferences.as_ref().unwrap();
+        assert!(prefs.software_token_enabled);
+        assert!(prefs.software_token_preferred);
+        assert!(!prefs.sms_enabled);
+        assert!(!prefs.sms_preferred);
     }
 }

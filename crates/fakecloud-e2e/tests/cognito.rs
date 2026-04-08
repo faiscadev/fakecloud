@@ -4,6 +4,7 @@ use helpers::TestServer;
 use aws_sdk_cognitoidentityprovider::types::{
     AccountRecoverySettingType, AttributeType, ChallengeNameType, DeliveryMediumType,
     ExplicitAuthFlowsType, PasswordPolicyType, RecoveryOptionNameType, RecoveryOptionType,
+    SmsMfaSettingsType, SoftwareTokenMfaConfigType, SoftwareTokenMfaSettingsType, UserPoolMfaType,
     UserPoolPolicyType, UserStatusType,
 };
 
@@ -2906,4 +2907,334 @@ async fn cognito_resend_confirmation_code() {
         .send()
         .await;
     assert!(err.is_err(), "Resend for non-existent user should fail");
+}
+
+#[tokio::test]
+async fn cognito_set_get_user_pool_mfa_config() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("mfa-config-pool")
+        .send()
+        .await
+        .expect("create pool");
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    // Set MFA config to OPTIONAL with software token
+    let set_result = client
+        .set_user_pool_mfa_config()
+        .user_pool_id(&pool_id)
+        .mfa_configuration(UserPoolMfaType::Optional)
+        .software_token_mfa_configuration(
+            SoftwareTokenMfaConfigType::builder().enabled(true).build(),
+        )
+        .send()
+        .await
+        .expect("set mfa config");
+
+    assert_eq!(
+        set_result.mfa_configuration(),
+        Some(&UserPoolMfaType::Optional)
+    );
+    let stmc = set_result.software_token_mfa_configuration().unwrap();
+    assert!(stmc.enabled());
+
+    // Get MFA config and verify
+    let get_result = client
+        .get_user_pool_mfa_config()
+        .user_pool_id(&pool_id)
+        .send()
+        .await
+        .expect("get mfa config");
+
+    assert_eq!(
+        get_result.mfa_configuration(),
+        Some(&UserPoolMfaType::Optional)
+    );
+    let stmc = get_result.software_token_mfa_configuration().unwrap();
+    assert!(stmc.enabled());
+
+    // Error for non-existent pool
+    let err = client
+        .get_user_pool_mfa_config()
+        .user_pool_id("us-east-1_NOTEXIST")
+        .send()
+        .await;
+    assert!(err.is_err(), "Should fail for non-existent pool");
+}
+
+#[tokio::test]
+async fn cognito_admin_set_user_mfa_preference() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("admin-mfa-pref-pool")
+        .send()
+        .await
+        .expect("create pool");
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    client
+        .admin_create_user()
+        .user_pool_id(&pool_id)
+        .username("mfaprefuser")
+        .send()
+        .await
+        .expect("create user");
+
+    // Set MFA preferences
+    let result = client
+        .admin_set_user_mfa_preference()
+        .user_pool_id(&pool_id)
+        .username("mfaprefuser")
+        .software_token_mfa_settings(
+            SoftwareTokenMfaSettingsType::builder()
+                .enabled(true)
+                .preferred_mfa(true)
+                .build(),
+        )
+        .sms_mfa_settings(
+            SmsMfaSettingsType::builder()
+                .enabled(false)
+                .preferred_mfa(false)
+                .build(),
+        )
+        .send()
+        .await;
+    assert!(result.is_ok(), "admin set mfa preference should succeed");
+
+    // Error for non-existent user
+    let err = client
+        .admin_set_user_mfa_preference()
+        .user_pool_id(&pool_id)
+        .username("nosuchuser")
+        .send()
+        .await;
+    assert!(err.is_err(), "Should fail for non-existent user");
+}
+
+#[tokio::test]
+async fn cognito_associate_verify_software_token() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    // Create pool and client
+    let pool = client
+        .create_user_pool()
+        .pool_name("totp-pool")
+        .policies(
+            UserPoolPolicyType::builder()
+                .password_policy(
+                    PasswordPolicyType::builder()
+                        .minimum_length(6)
+                        .require_uppercase(false)
+                        .require_lowercase(false)
+                        .require_numbers(false)
+                        .require_symbols(false)
+                        .build(),
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .expect("create pool");
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    let pool_client = client
+        .create_user_pool_client()
+        .user_pool_id(&pool_id)
+        .client_name("totp-client")
+        .explicit_auth_flows(ExplicitAuthFlowsType::AllowAdminUserPasswordAuth)
+        .explicit_auth_flows(ExplicitAuthFlowsType::AllowRefreshTokenAuth)
+        .send()
+        .await
+        .expect("create client");
+    let client_id = pool_client
+        .user_pool_client()
+        .unwrap()
+        .client_id()
+        .unwrap()
+        .to_string();
+
+    // Create user with password
+    client
+        .admin_create_user()
+        .user_pool_id(&pool_id)
+        .username("totpuser")
+        .send()
+        .await
+        .expect("create user");
+
+    client
+        .admin_set_user_password()
+        .user_pool_id(&pool_id)
+        .username("totpuser")
+        .password("passwd")
+        .permanent(true)
+        .send()
+        .await
+        .expect("set password");
+
+    // Auth to get access token
+    let auth = client
+        .admin_initiate_auth()
+        .user_pool_id(&pool_id)
+        .client_id(&client_id)
+        .auth_flow(aws_sdk_cognitoidentityprovider::types::AuthFlowType::AdminUserPasswordAuth)
+        .auth_parameters("USERNAME", "totpuser")
+        .auth_parameters("PASSWORD", "passwd")
+        .send()
+        .await
+        .expect("auth");
+
+    let access_token = auth
+        .authentication_result()
+        .unwrap()
+        .access_token()
+        .unwrap()
+        .to_string();
+
+    // Associate software token
+    let assoc = client
+        .associate_software_token()
+        .access_token(&access_token)
+        .send()
+        .await
+        .expect("associate software token");
+
+    let secret = assoc.secret_code().unwrap();
+    assert_eq!(secret.len(), 32, "Secret should be 32 chars: {secret}");
+    assert!(
+        secret
+            .chars()
+            .all(|c| "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567".contains(c)),
+        "Secret should be base32: {secret}"
+    );
+    assert!(assoc.session().is_some(), "Should return a session");
+
+    // Verify software token with a 6-digit code
+    let verify = client
+        .verify_software_token()
+        .access_token(&access_token)
+        .user_code("123456")
+        .send()
+        .await
+        .expect("verify software token");
+
+    assert_eq!(
+        verify.status(),
+        Some(&aws_sdk_cognitoidentityprovider::types::VerifySoftwareTokenResponseType::Success)
+    );
+}
+
+#[tokio::test]
+async fn cognito_set_user_mfa_preference() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    // Create pool and client
+    let pool = client
+        .create_user_pool()
+        .pool_name("user-mfa-pref-pool")
+        .policies(
+            UserPoolPolicyType::builder()
+                .password_policy(
+                    PasswordPolicyType::builder()
+                        .minimum_length(6)
+                        .require_uppercase(false)
+                        .require_lowercase(false)
+                        .require_numbers(false)
+                        .require_symbols(false)
+                        .build(),
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .expect("create pool");
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    let pool_client = client
+        .create_user_pool_client()
+        .user_pool_id(&pool_id)
+        .client_name("user-mfa-client")
+        .explicit_auth_flows(ExplicitAuthFlowsType::AllowAdminUserPasswordAuth)
+        .explicit_auth_flows(ExplicitAuthFlowsType::AllowRefreshTokenAuth)
+        .send()
+        .await
+        .expect("create client");
+    let client_id = pool_client
+        .user_pool_client()
+        .unwrap()
+        .client_id()
+        .unwrap()
+        .to_string();
+
+    // Create user with password
+    client
+        .admin_create_user()
+        .user_pool_id(&pool_id)
+        .username("mfaprefuser2")
+        .send()
+        .await
+        .expect("create user");
+
+    client
+        .admin_set_user_password()
+        .user_pool_id(&pool_id)
+        .username("mfaprefuser2")
+        .password("passwd")
+        .permanent(true)
+        .send()
+        .await
+        .expect("set password");
+
+    // Auth to get access token
+    let auth = client
+        .admin_initiate_auth()
+        .user_pool_id(&pool_id)
+        .client_id(&client_id)
+        .auth_flow(aws_sdk_cognitoidentityprovider::types::AuthFlowType::AdminUserPasswordAuth)
+        .auth_parameters("USERNAME", "mfaprefuser2")
+        .auth_parameters("PASSWORD", "passwd")
+        .send()
+        .await
+        .expect("auth");
+
+    let access_token = auth
+        .authentication_result()
+        .unwrap()
+        .access_token()
+        .unwrap()
+        .to_string();
+
+    // Set MFA preference via access token
+    let result = client
+        .set_user_mfa_preference()
+        .access_token(&access_token)
+        .software_token_mfa_settings(
+            SoftwareTokenMfaSettingsType::builder()
+                .enabled(true)
+                .preferred_mfa(true)
+                .build(),
+        )
+        .send()
+        .await;
+    assert!(
+        result.is_ok(),
+        "set user mfa preference should succeed: {:?}",
+        result.err()
+    );
+
+    // Invalid token should fail
+    let err = client
+        .set_user_mfa_preference()
+        .access_token("invalid-token")
+        .send()
+        .await;
+    assert!(err.is_err(), "Should fail with invalid token");
 }

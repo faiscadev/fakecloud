@@ -97,6 +97,19 @@ pub struct UserPool {
     pub account_recovery_setting: Option<AccountRecoverySetting>,
     pub deletion_protection: Option<String>,
     pub estimated_number_of_users: i64,
+    pub software_token_mfa_configuration: Option<SoftwareTokenMfaConfiguration>,
+    pub sms_mfa_configuration: Option<SmsMfaConfiguration>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SoftwareTokenMfaConfiguration {
+    pub enabled: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SmsMfaConfiguration {
+    pub enabled: bool,
+    pub sms_configuration: Option<SmsConfiguration>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -238,6 +251,17 @@ pub struct User {
     pub confirmation_code: Option<String>,
     /// attribute_name -> verification_code (for GetUserAttributeVerificationCode / VerifyUserAttribute)
     pub attribute_verification_codes: HashMap<String, String>,
+    pub mfa_preferences: Option<MfaPreferences>,
+    pub totp_secret: Option<String>,
+    pub totp_verified: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MfaPreferences {
+    pub sms_enabled: bool,
+    pub sms_preferred: bool,
+    pub software_token_enabled: bool,
+    pub software_token_preferred: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
