@@ -112,6 +112,20 @@ jobs:
 
       - name: Publish all crates
         run: |
+          TAG="${GITHUB_REF#refs/tags/v}"
+
+          wait_for_crate() {
+            echo "Waiting for $1@$TAG on crates.io..."
+            for i in $(seq 1 60); do
+              if curl -sf "https://crates.io/api/v1/crates/$1/$TAG" > /dev/null 2>&1; then
+                echo "$1@$TAG available after $((i * 5))s"
+                return 0
+              fi
+              sleep 5
+            done
+            echo "WARNING: timed out waiting for $1@$TAG, continuing anyway"
+          }
+
           publish() {
             echo "Publishing $1..."
             OUTPUT=$(cargo publish -p "$1" 2>&1) && {
@@ -119,14 +133,14 @@ jobs:
             } || {
               if echo "$OUTPUT" | grep -q "already uploaded"; then
                 echo "Skipping $1: already published"
+                return 0
               else
                 echo "ERROR publishing $1:"
                 echo "$OUTPUT"
                 exit 1
               fi
             }
-            echo "Waiting for crates.io index..."
-            sleep 60
+            wait_for_crate "$1"
           }
 
           # Layer 1: no internal deps
