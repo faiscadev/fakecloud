@@ -360,6 +360,50 @@ impl ContainerRuntime {
         }
     }
 
+    /// List all warm containers and their metadata for introspection.
+    pub fn list_warm_containers(
+        &self,
+        lambda_state: &crate::state::SharedLambdaState,
+    ) -> Vec<serde_json::Value> {
+        let containers = self.containers.read();
+        let state = lambda_state.read();
+        containers
+            .iter()
+            .map(|(name, container)| {
+                let runtime = state
+                    .functions
+                    .get(name)
+                    .map(|f| f.runtime.clone())
+                    .unwrap_or_default();
+                let last_used = container.last_used.read();
+                let idle_secs = last_used.elapsed().as_secs();
+                serde_json::json!({
+                    "functionName": name,
+                    "runtime": runtime,
+                    "containerId": container.container_id,
+                    "lastUsedSecsAgo": idle_secs,
+                })
+            })
+            .collect()
+    }
+
+    /// Evict (stop and remove) the warm container for a specific function.
+    /// Returns true if a container was found and evicted.
+    pub async fn evict_container(&self, function_name: &str) -> bool {
+        let container = self.containers.write().remove(function_name);
+        if let Some(container) = container {
+            tracing::info!(
+                function = %function_name,
+                container_id = %container.container_id,
+                "evicting Lambda container via simulation API"
+            );
+            self.remove_container(&container.container_id).await;
+            true
+        } else {
+            false
+        }
+    }
+
     /// Background loop that stops containers idle longer than `ttl`.
     pub async fn run_cleanup_loop(self: Arc<Self>, ttl: Duration) {
         let mut interval = tokio::time::interval(Duration::from_secs(30));

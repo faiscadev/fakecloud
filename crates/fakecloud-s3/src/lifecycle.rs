@@ -28,7 +28,7 @@ impl LifecycleProcessor {
         }
     }
 
-    fn tick(&self) {
+    pub fn tick(&self) {
         let now = Utc::now();
         let today = now.date_naive();
 

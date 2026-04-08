@@ -449,3 +449,71 @@ async fn get_queue_arn(sqs: &aws_sdk_sqs::Client, queue_url: &str) -> String {
         .unwrap()
         .to_string()
 }
+
+/// Per-service reset: resetting SQS should leave SNS state intact.
+#[tokio::test]
+async fn per_service_reset_sqs_leaves_sns() {
+    let server = TestServer::start().await;
+    let sqs = server.sqs_client().await;
+    let sns = server.sns_client().await;
+    let http_client = reqwest::Client::new();
+
+    // Create an SQS queue
+    sqs.create_queue()
+        .queue_name("reset-test-queue")
+        .send()
+        .await
+        .unwrap();
+
+    // Create an SNS topic
+    let topic_resp = sns
+        .create_topic()
+        .name("reset-test-topic")
+        .send()
+        .await
+        .unwrap();
+    let topic_arn = topic_resp.topic_arn().unwrap().to_string();
+
+    // Verify both exist
+    assert_eq!(
+        sqs.list_queues().send().await.unwrap().queue_urls().len(),
+        1
+    );
+    assert_eq!(sns.list_topics().send().await.unwrap().topics().len(), 1);
+
+    // Reset only SQS
+    let url = format!("{}/_fakecloud/reset/sqs", server.endpoint());
+    let resp: serde_json::Value = http_client
+        .post(&url)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(resp["reset"], "sqs");
+
+    // Verify SQS queue is gone
+    assert_eq!(
+        sqs.list_queues().send().await.unwrap().queue_urls().len(),
+        0
+    );
+
+    // Verify SNS topic still exists
+    let topics = sns.list_topics().send().await.unwrap();
+    assert_eq!(topics.topics().len(), 1);
+    assert_eq!(topics.topics()[0].topic_arn().unwrap(), topic_arn);
+}
+
+/// Per-service reset: unknown service returns 404.
+#[tokio::test]
+async fn per_service_reset_unknown_service_returns_404() {
+    let server = TestServer::start().await;
+    let http_client = reqwest::Client::new();
+
+    let url = format!("{}/_fakecloud/reset/nonexistent", server.endpoint());
+    let resp = http_client.post(&url).send().await.unwrap();
+    assert_eq!(resp.status(), 404);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert!(body["error"].as_str().unwrap().contains("Unknown service"));
+}

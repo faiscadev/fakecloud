@@ -821,3 +821,88 @@ async fn sns_introspection_messages() {
     assert!(!msg["messageId"].as_str().unwrap().is_empty());
     assert!(!msg["timestamp"].as_str().unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn sns_simulation_http_subscription_pending_and_confirm() {
+    let server = TestServer::start().await;
+    let client = server.sns_client().await;
+    let http_client = reqwest::Client::new();
+
+    // Create topic
+    let resp = client
+        .create_topic()
+        .name("http-confirm-topic")
+        .send()
+        .await
+        .unwrap();
+    let topic_arn = resp.topic_arn().unwrap().to_string();
+
+    // Subscribe with HTTP protocol (should be pending)
+    let sub_resp = client
+        .subscribe()
+        .topic_arn(&topic_arn)
+        .protocol("http")
+        .endpoint("http://example.com/webhook")
+        .send()
+        .await
+        .unwrap();
+    // HTTP subscriptions return "pending confirmation" as the ARN
+    let sub_arn_str = sub_resp.subscription_arn().unwrap_or_default().to_string();
+    assert_eq!(sub_arn_str, "pending confirmation");
+
+    // List pending confirmations
+    let url = format!("{}/_fakecloud/sns/pending-confirmations", server.endpoint());
+    let resp: serde_json::Value = http_client
+        .get(&url)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let pending = resp["pendingConfirmations"].as_array().unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0]["topicArn"], topic_arn);
+    assert_eq!(pending[0]["protocol"], "http");
+    assert_eq!(pending[0]["endpoint"], "http://example.com/webhook");
+    let actual_sub_arn = pending[0]["subscriptionArn"].as_str().unwrap().to_string();
+
+    // Force confirm via simulation endpoint
+    let confirm_url = format!("{}/_fakecloud/sns/confirm-subscription", server.endpoint());
+    let resp: serde_json::Value = http_client
+        .post(&confirm_url)
+        .json(&serde_json::json!({ "subscriptionArn": actual_sub_arn }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(resp["confirmed"], true);
+
+    // Verify no more pending
+    let resp: serde_json::Value = http_client
+        .get(&url)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let pending = resp["pendingConfirmations"].as_array().unwrap();
+    assert!(pending.is_empty());
+
+    // Verify the subscription is now listed normally (not "pending confirmation")
+    let subs = client
+        .list_subscriptions_by_topic()
+        .topic_arn(&topic_arn)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(subs.subscriptions().len(), 1);
+    let sub = &subs.subscriptions()[0];
+    assert_ne!(
+        sub.subscription_arn().unwrap_or_default(),
+        "pending confirmation"
+    );
+}

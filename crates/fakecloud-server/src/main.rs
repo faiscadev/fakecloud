@@ -206,6 +206,12 @@ async fn main() {
     let eb_sim_lambda_state = Some(lambda_state.clone());
     let eb_sim_logs_state = Some(logs_state.clone());
     let eb_sim_container_runtime = container_runtime.clone();
+    let s3_sim_lifecycle_state = s3_state.clone();
+    let lambda_sim_warm_state = lambda_state.clone();
+    let lambda_sim_warm_runtime = container_runtime.clone();
+    let lambda_sim_evict_runtime = container_runtime.clone();
+    let sns_sim_pending_state = sns_state.clone();
+    let sns_sim_confirm_state = sns_state.clone();
 
     // Clone state for reset endpoint before moving into services
     let reset_state = ResetState {
@@ -365,7 +371,7 @@ async fn main() {
         .route(
             "/_reset",
             axum::routing::post({
-                let s = reset_state;
+                let s = reset_state.clone();
                 move || async move { s.reset() }
             }),
         )
@@ -729,6 +735,99 @@ async fn main() {
                 }
             }),
         )
+        .route(
+            "/_fakecloud/s3/lifecycle-processor/tick",
+            axum::routing::post({
+                let ss = s3_sim_lifecycle_state;
+                move || async move {
+                    let result = fakecloud_s3::simulation::tick_lifecycle(&ss);
+                    axum::Json(serde_json::json!({
+                        "processedBuckets": result.processed_buckets,
+                        "expiredObjects": result.expired_objects,
+                        "transitionedObjects": result.transitioned_objects,
+                    }))
+                }
+            }),
+        )
+        .route(
+            "/_fakecloud/lambda/warm-containers",
+            axum::routing::get({
+                let ls = lambda_sim_warm_state;
+                let rt = lambda_sim_warm_runtime;
+                move || async move {
+                    let containers: Vec<serde_json::Value> = if let Some(ref rt) = rt {
+                        rt.list_warm_containers(&ls)
+                    } else {
+                        Vec::new()
+                    };
+                    axum::Json(serde_json::json!({ "containers": containers }))
+                }
+            }),
+        )
+        .route(
+            "/_fakecloud/lambda/{function_name}/evict-container",
+            axum::routing::post({
+                let rt = lambda_sim_evict_runtime;
+                move |axum::extract::Path(function_name): axum::extract::Path<String>| async move {
+                    if let Some(ref rt) = rt {
+                        let evicted = rt.evict_container(&function_name).await;
+                        axum::Json(serde_json::json!({ "evicted": evicted }))
+                    } else {
+                        axum::Json(serde_json::json!({ "evicted": false }))
+                    }
+                }
+            }),
+        )
+        .route(
+            "/_fakecloud/sns/pending-confirmations",
+            axum::routing::get({
+                let ss = sns_sim_pending_state;
+                move || async move {
+                    let pending = fakecloud_sns::simulation::list_pending_confirmations(&ss);
+                    let items: Vec<serde_json::Value> = pending
+                        .iter()
+                        .map(|p| {
+                            serde_json::json!({
+                                "subscriptionArn": p.subscription_arn,
+                                "topicArn": p.topic_arn,
+                                "protocol": p.protocol,
+                                "endpoint": p.endpoint,
+                            })
+                        })
+                        .collect();
+                    axum::Json(serde_json::json!({ "pendingConfirmations": items }))
+                }
+            }),
+        )
+        .route(
+            "/_fakecloud/sns/confirm-subscription",
+            axum::routing::post({
+                let ss = sns_sim_confirm_state;
+                move |axum::Json(body): axum::Json<serde_json::Value>| async move {
+                    let sub_arn = body["subscriptionArn"].as_str().unwrap_or("");
+                    let confirmed = fakecloud_sns::simulation::confirm_subscription(&ss, sub_arn);
+                    axum::Json(serde_json::json!({ "confirmed": confirmed }))
+                }
+            }),
+        )
+        .route(
+            "/_fakecloud/reset/{service}",
+            axum::routing::post({
+                let s = reset_state.clone();
+                move |axum::extract::Path(service): axum::extract::Path<String>| async move {
+                    match s.reset_service(&service) {
+                        Ok(()) => (
+                            axum::http::StatusCode::OK,
+                            axum::Json(serde_json::json!({ "reset": service })),
+                        ),
+                        Err(msg) => (
+                            axum::http::StatusCode::NOT_FOUND,
+                            axum::Json(serde_json::json!({ "error": msg })),
+                        ),
+                    }
+                }
+            }),
+        )
         .fallback(dispatch::dispatch)
         .layer(Extension(Arc::new(registry)))
         .layer(Extension(Arc::new(config)))
@@ -768,6 +867,76 @@ struct ResetState {
 }
 
 impl ResetState {
+    fn reset_service(&self, service: &str) -> Result<(), String> {
+        match service {
+            "iam" | "sts" => {
+                self.iam.write().reset();
+            }
+            "sqs" => {
+                let mut s = self.sqs.write();
+                s.queues.clear();
+                s.name_to_url.clear();
+            }
+            "sns" => {
+                let mut s = self.sns.write();
+                s.reset();
+                s.seed_default_opted_out();
+            }
+            "events" | "eventbridge" => {
+                let mut eb = self.eb.write();
+                eb.rules.clear();
+                eb.events.clear();
+                eb.archives.clear();
+                eb.connections.clear();
+                eb.api_destinations.clear();
+                eb.replays.clear();
+                eb.buses.retain(|name, _| name == "default");
+                eb.lambda_invocations.clear();
+                eb.log_deliveries.clear();
+                eb.step_function_executions.clear();
+            }
+            "ssm" => {
+                self.ssm.write().reset();
+            }
+            "dynamodb" => {
+                self.dynamodb.write().reset();
+            }
+            "lambda" => {
+                self.lambda.write().reset();
+                if let Some(ref rt) = self.container_runtime {
+                    let rt = rt.clone();
+                    tokio::spawn(async move { rt.stop_all().await });
+                }
+            }
+            "secretsmanager" => {
+                self.secretsmanager.write().reset();
+            }
+            "s3" => {
+                self.s3.write().reset();
+            }
+            "logs" => {
+                self.logs.write().reset();
+            }
+            "kms" => {
+                self.kms.write().reset();
+            }
+            "cloudformation" => {
+                self.cloudformation.write().reset();
+            }
+            "ses" => {
+                self.ses.write().reset();
+            }
+            "cognito" => {
+                self.cognito.write().reset();
+            }
+            _ => {
+                return Err(format!("Unknown service: {service}"));
+            }
+        }
+        tracing::info!(service = %service, "service state reset via per-service reset API");
+        Ok(())
+    }
+
     fn reset(&self) -> axum::Json<serde_json::Value> {
         self.iam.write().reset();
         self.sqs.write().queues.clear();

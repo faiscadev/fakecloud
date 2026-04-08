@@ -660,6 +660,14 @@ impl SnsService {
 
         let sub_arn = format!("{}:{}", topic_arn, uuid::Uuid::new_v4());
 
+        // HTTP/HTTPS subscriptions start as pending (require confirmation)
+        let confirmed = protocol != "http" && protocol != "https";
+        let response_arn = if confirmed {
+            sub_arn.clone()
+        } else {
+            "pending confirmation".to_string()
+        };
+
         let sub = SnsSubscription {
             subscription_arn: sub_arn.clone(),
             topic_arn,
@@ -667,7 +675,7 @@ impl SnsService {
             endpoint,
             owner: account_id,
             attributes,
-            confirmed: true,
+            confirmed,
         };
 
         state.subscriptions.insert(sub_arn.clone(), sub);
@@ -676,7 +684,7 @@ impl SnsService {
             &format!(
                 r#"<SubscribeResponse xmlns="http://sns.amazonaws.com/doc/2010-03-31/">
   <SubscribeResult>
-    <SubscriptionArn>{sub_arn}</SubscriptionArn>
+    <SubscriptionArn>{response_arn}</SubscriptionArn>
   </SubscribeResult>
   <ResponseMetadata>
     <RequestId>{}</RequestId>
@@ -692,13 +700,18 @@ impl SnsService {
         let topic_arn = required(req, "TopicArn")?;
         let _token = required(req, "Token")?;
 
-        let state = self.state.read();
+        let mut state = self.state.write();
         let sub_arn = state
             .subscriptions
             .values()
-            .find(|s| s.topic_arn == topic_arn)
+            .find(|s| s.topic_arn == topic_arn && !s.confirmed)
             .map(|s| s.subscription_arn.clone())
             .unwrap_or_else(|| format!("{}:{}", topic_arn, uuid::Uuid::new_v4()));
+
+        // Mark the subscription as confirmed
+        if let Some(sub) = state.subscriptions.get_mut(&sub_arn) {
+            sub.confirmed = true;
+        }
 
         Ok(xml_resp(
             &format!(
@@ -2664,6 +2677,11 @@ fn format_attr(name: &str, value: &str) -> String {
 }
 
 fn format_sub_member(sub: &SnsSubscription) -> String {
+    let display_arn = if sub.confirmed {
+        &sub.subscription_arn
+    } else {
+        "PendingConfirmation"
+    };
     format!(
         r#"      <member>
         <SubscriptionArn>{}</SubscriptionArn>
@@ -2672,7 +2690,7 @@ fn format_sub_member(sub: &SnsSubscription) -> String {
         <Endpoint>{}</Endpoint>
         <Owner>{}</Owner>
       </member>"#,
-        sub.subscription_arn, sub.topic_arn, sub.protocol, sub.endpoint, sub.owner,
+        display_arn, sub.topic_arn, sub.protocol, sub.endpoint, sub.owner,
     )
 }
 

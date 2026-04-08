@@ -3926,3 +3926,91 @@ async fn s3_introspection_notifications() {
     assert_eq!(notif["eventType"], "s3:ObjectCreated:Put");
     assert!(!notif["timestamp"].as_str().unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn s3_simulation_lifecycle_tick_expires_objects() {
+    let server = TestServer::start().await;
+    let client = server.s3_client().await;
+    let http_client = reqwest::Client::new();
+
+    // Create bucket
+    client
+        .create_bucket()
+        .bucket("lifecycle-tick-bucket")
+        .send()
+        .await
+        .unwrap();
+
+    // Set lifecycle config that expires objects after 0 days via CLI
+    let lifecycle_json = r#"{
+        "Rules": [
+            {
+                "ID": "expire-all",
+                "Filter": {"Prefix": ""},
+                "Status": "Enabled",
+                "Expiration": {"Days": 0}
+            }
+        ]
+    }"#;
+
+    let output = server
+        .aws_cli(&[
+            "s3api",
+            "put-bucket-lifecycle-configuration",
+            "--bucket",
+            "lifecycle-tick-bucket",
+            "--lifecycle-configuration",
+            lifecycle_json,
+        ])
+        .await;
+    assert!(
+        output.success(),
+        "put lifecycle failed: {}",
+        output.stderr_text()
+    );
+
+    // Put an object
+    client
+        .put_object()
+        .bucket("lifecycle-tick-bucket")
+        .key("ephemeral.txt")
+        .body(ByteStream::from_static(b"will be deleted"))
+        .send()
+        .await
+        .unwrap();
+
+    // Verify object exists
+    let resp = client
+        .list_objects_v2()
+        .bucket("lifecycle-tick-bucket")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.key_count().unwrap_or(0), 1);
+
+    // Call the lifecycle tick endpoint
+    let url = format!(
+        "{}/_fakecloud/s3/lifecycle-processor/tick",
+        server.endpoint()
+    );
+    let resp: serde_json::Value = http_client
+        .post(&url)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(resp["processedBuckets"], 1);
+    assert_eq!(resp["expiredObjects"], 1);
+    assert_eq!(resp["transitionedObjects"], 0);
+
+    // Verify object was deleted
+    let resp = client
+        .list_objects_v2()
+        .bucket("lifecycle-tick-bucket")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.key_count().unwrap_or(0), 0);
+}

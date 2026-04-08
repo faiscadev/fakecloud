@@ -173,12 +173,21 @@ fakecloud exposes `/_fakecloud/*` endpoints for testing behaviors that AWS runs 
 |---|---|---|
 | `/_fakecloud/dynamodb/ttl-processor/tick` | POST | Expire DynamoDB items whose TTL attribute is in the past. Returns `{"expiredItems": N}`. |
 | `/_fakecloud/secretsmanager/rotation-scheduler/tick` | POST | Rotate secrets whose rotation schedule is due. Returns `{"rotatedSecrets": ["name", ...]}`. |
+| `/_fakecloud/s3/lifecycle-processor/tick` | POST | Run one S3 lifecycle processing tick. Returns `{"processedBuckets": N, "expiredObjects": N, "transitionedObjects": N}`. |
+| `/_fakecloud/sqs/expiration-processor/tick` | POST | Expire SQS messages past retention period. Returns `{"expiredMessages": N}`. |
+| `/_fakecloud/sqs/{queue_name}/force-dlq` | POST | Force-move messages exceeding maxReceiveCount to DLQ. Returns `{"movedMessages": N}`. |
+| `/_fakecloud/events/fire-rule` | POST | Fire an EventBridge rule regardless of state. Body: `{"busName": "...", "ruleName": "..."}`. |
 | `/_fakecloud/lambda/invocations` | GET | List all Lambda invocations (introspection). |
+| `/_fakecloud/lambda/warm-containers` | GET | List all warm Lambda containers. Returns `{"containers": [...]}`. |
+| `/_fakecloud/lambda/{function-name}/evict-container` | POST | Evict a warm Lambda container (forces cold start). Returns `{"evicted": true/false}`. |
 | `/_fakecloud/sns/messages` | GET | List all published SNS messages. |
+| `/_fakecloud/sns/pending-confirmations` | GET | List SNS subscriptions pending confirmation. Returns `{"pendingConfirmations": [...]}`. |
+| `/_fakecloud/sns/confirm-subscription` | POST | Force-confirm an SNS subscription. Body: `{"subscriptionArn": "..."}`. Returns `{"confirmed": true}`. |
 | `/_fakecloud/sqs/messages` | GET | List all SQS messages across queues. |
 | `/_fakecloud/events/history` | GET | List all EventBridge events and deliveries. |
 | `/_fakecloud/s3/notifications` | GET | List all S3 notification events. |
 | `/_fakecloud/ses/emails` | GET | List all sent SES emails. |
+| `/_fakecloud/reset/{service}` | POST | Reset only the specified service's state. Returns `{"reset": "service_name"}`. |
 
 ## Architecture
 
