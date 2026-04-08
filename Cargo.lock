@@ -1486,6 +1486,7 @@ dependencies = [
  "fakecloud-lambda",
  "fakecloud-logs",
  "fakecloud-s3",
+ "fakecloud-sdk",
  "fakecloud-secretsmanager",
  "fakecloud-ses",
  "fakecloud-sns",
@@ -1795,6 +1796,15 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "fakecloud-sdk"
+version = "0.4.0"
+dependencies = [
+ "reqwest",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

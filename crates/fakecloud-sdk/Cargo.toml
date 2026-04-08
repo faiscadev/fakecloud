@@ -1,0 +1,13 @@
+[package]
+name = "fakecloud-sdk"
+description = "Client SDK for fakecloud — local AWS cloud emulator"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+version.workspace = true
+homepage.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { workspace = true }

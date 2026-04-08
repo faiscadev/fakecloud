@@ -9,6 +9,7 @@ use tower_http::trace::TraceLayer;
 use fakecloud_core::delivery::DeliveryBus;
 use fakecloud_core::dispatch::{self, DispatchConfig};
 use fakecloud_core::registry::ServiceRegistry;
+use fakecloud_sdk::types;
 
 mod lambda_delivery;
 mod sqs_lambda_poller;
@@ -379,11 +380,11 @@ async fn main() {
             axum::routing::get({
                 let services = service_names.clone();
                 move || async move {
-                    axum::Json(serde_json::json!({
-                        "status": "ok",
-                        "version": env!("CARGO_PKG_VERSION"),
-                        "services": services,
-                    }))
+                    axum::Json(types::HealthResponse {
+                        status: "ok".to_string(),
+                        version: env!("CARGO_PKG_VERSION").to_string(),
+                        services,
+                    })
                 }
             }),
         )
@@ -400,19 +401,17 @@ async fn main() {
                 let ls = lambda_invocations_state.clone();
                 move || async move {
                     let state = ls.read();
-                    let invocations: Vec<serde_json::Value> = state
+                    let invocations = state
                         .invocations
                         .iter()
-                        .map(|inv| {
-                            serde_json::json!({
-                                "functionArn": inv.function_arn,
-                                "payload": inv.payload,
-                                "source": inv.source,
-                                "timestamp": inv.timestamp.to_rfc3339(),
-                            })
+                        .map(|inv| types::LambdaInvocation {
+                            function_arn: inv.function_arn.clone(),
+                            payload: inv.payload.clone(),
+                            source: inv.source.clone(),
+                            timestamp: inv.timestamp.to_rfc3339(),
                         })
                         .collect();
-                    axum::Json(serde_json::json!({ "invocations": invocations }))
+                    axum::Json(types::LambdaInvocationsResponse { invocations })
                 }
             }),
         )
@@ -422,27 +421,25 @@ async fn main() {
                 let ss = ses_emails_state.clone();
                 move || async move {
                     let state = ss.read();
-                    let emails: Vec<serde_json::Value> = state
+                    let emails = state
                         .sent_emails
                         .iter()
-                        .map(|email| {
-                            serde_json::json!({
-                                "messageId": email.message_id,
-                                "from": email.from,
-                                "to": email.to,
-                                "cc": email.cc,
-                                "bcc": email.bcc,
-                                "subject": email.subject,
-                                "htmlBody": email.html_body,
-                                "textBody": email.text_body,
-                                "rawData": email.raw_data,
-                                "templateName": email.template_name,
-                                "templateData": email.template_data,
-                                "timestamp": email.timestamp.to_rfc3339(),
-                            })
+                        .map(|email| types::SentEmail {
+                            message_id: email.message_id.clone(),
+                            from: email.from.clone(),
+                            to: email.to.clone(),
+                            cc: email.cc.clone(),
+                            bcc: email.bcc.clone(),
+                            subject: email.subject.clone(),
+                            html_body: email.html_body.clone(),
+                            text_body: email.text_body.clone(),
+                            raw_data: email.raw_data.clone(),
+                            template_name: email.template_name.clone(),
+                            template_data: email.template_data.clone(),
+                            timestamp: email.timestamp.to_rfc3339(),
                         })
                         .collect();
-                    axum::Json(serde_json::json!({ "emails": emails }))
+                    axum::Json(types::SesEmailsResponse { emails })
                 }
             }),
         )
@@ -450,46 +447,39 @@ async fn main() {
             "/_fakecloud/ses/inbound",
             axum::routing::post({
                 let ss = ses_inbound_state.clone();
-                move |axum::Json(body): axum::Json<serde_json::Value>| async move {
-                    let from = body["from"].as_str().unwrap_or("").to_string();
-                    let to: Vec<String> = body["to"]
-                        .as_array()
-                        .map(|a| {
-                            a.iter()
-                                .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    let subject = body["subject"].as_str().unwrap_or("").to_string();
-                    let email_body = body["body"].as_str().unwrap_or("").to_string();
-
+                move |axum::Json(body): axum::Json<types::InboundEmailRequest>| async move {
                     let (message_id, matched_rules, actions) =
                         fakecloud_ses::v1::evaluate_inbound_email(
-                            &ss, &from, &to, &subject, &email_body,
+                            &ss,
+                            &body.from,
+                            &body.to,
+                            &body.subject,
+                            &body.body,
                         );
 
-                    let actions_executed: Vec<serde_json::Value> = actions
+                    let actions_executed = actions
                         .iter()
-                        .map(|(rule, action)| {
-                            serde_json::json!({
-                                "rule": rule,
-                                "actionType": match action {
-                                    fakecloud_ses::state::ReceiptAction::S3 { .. } => "S3",
-                                    fakecloud_ses::state::ReceiptAction::Sns { .. } => "SNS",
-                                    fakecloud_ses::state::ReceiptAction::Lambda { .. } => "Lambda",
-                                    fakecloud_ses::state::ReceiptAction::Bounce { .. } => "Bounce",
-                                    fakecloud_ses::state::ReceiptAction::AddHeader { .. } => "AddHeader",
-                                    fakecloud_ses::state::ReceiptAction::Stop { .. } => "Stop",
-                                },
-                            })
+                        .map(|(rule, action)| types::InboundActionExecuted {
+                            rule: rule.clone(),
+                            action_type: match action {
+                                fakecloud_ses::state::ReceiptAction::S3 { .. } => "S3",
+                                fakecloud_ses::state::ReceiptAction::Sns { .. } => "SNS",
+                                fakecloud_ses::state::ReceiptAction::Lambda { .. } => "Lambda",
+                                fakecloud_ses::state::ReceiptAction::Bounce { .. } => "Bounce",
+                                fakecloud_ses::state::ReceiptAction::AddHeader { .. } => {
+                                    "AddHeader"
+                                }
+                                fakecloud_ses::state::ReceiptAction::Stop { .. } => "Stop",
+                            }
+                            .to_string(),
                         })
                         .collect();
 
-                    axum::Json(serde_json::json!({
-                        "messageId": message_id,
-                        "matchedRules": matched_rules,
-                        "actionsExecuted": actions_executed,
-                    }))
+                    axum::Json(types::InboundEmailResponse {
+                        message_id,
+                        matched_rules,
+                        actions_executed,
+                    })
                 }
             }),
         )
@@ -499,20 +489,18 @@ async fn main() {
                 let ss = sns_introspection_state;
                 move || async move {
                     let state = ss.read();
-                    let messages: Vec<serde_json::Value> = state
+                    let messages = state
                         .published
                         .iter()
-                        .map(|msg| {
-                            serde_json::json!({
-                                "messageId": msg.message_id,
-                                "topicArn": msg.topic_arn,
-                                "message": msg.message,
-                                "subject": msg.subject,
-                                "timestamp": msg.timestamp.to_rfc3339(),
-                            })
+                        .map(|msg| types::SnsMessage {
+                            message_id: msg.message_id.clone(),
+                            topic_arn: msg.topic_arn.clone(),
+                            message: msg.message.clone(),
+                            subject: msg.subject.clone(),
+                            timestamp: msg.timestamp.to_rfc3339(),
                         })
                         .collect();
-                    axum::Json(serde_json::json!({ "messages": messages }))
+                    axum::Json(types::SnsMessagesResponse { messages })
                 }
             }),
         )
@@ -522,45 +510,41 @@ async fn main() {
                 let ss = sqs_introspection_state;
                 move || async move {
                     let state = ss.read();
-                    let queues: Vec<serde_json::Value> = state
+                    let queues = state
                         .queues
                         .values()
                         .map(|queue| {
-                            let mut messages: Vec<serde_json::Value> = queue
+                            let mut messages: Vec<types::SqsMessageInfo> = queue
                                 .messages
                                 .iter()
-                                .map(|msg| {
-                                    serde_json::json!({
-                                        "messageId": msg.message_id,
-                                        "body": msg.body,
-                                        "receiveCount": msg.receive_count,
-                                        "inFlight": false,
-                                        "createdAt": msg.created_at.to_rfc3339(),
-                                    })
+                                .map(|msg| types::SqsMessageInfo {
+                                    message_id: msg.message_id.clone(),
+                                    body: msg.body.clone(),
+                                    receive_count: msg.receive_count as u64,
+                                    in_flight: false,
+                                    created_at: msg.created_at.to_rfc3339(),
                                 })
                                 .collect();
-                            let inflight: Vec<serde_json::Value> = queue
+                            let inflight: Vec<types::SqsMessageInfo> = queue
                                 .inflight
                                 .iter()
-                                .map(|msg| {
-                                    serde_json::json!({
-                                        "messageId": msg.message_id,
-                                        "body": msg.body,
-                                        "receiveCount": msg.receive_count,
-                                        "inFlight": true,
-                                        "createdAt": msg.created_at.to_rfc3339(),
-                                    })
+                                .map(|msg| types::SqsMessageInfo {
+                                    message_id: msg.message_id.clone(),
+                                    body: msg.body.clone(),
+                                    receive_count: msg.receive_count as u64,
+                                    in_flight: true,
+                                    created_at: msg.created_at.to_rfc3339(),
                                 })
                                 .collect();
                             messages.extend(inflight);
-                            serde_json::json!({
-                                "queueUrl": queue.queue_url,
-                                "queueName": queue.queue_name,
-                                "messages": messages,
-                            })
+                            types::SqsQueueMessages {
+                                queue_url: queue.queue_url.clone(),
+                                queue_name: queue.queue_name.clone(),
+                                messages,
+                            }
                         })
                         .collect();
-                    axum::Json(serde_json::json!({ "queues": queues }))
+                    axum::Json(types::SqsMessagesResponse { queues })
                 }
             }),
         )
@@ -570,49 +554,40 @@ async fn main() {
                 let es = eb_introspection_state;
                 move || async move {
                     let state = es.read();
-                    let events: Vec<serde_json::Value> = state
+                    let events = state
                         .events
                         .iter()
-                        .map(|evt| {
-                            serde_json::json!({
-                                "eventId": evt.event_id,
-                                "source": evt.source,
-                                "detailType": evt.detail_type,
-                                "detail": evt.detail,
-                                "busName": evt.event_bus_name,
-                                "timestamp": evt.time.to_rfc3339(),
-                            })
+                        .map(|evt| types::EventBridgeEvent {
+                            event_id: evt.event_id.clone(),
+                            source: evt.source.clone(),
+                            detail_type: evt.detail_type.clone(),
+                            detail: evt.detail.clone(),
+                            bus_name: evt.event_bus_name.clone(),
+                            timestamp: evt.time.to_rfc3339(),
                         })
                         .collect();
-                    let lambda_deliveries: Vec<serde_json::Value> = state
+                    let lambda = state
                         .lambda_invocations
                         .iter()
-                        .map(|inv| {
-                            serde_json::json!({
-                                "functionArn": inv.function_arn,
-                                "payload": inv.payload,
-                                "timestamp": inv.timestamp.to_rfc3339(),
-                            })
+                        .map(|inv| types::EventBridgeLambdaDelivery {
+                            function_arn: inv.function_arn.clone(),
+                            payload: inv.payload.clone(),
+                            timestamp: inv.timestamp.to_rfc3339(),
                         })
                         .collect();
-                    let log_deliveries: Vec<serde_json::Value> = state
+                    let logs = state
                         .log_deliveries
                         .iter()
-                        .map(|ld| {
-                            serde_json::json!({
-                                "logGroupArn": ld.log_group_arn,
-                                "payload": ld.payload,
-                                "timestamp": ld.timestamp.to_rfc3339(),
-                            })
+                        .map(|ld| types::EventBridgeLogDelivery {
+                            log_group_arn: ld.log_group_arn.clone(),
+                            payload: ld.payload.clone(),
+                            timestamp: ld.timestamp.to_rfc3339(),
                         })
                         .collect();
-                    axum::Json(serde_json::json!({
-                        "events": events,
-                        "deliveries": {
-                            "lambda": lambda_deliveries,
-                            "logs": log_deliveries,
-                        },
-                    }))
+                    axum::Json(types::EventHistoryResponse {
+                        events,
+                        deliveries: types::EventBridgeDeliveries { lambda, logs },
+                    })
                 }
             }),
         )
@@ -622,7 +597,9 @@ async fn main() {
                 let ss = sqs_sim_expiration_state;
                 move || async move {
                     let expired = fakecloud_sqs::simulation::tick_expiration(&ss);
-                    axum::Json(serde_json::json!({ "expiredMessages": expired }))
+                    axum::Json(types::ExpirationTickResponse {
+                        expired_messages: expired,
+                    })
                 }
             }),
         )
@@ -632,7 +609,9 @@ async fn main() {
                 let ss = sqs_sim_force_dlq_state;
                 move |axum::extract::Path(queue_name): axum::extract::Path<String>| async move {
                     let moved = fakecloud_sqs::simulation::force_dlq(&ss, &queue_name);
-                    axum::Json(serde_json::json!({ "movedMessages": moved }))
+                    axum::Json(types::ForceDlqResponse {
+                        moved_messages: moved,
+                    })
                 }
             }),
         )
@@ -644,17 +623,8 @@ async fn main() {
                 let lambda_state = eb_sim_lambda_state;
                 let logs_state = eb_sim_logs_state;
                 let container_runtime = eb_sim_container_runtime;
-                move |axum::Json(body): axum::Json<serde_json::Value>| async move {
-                    let bus_name = body["busName"].as_str().unwrap_or("default");
-                    let rule_name = match body["ruleName"].as_str() {
-                        Some(n) => n,
-                        None => {
-                            return (
-                                axum::http::StatusCode::BAD_REQUEST,
-                                axum::Json(serde_json::json!({ "error": "ruleName is required" })),
-                            );
-                        }
-                    };
+                move |axum::Json(body): axum::Json<types::FireRuleRequest>| async move {
+                    let bus_name = body.bus_name.as_deref().unwrap_or("default");
 
                     match fakecloud_eventbridge::simulation::fire_rule(
                         &es,
@@ -663,21 +633,21 @@ async fn main() {
                         &logs_state,
                         &container_runtime,
                         bus_name,
-                        rule_name,
+                        &body.rule_name,
                     ) {
                         Ok(targets) => {
-                            let target_list: Vec<serde_json::Value> = targets
+                            let target_list = targets
                                 .iter()
-                                .map(|t| {
-                                    serde_json::json!({
-                                        "type": t.target_type,
-                                        "arn": t.arn,
-                                    })
+                                .map(|t| types::FireRuleTarget {
+                                    target_type: t.target_type.clone(),
+                                    arn: t.arn.clone(),
                                 })
                                 .collect();
                             (
                                 axum::http::StatusCode::OK,
-                                axum::Json(serde_json::json!({ "targets": target_list })),
+                                axum::Json(serde_json::json!(types::FireRuleResponse {
+                                    targets: target_list
+                                })),
                             )
                         }
                         Err(msg) => (
@@ -694,19 +664,17 @@ async fn main() {
                 let ss = s3_introspection_state;
                 move || async move {
                     let state = ss.read();
-                    let notifications: Vec<serde_json::Value> = state
+                    let notifications = state
                         .notification_events
                         .iter()
-                        .map(|evt| {
-                            serde_json::json!({
-                                "bucket": evt.bucket,
-                                "key": evt.key,
-                                "eventType": evt.event_type,
-                                "timestamp": evt.timestamp.to_rfc3339(),
-                            })
+                        .map(|evt| types::S3Notification {
+                            bucket: evt.bucket.clone(),
+                            key: evt.key.clone(),
+                            event_type: evt.event_type.clone(),
+                            timestamp: evt.timestamp.to_rfc3339(),
                         })
                         .collect();
-                    axum::Json(serde_json::json!({ "notifications": notifications }))
+                    axum::Json(types::S3NotificationsResponse { notifications })
                 }
             }),
         )
@@ -716,7 +684,9 @@ async fn main() {
                 let ds = dynamodb_ttl_state;
                 move || async move {
                     let count = fakecloud_dynamodb::ttl::process_ttl_expirations(&ds);
-                    axum::Json(serde_json::json!({ "expiredItems": count }))
+                    axum::Json(types::TtlTickResponse {
+                        expired_items: count as u64,
+                    })
                 }
             }),
         )
@@ -727,9 +697,10 @@ async fn main() {
                 let bus = delivery_for_rotation_scheduler;
                 move || async move {
                     let rotated =
-                        fakecloud_secretsmanager::rotation::check_and_rotate(&ss, Some(&bus))
-                            .await;
-                    axum::Json(serde_json::json!({ "rotatedSecrets": rotated }))
+                        fakecloud_secretsmanager::rotation::check_and_rotate(&ss, Some(&bus)).await;
+                    axum::Json(types::RotationTickResponse {
+                        rotated_secrets: rotated,
+                    })
                 }
             }),
         )
@@ -749,13 +720,13 @@ async fn main() {
                             .get(&pool_id)
                             .and_then(|users| users.get(&username));
                         let code = user.and_then(|u| u.confirmation_code.clone());
-                        let attr_codes: serde_json::Value = user
+                        let attr_codes = user
                             .map(|u| serde_json::json!(u.attribute_verification_codes))
                             .unwrap_or(serde_json::json!({}));
-                        axum::Json(serde_json::json!({
-                            "confirmationCode": code,
-                            "attributeVerificationCodes": attr_codes
-                        }))
+                        axum::Json(types::UserConfirmationCodes {
+                            confirmation_code: code,
+                            attribute_verification_codes: attr_codes,
+                        })
                     }
                 }
             }),
@@ -772,25 +743,26 @@ async fn main() {
                         for (pool_id, users) in &state.users {
                             for (username, user) in users {
                                 if let Some(code) = &user.confirmation_code {
-                                    codes.push(serde_json::json!({
-                                        "poolId": pool_id,
-                                        "username": username,
-                                        "code": code,
-                                        "type": "signup"
-                                    }));
+                                    codes.push(types::ConfirmationCode {
+                                        pool_id: pool_id.clone(),
+                                        username: username.clone(),
+                                        code: code.clone(),
+                                        code_type: "signup".to_string(),
+                                        attribute: None,
+                                    });
                                 }
                                 for (attr, code) in &user.attribute_verification_codes {
-                                    codes.push(serde_json::json!({
-                                        "poolId": pool_id,
-                                        "username": username,
-                                        "code": code,
-                                        "type": "attribute_verification",
-                                        "attribute": attr
-                                    }));
+                                    codes.push(types::ConfirmationCode {
+                                        pool_id: pool_id.clone(),
+                                        username: username.clone(),
+                                        code: code.clone(),
+                                        code_type: "attribute_verification".to_string(),
+                                        attribute: Some(attr.clone()),
+                                    });
                                 }
                             }
                         }
-                        axum::Json(serde_json::json!({ "codes": codes }))
+                        axum::Json(types::ConfirmationCodesResponse { codes })
                     }
                 }
             }),
@@ -799,16 +771,14 @@ async fn main() {
             "/_fakecloud/cognito/confirm-user",
             axum::routing::post({
                 let cs = cognito_confirm_state;
-                move |axum::Json(body): axum::Json<serde_json::Value>| {
+                move |axum::Json(body): axum::Json<types::ConfirmUserRequest>| {
                     let cs = cs.clone();
                     async move {
-                        let pool_id = body["userPoolId"].as_str().unwrap_or("").to_string();
-                        let username = body["username"].as_str().unwrap_or("").to_string();
                         let mut state = cs.write();
                         let user = state
                             .users
-                            .get_mut(&pool_id)
-                            .and_then(|users| users.get_mut(&username));
+                            .get_mut(&body.user_pool_id)
+                            .and_then(|users| users.get_mut(&body.username));
                         match user {
                             Some(user) => {
                                 user.user_status = "CONFIRMED".to_string();
@@ -816,14 +786,17 @@ async fn main() {
                                 user.user_last_modified_date = chrono::Utc::now();
                                 (
                                     axum::http::StatusCode::OK,
-                                    axum::Json(serde_json::json!({ "confirmed": true })),
+                                    axum::Json(serde_json::json!(types::ConfirmUserResponse {
+                                        confirmed: true,
+                                        error: None,
+                                    })),
                                 )
                             }
                             None => (
                                 axum::http::StatusCode::NOT_FOUND,
-                                axum::Json(serde_json::json!({
-                                    "confirmed": false,
-                                    "error": "User not found"
+                                axum::Json(serde_json::json!(types::ConfirmUserResponse {
+                                    confirmed: false,
+                                    error: Some("User not found".to_string()),
                                 })),
                             ),
                         }
@@ -841,24 +814,24 @@ async fn main() {
                         let state = cs.read();
                         let mut tokens = Vec::new();
                         for data in state.access_tokens.values() {
-                            tokens.push(serde_json::json!({
-                                "type": "access",
-                                "username": data.username,
-                                "poolId": data.user_pool_id,
-                                "clientId": data.client_id,
-                                "issuedAt": data.issued_at.timestamp()
-                            }));
+                            tokens.push(types::TokenInfo {
+                                token_type: "access".to_string(),
+                                username: data.username.clone(),
+                                pool_id: data.user_pool_id.clone(),
+                                client_id: data.client_id.clone(),
+                                issued_at: data.issued_at.timestamp() as f64,
+                            });
                         }
                         for data in state.refresh_tokens.values() {
-                            tokens.push(serde_json::json!({
-                                "type": "refresh",
-                                "username": data.username,
-                                "poolId": data.user_pool_id,
-                                "clientId": data.client_id,
-                                "issuedAt": data.issued_at.timestamp()
-                            }));
+                            tokens.push(types::TokenInfo {
+                                token_type: "refresh".to_string(),
+                                username: data.username.clone(),
+                                pool_id: data.user_pool_id.clone(),
+                                client_id: data.client_id.clone(),
+                                issued_at: data.issued_at.timestamp() as f64,
+                            });
                         }
-                        axum::Json(serde_json::json!({ "tokens": tokens }))
+                        axum::Json(types::TokensResponse { tokens })
                     }
                 }
             }),
@@ -867,17 +840,15 @@ async fn main() {
             "/_fakecloud/cognito/expire-tokens",
             axum::routing::post({
                 let cs = cognito_expire_state;
-                move |axum::Json(body): axum::Json<serde_json::Value>| {
+                move |axum::Json(body): axum::Json<types::ExpireTokensRequest>| {
                     let cs = cs.clone();
                     async move {
-                        let pool_id = body["userPoolId"].as_str().map(|s| s.to_string());
-                        let username = body["username"].as_str().map(|s| s.to_string());
                         let mut state = cs.write();
                         let mut expired = 0usize;
 
                         let matches = |p: &str, u: &str| -> bool {
-                            pool_id.as_ref().is_none_or(|pid| pid == p)
-                                && username.as_ref().is_none_or(|un| un == u)
+                            body.user_pool_id.as_ref().is_none_or(|pid| pid == p)
+                                && body.username.as_ref().is_none_or(|un| un == u)
                         };
 
                         let before_access = state.access_tokens.len();
@@ -898,7 +869,9 @@ async fn main() {
                             .retain(|_, v| !matches(&v.user_pool_id, &v.username));
                         expired += before_sessions - state.sessions.len();
 
-                        axum::Json(serde_json::json!({ "expiredTokens": expired }))
+                        axum::Json(types::ExpireTokensResponse {
+                            expired_tokens: expired as u64,
+                        })
                     }
                 }
             }),
@@ -911,21 +884,19 @@ async fn main() {
                     let cs = cs.clone();
                     async move {
                         let state = cs.read();
-                        let events: Vec<serde_json::Value> = state
+                        let events = state
                             .auth_events
                             .iter()
-                            .map(|e| {
-                                serde_json::json!({
-                                    "eventType": e.event_type,
-                                    "username": e.username,
-                                    "userPoolId": e.user_pool_id,
-                                    "clientId": e.client_id,
-                                    "timestamp": e.timestamp.timestamp(),
-                                    "success": e.success
-                                })
+                            .map(|e| types::AuthEvent {
+                                event_type: e.event_type.clone(),
+                                username: e.username.clone(),
+                                user_pool_id: e.user_pool_id.clone(),
+                                client_id: e.client_id.clone(),
+                                timestamp: e.timestamp.timestamp() as f64,
+                                success: e.success,
                             })
                             .collect();
-                        axum::Json(serde_json::json!({ "events": events }))
+                        axum::Json(types::AuthEventsResponse { events })
                     }
                 }
             }),
@@ -936,11 +907,11 @@ async fn main() {
                 let ss = s3_sim_lifecycle_state;
                 move || async move {
                     let result = fakecloud_s3::simulation::tick_lifecycle(&ss);
-                    axum::Json(serde_json::json!({
-                        "processedBuckets": result.processed_buckets,
-                        "expiredObjects": result.expired_objects,
-                        "transitionedObjects": result.transitioned_objects,
-                    }))
+                    axum::Json(types::LifecycleTickResponse {
+                        processed_buckets: result.processed_buckets,
+                        expired_objects: result.expired_objects,
+                        transitioned_objects: result.transitioned_objects,
+                    })
                 }
             }),
         )
@@ -955,7 +926,13 @@ async fn main() {
                     } else {
                         Vec::new()
                     };
-                    axum::Json(serde_json::json!({ "containers": containers }))
+                    // list_warm_containers returns Vec<serde_json::Value>, so we
+                    // deserialize into our typed struct for consistency.
+                    let containers: Vec<types::WarmContainer> = containers
+                        .into_iter()
+                        .filter_map(|v| serde_json::from_value(v).ok())
+                        .collect();
+                    axum::Json(types::WarmContainersResponse { containers })
                 }
             }),
         )
@@ -964,12 +941,12 @@ async fn main() {
             axum::routing::post({
                 let rt = lambda_sim_evict_runtime;
                 move |axum::extract::Path(function_name): axum::extract::Path<String>| async move {
-                    if let Some(ref rt) = rt {
-                        let evicted = rt.evict_container(&function_name).await;
-                        axum::Json(serde_json::json!({ "evicted": evicted }))
+                    let evicted = if let Some(ref rt) = rt {
+                        rt.evict_container(&function_name).await
                     } else {
-                        axum::Json(serde_json::json!({ "evicted": false }))
-                    }
+                        false
+                    };
+                    axum::Json(types::EvictContainerResponse { evicted })
                 }
             }),
         )
@@ -979,19 +956,19 @@ async fn main() {
                 let ss = sns_sim_pending_state;
                 move || async move {
                     let pending = fakecloud_sns::simulation::list_pending_confirmations(&ss);
-                    let items: Vec<serde_json::Value> = pending
-                        .iter()
-                        .map(|p| {
-                            serde_json::json!({
-                                "subscriptionArn": p.subscription_arn,
-                                "topicArn": p.topic_arn,
-                                "protocol": p.protocol,
-                                "endpoint": p.endpoint,
-                                "token": p.token,
-                            })
+                    let pending_confirmations = pending
+                        .into_iter()
+                        .map(|p| types::PendingConfirmation {
+                            subscription_arn: p.subscription_arn,
+                            topic_arn: p.topic_arn,
+                            protocol: p.protocol,
+                            endpoint: p.endpoint,
+                            token: p.token,
                         })
                         .collect();
-                    axum::Json(serde_json::json!({ "pendingConfirmations": items }))
+                    axum::Json(types::PendingConfirmationsResponse {
+                        pending_confirmations,
+                    })
                 }
             }),
         )
@@ -999,10 +976,12 @@ async fn main() {
             "/_fakecloud/sns/confirm-subscription",
             axum::routing::post({
                 let ss = sns_sim_confirm_state;
-                move |axum::Json(body): axum::Json<serde_json::Value>| async move {
-                    let sub_arn = body["subscriptionArn"].as_str().unwrap_or("");
-                    let confirmed = fakecloud_sns::simulation::confirm_subscription(&ss, sub_arn);
-                    axum::Json(serde_json::json!({ "confirmed": confirmed }))
+                move |axum::Json(body): axum::Json<types::ConfirmSubscriptionRequest>| async move {
+                    let confirmed = fakecloud_sns::simulation::confirm_subscription(
+                        &ss,
+                        &body.subscription_arn,
+                    );
+                    axum::Json(types::ConfirmSubscriptionResponse { confirmed })
                 }
             }),
         )
@@ -1014,7 +993,9 @@ async fn main() {
                     match s.reset_service(&service) {
                         Ok(()) => (
                             axum::http::StatusCode::OK,
-                            axum::Json(serde_json::json!({ "reset": service })),
+                            axum::Json(serde_json::json!(types::ResetServiceResponse {
+                                reset: service
+                            })),
                         ),
                         Err(msg) => (
                             axum::http::StatusCode::NOT_FOUND,
@@ -1133,7 +1114,7 @@ impl ResetState {
         Ok(())
     }
 
-    fn reset(&self) -> axum::Json<serde_json::Value> {
+    fn reset(&self) -> axum::Json<types::ResetResponse> {
         self.iam.write().reset();
         self.sqs.write().queues.clear();
         self.sqs.write().name_to_url.clear();
@@ -1171,7 +1152,9 @@ impl ResetState {
         self.ses.write().reset();
         self.cognito.write().reset();
         tracing::info!("state reset via reset API");
-        axum::Json(serde_json::json!({"status": "ok"}))
+        axum::Json(types::ResetResponse {
+            status: "ok".to_string(),
+        })
     }
 }
 
