@@ -2457,3 +2457,234 @@ async fn cognito_list_identity_providers() {
         .unwrap();
     assert_eq!(resp.providers().len(), 2);
 }
+
+// ---------------------------------------------------------------------------
+// Resource Servers & Domains
+// ---------------------------------------------------------------------------
+
+#[test_action("cognito-idp", "CreateResourceServer", checksum = "b97cc403")]
+#[test_action("cognito-idp", "DescribeResourceServer", checksum = "67f1b947")]
+#[tokio::test]
+async fn cognito_create_describe_resource_server() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("rs-pool")
+        .send()
+        .await
+        .unwrap();
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    let resp = client
+        .create_resource_server()
+        .user_pool_id(&pool_id)
+        .identifier("https://api.example.com")
+        .name("Example API")
+        .scopes(
+            aws_sdk_cognitoidentityprovider::types::ResourceServerScopeType::builder()
+                .scope_name("read")
+                .scope_description("Read access")
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.resource_server().unwrap().name().unwrap(),
+        "Example API"
+    );
+
+    let desc = client
+        .describe_resource_server()
+        .user_pool_id(&pool_id)
+        .identifier("https://api.example.com")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        desc.resource_server().unwrap().identifier().unwrap(),
+        "https://api.example.com"
+    );
+}
+
+#[test_action("cognito-idp", "UpdateResourceServer", checksum = "5e9ce1ee")]
+#[test_action("cognito-idp", "DeleteResourceServer", checksum = "ad92e082")]
+#[tokio::test]
+async fn cognito_update_delete_resource_server() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("updrs-pool")
+        .send()
+        .await
+        .unwrap();
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    client
+        .create_resource_server()
+        .user_pool_id(&pool_id)
+        .identifier("https://api2.example.com")
+        .name("API 2")
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .update_resource_server()
+        .user_pool_id(&pool_id)
+        .identifier("https://api2.example.com")
+        .name("Updated API 2")
+        .send()
+        .await
+        .unwrap();
+
+    let desc = client
+        .describe_resource_server()
+        .user_pool_id(&pool_id)
+        .identifier("https://api2.example.com")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        desc.resource_server().unwrap().name().unwrap(),
+        "Updated API 2"
+    );
+
+    client
+        .delete_resource_server()
+        .user_pool_id(&pool_id)
+        .identifier("https://api2.example.com")
+        .send()
+        .await
+        .unwrap();
+
+    let err = client
+        .describe_resource_server()
+        .user_pool_id(&pool_id)
+        .identifier("https://api2.example.com")
+        .send()
+        .await
+        .unwrap_err();
+    assert!(err.into_service_error().is_resource_not_found_exception());
+}
+
+#[test_action("cognito-idp", "ListResourceServers", checksum = "5c4ebddb")]
+#[tokio::test]
+async fn cognito_list_resource_servers() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("listrs-pool")
+        .send()
+        .await
+        .unwrap();
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    client
+        .create_resource_server()
+        .user_pool_id(&pool_id)
+        .identifier("https://rs1.example.com")
+        .name("RS1")
+        .send()
+        .await
+        .unwrap();
+    client
+        .create_resource_server()
+        .user_pool_id(&pool_id)
+        .identifier("https://rs2.example.com")
+        .name("RS2")
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .list_resource_servers()
+        .user_pool_id(&pool_id)
+        .max_results(10)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.resource_servers().len(), 2);
+}
+
+#[test_action("cognito-idp", "CreateUserPoolDomain", checksum = "28b91b3c")]
+#[test_action("cognito-idp", "DescribeUserPoolDomain", checksum = "6ecd5522")]
+#[tokio::test]
+async fn cognito_create_describe_domain() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("domain-pool")
+        .send()
+        .await
+        .unwrap();
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    client
+        .create_user_pool_domain()
+        .user_pool_id(&pool_id)
+        .domain("my-test-domain")
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .describe_user_pool_domain()
+        .domain("my-test-domain")
+        .send()
+        .await
+        .unwrap();
+    let desc = resp.domain_description().unwrap();
+    assert_eq!(desc.domain().unwrap(), "my-test-domain");
+    assert_eq!(desc.user_pool_id().unwrap(), pool_id);
+}
+
+#[test_action("cognito-idp", "UpdateUserPoolDomain", checksum = "03177020")]
+#[test_action("cognito-idp", "DeleteUserPoolDomain", checksum = "f25ae5ad")]
+#[tokio::test]
+async fn cognito_update_delete_domain() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("deldomain-pool")
+        .send()
+        .await
+        .unwrap();
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    client
+        .create_user_pool_domain()
+        .user_pool_id(&pool_id)
+        .domain("del-test-domain")
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .delete_user_pool_domain()
+        .user_pool_id(&pool_id)
+        .domain("del-test-domain")
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .describe_user_pool_domain()
+        .domain("del-test-domain")
+        .send()
+        .await
+        .unwrap();
+    // AWS returns empty description for non-existent domains
+    assert!(resp.domain_description().unwrap().user_pool_id().is_none());
+}
