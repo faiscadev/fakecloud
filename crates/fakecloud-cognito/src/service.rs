@@ -1,16 +1,18 @@
 use async_trait::async_trait;
+use base64::Engine;
 use chrono::Utc;
 use http::StatusCode;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 
 use crate::state::{
     default_schema_attributes, AccountRecoverySetting, AdminCreateUserConfig, EmailConfiguration,
-    InviteMessageTemplate, PasswordPolicy, PoolPolicies, RecoveryOption, SchemaAttribute,
-    SharedCognitoState, SmsConfiguration, StringAttributeConstraints, TokenValidityUnits, User,
-    UserAttribute, UserPool, UserPoolClient,
+    InviteMessageTemplate, PasswordPolicy, PoolPolicies, RecoveryOption, RefreshTokenData,
+    SchemaAttribute, SessionData, SharedCognitoState, SmsConfiguration, StringAttributeConstraints,
+    TokenValidityUnits, User, UserAttribute, UserPool, UserPoolClient,
 };
 
 pub struct CognitoService {
@@ -49,6 +51,14 @@ impl AwsService for CognitoService {
             "AdminUpdateUserAttributes" => self.admin_update_user_attributes(&req),
             "AdminDeleteUserAttributes" => self.admin_delete_user_attributes(&req),
             "ListUsers" => self.list_users(&req),
+            "AdminSetUserPassword" => self.admin_set_user_password(&req),
+            "AdminInitiateAuth" => self.admin_initiate_auth(&req),
+            "InitiateAuth" => self.initiate_auth(&req),
+            "RespondToAuthChallenge" => self.respond_to_auth_challenge(&req),
+            "AdminRespondToAuthChallenge" => self.admin_respond_to_auth_challenge(&req),
+            "SignUp" => self.sign_up(&req),
+            "ConfirmSignUp" => self.confirm_sign_up(&req),
+            "AdminConfirmSignUp" => self.admin_confirm_sign_up(&req),
             _ => Err(AwsServiceError::action_not_implemented(
                 "cognito-idp",
                 &req.action,
@@ -76,6 +86,14 @@ impl AwsService for CognitoService {
             "AdminUpdateUserAttributes",
             "AdminDeleteUserAttributes",
             "ListUsers",
+            "AdminSetUserPassword",
+            "AdminInitiateAuth",
+            "InitiateAuth",
+            "RespondToAuthChallenge",
+            "AdminRespondToAuthChallenge",
+            "SignUp",
+            "ConfirmSignUp",
+            "AdminConfirmSignUp",
         ]
     }
 }
@@ -1208,6 +1226,743 @@ impl CognitoService {
 
         Ok(AwsResponse::ok_json(response))
     }
+
+    fn admin_set_user_password(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+
+        let pool_id = require_str(&body, "UserPoolId")?;
+        let username = require_str(&body, "Username")?;
+        let password = body["Password"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterException",
+                    "Password is required",
+                )
+            })?;
+        let permanent = body["Permanent"].as_bool().unwrap_or(false);
+
+        let mut state = self.state.write();
+
+        let pool = state.user_pools.get(pool_id).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("User pool {pool_id} does not exist."),
+            )
+        })?;
+
+        validate_password(password, &pool.policies.password_policy)?;
+
+        let user = state
+            .users
+            .get_mut(pool_id)
+            .and_then(|users| users.get_mut(username))
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "UserNotFoundException",
+                    "User does not exist.",
+                )
+            })?;
+
+        if permanent {
+            user.password = Some(password.to_string());
+            user.temporary_password = None;
+            user.user_status = "CONFIRMED".to_string();
+        } else {
+            user.temporary_password = Some(password.to_string());
+        }
+        user.user_last_modified_date = Utc::now();
+
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    fn admin_initiate_auth(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+
+        let pool_id = require_str(&body, "UserPoolId")?;
+        let client_id = require_str(&body, "ClientId")?;
+        let auth_flow = require_str(&body, "AuthFlow")?;
+
+        let auth_params = body["AuthParameters"].as_object().ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterException",
+                "AuthParameters is required",
+            )
+        })?;
+
+        match auth_flow {
+            "ADMIN_NO_SRP_AUTH" | "ADMIN_USER_PASSWORD_AUTH" => {}
+            _ => {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterException",
+                    format!("Unsupported auth flow: {auth_flow}"),
+                ));
+            }
+        }
+
+        let username = auth_params
+            .get("USERNAME")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterException",
+                    "USERNAME is required in AuthParameters",
+                )
+            })?;
+
+        let password = auth_params
+            .get("PASSWORD")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterException",
+                    "PASSWORD is required in AuthParameters",
+                )
+            })?;
+
+        let mut state = self.state.write();
+
+        // Validate pool exists
+        if !state.user_pools.contains_key(pool_id) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("User pool {pool_id} does not exist."),
+            ));
+        }
+
+        // Validate client exists and belongs to pool
+        let client = state.user_pool_clients.get(client_id).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("User pool client {client_id} does not exist."),
+            )
+        })?;
+        if client.user_pool_id != pool_id {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("User pool client {client_id} does not exist."),
+            ));
+        }
+
+        // Validate user exists and is enabled
+        let user = state
+            .users
+            .get(pool_id)
+            .and_then(|users| users.get(username))
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "UserNotFoundException",
+                    "User does not exist.",
+                )
+            })?;
+
+        if !user.enabled {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "NotAuthorizedException",
+                "User is disabled.",
+            ));
+        }
+
+        // Validate password
+        let password_matches = match (&user.password, &user.temporary_password) {
+            (Some(p), _) if p == password => true,
+            (_, Some(tp)) if tp == password => true,
+            _ => false,
+        };
+        if !password_matches {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "NotAuthorizedException",
+                "Incorrect username or password.",
+            ));
+        }
+
+        let region = state.region.clone();
+
+        // Check if user needs to change password
+        if user.user_status == "FORCE_CHANGE_PASSWORD" {
+            let session = Uuid::new_v4().to_string();
+            state.sessions.insert(
+                session.clone(),
+                SessionData {
+                    user_pool_id: pool_id.to_string(),
+                    username: username.to_string(),
+                    client_id: client_id.to_string(),
+                    challenge_name: "NEW_PASSWORD_REQUIRED".to_string(),
+                },
+            );
+            return Ok(AwsResponse::ok_json(json!({
+                "ChallengeName": "NEW_PASSWORD_REQUIRED",
+                "Session": session,
+                "ChallengeParameters": {
+                    "USER_ID_FOR_SRP": username,
+                    "requiredAttributes": "[]",
+                    "userAttributes": "{}"
+                }
+            })));
+        }
+
+        // Generate tokens
+        let sub = user.sub.clone();
+        let tokens = generate_tokens(pool_id, client_id, &sub, username, &region);
+
+        // Store refresh token
+        state.refresh_tokens.insert(
+            tokens.refresh_token.clone(),
+            RefreshTokenData {
+                user_pool_id: pool_id.to_string(),
+                username: username.to_string(),
+                client_id: client_id.to_string(),
+                issued_at: Utc::now(),
+            },
+        );
+
+        Ok(AwsResponse::ok_json(json!({
+            "AuthenticationResult": {
+                "AccessToken": tokens.access_token,
+                "IdToken": tokens.id_token,
+                "RefreshToken": tokens.refresh_token,
+                "TokenType": "Bearer",
+                "ExpiresIn": 3600
+            }
+        })))
+    }
+
+    fn initiate_auth(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+
+        let client_id = require_str(&body, "ClientId")?;
+        let auth_flow = require_str(&body, "AuthFlow")?;
+
+        let mut state = self.state.write();
+
+        // Find client
+        let client = state.user_pool_clients.get(client_id).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("User pool client {client_id} does not exist."),
+            )
+        })?;
+
+        let pool_id = client.user_pool_id.clone();
+        let explicit_auth_flows = client.explicit_auth_flows.clone();
+
+        match auth_flow {
+            "USER_PASSWORD_AUTH" => {
+                // Validate client allows this flow
+                if !explicit_auth_flows.contains(&"ALLOW_USER_PASSWORD_AUTH".to_string()) {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "NotAuthorizedException",
+                        "USER_PASSWORD_AUTH flow is not enabled for this client.",
+                    ));
+                }
+
+                let auth_params = body["AuthParameters"].as_object().ok_or_else(|| {
+                    AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "InvalidParameterException",
+                        "AuthParameters is required",
+                    )
+                })?;
+
+                let username = auth_params
+                    .get("USERNAME")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| {
+                        AwsServiceError::aws_error(
+                            StatusCode::BAD_REQUEST,
+                            "InvalidParameterException",
+                            "USERNAME is required in AuthParameters",
+                        )
+                    })?;
+
+                let password = auth_params
+                    .get("PASSWORD")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| {
+                        AwsServiceError::aws_error(
+                            StatusCode::BAD_REQUEST,
+                            "InvalidParameterException",
+                            "PASSWORD is required in AuthParameters",
+                        )
+                    })?;
+
+                let user = state
+                    .users
+                    .get(&pool_id)
+                    .and_then(|users| users.get(username))
+                    .ok_or_else(|| {
+                        AwsServiceError::aws_error(
+                            StatusCode::BAD_REQUEST,
+                            "NotAuthorizedException",
+                            "Incorrect username or password.",
+                        )
+                    })?;
+
+                if !user.enabled {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "NotAuthorizedException",
+                        "User is disabled.",
+                    ));
+                }
+
+                let password_matches = match (&user.password, &user.temporary_password) {
+                    (Some(p), _) if p == password => true,
+                    (_, Some(tp)) if tp == password => true,
+                    _ => false,
+                };
+                if !password_matches {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "NotAuthorizedException",
+                        "Incorrect username or password.",
+                    ));
+                }
+
+                let region = state.region.clone();
+
+                if user.user_status == "FORCE_CHANGE_PASSWORD" {
+                    let session = Uuid::new_v4().to_string();
+                    state.sessions.insert(
+                        session.clone(),
+                        SessionData {
+                            user_pool_id: pool_id.to_string(),
+                            username: username.to_string(),
+                            client_id: client_id.to_string(),
+                            challenge_name: "NEW_PASSWORD_REQUIRED".to_string(),
+                        },
+                    );
+                    return Ok(AwsResponse::ok_json(json!({
+                        "ChallengeName": "NEW_PASSWORD_REQUIRED",
+                        "Session": session,
+                        "ChallengeParameters": {
+                            "USER_ID_FOR_SRP": username,
+                            "requiredAttributes": "[]",
+                            "userAttributes": "{}"
+                        }
+                    })));
+                }
+
+                let sub = user.sub.clone();
+                let tokens = generate_tokens(&pool_id, client_id, &sub, username, &region);
+
+                state.refresh_tokens.insert(
+                    tokens.refresh_token.clone(),
+                    RefreshTokenData {
+                        user_pool_id: pool_id.to_string(),
+                        username: username.to_string(),
+                        client_id: client_id.to_string(),
+                        issued_at: Utc::now(),
+                    },
+                );
+
+                Ok(AwsResponse::ok_json(json!({
+                    "AuthenticationResult": {
+                        "AccessToken": tokens.access_token,
+                        "IdToken": tokens.id_token,
+                        "RefreshToken": tokens.refresh_token,
+                        "TokenType": "Bearer",
+                        "ExpiresIn": 3600
+                    }
+                })))
+            }
+            "REFRESH_TOKEN_AUTH" | "REFRESH_TOKEN" => {
+                // Validate client allows this flow
+                if !explicit_auth_flows.contains(&"ALLOW_REFRESH_TOKEN_AUTH".to_string()) {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "NotAuthorizedException",
+                        "REFRESH_TOKEN_AUTH flow is not enabled for this client.",
+                    ));
+                }
+
+                let auth_params = body["AuthParameters"].as_object().ok_or_else(|| {
+                    AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "InvalidParameterException",
+                        "AuthParameters is required",
+                    )
+                })?;
+
+                let refresh_token = auth_params
+                    .get("REFRESH_TOKEN")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| {
+                        AwsServiceError::aws_error(
+                            StatusCode::BAD_REQUEST,
+                            "InvalidParameterException",
+                            "REFRESH_TOKEN is required in AuthParameters",
+                        )
+                    })?;
+
+                let token_data = state.refresh_tokens.get(refresh_token).ok_or_else(|| {
+                    AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "NotAuthorizedException",
+                        "Invalid refresh token.",
+                    )
+                })?;
+
+                if token_data.client_id != client_id {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "NotAuthorizedException",
+                        "Invalid refresh token.",
+                    ));
+                }
+
+                let token_pool_id = token_data.user_pool_id.clone();
+                let token_username = token_data.username.clone();
+
+                let user = state
+                    .users
+                    .get(&token_pool_id)
+                    .and_then(|users| users.get(&token_username))
+                    .ok_or_else(|| {
+                        AwsServiceError::aws_error(
+                            StatusCode::BAD_REQUEST,
+                            "NotAuthorizedException",
+                            "User does not exist.",
+                        )
+                    })?;
+
+                let region = state.region.clone();
+                let sub = user.sub.clone();
+                let tokens =
+                    generate_tokens(&token_pool_id, client_id, &sub, &token_username, &region);
+
+                Ok(AwsResponse::ok_json(json!({
+                    "AuthenticationResult": {
+                        "AccessToken": tokens.access_token,
+                        "IdToken": tokens.id_token,
+                        "TokenType": "Bearer",
+                        "ExpiresIn": 3600
+                    }
+                })))
+            }
+            _ => Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterException",
+                format!("Unsupported auth flow: {auth_flow}"),
+            )),
+        }
+    }
+
+    fn respond_to_auth_challenge(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+
+        let client_id = require_str(&body, "ClientId")?;
+        let challenge_name = require_str(&body, "ChallengeName")?;
+        let session = require_str(&body, "Session")?;
+
+        self.handle_auth_challenge_response(client_id, challenge_name, session, &body)
+    }
+
+    fn admin_respond_to_auth_challenge(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+
+        let _pool_id = require_str(&body, "UserPoolId")?;
+        let client_id = require_str(&body, "ClientId")?;
+        let challenge_name = require_str(&body, "ChallengeName")?;
+        let session = require_str(&body, "Session")?;
+
+        self.handle_auth_challenge_response(client_id, challenge_name, session, &body)
+    }
+
+    fn handle_auth_challenge_response(
+        &self,
+        client_id: &str,
+        challenge_name: &str,
+        session: &str,
+        body: &Value,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        match challenge_name {
+            "NEW_PASSWORD_REQUIRED" => {
+                let challenge_responses =
+                    body["ChallengeResponses"].as_object().ok_or_else(|| {
+                        AwsServiceError::aws_error(
+                            StatusCode::BAD_REQUEST,
+                            "InvalidParameterException",
+                            "ChallengeResponses is required",
+                        )
+                    })?;
+
+                let new_password = challenge_responses
+                    .get("NEW_PASSWORD")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| {
+                        AwsServiceError::aws_error(
+                            StatusCode::BAD_REQUEST,
+                            "InvalidParameterException",
+                            "NEW_PASSWORD is required in ChallengeResponses",
+                        )
+                    })?;
+
+                let mut state = self.state.write();
+
+                let session_data = state.sessions.remove(session).ok_or_else(|| {
+                    AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "NotAuthorizedException",
+                        "Invalid session.",
+                    )
+                })?;
+
+                if session_data.client_id != client_id {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "NotAuthorizedException",
+                        "Invalid session.",
+                    ));
+                }
+
+                // Validate password against pool policy (clone to release immutable borrow)
+                let password_policy = state
+                    .user_pools
+                    .get(&session_data.user_pool_id)
+                    .ok_or_else(|| {
+                        AwsServiceError::aws_error(
+                            StatusCode::BAD_REQUEST,
+                            "ResourceNotFoundException",
+                            "User pool does not exist.",
+                        )
+                    })?
+                    .policies
+                    .password_policy
+                    .clone();
+                validate_password(new_password, &password_policy)?;
+
+                let region = state.region.clone();
+
+                let user = state
+                    .users
+                    .get_mut(&session_data.user_pool_id)
+                    .and_then(|users| users.get_mut(&session_data.username))
+                    .ok_or_else(|| {
+                        AwsServiceError::aws_error(
+                            StatusCode::BAD_REQUEST,
+                            "UserNotFoundException",
+                            "User does not exist.",
+                        )
+                    })?;
+
+                user.password = Some(new_password.to_string());
+                user.temporary_password = None;
+                user.user_status = "CONFIRMED".to_string();
+                user.user_last_modified_date = Utc::now();
+
+                let sub = user.sub.clone();
+                let username = user.username.clone();
+                let pool_id = session_data.user_pool_id.clone();
+
+                let tokens = generate_tokens(&pool_id, client_id, &sub, &username, &region);
+
+                state.refresh_tokens.insert(
+                    tokens.refresh_token.clone(),
+                    RefreshTokenData {
+                        user_pool_id: pool_id,
+                        username,
+                        client_id: client_id.to_string(),
+                        issued_at: Utc::now(),
+                    },
+                );
+
+                Ok(AwsResponse::ok_json(json!({
+                    "AuthenticationResult": {
+                        "AccessToken": tokens.access_token,
+                        "IdToken": tokens.id_token,
+                        "RefreshToken": tokens.refresh_token,
+                        "TokenType": "Bearer",
+                        "ExpiresIn": 3600
+                    }
+                })))
+            }
+            _ => Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterException",
+                format!("Unsupported challenge: {challenge_name}"),
+            )),
+        }
+    }
+
+    fn sign_up(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+
+        let client_id = require_str(&body, "ClientId")?;
+        let username = require_str(&body, "Username")?;
+        let password = body["Password"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterException",
+                    "Password is required",
+                )
+            })?;
+
+        let mut state = self.state.write();
+
+        // Find pool from client
+        let client = state.user_pool_clients.get(client_id).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("User pool client {client_id} does not exist."),
+            )
+        })?;
+        let pool_id = client.user_pool_id.clone();
+
+        // Validate password against pool policy
+        let pool = state.user_pools.get(&pool_id).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                "User pool does not exist.",
+            )
+        })?;
+        validate_password(password, &pool.policies.password_policy)?;
+
+        // Check username unique
+        let pool_users = state.users.entry(pool_id.clone()).or_default();
+        if pool_users.contains_key(username) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "UsernameExistsException",
+                "User account already exists.",
+            ));
+        }
+
+        let now = Utc::now();
+        let sub = Uuid::new_v4().to_string();
+
+        let mut attributes = parse_user_attributes(&body["UserAttributes"]);
+
+        // Ensure sub attribute
+        if !attributes.iter().any(|a| a.name == "sub") {
+            attributes.push(UserAttribute {
+                name: "sub".to_string(),
+                value: sub.clone(),
+            });
+        }
+
+        let user = User {
+            username: username.to_string(),
+            sub: sub.clone(),
+            attributes,
+            enabled: true,
+            user_status: "UNCONFIRMED".to_string(),
+            user_create_date: now,
+            user_last_modified_date: now,
+            password: Some(password.to_string()),
+            temporary_password: None,
+        };
+
+        pool_users.insert(username.to_string(), user);
+
+        Ok(AwsResponse::ok_json(json!({
+            "UserConfirmed": false,
+            "UserSub": sub
+        })))
+    }
+
+    fn confirm_sign_up(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+
+        let client_id = require_str(&body, "ClientId")?;
+        let username = require_str(&body, "Username")?;
+        let code = body["ConfirmationCode"].as_str().unwrap_or("");
+
+        if code.is_empty() {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterException",
+                "ConfirmationCode is required",
+            ));
+        }
+
+        let mut state = self.state.write();
+
+        let client = state.user_pool_clients.get(client_id).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("User pool client {client_id} does not exist."),
+            )
+        })?;
+        let pool_id = client.user_pool_id.clone();
+
+        let user = state
+            .users
+            .get_mut(&pool_id)
+            .and_then(|users| users.get_mut(username))
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "UserNotFoundException",
+                    "User does not exist.",
+                )
+            })?;
+
+        user.user_status = "CONFIRMED".to_string();
+        user.user_last_modified_date = Utc::now();
+
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    fn admin_confirm_sign_up(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+
+        let pool_id = require_str(&body, "UserPoolId")?;
+        let username = require_str(&body, "Username")?;
+
+        let mut state = self.state.write();
+
+        // Validate pool exists
+        if !state.user_pools.contains_key(pool_id) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("User pool {pool_id} does not exist."),
+            ));
+        }
+
+        let user = state
+            .users
+            .get_mut(pool_id)
+            .and_then(|users| users.get_mut(username))
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "UserNotFoundException",
+                    "User does not exist.",
+                )
+            })?;
+
+        user.user_status = "CONFIRMED".to_string();
+        user.user_last_modified_date = Utc::now();
+
+        Ok(AwsResponse::ok_json(json!({})))
+    }
 }
 
 /// Generate a pool ID in the format `{region}_{9 random alphanumeric chars}`.
@@ -1692,6 +2447,146 @@ fn user_pool_to_json(pool: &UserPool) -> Value {
     }
 
     obj
+}
+
+/// Helper to extract a required string field from JSON.
+fn require_str<'a>(body: &'a Value, field: &str) -> Result<&'a str, AwsServiceError> {
+    body[field]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterException",
+                format!("{field} is required"),
+            )
+        })
+}
+
+/// Validate a password against a pool's password policy.
+fn validate_password(password: &str, policy: &PasswordPolicy) -> Result<(), AwsServiceError> {
+    if (password.len() as i64) < policy.minimum_length {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidPasswordException",
+            format!(
+                "Password did not conform with policy: Password not long enough (minimum {})",
+                policy.minimum_length
+            ),
+        ));
+    }
+    if policy.require_uppercase && !password.chars().any(|c| c.is_ascii_uppercase()) {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidPasswordException",
+            "Password did not conform with policy: Password must have uppercase characters",
+        ));
+    }
+    if policy.require_lowercase && !password.chars().any(|c| c.is_ascii_lowercase()) {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidPasswordException",
+            "Password did not conform with policy: Password must have lowercase characters",
+        ));
+    }
+    if policy.require_numbers && !password.chars().any(|c| c.is_ascii_digit()) {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidPasswordException",
+            "Password did not conform with policy: Password must have numeric characters",
+        ));
+    }
+    if policy.require_symbols
+        && !password
+            .chars()
+            .any(|c| !c.is_ascii_alphanumeric() && c.is_ascii())
+    {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidPasswordException",
+            "Password did not conform with policy: Password must have symbol characters",
+        ));
+    }
+    Ok(())
+}
+
+struct TokenSet {
+    id_token: String,
+    access_token: String,
+    refresh_token: String,
+}
+
+/// Generate structurally valid JWTs for Cognito auth responses.
+fn generate_tokens(
+    pool_id: &str,
+    client_id: &str,
+    sub: &str,
+    username: &str,
+    region: &str,
+) -> TokenSet {
+    let b64url = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let now = Utc::now().timestamp();
+    let jti = Uuid::new_v4().to_string();
+    let iss = format!("https://cognito-idp.{region}.amazonaws.com/{pool_id}");
+
+    // ID Token
+    let id_header = json!({"kid": "fakecloud-key-1", "alg": "RS256"});
+    let id_payload = json!({
+        "sub": sub,
+        "iss": iss,
+        "aud": client_id,
+        "cognito:username": username,
+        "token_use": "id",
+        "auth_time": now,
+        "exp": now + 3600,
+        "iat": now,
+        "jti": jti,
+    });
+    let id_token = sign_jwt(&id_header, &id_payload, &b64url);
+
+    // Access Token
+    let access_jti = Uuid::new_v4().to_string();
+    let access_header = json!({"kid": "fakecloud-key-1", "alg": "RS256"});
+    let access_payload = json!({
+        "sub": sub,
+        "iss": iss,
+        "client_id": client_id,
+        "token_use": "access",
+        "scope": "aws.cognito.signin.user.admin",
+        "jti": access_jti,
+        "exp": now + 3600,
+        "iat": now,
+    });
+    let access_token = sign_jwt(&access_header, &access_payload, &b64url);
+
+    // Refresh Token — random base64url string
+    let mut refresh_bytes = Vec::with_capacity(72);
+    for _ in 0..5 {
+        refresh_bytes.extend_from_slice(Uuid::new_v4().as_bytes());
+    }
+    let refresh_token = b64url.encode(&refresh_bytes);
+
+    TokenSet {
+        id_token,
+        access_token,
+        refresh_token,
+    }
+}
+
+/// Create a JWT with header.payload.signature using SHA256.
+fn sign_jwt(
+    header: &Value,
+    payload: &Value,
+    engine: &base64::engine::general_purpose::GeneralPurpose,
+) -> String {
+    let header_b64 = engine.encode(header.to_string().as_bytes());
+    let payload_b64 = engine.encode(payload.to_string().as_bytes());
+    let signing_input = format!("{header_b64}.{payload_b64}");
+    let mut hasher = Sha256::new();
+    hasher.update(signing_input.as_bytes());
+    let signature = hasher.finalize();
+    let sig_b64 = engine.encode(signature);
+    format!("{header_b64}.{payload_b64}.{sig_b64}")
 }
 
 #[cfg(test)]
@@ -2225,5 +3120,173 @@ mod tests {
         let attrs = resp_json["User"]["Attributes"].as_array().unwrap();
         let sub_attr = attrs.iter().find(|a| a["Name"] == "sub").unwrap();
         assert!(!sub_attr["Value"].as_str().unwrap().is_empty());
+    }
+
+    #[test]
+    fn jwt_format_three_base64url_segments() {
+        let tokens = generate_tokens(
+            "us-east-1_abc123456",
+            "client123",
+            "sub-uuid",
+            "user1",
+            "us-east-1",
+        );
+        // Each token should have 3 dot-separated segments
+        for (name, token) in [("id", &tokens.id_token), ("access", &tokens.access_token)] {
+            let parts: Vec<&str> = token.split('.').collect();
+            assert_eq!(
+                parts.len(),
+                3,
+                "{name} token should have 3 segments, got {}",
+                parts.len()
+            );
+            // Each segment should be valid base64url (no padding, no + or /)
+            for (i, part) in parts.iter().enumerate() {
+                assert!(
+                    !part.is_empty(),
+                    "{name} token segment {i} should not be empty"
+                );
+                assert!(
+                    !part.contains('+'),
+                    "{name} token segment {i} should not contain '+'"
+                );
+                assert!(
+                    !part.contains('/'),
+                    "{name} token segment {i} should not contain '/'"
+                );
+                assert!(
+                    !part.contains('='),
+                    "{name} token segment {i} should not contain '='"
+                );
+            }
+        }
+        // Refresh token is just a random base64url string (no dots)
+        assert!(
+            !tokens.refresh_token.is_empty(),
+            "refresh token should not be empty"
+        );
+        assert!(
+            tokens.refresh_token.len() >= 96,
+            "refresh token should be at least 96 chars, got {}",
+            tokens.refresh_token.len()
+        );
+    }
+
+    #[test]
+    fn jwt_id_token_payload_contains_required_fields() {
+        let b64url = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let tokens = generate_tokens(
+            "us-east-1_abc123456",
+            "client123",
+            "sub-uuid",
+            "user1",
+            "us-east-1",
+        );
+        let parts: Vec<&str> = tokens.id_token.split('.').collect();
+        let header: Value = serde_json::from_slice(&b64url.decode(parts[0]).unwrap()).unwrap();
+        let payload: Value = serde_json::from_slice(&b64url.decode(parts[1]).unwrap()).unwrap();
+
+        assert_eq!(header["alg"], "RS256");
+        assert_eq!(header["kid"], "fakecloud-key-1");
+        assert_eq!(payload["sub"], "sub-uuid");
+        assert_eq!(payload["aud"], "client123");
+        assert_eq!(payload["cognito:username"], "user1");
+        assert_eq!(payload["token_use"], "id");
+        assert!(payload["iss"]
+            .as_str()
+            .unwrap()
+            .contains("us-east-1_abc123456"));
+        assert!(payload["exp"].is_number());
+        assert!(payload["iat"].is_number());
+        assert!(payload["jti"].is_string());
+    }
+
+    #[test]
+    fn jwt_access_token_payload_contains_required_fields() {
+        let b64url = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let tokens = generate_tokens(
+            "us-east-1_abc123456",
+            "client123",
+            "sub-uuid",
+            "user1",
+            "us-east-1",
+        );
+        let parts: Vec<&str> = tokens.access_token.split('.').collect();
+        let payload: Value = serde_json::from_slice(&b64url.decode(parts[1]).unwrap()).unwrap();
+
+        assert_eq!(payload["sub"], "sub-uuid");
+        assert_eq!(payload["client_id"], "client123");
+        assert_eq!(payload["token_use"], "access");
+        assert_eq!(payload["scope"], "aws.cognito.signin.user.admin");
+        assert!(payload["exp"].is_number());
+        assert!(payload["iat"].is_number());
+    }
+
+    #[test]
+    fn password_policy_rejects_short_password() {
+        let policy = PasswordPolicy {
+            minimum_length: 8,
+            require_uppercase: false,
+            require_lowercase: false,
+            require_numbers: false,
+            require_symbols: false,
+            temporary_password_validity_days: 7,
+        };
+        let err = validate_password("short", &policy).unwrap_err();
+        assert_eq!(err.code(), "InvalidPasswordException");
+    }
+
+    #[test]
+    fn password_policy_rejects_missing_uppercase() {
+        let policy = PasswordPolicy {
+            minimum_length: 1,
+            require_uppercase: true,
+            require_lowercase: false,
+            require_numbers: false,
+            require_symbols: false,
+            temporary_password_validity_days: 7,
+        };
+        let err = validate_password("lowercase", &policy).unwrap_err();
+        assert_eq!(err.code(), "InvalidPasswordException");
+        assert!(validate_password("Uppercase", &policy).is_ok());
+    }
+
+    #[test]
+    fn password_policy_rejects_missing_numbers() {
+        let policy = PasswordPolicy {
+            minimum_length: 1,
+            require_uppercase: false,
+            require_lowercase: false,
+            require_numbers: true,
+            require_symbols: false,
+            temporary_password_validity_days: 7,
+        };
+        let err = validate_password("nodigits", &policy).unwrap_err();
+        assert_eq!(err.code(), "InvalidPasswordException");
+        assert!(validate_password("has1digit", &policy).is_ok());
+    }
+
+    #[test]
+    fn password_policy_rejects_missing_symbols() {
+        let policy = PasswordPolicy {
+            minimum_length: 1,
+            require_uppercase: false,
+            require_lowercase: false,
+            require_numbers: false,
+            require_symbols: true,
+            temporary_password_validity_days: 7,
+        };
+        let err = validate_password("nosymbols", &policy).unwrap_err();
+        assert_eq!(err.code(), "InvalidPasswordException");
+        assert!(validate_password("has!symbol", &policy).is_ok());
+    }
+
+    #[test]
+    fn session_token_is_uuid_format() {
+        let session = Uuid::new_v4().to_string();
+        // UUID v4 format: 8-4-4-4-12 hex chars
+        assert_eq!(session.len(), 36);
+        let parts: Vec<&str> = session.split('-').collect();
+        assert_eq!(parts.len(), 5);
     }
 }

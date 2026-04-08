@@ -14,6 +14,10 @@ pub struct CognitoState {
     pub user_pool_clients: HashMap<String, UserPoolClient>,
     /// pool_id -> (username -> User)
     pub users: HashMap<String, HashMap<String, User>>,
+    /// refresh_token -> RefreshTokenData
+    pub refresh_tokens: HashMap<String, RefreshTokenData>,
+    /// session_token -> SessionData
+    pub sessions: HashMap<String, SessionData>,
 }
 
 impl CognitoState {
@@ -24,6 +28,8 @@ impl CognitoState {
             user_pools: HashMap::new(),
             user_pool_clients: HashMap::new(),
             users: HashMap::new(),
+            refresh_tokens: HashMap::new(),
+            sessions: HashMap::new(),
         }
     }
 
@@ -31,7 +37,23 @@ impl CognitoState {
         self.user_pools.clear();
         self.user_pool_clients.clear();
         self.users.clear();
+        self.refresh_tokens.clear();
+        self.sessions.clear();
     }
+}
+
+pub struct RefreshTokenData {
+    pub user_pool_id: String,
+    pub username: String,
+    pub client_id: String,
+    pub issued_at: DateTime<Utc>,
+}
+
+pub struct SessionData {
+    pub user_pool_id: String,
+    pub username: String,
+    pub client_id: String,
+    pub challenge_name: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

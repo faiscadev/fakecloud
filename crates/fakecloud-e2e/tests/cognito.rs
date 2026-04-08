@@ -2,8 +2,8 @@ mod helpers;
 use helpers::TestServer;
 
 use aws_sdk_cognitoidentityprovider::types::{
-    AccountRecoverySettingType, AttributeType, ExplicitAuthFlowsType, PasswordPolicyType,
-    RecoveryOptionNameType, RecoveryOptionType, UserPoolPolicyType,
+    AccountRecoverySettingType, AttributeType, ChallengeNameType, ExplicitAuthFlowsType,
+    PasswordPolicyType, RecoveryOptionNameType, RecoveryOptionType, UserPoolPolicyType,
 };
 
 #[tokio::test]
@@ -949,4 +949,561 @@ async fn cognito_list_users_with_filter() {
     let users = result.users();
     assert_eq!(users.len(), 1, "Prefix filter should match one user");
     assert_eq!(users[0].username().unwrap(), "carol");
+}
+
+#[tokio::test]
+async fn cognito_admin_set_user_password_and_auth() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    // Create pool with relaxed password policy
+    let pool_result = client
+        .create_user_pool()
+        .pool_name("auth-pool")
+        .policies(
+            UserPoolPolicyType::builder()
+                .password_policy(
+                    PasswordPolicyType::builder()
+                        .minimum_length(6)
+                        .require_uppercase(false)
+                        .require_lowercase(false)
+                        .require_numbers(false)
+                        .require_symbols(false)
+                        .build(),
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .expect("create pool");
+    let pool_id = pool_result.user_pool().unwrap().id().unwrap().to_string();
+
+    // Create client with admin auth flows
+    let client_result = client
+        .create_user_pool_client()
+        .user_pool_id(&pool_id)
+        .client_name("auth-client")
+        .explicit_auth_flows(ExplicitAuthFlowsType::AllowAdminUserPasswordAuth)
+        .explicit_auth_flows(ExplicitAuthFlowsType::AllowRefreshTokenAuth)
+        .send()
+        .await
+        .expect("create client");
+    let client_id = client_result
+        .user_pool_client()
+        .unwrap()
+        .client_id()
+        .unwrap()
+        .to_string();
+
+    // Create user
+    client
+        .admin_create_user()
+        .user_pool_id(&pool_id)
+        .username("authuser")
+        .send()
+        .await
+        .expect("create user");
+
+    // Set permanent password
+    client
+        .admin_set_user_password()
+        .user_pool_id(&pool_id)
+        .username("authuser")
+        .password("mypassword")
+        .permanent(true)
+        .send()
+        .await
+        .expect("set password");
+
+    // Verify user status is CONFIRMED
+    let get = client
+        .admin_get_user()
+        .user_pool_id(&pool_id)
+        .username("authuser")
+        .send()
+        .await
+        .expect("get user");
+    assert_eq!(
+        get.user_status(),
+        Some(&aws_sdk_cognitoidentityprovider::types::UserStatusType::Confirmed),
+    );
+
+    // Admin initiate auth
+    let auth_result = client
+        .admin_initiate_auth()
+        .user_pool_id(&pool_id)
+        .client_id(&client_id)
+        .auth_flow(aws_sdk_cognitoidentityprovider::types::AuthFlowType::AdminUserPasswordAuth)
+        .auth_parameters("USERNAME", "authuser")
+        .auth_parameters("PASSWORD", "mypassword")
+        .send()
+        .await
+        .expect("admin initiate auth");
+
+    let auth = auth_result
+        .authentication_result()
+        .expect("should have auth result");
+    assert!(auth.access_token().is_some(), "should have access token");
+    assert!(auth.id_token().is_some(), "should have id token");
+    assert!(auth.refresh_token().is_some(), "should have refresh token");
+    assert_eq!(auth.token_type().unwrap(), "Bearer");
+
+    // Verify JWT format: 3 dot-separated segments
+    let id_token = auth.id_token().unwrap();
+    let parts: Vec<&str> = id_token.split('.').collect();
+    assert_eq!(parts.len(), 3, "ID token should have 3 segments");
+}
+
+#[tokio::test]
+async fn cognito_force_change_password_flow() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    // Create pool with relaxed policy
+    let pool_result = client
+        .create_user_pool()
+        .pool_name("fcp-pool")
+        .policies(
+            UserPoolPolicyType::builder()
+                .password_policy(
+                    PasswordPolicyType::builder()
+                        .minimum_length(6)
+                        .require_uppercase(false)
+                        .require_lowercase(false)
+                        .require_numbers(false)
+                        .require_symbols(false)
+                        .build(),
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .expect("create pool");
+    let pool_id = pool_result.user_pool().unwrap().id().unwrap().to_string();
+
+    let client_result = client
+        .create_user_pool_client()
+        .user_pool_id(&pool_id)
+        .client_name("fcp-client")
+        .explicit_auth_flows(ExplicitAuthFlowsType::AllowAdminUserPasswordAuth)
+        .explicit_auth_flows(ExplicitAuthFlowsType::AllowRefreshTokenAuth)
+        .send()
+        .await
+        .expect("create client");
+    let client_id = client_result
+        .user_pool_client()
+        .unwrap()
+        .client_id()
+        .unwrap()
+        .to_string();
+
+    // Create user with temp password (FORCE_CHANGE_PASSWORD status)
+    client
+        .admin_create_user()
+        .user_pool_id(&pool_id)
+        .username("fcpuser")
+        .temporary_password("temppass")
+        .send()
+        .await
+        .expect("create user");
+
+    // Auth should return NEW_PASSWORD_REQUIRED challenge
+    let auth_result = client
+        .admin_initiate_auth()
+        .user_pool_id(&pool_id)
+        .client_id(&client_id)
+        .auth_flow(aws_sdk_cognitoidentityprovider::types::AuthFlowType::AdminUserPasswordAuth)
+        .auth_parameters("USERNAME", "fcpuser")
+        .auth_parameters("PASSWORD", "temppass")
+        .send()
+        .await
+        .expect("admin initiate auth");
+
+    assert_eq!(
+        auth_result.challenge_name(),
+        Some(&ChallengeNameType::NewPasswordRequired),
+    );
+    let session = auth_result.session().expect("should have session");
+
+    // Respond to challenge with new password
+    let respond_result = client
+        .admin_respond_to_auth_challenge()
+        .user_pool_id(&pool_id)
+        .client_id(&client_id)
+        .challenge_name(ChallengeNameType::NewPasswordRequired)
+        .challenge_responses("NEW_PASSWORD", "newpassword")
+        .challenge_responses("USERNAME", "fcpuser")
+        .session(session)
+        .send()
+        .await
+        .expect("respond to challenge");
+
+    let auth = respond_result
+        .authentication_result()
+        .expect("should have auth result");
+    assert!(auth.access_token().is_some());
+    assert!(auth.id_token().is_some());
+    assert!(auth.refresh_token().is_some());
+
+    // Verify user is now CONFIRMED
+    let get = client
+        .admin_get_user()
+        .user_pool_id(&pool_id)
+        .username("fcpuser")
+        .send()
+        .await
+        .expect("get user");
+    assert_eq!(
+        get.user_status(),
+        Some(&aws_sdk_cognitoidentityprovider::types::UserStatusType::Confirmed),
+    );
+}
+
+#[tokio::test]
+async fn cognito_sign_up_and_confirm() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    // Create pool with relaxed policy
+    let pool_result = client
+        .create_user_pool()
+        .pool_name("signup-pool")
+        .policies(
+            UserPoolPolicyType::builder()
+                .password_policy(
+                    PasswordPolicyType::builder()
+                        .minimum_length(6)
+                        .require_uppercase(false)
+                        .require_lowercase(false)
+                        .require_numbers(false)
+                        .require_symbols(false)
+                        .build(),
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .expect("create pool");
+    let pool_id = pool_result.user_pool().unwrap().id().unwrap().to_string();
+
+    let client_result = client
+        .create_user_pool_client()
+        .user_pool_id(&pool_id)
+        .client_name("signup-client")
+        .explicit_auth_flows(ExplicitAuthFlowsType::AllowUserPasswordAuth)
+        .explicit_auth_flows(ExplicitAuthFlowsType::AllowRefreshTokenAuth)
+        .send()
+        .await
+        .expect("create client");
+    let client_id = client_result
+        .user_pool_client()
+        .unwrap()
+        .client_id()
+        .unwrap()
+        .to_string();
+
+    // Sign up
+    let signup_result = client
+        .sign_up()
+        .client_id(&client_id)
+        .username("signupuser")
+        .password("mypassword")
+        .user_attributes(
+            AttributeType::builder()
+                .name("email")
+                .value("signup@example.com")
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .expect("sign up");
+
+    assert!(
+        !signup_result.user_confirmed(),
+        "User should not be confirmed yet"
+    );
+    assert!(!signup_result.user_sub().is_empty(), "Should have UserSub");
+
+    // Confirm sign up
+    client
+        .confirm_sign_up()
+        .client_id(&client_id)
+        .username("signupuser")
+        .confirmation_code("123456")
+        .send()
+        .await
+        .expect("confirm sign up");
+
+    // Now auth should work
+    let auth_result = client
+        .initiate_auth()
+        .client_id(&client_id)
+        .auth_flow(aws_sdk_cognitoidentityprovider::types::AuthFlowType::UserPasswordAuth)
+        .auth_parameters("USERNAME", "signupuser")
+        .auth_parameters("PASSWORD", "mypassword")
+        .send()
+        .await
+        .expect("initiate auth after confirm");
+
+    let auth = auth_result
+        .authentication_result()
+        .expect("should have auth result");
+    assert!(auth.access_token().is_some());
+    assert!(auth.id_token().is_some());
+    assert!(auth.refresh_token().is_some());
+}
+
+#[tokio::test]
+async fn cognito_admin_confirm_sign_up() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool_result = client
+        .create_user_pool()
+        .pool_name("admin-confirm-pool")
+        .policies(
+            UserPoolPolicyType::builder()
+                .password_policy(
+                    PasswordPolicyType::builder()
+                        .minimum_length(6)
+                        .require_uppercase(false)
+                        .require_lowercase(false)
+                        .require_numbers(false)
+                        .require_symbols(false)
+                        .build(),
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .expect("create pool");
+    let pool_id = pool_result.user_pool().unwrap().id().unwrap().to_string();
+
+    let client_result = client
+        .create_user_pool_client()
+        .user_pool_id(&pool_id)
+        .client_name("admin-confirm-client")
+        .explicit_auth_flows(ExplicitAuthFlowsType::AllowUserPasswordAuth)
+        .explicit_auth_flows(ExplicitAuthFlowsType::AllowRefreshTokenAuth)
+        .send()
+        .await
+        .expect("create client");
+    let client_id = client_result
+        .user_pool_client()
+        .unwrap()
+        .client_id()
+        .unwrap()
+        .to_string();
+
+    // Sign up
+    client
+        .sign_up()
+        .client_id(&client_id)
+        .username("adminconfirm")
+        .password("mypassword")
+        .send()
+        .await
+        .expect("sign up");
+
+    // Admin confirm
+    client
+        .admin_confirm_sign_up()
+        .user_pool_id(&pool_id)
+        .username("adminconfirm")
+        .send()
+        .await
+        .expect("admin confirm sign up");
+
+    // Verify status is CONFIRMED
+    let get = client
+        .admin_get_user()
+        .user_pool_id(&pool_id)
+        .username("adminconfirm")
+        .send()
+        .await
+        .expect("get user");
+    assert_eq!(
+        get.user_status(),
+        Some(&aws_sdk_cognitoidentityprovider::types::UserStatusType::Confirmed),
+    );
+}
+
+#[tokio::test]
+async fn cognito_refresh_token_flow() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool_result = client
+        .create_user_pool()
+        .pool_name("refresh-pool")
+        .policies(
+            UserPoolPolicyType::builder()
+                .password_policy(
+                    PasswordPolicyType::builder()
+                        .minimum_length(6)
+                        .require_uppercase(false)
+                        .require_lowercase(false)
+                        .require_numbers(false)
+                        .require_symbols(false)
+                        .build(),
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .expect("create pool");
+    let pool_id = pool_result.user_pool().unwrap().id().unwrap().to_string();
+
+    let client_result = client
+        .create_user_pool_client()
+        .user_pool_id(&pool_id)
+        .client_name("refresh-client")
+        .explicit_auth_flows(ExplicitAuthFlowsType::AllowUserPasswordAuth)
+        .explicit_auth_flows(ExplicitAuthFlowsType::AllowRefreshTokenAuth)
+        .send()
+        .await
+        .expect("create client");
+    let client_id = client_result
+        .user_pool_client()
+        .unwrap()
+        .client_id()
+        .unwrap()
+        .to_string();
+
+    // Create and confirm user via sign up
+    client
+        .sign_up()
+        .client_id(&client_id)
+        .username("refreshuser")
+        .password("mypassword")
+        .send()
+        .await
+        .expect("sign up");
+
+    client
+        .confirm_sign_up()
+        .client_id(&client_id)
+        .username("refreshuser")
+        .confirmation_code("123456")
+        .send()
+        .await
+        .expect("confirm sign up");
+
+    // Initial auth
+    let auth_result = client
+        .initiate_auth()
+        .client_id(&client_id)
+        .auth_flow(aws_sdk_cognitoidentityprovider::types::AuthFlowType::UserPasswordAuth)
+        .auth_parameters("USERNAME", "refreshuser")
+        .auth_parameters("PASSWORD", "mypassword")
+        .send()
+        .await
+        .expect("initial auth");
+
+    let refresh_token = auth_result
+        .authentication_result()
+        .unwrap()
+        .refresh_token()
+        .unwrap()
+        .to_string();
+
+    // Use refresh token to get new tokens
+    let refresh_result = client
+        .initiate_auth()
+        .client_id(&client_id)
+        .auth_flow(aws_sdk_cognitoidentityprovider::types::AuthFlowType::RefreshTokenAuth)
+        .auth_parameters("REFRESH_TOKEN", &refresh_token)
+        .send()
+        .await
+        .expect("refresh token auth");
+
+    let new_auth = refresh_result
+        .authentication_result()
+        .expect("should have auth result from refresh");
+    assert!(
+        new_auth.access_token().is_some(),
+        "should have new access token"
+    );
+    assert!(new_auth.id_token().is_some(), "should have new id token");
+}
+
+#[tokio::test]
+async fn cognito_auth_wrong_password() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool_result = client
+        .create_user_pool()
+        .pool_name("wrongpw-pool")
+        .policies(
+            UserPoolPolicyType::builder()
+                .password_policy(
+                    PasswordPolicyType::builder()
+                        .minimum_length(6)
+                        .require_uppercase(false)
+                        .require_lowercase(false)
+                        .require_numbers(false)
+                        .require_symbols(false)
+                        .build(),
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .expect("create pool");
+    let pool_id = pool_result.user_pool().unwrap().id().unwrap().to_string();
+
+    let client_result = client
+        .create_user_pool_client()
+        .user_pool_id(&pool_id)
+        .client_name("wrongpw-client")
+        .explicit_auth_flows(ExplicitAuthFlowsType::AllowAdminUserPasswordAuth)
+        .send()
+        .await
+        .expect("create client");
+    let client_id = client_result
+        .user_pool_client()
+        .unwrap()
+        .client_id()
+        .unwrap()
+        .to_string();
+
+    // Create user with permanent password
+    client
+        .admin_create_user()
+        .user_pool_id(&pool_id)
+        .username("wrongpwuser")
+        .send()
+        .await
+        .expect("create user");
+
+    client
+        .admin_set_user_password()
+        .user_pool_id(&pool_id)
+        .username("wrongpwuser")
+        .password("correctpassword")
+        .permanent(true)
+        .send()
+        .await
+        .expect("set password");
+
+    // Try auth with wrong password
+    let err = client
+        .admin_initiate_auth()
+        .user_pool_id(&pool_id)
+        .client_id(&client_id)
+        .auth_flow(aws_sdk_cognitoidentityprovider::types::AuthFlowType::AdminUserPasswordAuth)
+        .auth_parameters("USERNAME", "wrongpwuser")
+        .auth_parameters("PASSWORD", "wrongpassword")
+        .send()
+        .await;
+
+    assert!(err.is_err(), "Auth with wrong password should fail");
+    let err_str = format!("{:?}", err.unwrap_err());
+    assert!(
+        err_str.contains("NotAuthorizedException")
+            || err_str.contains("Incorrect username or password"),
+        "Error should be NotAuthorizedException: {err_str}"
+    );
 }
