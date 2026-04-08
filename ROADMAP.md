@@ -4,10 +4,6 @@ fakecloud's goal is to be the best free AWS emulator for integration testing and
 
 For every service we implement, the standard is the same: full API coverage, real behavior (not stubs), conformance testing against AWS Smithy models, and cross-service integrations where applicable.
 
-## Currently shipping
-
-**Cognito** — User Pools and Identity Pools. Authentication and authorization testing without real AWS credentials.
-
 ## Up next
 
 ### Kinesis

@@ -3,7 +3,7 @@
 > fakecloud is a free, open-source local AWS cloud emulator written in Rust. It runs on a single port (4566), requires no account or auth token, and aims for 100% behavioral parity with real AWS on every service it implements. It is an open-source alternative to LocalStack, which went proprietary in March 2026.
 
 - Single binary, no Docker required, starts in under 100ms
-- 14 AWS services: S3, SQS, SNS, EventBridge, IAM/STS, SSM, DynamoDB, Lambda, Secrets Manager, CloudWatch Logs, KMS, CloudFormation, SES
+- 15 AWS services: S3, SQS, SNS, EventBridge, IAM/STS, SSM, DynamoDB, Lambda, Secrets Manager, CloudWatch Logs, KMS, CloudFormation, SES, Cognito User Pools
 - Cross-service delivery: S3 notifications to SNS/SQS, SNS fan-out to SQS, EventBridge rules to SNS/SQS
 - Scheduled EventBridge rules (cron and rate) that actually fire
 - Conformance tested against real AWS behavior
@@ -36,6 +36,7 @@
 - [KMS](https://github.com/faiscadev/fakecloud#kms-16-actions): 16 actions — keys, encryption/decryption, aliases, data key generation
 - [CloudFormation](https://github.com/faiscadev/fakecloud#cloudformation-8-actions): 8 actions — stacks, resource provisioning, template parsing, intrinsic functions
 - [SES](https://github.com/faiscadev/fakecloud#supported-services): 111 actions — v2 (97 ops): identities, templates, configuration sets, send email, event fanout, mailbox simulator. v1 inbound (14 ops): receipt rules, receipt filters, inbound email pipeline with S3/SNS/Lambda actions
+- [Cognito User Pools](https://github.com/faiscadev/fakecloud#supported-services): 80 actions — user pools, app clients, users, groups, MFA, identity providers, resource servers, domains, devices, authentication flows
 
 ## Optional
 

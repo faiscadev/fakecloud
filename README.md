@@ -35,7 +35,8 @@ proprietary image that requires an account and auth token.
 | Startup time | ~500ms | ~3s |
 | Idle memory | ~10 MiB | ~150 MiB |
 | Install size | ~19 MB binary | ~1 GB Docker image |
-| AWS services | 14 | 30+ |
+| AWS services | 15 | 30+ |
+| Cognito User Pools | 80 operations | [Paid only](https://docs.localstack.cloud/references/licensing/) |
 | SES v2 | 97 operations | [Paid only](https://docs.localstack.cloud/references/licensing/) |
 | SES inbound email | Real receipt rule action execution | [Stored but never executed](https://docs.localstack.cloud/user-guide/aws/ses/) |
 
@@ -98,7 +99,7 @@ fakecloud is now listening at `http://localhost:4566`.
 
 ## Supported Services
 
-14 AWS services, 842 API operations:
+15 AWS services, 922 API operations:
 
 | Service | Actions | Highlights |
 |---|---|---|
@@ -116,6 +117,7 @@ fakecloud is now listening at `http://localhost:4566`.
 | **KMS** | 53 | Encryption, key management, aliases, grants, real ECDH and key import |
 | **CloudFormation** | 8 | Template parsing, resource provisioning, custom resources via Lambda |
 | **SES** | 111 | **v2** (97 ops): identities, templates, configuration sets, contact lists, send email, suppression list, event destinations, DKIM/feedback/mail-from attributes, dedicated IP pools, account settings, import/export jobs, event fanout (SNS/EventBridge), mailbox simulator. **v1 inbound** (14 ops): receipt rule sets, receipt rules, receipt filters, inbound email pipeline with S3/SNS/Lambda actions |
+| **Cognito User Pools** | 80 | User pools, app clients, users, groups, MFA, identity providers, resource servers, domains, devices, authentication flows, password management |
 
 ### Cross-Service Integration
 
@@ -161,7 +163,7 @@ curl http://localhost:4566/_fakecloud/health
 {
   "status": "ok",
   "version": "0.3.0",
-  "services": ["cloudformation", "dynamodb", "sqs", "sns", "events", "iam", "sts", "ssm", "lambda", "secretsmanager", "logs", "kms", "s3", "ses"]
+  "services": ["cloudformation", "cognito-idp", "dynamodb", "sqs", "sns", "events", "iam", "sts", "ssm", "lambda", "secretsmanager", "logs", "kms", "s3", "ses"]
 }
 ```
 
@@ -213,11 +215,12 @@ fakecloud is organized as a Cargo workspace:
 | `fakecloud-kms` | KMS implementation |
 | `fakecloud-cloudformation` | CloudFormation implementation |
 | `fakecloud-ses` | SES implementation (v2 REST + v1 inbound Query) |
+| `fakecloud-cognito` | Cognito User Pools implementation |
 | `fakecloud-e2e` | End-to-end tests using aws-sdk-rust |
 
 Protocol handling:
 - **Query protocol** (SQS, SNS, IAM, STS, CloudFormation, SES v1): form-encoded body, `Action` parameter, XML responses
-- **JSON protocol** (SSM, EventBridge, DynamoDB, Secrets Manager, CloudWatch Logs, KMS): JSON body, `X-Amz-Target` header, JSON responses
+- **JSON protocol** (SSM, EventBridge, DynamoDB, Secrets Manager, CloudWatch Logs, KMS, Cognito User Pools): JSON body, `X-Amz-Target` header, JSON responses
 - **REST protocol** (S3, Lambda, SES v2): HTTP method + path-based routing, XML/JSON responses
 - **SES v1 inbound** uses Query protocol for receipt rule/filter operations
 - SigV4 signatures are parsed for service routing but never validated
@@ -236,7 +239,7 @@ server per test.
 
 ## Roadmap
 
-See [ROADMAP.md](ROADMAP.md) for what's coming next: Cognito, Kinesis, RDS, ECS, ElastiCache, and more.
+See [ROADMAP.md](ROADMAP.md) for what's coming next: Kinesis, RDS, ECS, ElastiCache, and more.
 
 ## Contributing
 
@@ -256,7 +259,7 @@ Contributions are welcome.
 **fakecloud is** a free, open-source local AWS emulator for integration testing and
 local development. For every service it implements, the goal is 100% behavioral
 parity with real AWS — verified by 34,000+ automated conformance test variants
-against official AWS Smithy models across all API operations. 14 services,
+against official AWS Smithy models across all API operations. 15 services,
 100% conformance.
 
 **fakecloud is not** a production-ready cloud replacement. It's not designed to
