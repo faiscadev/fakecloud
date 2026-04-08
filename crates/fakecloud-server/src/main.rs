@@ -196,6 +196,15 @@ async fn main() {
     let eb_introspection_state = eb_state.clone();
     let s3_introspection_state = s3_state.clone();
 
+    // Clone state refs for simulation endpoints
+    let sqs_sim_expiration_state = sqs_state.clone();
+    let sqs_sim_force_dlq_state = sqs_state.clone();
+    let eb_sim_state = eb_state.clone();
+    let eb_sim_delivery = delivery_for_eb.clone();
+    let eb_sim_lambda_state = Some(lambda_state.clone());
+    let eb_sim_logs_state = Some(logs_state.clone());
+    let eb_sim_container_runtime = container_runtime.clone();
+
     // Clone state for reset endpoint before moving into services
     let reset_state = ResetState {
         iam: iam_state.clone(),
@@ -576,6 +585,78 @@ async fn main() {
                             "logs": log_deliveries,
                         },
                     }))
+                }
+            }),
+        )
+        .route(
+            "/_fakecloud/sqs/expiration-processor/tick",
+            axum::routing::post({
+                let ss = sqs_sim_expiration_state;
+                move || async move {
+                    let expired = fakecloud_sqs::simulation::tick_expiration(&ss);
+                    axum::Json(serde_json::json!({ "expiredMessages": expired }))
+                }
+            }),
+        )
+        .route(
+            "/_fakecloud/sqs/{queue_name}/force-dlq",
+            axum::routing::post({
+                let ss = sqs_sim_force_dlq_state;
+                move |axum::extract::Path(queue_name): axum::extract::Path<String>| async move {
+                    let moved = fakecloud_sqs::simulation::force_dlq(&ss, &queue_name);
+                    axum::Json(serde_json::json!({ "movedMessages": moved }))
+                }
+            }),
+        )
+        .route(
+            "/_fakecloud/events/fire-rule",
+            axum::routing::post({
+                let es = eb_sim_state;
+                let delivery = eb_sim_delivery;
+                let lambda_state = eb_sim_lambda_state;
+                let logs_state = eb_sim_logs_state;
+                let container_runtime = eb_sim_container_runtime;
+                move |axum::Json(body): axum::Json<serde_json::Value>| async move {
+                    let bus_name = body["busName"].as_str().unwrap_or("default");
+                    let rule_name = match body["ruleName"].as_str() {
+                        Some(n) => n,
+                        None => {
+                            return (
+                                axum::http::StatusCode::BAD_REQUEST,
+                                axum::Json(serde_json::json!({ "error": "ruleName is required" })),
+                            );
+                        }
+                    };
+
+                    match fakecloud_eventbridge::simulation::fire_rule(
+                        &es,
+                        &delivery,
+                        &lambda_state,
+                        &logs_state,
+                        &container_runtime,
+                        bus_name,
+                        rule_name,
+                    ) {
+                        Ok(targets) => {
+                            let target_list: Vec<serde_json::Value> = targets
+                                .iter()
+                                .map(|t| {
+                                    serde_json::json!({
+                                        "type": t.target_type,
+                                        "arn": t.arn,
+                                    })
+                                })
+                                .collect();
+                            (
+                                axum::http::StatusCode::OK,
+                                axum::Json(serde_json::json!({ "targets": target_list })),
+                            )
+                        }
+                        Err(msg) => (
+                            axum::http::StatusCode::NOT_FOUND,
+                            axum::Json(serde_json::json!({ "error": msg })),
+                        ),
+                    }
                 }
             }),
         )

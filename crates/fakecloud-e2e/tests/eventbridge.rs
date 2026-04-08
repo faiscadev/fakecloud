@@ -1079,3 +1079,103 @@ async fn eventbridge_introspection_history() {
     assert!(resp["deliveries"]["lambda"].is_array());
     assert!(resp["deliveries"]["logs"].is_array());
 }
+
+#[tokio::test]
+async fn eb_simulation_fire_rule_to_sqs() {
+    let server = TestServer::start().await;
+    let eb_client = server.eventbridge_client().await;
+    let sqs_client = server.sqs_client().await;
+
+    // Create SQS queue to use as target
+    let q_resp = sqs_client
+        .create_queue()
+        .queue_name("fire-rule-target")
+        .send()
+        .await
+        .unwrap();
+    let queue_url = q_resp.queue_url().unwrap().to_string();
+
+    // Get queue ARN
+    let q_attrs = sqs_client
+        .get_queue_attributes()
+        .queue_url(&queue_url)
+        .attribute_names(QueueAttributeName::QueueArn)
+        .send()
+        .await
+        .unwrap();
+    let queue_arn = q_attrs
+        .attributes()
+        .unwrap()
+        .get(&QueueAttributeName::QueueArn)
+        .unwrap()
+        .clone();
+
+    // Create a scheduled rule on the default bus
+    eb_client
+        .put_rule()
+        .name("test-fire-rule")
+        .schedule_expression("rate(1 hour)")
+        .state(RuleState::Enabled)
+        .send()
+        .await
+        .unwrap();
+
+    // Add SQS target
+    eb_client
+        .put_targets()
+        .rule("test-fire-rule")
+        .targets(
+            Target::builder()
+                .id("sqs-target")
+                .arn(&queue_arn)
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    // Fire the rule via simulation endpoint
+    let url = format!("{}/_fakecloud/events/fire-rule", server.endpoint());
+    let resp: serde_json::Value = reqwest::Client::new()
+        .post(&url)
+        .json(&serde_json::json!({
+            "busName": "default",
+            "ruleName": "test-fire-rule"
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let targets = resp["targets"].as_array().unwrap();
+    assert_eq!(targets.len(), 1);
+    assert_eq!(targets[0]["type"], "sqs");
+    assert_eq!(targets[0]["arn"], queue_arn);
+
+    // Verify message appeared in SQS queue
+    let recv = sqs_client
+        .receive_message()
+        .queue_url(&queue_url)
+        .max_number_of_messages(10)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(recv.messages().len(), 1);
+    let body: serde_json::Value = serde_json::from_str(recv.messages()[0].body().unwrap()).unwrap();
+    assert_eq!(body["source"], "aws.events");
+    assert_eq!(body["detail-type"], "Scheduled Event");
+
+    // Verify event recorded in introspection
+    let history_url = format!("{}/_fakecloud/events/history", server.endpoint());
+    let history: serde_json::Value = reqwest::get(&history_url)
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let events = history["events"].as_array().unwrap();
+    assert!(events.iter().any(|e| e["source"] == "aws.events"));
+}

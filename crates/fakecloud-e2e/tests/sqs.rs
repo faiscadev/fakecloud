@@ -1206,3 +1206,143 @@ async fn sqs_introspection_messages() {
     assert!(!messages[0]["messageId"].as_str().unwrap().is_empty());
     assert!(!messages[0]["createdAt"].as_str().unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn sqs_simulation_expiration_tick() {
+    let server = TestServer::start().await;
+    let client = server.sqs_client().await;
+
+    // Create queue with very short retention period (1 second)
+    let resp = client
+        .create_queue()
+        .queue_name("expire-queue")
+        .attributes(QueueAttributeName::MessageRetentionPeriod, "1")
+        .send()
+        .await
+        .unwrap();
+    let queue_url = resp.queue_url().unwrap().to_string();
+
+    // Send a message
+    client
+        .send_message()
+        .queue_url(&queue_url)
+        .message_body("will expire")
+        .send()
+        .await
+        .unwrap();
+
+    // Wait for message to expire
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    // Call the expiration tick endpoint
+    let url = format!(
+        "{}/_fakecloud/sqs/expiration-processor/tick",
+        server.endpoint()
+    );
+    let resp: serde_json::Value = reqwest::Client::new()
+        .post(&url)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(resp["expiredMessages"].as_u64().unwrap() >= 1);
+
+    // Verify message is gone
+    let recv = client
+        .receive_message()
+        .queue_url(&queue_url)
+        .max_number_of_messages(10)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(recv.messages().len(), 0);
+}
+
+#[tokio::test]
+async fn sqs_simulation_force_dlq() {
+    let server = TestServer::start().await;
+    let client = server.sqs_client().await;
+
+    // Create DLQ
+    let dlq_resp = client
+        .create_queue()
+        .queue_name("my-dlq")
+        .send()
+        .await
+        .unwrap();
+    let dlq_url = dlq_resp.queue_url().unwrap().to_string();
+
+    // Get DLQ ARN
+    let dlq_attrs = client
+        .get_queue_attributes()
+        .queue_url(&dlq_url)
+        .attribute_names(QueueAttributeName::QueueArn)
+        .send()
+        .await
+        .unwrap();
+    let dlq_arn = dlq_attrs
+        .attributes()
+        .unwrap()
+        .get(&QueueAttributeName::QueueArn)
+        .unwrap()
+        .clone();
+
+    // Create source queue with redrive policy (maxReceiveCount=1)
+    let redrive_policy =
+        serde_json::json!({"deadLetterTargetArn": dlq_arn, "maxReceiveCount": 1}).to_string();
+    let src_resp = client
+        .create_queue()
+        .queue_name("src-queue")
+        .attributes(QueueAttributeName::RedrivePolicy, &redrive_policy)
+        .send()
+        .await
+        .unwrap();
+    let src_url = src_resp.queue_url().unwrap().to_string();
+
+    // Send a message
+    client
+        .send_message()
+        .queue_url(&src_url)
+        .message_body("hello dlq")
+        .send()
+        .await
+        .unwrap();
+
+    // Receive the message once (increments receive count to 1)
+    let recv = client
+        .receive_message()
+        .queue_url(&src_url)
+        .max_number_of_messages(1)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(recv.messages().len(), 1);
+
+    // Wait for visibility timeout to expire so message returns to queue
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    // Call force-dlq endpoint
+    let url = format!("{}/_fakecloud/sqs/src-queue/force-dlq", server.endpoint());
+    let resp: serde_json::Value = reqwest::Client::new()
+        .post(&url)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(resp["movedMessages"].as_u64().unwrap(), 1);
+
+    // Verify message appeared in DLQ
+    let dlq_recv = client
+        .receive_message()
+        .queue_url(&dlq_url)
+        .max_number_of_messages(10)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(dlq_recv.messages().len(), 1);
+    assert_eq!(dlq_recv.messages()[0].body().unwrap(), "hello dlq");
+}
