@@ -12,9 +12,9 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceErr
 
 use crate::state::{
     default_schema_attributes, AccessTokenData, AccountRecoverySetting, AdminCreateUserConfig,
-    EmailConfiguration, Group, InviteMessageTemplate, MfaPreferences, PasswordPolicy, PoolPolicies,
-    RecoveryOption, RefreshTokenData, SchemaAttribute, SessionData, SharedCognitoState,
-    SmsConfiguration, SmsMfaConfiguration, SoftwareTokenMfaConfiguration,
+    EmailConfiguration, Group, IdentityProvider, InviteMessageTemplate, MfaPreferences,
+    PasswordPolicy, PoolPolicies, RecoveryOption, RefreshTokenData, SchemaAttribute, SessionData,
+    SharedCognitoState, SmsConfiguration, SmsMfaConfiguration, SoftwareTokenMfaConfiguration,
     StringAttributeConstraints, TokenValidityUnits, User, UserAttribute, UserPool, UserPoolClient,
 };
 
@@ -90,6 +90,11 @@ impl AwsService for CognitoService {
             "SetUserMFAPreference" => self.set_user_mfa_preference(&req),
             "AssociateSoftwareToken" => self.associate_software_token(&req),
             "VerifySoftwareToken" => self.verify_software_token(&req),
+            "CreateIdentityProvider" => self.create_identity_provider(&req),
+            "DescribeIdentityProvider" => self.describe_identity_provider(&req),
+            "UpdateIdentityProvider" => self.update_identity_provider(&req),
+            "DeleteIdentityProvider" => self.delete_identity_provider(&req),
+            "ListIdentityProviders" => self.list_identity_providers(&req),
             _ => Err(AwsServiceError::action_not_implemented(
                 "cognito-idp",
                 &req.action,
@@ -153,6 +158,11 @@ impl AwsService for CognitoService {
             "SetUserMFAPreference",
             "AssociateSoftwareToken",
             "VerifySoftwareToken",
+            "CreateIdentityProvider",
+            "DescribeIdentityProvider",
+            "UpdateIdentityProvider",
+            "DeleteIdentityProvider",
+            "ListIdentityProviders",
         ]
     }
 }
@@ -398,6 +408,9 @@ impl CognitoService {
         // Remove associated groups and user-group associations
         state.groups.remove(pool_id);
         state.user_groups.remove(pool_id);
+
+        // Remove associated identity providers
+        state.identity_providers.remove(pool_id);
 
         Ok(AwsResponse::ok_json(json!({})))
     }
@@ -3675,6 +3688,242 @@ impl CognitoService {
             "Status": "SUCCESS",
         })))
     }
+
+    // ── Identity Provider operations ──────────────────────────────────
+
+    fn create_identity_provider(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+
+        let pool_id = require_str(&body, "UserPoolId")?;
+        let provider_name = require_str(&body, "ProviderName")?;
+        let provider_type = require_str(&body, "ProviderType")?;
+
+        validate_provider_type(provider_type)?;
+
+        let provider_details = parse_string_map(&body["ProviderDetails"]);
+        let attribute_mapping = parse_string_map(&body["AttributeMapping"]);
+        let idp_identifiers = body["IdpIdentifiers"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let mut state = self.state.write();
+
+        if !state.user_pools.contains_key(pool_id) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("User pool {pool_id} does not exist."),
+            ));
+        }
+
+        let pool_providers = state
+            .identity_providers
+            .entry(pool_id.to_string())
+            .or_default();
+        if pool_providers.contains_key(provider_name) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "DuplicateProviderException",
+                format!(
+                    "A provider with the name {provider_name} already exists in this user pool."
+                ),
+            ));
+        }
+
+        let now = Utc::now();
+        let idp = IdentityProvider {
+            user_pool_id: pool_id.to_string(),
+            provider_name: provider_name.to_string(),
+            provider_type: provider_type.to_string(),
+            provider_details,
+            attribute_mapping,
+            idp_identifiers,
+            creation_date: now,
+            last_modified_date: now,
+        };
+
+        pool_providers.insert(provider_name.to_string(), idp.clone());
+
+        Ok(AwsResponse::ok_json(json!({
+            "IdentityProvider": identity_provider_to_json(&idp)
+        })))
+    }
+
+    fn describe_identity_provider(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+
+        let pool_id = require_str(&body, "UserPoolId")?;
+        let provider_name = require_str(&body, "ProviderName")?;
+
+        let state = self.state.read();
+
+        if !state.user_pools.contains_key(pool_id) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("User pool {pool_id} does not exist."),
+            ));
+        }
+
+        let idp = state
+            .identity_providers
+            .get(pool_id)
+            .and_then(|providers| providers.get(provider_name))
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ResourceNotFoundException",
+                    format!("Identity provider {provider_name} does not exist."),
+                )
+            })?;
+
+        Ok(AwsResponse::ok_json(json!({
+            "IdentityProvider": identity_provider_to_json(idp)
+        })))
+    }
+
+    fn update_identity_provider(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+
+        let pool_id = require_str(&body, "UserPoolId")?;
+        let provider_name = require_str(&body, "ProviderName")?;
+
+        let mut state = self.state.write();
+
+        if !state.user_pools.contains_key(pool_id) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("User pool {pool_id} does not exist."),
+            ));
+        }
+
+        let idp = state
+            .identity_providers
+            .get_mut(pool_id)
+            .and_then(|providers| providers.get_mut(provider_name))
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ResourceNotFoundException",
+                    format!("Identity provider {provider_name} does not exist."),
+                )
+            })?;
+
+        if body["ProviderDetails"].is_object() {
+            idp.provider_details = parse_string_map(&body["ProviderDetails"]);
+        }
+        if body["AttributeMapping"].is_object() {
+            idp.attribute_mapping = parse_string_map(&body["AttributeMapping"]);
+        }
+        if let Some(arr) = body["IdpIdentifiers"].as_array() {
+            idp.idp_identifiers = arr
+                .iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect();
+        }
+        idp.last_modified_date = Utc::now();
+
+        let idp = idp.clone();
+
+        Ok(AwsResponse::ok_json(json!({
+            "IdentityProvider": identity_provider_to_json(&idp)
+        })))
+    }
+
+    fn delete_identity_provider(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+
+        let pool_id = require_str(&body, "UserPoolId")?;
+        let provider_name = require_str(&body, "ProviderName")?;
+
+        let mut state = self.state.write();
+
+        if !state.user_pools.contains_key(pool_id) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("User pool {pool_id} does not exist."),
+            ));
+        }
+
+        let removed = state
+            .identity_providers
+            .get_mut(pool_id)
+            .and_then(|providers| providers.remove(provider_name));
+
+        if removed.is_none() {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("Identity provider {provider_name} does not exist."),
+            ));
+        }
+
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    fn list_identity_providers(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+
+        let pool_id = require_str(&body, "UserPoolId")?;
+        let max_results = body["MaxResults"].as_i64().unwrap_or(60).clamp(1, 60) as usize;
+        let next_token = body["NextToken"].as_str();
+
+        let state = self.state.read();
+
+        if !state.user_pools.contains_key(pool_id) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("User pool {pool_id} does not exist."),
+            ));
+        }
+
+        let empty = HashMap::new();
+        let pool_providers = state.identity_providers.get(pool_id).unwrap_or(&empty);
+
+        let mut providers: Vec<&IdentityProvider> = pool_providers.values().collect();
+        providers.sort_by_key(|p| p.creation_date);
+
+        let start_idx = if let Some(token) = next_token {
+            providers
+                .iter()
+                .position(|p| p.provider_name == token)
+                .unwrap_or(0)
+        } else {
+            0
+        };
+
+        let page: Vec<Value> = providers
+            .iter()
+            .skip(start_idx)
+            .take(max_results)
+            .map(|p| {
+                json!({
+                    "ProviderName": p.provider_name,
+                    "ProviderType": p.provider_type,
+                    "CreationDate": p.creation_date.timestamp() as f64,
+                    "LastModifiedDate": p.last_modified_date.timestamp() as f64,
+                })
+            })
+            .collect();
+
+        let has_more = start_idx + max_results < providers.len();
+        let mut response = json!({ "Providers": page });
+        if has_more {
+            if let Some(last) = providers.get(start_idx + max_results) {
+                response["NextToken"] = json!(last.provider_name);
+            }
+        }
+
+        Ok(AwsResponse::ok_json(response))
+    }
 }
 
 /// Generate a pool ID in the format `{region}_{9 random alphanumeric chars}`.
@@ -3994,6 +4243,58 @@ fn group_to_json(group: &Group) -> Value {
         val["RoleArn"] = json!(arn);
     }
     val
+}
+
+fn identity_provider_to_json(idp: &IdentityProvider) -> Value {
+    let mut val = json!({
+        "UserPoolId": idp.user_pool_id,
+        "ProviderName": idp.provider_name,
+        "ProviderType": idp.provider_type,
+        "CreationDate": idp.creation_date.timestamp() as f64,
+        "LastModifiedDate": idp.last_modified_date.timestamp() as f64,
+    });
+    if !idp.provider_details.is_empty() {
+        val["ProviderDetails"] = json!(idp.provider_details);
+    }
+    if !idp.attribute_mapping.is_empty() {
+        val["AttributeMapping"] = json!(idp.attribute_mapping);
+    }
+    if !idp.idp_identifiers.is_empty() {
+        val["IdpIdentifiers"] = json!(idp.idp_identifiers);
+    }
+    val
+}
+
+const VALID_PROVIDER_TYPES: &[&str] = &[
+    "SAML",
+    "Facebook",
+    "Google",
+    "LoginWithAmazon",
+    "SignInWithApple",
+    "OIDC",
+];
+
+fn validate_provider_type(provider_type: &str) -> Result<(), AwsServiceError> {
+    if !VALID_PROVIDER_TYPES.contains(&provider_type) {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidParameterException",
+            format!(
+                "Invalid ProviderType: {provider_type}. Must be one of: SAML, Facebook, Google, LoginWithAmazon, SignInWithApple, OIDC"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn parse_string_map(val: &Value) -> HashMap<String, String> {
+    val.as_object()
+        .map(|obj| {
+            obj.iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Convert a User to the JSON format AWS returns (for ListUsers and AdminCreateUser response).
@@ -5893,5 +6194,100 @@ mod tests {
         assert!(prefs.software_token_preferred);
         assert!(!prefs.sms_enabled);
         assert!(!prefs.sms_preferred);
+    }
+
+    fn make_req(action: &str, body: &str) -> AwsRequest {
+        AwsRequest {
+            service: "cognito-idp".to_string(),
+            action: action.to_string(),
+            region: "us-east-1".to_string(),
+            account_id: "123456789012".to_string(),
+            request_id: "test".to_string(),
+            headers: http::HeaderMap::new(),
+            query_params: std::collections::HashMap::new(),
+            body: bytes::Bytes::from(body.to_string()),
+            path_segments: vec![],
+            raw_path: "/".to_string(),
+            raw_query: String::new(),
+            method: http::Method::POST,
+            is_query_protocol: false,
+            access_key_id: None,
+        }
+    }
+
+    fn setup_svc_with_pool() -> (CognitoService, String) {
+        let state = std::sync::Arc::new(parking_lot::RwLock::new(crate::state::CognitoState::new(
+            "123456789012",
+            "us-east-1",
+        )));
+        let svc = CognitoService::new(state);
+        let req = make_req("CreateUserPool", r#"{"PoolName":"test"}"#);
+        let resp = svc.create_user_pool(&req).unwrap();
+        let resp_body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let pool_id = resp_body["UserPool"]["Id"].as_str().unwrap().to_string();
+        (svc, pool_id)
+    }
+
+    #[test]
+    fn identity_provider_name_uniqueness() {
+        let (svc, pool_id) = setup_svc_with_pool();
+
+        let body = serde_json::to_string(&json!({
+            "UserPoolId": pool_id,
+            "ProviderName": "MyGoogle",
+            "ProviderType": "Google",
+            "ProviderDetails": {"client_id": "123", "client_secret": "secret"}
+        }))
+        .unwrap();
+        let req = make_req("CreateIdentityProvider", &body);
+        svc.create_identity_provider(&req).unwrap();
+
+        // Duplicate name should fail
+        let req2 = make_req("CreateIdentityProvider", &body);
+        match svc.create_identity_provider(&req2) {
+            Err(e) => assert_eq!(e.code(), "DuplicateProviderException"),
+            Ok(_) => panic!("Expected DuplicateProviderException"),
+        }
+    }
+
+    #[test]
+    fn identity_provider_type_validation() {
+        let (svc, pool_id) = setup_svc_with_pool();
+
+        let body = serde_json::to_string(&json!({
+            "UserPoolId": pool_id,
+            "ProviderName": "MyInvalid",
+            "ProviderType": "InvalidType",
+            "ProviderDetails": {}
+        }))
+        .unwrap();
+        let req = make_req("CreateIdentityProvider", &body);
+        match svc.create_identity_provider(&req) {
+            Err(e) => assert_eq!(e.code(), "InvalidParameterException"),
+            Ok(_) => panic!("Expected InvalidParameterException"),
+        }
+
+        // Valid types should all work
+        for provider_type in &[
+            "SAML",
+            "Facebook",
+            "Google",
+            "LoginWithAmazon",
+            "SignInWithApple",
+            "OIDC",
+        ] {
+            let body = serde_json::to_string(&json!({
+                "UserPoolId": pool_id,
+                "ProviderName": format!("prov_{provider_type}"),
+                "ProviderType": provider_type,
+                "ProviderDetails": {}
+            }))
+            .unwrap();
+            let req = make_req("CreateIdentityProvider", &body);
+            assert!(
+                svc.create_identity_provider(&req).is_ok(),
+                "ProviderType {provider_type} should be valid"
+            );
+        }
     }
 }

@@ -24,6 +24,8 @@ pub struct CognitoState {
     pub groups: HashMap<String, HashMap<String, Group>>,
     /// pool_id -> (username -> [group_names])
     pub user_groups: HashMap<String, HashMap<String, Vec<String>>>,
+    /// pool_id -> (provider_name -> IdentityProvider)
+    pub identity_providers: HashMap<String, HashMap<String, IdentityProvider>>,
 }
 
 impl CognitoState {
@@ -39,6 +41,7 @@ impl CognitoState {
             access_tokens: HashMap::new(),
             groups: HashMap::new(),
             user_groups: HashMap::new(),
+            identity_providers: HashMap::new(),
         }
     }
 
@@ -51,6 +54,7 @@ impl CognitoState {
         self.access_tokens.clear();
         self.groups.clear();
         self.user_groups.clear();
+        self.identity_providers.clear();
     }
 }
 
@@ -277,6 +281,18 @@ pub struct Group {
     pub description: Option<String>,
     pub precedence: Option<i64>,
     pub role_arn: Option<String>,
+    pub creation_date: DateTime<Utc>,
+    pub last_modified_date: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct IdentityProvider {
+    pub user_pool_id: String,
+    pub provider_name: String,
+    pub provider_type: String,
+    pub provider_details: HashMap<String, String>,
+    pub attribute_mapping: HashMap<String, String>,
+    pub idp_identifiers: Vec<String>,
     pub creation_date: DateTime<Utc>,
     pub last_modified_date: DateTime<Utc>,
 }

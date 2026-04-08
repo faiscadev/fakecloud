@@ -3,9 +3,9 @@ use helpers::TestServer;
 
 use aws_sdk_cognitoidentityprovider::types::{
     AccountRecoverySettingType, AttributeType, ChallengeNameType, DeliveryMediumType,
-    ExplicitAuthFlowsType, PasswordPolicyType, RecoveryOptionNameType, RecoveryOptionType,
-    SmsMfaSettingsType, SoftwareTokenMfaConfigType, SoftwareTokenMfaSettingsType, UserPoolMfaType,
-    UserPoolPolicyType, UserStatusType,
+    ExplicitAuthFlowsType, IdentityProviderTypeType, PasswordPolicyType, RecoveryOptionNameType,
+    RecoveryOptionType, SmsMfaSettingsType, SoftwareTokenMfaConfigType,
+    SoftwareTokenMfaSettingsType, UserPoolMfaType, UserPoolPolicyType, UserStatusType,
 };
 
 #[tokio::test]
@@ -3237,4 +3237,249 @@ async fn cognito_set_user_mfa_preference() {
         .send()
         .await;
     assert!(err.is_err(), "Should fail with invalid token");
+}
+
+#[tokio::test]
+async fn cognito_create_describe_identity_provider() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("idp-pool")
+        .send()
+        .await
+        .expect("create pool");
+    let pool_id = pool.user_pool().unwrap().id().unwrap();
+
+    // Create an identity provider
+    let result = client
+        .create_identity_provider()
+        .user_pool_id(pool_id)
+        .provider_name("MyGoogle")
+        .provider_type(IdentityProviderTypeType::Google)
+        .provider_details("client_id", "google-client-id")
+        .provider_details("client_secret", "google-secret")
+        .attribute_mapping("email", "email")
+        .idp_identifiers("google.example.com")
+        .send()
+        .await
+        .expect("create identity provider");
+
+    let idp = result.identity_provider().unwrap();
+    assert_eq!(idp.provider_name().unwrap(), "MyGoogle");
+    assert_eq!(
+        idp.provider_type().unwrap(),
+        &IdentityProviderTypeType::Google
+    );
+    let details = idp.provider_details().unwrap();
+    assert_eq!(details.get("client_id").unwrap(), "google-client-id");
+    let mapping = idp.attribute_mapping().unwrap();
+    assert_eq!(mapping.get("email").unwrap(), "email");
+    let identifiers = idp.idp_identifiers();
+    assert_eq!(identifiers, &["google.example.com"]);
+
+    // Describe it
+    let described = client
+        .describe_identity_provider()
+        .user_pool_id(pool_id)
+        .provider_name("MyGoogle")
+        .send()
+        .await
+        .expect("describe identity provider");
+
+    let idp2 = described.identity_provider().unwrap();
+    assert_eq!(idp2.provider_name().unwrap(), "MyGoogle");
+    assert_eq!(
+        idp2.provider_type().unwrap(),
+        &IdentityProviderTypeType::Google
+    );
+
+    // Describe non-existent should fail
+    let err = client
+        .describe_identity_provider()
+        .user_pool_id(pool_id)
+        .provider_name("DoesNotExist")
+        .send()
+        .await;
+    assert!(err.is_err(), "Should fail for non-existent provider");
+}
+
+#[tokio::test]
+async fn cognito_update_identity_provider() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("idp-update-pool")
+        .send()
+        .await
+        .expect("create pool");
+    let pool_id = pool.user_pool().unwrap().id().unwrap();
+
+    client
+        .create_identity_provider()
+        .user_pool_id(pool_id)
+        .provider_name("MySAML")
+        .provider_type(IdentityProviderTypeType::Saml)
+        .provider_details("MetadataURL", "https://example.com/saml")
+        .send()
+        .await
+        .expect("create identity provider");
+
+    // Update provider details
+    let updated = client
+        .update_identity_provider()
+        .user_pool_id(pool_id)
+        .provider_name("MySAML")
+        .provider_details("MetadataURL", "https://new.example.com/saml")
+        .attribute_mapping("email", "saml:email")
+        .send()
+        .await
+        .expect("update identity provider");
+
+    let idp = updated.identity_provider().unwrap();
+    assert_eq!(idp.provider_name().unwrap(), "MySAML");
+    let details = idp.provider_details().unwrap();
+    assert_eq!(
+        details.get("MetadataURL").unwrap(),
+        "https://new.example.com/saml"
+    );
+    let mapping = idp.attribute_mapping().unwrap();
+    assert_eq!(mapping.get("email").unwrap(), "saml:email");
+
+    // Update non-existent should fail
+    let err = client
+        .update_identity_provider()
+        .user_pool_id(pool_id)
+        .provider_name("DoesNotExist")
+        .provider_details("foo", "bar")
+        .send()
+        .await;
+    assert!(err.is_err(), "Should fail for non-existent provider");
+}
+
+#[tokio::test]
+async fn cognito_delete_identity_provider() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("idp-delete-pool")
+        .send()
+        .await
+        .expect("create pool");
+    let pool_id = pool.user_pool().unwrap().id().unwrap();
+
+    client
+        .create_identity_provider()
+        .user_pool_id(pool_id)
+        .provider_name("MyOIDC")
+        .provider_type(IdentityProviderTypeType::Oidc)
+        .provider_details("client_id", "oidc-id")
+        .provider_details("client_secret", "oidc-secret")
+        .provider_details("oidc_issuer", "https://auth.example.com")
+        .send()
+        .await
+        .expect("create identity provider");
+
+    // Delete it
+    client
+        .delete_identity_provider()
+        .user_pool_id(pool_id)
+        .provider_name("MyOIDC")
+        .send()
+        .await
+        .expect("delete identity provider");
+
+    // Describe should now fail
+    let err = client
+        .describe_identity_provider()
+        .user_pool_id(pool_id)
+        .provider_name("MyOIDC")
+        .send()
+        .await;
+    assert!(err.is_err(), "Should fail after deletion");
+
+    // Delete again should fail
+    let err = client
+        .delete_identity_provider()
+        .user_pool_id(pool_id)
+        .provider_name("MyOIDC")
+        .send()
+        .await;
+    assert!(err.is_err(), "Should fail for already-deleted provider");
+}
+
+#[tokio::test]
+async fn cognito_list_identity_providers() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("idp-list-pool")
+        .send()
+        .await
+        .expect("create pool");
+    let pool_id = pool.user_pool().unwrap().id().unwrap();
+
+    // Create multiple providers
+    for (name, ptype) in &[
+        ("GoogleIdP", IdentityProviderTypeType::Google),
+        ("FacebookIdP", IdentityProviderTypeType::Facebook),
+        ("AppleIdP", IdentityProviderTypeType::SignInWithApple),
+    ] {
+        client
+            .create_identity_provider()
+            .user_pool_id(pool_id)
+            .provider_name(*name)
+            .provider_type(ptype.clone())
+            .provider_details("client_id", "test")
+            .send()
+            .await
+            .unwrap_or_else(|e| panic!("create {name}: {e}"));
+    }
+
+    // List all
+    let result = client
+        .list_identity_providers()
+        .user_pool_id(pool_id)
+        .max_results(10)
+        .send()
+        .await
+        .expect("list identity providers");
+
+    let providers = result.providers();
+    assert_eq!(providers.len(), 3);
+
+    let names: Vec<&str> = providers.iter().filter_map(|p| p.provider_name()).collect();
+    assert!(names.contains(&"GoogleIdP"));
+    assert!(names.contains(&"FacebookIdP"));
+    assert!(names.contains(&"AppleIdP"));
+
+    // List with pagination (max_results=1)
+    let page1 = client
+        .list_identity_providers()
+        .user_pool_id(pool_id)
+        .max_results(1)
+        .send()
+        .await
+        .expect("list page 1");
+
+    assert_eq!(page1.providers().len(), 1);
+    assert!(
+        page1.next_token().is_some(),
+        "Should have next_token with more results"
+    );
+
+    // List non-existent pool should fail
+    let err = client
+        .list_identity_providers()
+        .user_pool_id("us-east-1_NOTAPOOL")
+        .send()
+        .await;
+    assert!(err.is_err(), "Should fail for non-existent pool");
 }
