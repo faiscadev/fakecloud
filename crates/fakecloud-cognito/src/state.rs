@@ -236,6 +236,8 @@ pub struct User {
     pub password: Option<String>,
     pub temporary_password: Option<String>,
     pub confirmation_code: Option<String>,
+    /// attribute_name -> verification_code (for GetUserAttributeVerificationCode / VerifyUserAttribute)
+    pub attribute_verification_codes: HashMap<String, String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

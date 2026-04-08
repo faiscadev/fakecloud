@@ -2,9 +2,9 @@ mod helpers;
 use helpers::TestServer;
 
 use aws_sdk_cognitoidentityprovider::types::{
-    AccountRecoverySettingType, AttributeType, ChallengeNameType, ExplicitAuthFlowsType,
-    PasswordPolicyType, RecoveryOptionNameType, RecoveryOptionType, UserPoolPolicyType,
-    UserStatusType,
+    AccountRecoverySettingType, AttributeType, ChallengeNameType, DeliveryMediumType,
+    ExplicitAuthFlowsType, PasswordPolicyType, RecoveryOptionNameType, RecoveryOptionType,
+    UserPoolPolicyType, UserStatusType,
 };
 
 #[tokio::test]
@@ -2488,4 +2488,422 @@ async fn cognito_list_groups_for_user() {
         err.is_err(),
         "Listing groups for non-existent user should fail"
     );
+}
+
+// Helper: create pool + client + user + auth, return (server, client, pool_id, client_id, access_token)
+async fn setup_authed_user(
+    pool_name: &str,
+    client_name: &str,
+    username: &str,
+    password: &str,
+    email: &str,
+) -> (
+    TestServer,
+    aws_sdk_cognitoidentityprovider::Client,
+    String,
+    String,
+    String,
+) {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool_result = client
+        .create_user_pool()
+        .pool_name(pool_name)
+        .policies(
+            UserPoolPolicyType::builder()
+                .password_policy(
+                    PasswordPolicyType::builder()
+                        .minimum_length(6)
+                        .require_uppercase(false)
+                        .require_lowercase(false)
+                        .require_numbers(false)
+                        .require_symbols(false)
+                        .build(),
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .expect("create pool");
+    let pool_id = pool_result.user_pool().unwrap().id().unwrap().to_string();
+
+    let client_result = client
+        .create_user_pool_client()
+        .user_pool_id(&pool_id)
+        .client_name(client_name)
+        .explicit_auth_flows(ExplicitAuthFlowsType::AllowAdminUserPasswordAuth)
+        .explicit_auth_flows(ExplicitAuthFlowsType::AllowRefreshTokenAuth)
+        .send()
+        .await
+        .expect("create client");
+    let client_id = client_result
+        .user_pool_client()
+        .unwrap()
+        .client_id()
+        .unwrap()
+        .to_string();
+
+    client
+        .admin_create_user()
+        .user_pool_id(&pool_id)
+        .username(username)
+        .user_attributes(
+            AttributeType::builder()
+                .name("email")
+                .value(email)
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .expect("create user");
+
+    client
+        .admin_set_user_password()
+        .user_pool_id(&pool_id)
+        .username(username)
+        .password(password)
+        .permanent(true)
+        .send()
+        .await
+        .expect("set password");
+
+    let auth_result = client
+        .admin_initiate_auth()
+        .user_pool_id(&pool_id)
+        .client_id(&client_id)
+        .auth_flow(aws_sdk_cognitoidentityprovider::types::AuthFlowType::AdminUserPasswordAuth)
+        .auth_parameters("USERNAME", username)
+        .auth_parameters("PASSWORD", password)
+        .send()
+        .await
+        .expect("auth");
+
+    let access_token = auth_result
+        .authentication_result()
+        .unwrap()
+        .access_token()
+        .unwrap()
+        .to_string();
+
+    (server, client, pool_id, client_id, access_token)
+}
+
+#[tokio::test]
+async fn cognito_get_user() {
+    let (_server, client, _pool_id, _client_id, access_token) = setup_authed_user(
+        "getuser-pool",
+        "getuser-client",
+        "getuser",
+        "mypasswd",
+        "get@example.com",
+    )
+    .await;
+
+    let result = client
+        .get_user()
+        .access_token(&access_token)
+        .send()
+        .await
+        .expect("get user");
+
+    assert_eq!(result.username(), "getuser");
+
+    // Check attributes contain email
+    let attrs = result.user_attributes();
+    let email_attr = attrs.iter().find(|a| a.name() == "email");
+    assert!(email_attr.is_some(), "Should have email attribute");
+    assert_eq!(email_attr.unwrap().value(), Some("get@example.com"));
+
+    // Invalid token should fail
+    let err = client.get_user().access_token("bad-token").send().await;
+    assert!(err.is_err(), "Invalid token should fail");
+}
+
+#[tokio::test]
+async fn cognito_delete_user_self() {
+    let (_server, client, pool_id, _client_id, access_token) = setup_authed_user(
+        "delself-pool",
+        "delself-client",
+        "delself",
+        "mypasswd",
+        "del@example.com",
+    )
+    .await;
+
+    // Delete self
+    client
+        .delete_user()
+        .access_token(&access_token)
+        .send()
+        .await
+        .expect("delete user");
+
+    // GetUser should fail now
+    let err = client.get_user().access_token(&access_token).send().await;
+    assert!(err.is_err(), "Get user after delete should fail");
+
+    // Admin get user should also fail
+    let err = client
+        .admin_get_user()
+        .user_pool_id(&pool_id)
+        .username("delself")
+        .send()
+        .await;
+    assert!(err.is_err(), "Admin get user after delete should fail");
+}
+
+#[tokio::test]
+async fn cognito_update_delete_user_attributes_self() {
+    let (_server, client, _pool_id, _client_id, access_token) = setup_authed_user(
+        "upattr-pool",
+        "upattr-client",
+        "upattr",
+        "mypasswd",
+        "old@example.com",
+    )
+    .await;
+
+    // Update email attribute
+    client
+        .update_user_attributes()
+        .access_token(&access_token)
+        .user_attributes(
+            AttributeType::builder()
+                .name("email")
+                .value("new@example.com")
+                .build()
+                .unwrap(),
+        )
+        .user_attributes(
+            AttributeType::builder()
+                .name("custom:team")
+                .value("engineering")
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .expect("update user attributes");
+
+    // Verify via GetUser
+    let user = client
+        .get_user()
+        .access_token(&access_token)
+        .send()
+        .await
+        .expect("get user");
+
+    let attrs = user.user_attributes();
+    let email = attrs.iter().find(|a| a.name() == "email").unwrap();
+    assert_eq!(email.value(), Some("new@example.com"));
+    let team = attrs.iter().find(|a| a.name() == "custom:team").unwrap();
+    assert_eq!(team.value(), Some("engineering"));
+
+    // Delete email attribute
+    client
+        .delete_user_attributes()
+        .access_token(&access_token)
+        .user_attribute_names("email")
+        .send()
+        .await
+        .expect("delete user attributes");
+
+    // Verify email is gone
+    let user2 = client
+        .get_user()
+        .access_token(&access_token)
+        .send()
+        .await
+        .expect("get user after delete attr");
+
+    let attrs2 = user2.user_attributes();
+    assert!(
+        attrs2.iter().find(|a| a.name() == "email").is_none(),
+        "email attribute should be deleted"
+    );
+    // custom:team should still be there
+    assert!(
+        attrs2.iter().find(|a| a.name() == "custom:team").is_some(),
+        "custom:team should remain"
+    );
+}
+
+#[tokio::test]
+async fn cognito_verify_user_attribute() {
+    let (_server, client, pool_id, _client_id, access_token) = setup_authed_user(
+        "verify-pool",
+        "verify-client",
+        "verifyuser",
+        "mypasswd",
+        "verify@example.com",
+    )
+    .await;
+
+    // Get verification code
+    let code_result = client
+        .get_user_attribute_verification_code()
+        .access_token(&access_token)
+        .attribute_name("email")
+        .send()
+        .await
+        .expect("get verification code");
+
+    let delivery = code_result.code_delivery_details().unwrap();
+    assert_eq!(
+        delivery.delivery_medium().unwrap(),
+        &DeliveryMediumType::Email
+    );
+    assert_eq!(delivery.attribute_name().unwrap(), "email");
+    let dest = delivery.destination().unwrap();
+    assert!(dest.contains("***"), "Destination should be masked: {dest}");
+
+    // Wrong code should fail with CodeMismatchException
+    let err = client
+        .verify_user_attribute()
+        .access_token(&access_token)
+        .attribute_name("email")
+        .code("000000")
+        .send()
+        .await;
+    assert!(err.is_err(), "Wrong code should fail");
+
+    // Verify email_verified is not yet set
+    let user = client
+        .admin_get_user()
+        .user_pool_id(&pool_id)
+        .username("verifyuser")
+        .send()
+        .await
+        .expect("admin get user");
+
+    let attrs = user.user_attributes();
+    let email_verified = attrs.iter().find(|a| a.name() == "email_verified");
+    assert!(
+        email_verified.is_none() || email_verified.unwrap().value() != Some("true"),
+        "email should not be verified yet"
+    );
+
+    // Invalid token should fail
+    let err = client
+        .get_user_attribute_verification_code()
+        .access_token("bad-token")
+        .attribute_name("email")
+        .send()
+        .await;
+    assert!(err.is_err(), "Invalid token should fail");
+}
+
+#[tokio::test]
+async fn cognito_resend_confirmation_code() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    // Create pool with relaxed policy
+    let pool_result = client
+        .create_user_pool()
+        .pool_name("resend-pool")
+        .policies(
+            UserPoolPolicyType::builder()
+                .password_policy(
+                    PasswordPolicyType::builder()
+                        .minimum_length(6)
+                        .require_uppercase(false)
+                        .require_lowercase(false)
+                        .require_numbers(false)
+                        .require_symbols(false)
+                        .build(),
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .expect("create pool");
+    let pool_id = pool_result.user_pool().unwrap().id().unwrap().to_string();
+
+    let client_result = client
+        .create_user_pool_client()
+        .user_pool_id(&pool_id)
+        .client_name("resend-client")
+        .explicit_auth_flows(ExplicitAuthFlowsType::AllowUserPasswordAuth)
+        .explicit_auth_flows(ExplicitAuthFlowsType::AllowRefreshTokenAuth)
+        .send()
+        .await
+        .expect("create client");
+    let client_id = client_result
+        .user_pool_client()
+        .unwrap()
+        .client_id()
+        .unwrap()
+        .to_string();
+
+    // Sign up user
+    client
+        .sign_up()
+        .client_id(&client_id)
+        .username("resenduser")
+        .password("mypasswd")
+        .user_attributes(
+            AttributeType::builder()
+                .name("email")
+                .value("resend@example.com")
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .expect("sign up");
+
+    // Resend confirmation code
+    let result = client
+        .resend_confirmation_code()
+        .client_id(&client_id)
+        .username("resenduser")
+        .send()
+        .await
+        .expect("resend confirmation code");
+
+    let delivery = result.code_delivery_details().unwrap();
+    assert_eq!(
+        delivery.delivery_medium().unwrap(),
+        &DeliveryMediumType::Email
+    );
+    assert_eq!(delivery.attribute_name().unwrap(), "email");
+    let dest = delivery.destination().unwrap();
+    assert!(dest.contains("***"), "Destination should be masked: {dest}");
+    assert!(
+        dest.contains("@example.com"),
+        "Should contain domain: {dest}"
+    );
+
+    // Confirm with any code (confirm_sign_up accepts any code)
+    client
+        .confirm_sign_up()
+        .client_id(&client_id)
+        .username("resenduser")
+        .confirmation_code("123456")
+        .send()
+        .await
+        .expect("confirm sign up");
+
+    // Auth should work now
+    let auth = client
+        .initiate_auth()
+        .client_id(&client_id)
+        .auth_flow(aws_sdk_cognitoidentityprovider::types::AuthFlowType::UserPasswordAuth)
+        .auth_parameters("USERNAME", "resenduser")
+        .auth_parameters("PASSWORD", "mypasswd")
+        .send()
+        .await;
+    assert!(auth.is_ok(), "Auth after confirm should work");
+
+    // Resend for non-existent user should fail
+    let err = client
+        .resend_confirmation_code()
+        .client_id(&client_id)
+        .username("nosuchuser")
+        .send()
+        .await;
+    assert!(err.is_err(), "Resend for non-existent user should fail");
 }

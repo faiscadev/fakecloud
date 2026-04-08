@@ -76,6 +76,13 @@ impl AwsService for CognitoService {
             "AdminRemoveUserFromGroup" => self.admin_remove_user_from_group(&req),
             "AdminListGroupsForUser" => self.admin_list_groups_for_user(&req),
             "ListUsersInGroup" => self.list_users_in_group(&req),
+            "GetUser" => self.get_user(&req),
+            "DeleteUser" => self.delete_user(&req),
+            "UpdateUserAttributes" => self.update_user_attributes(&req),
+            "DeleteUserAttributes" => self.delete_user_attributes(&req),
+            "GetUserAttributeVerificationCode" => self.get_user_attribute_verification_code(&req),
+            "VerifyUserAttribute" => self.verify_user_attribute(&req),
+            "ResendConfirmationCode" => self.resend_confirmation_code(&req),
             _ => Err(AwsServiceError::action_not_implemented(
                 "cognito-idp",
                 &req.action,
@@ -126,6 +133,13 @@ impl AwsService for CognitoService {
             "AdminRemoveUserFromGroup",
             "AdminListGroupsForUser",
             "ListUsersInGroup",
+            "GetUser",
+            "DeleteUser",
+            "UpdateUserAttributes",
+            "DeleteUserAttributes",
+            "GetUserAttributeVerificationCode",
+            "VerifyUserAttribute",
+            "ResendConfirmationCode",
         ]
     }
 }
@@ -872,6 +886,7 @@ impl CognitoService {
             password: None,
             temporary_password,
             confirmation_code: None,
+            attribute_verification_codes: HashMap::new(),
         };
 
         let response = user_to_json(&user);
@@ -1994,6 +2009,7 @@ impl CognitoService {
             password: Some(password.to_string()),
             temporary_password: None,
             confirmation_code: None,
+            attribute_verification_codes: HashMap::new(),
         };
 
         pool_users.insert(username.to_string(), user);
@@ -2880,6 +2896,396 @@ impl CognitoService {
         }
 
         Ok(AwsResponse::ok_json(response))
+    }
+
+    // ── Self-service user operations ───────────────────────────────────
+
+    fn get_user(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let access_token = require_str(&body, "AccessToken")?;
+
+        let state = self.state.read();
+
+        let token_data = state.access_tokens.get(access_token).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "NotAuthorizedException",
+                "Invalid access token.",
+            )
+        })?;
+        let pool_id = &token_data.user_pool_id;
+        let username = &token_data.username;
+
+        let user = state
+            .users
+            .get(pool_id)
+            .and_then(|users| users.get(username.as_str()))
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "NotAuthorizedException",
+                    "Invalid access token.",
+                )
+            })?;
+
+        let response = json!({
+            "Username": user.username,
+            "UserAttributes": user.attributes.iter().map(|a| {
+                json!({ "Name": a.name, "Value": a.value })
+            }).collect::<Vec<Value>>(),
+            "UserCreateDate": user.user_create_date.timestamp() as f64,
+            "UserLastModifiedDate": user.user_last_modified_date.timestamp() as f64,
+            "UserStatus": user.user_status,
+            "MFAOptions": [],
+        });
+
+        Ok(AwsResponse::ok_json(response))
+    }
+
+    fn delete_user(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let access_token = require_str(&body, "AccessToken")?;
+
+        let mut state = self.state.write();
+
+        let token_data = state.access_tokens.get(access_token).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "NotAuthorizedException",
+                "Invalid access token.",
+            )
+        })?;
+        let pool_id = token_data.user_pool_id.clone();
+        let username = token_data.username.clone();
+
+        // Delete the user
+        let pool_users = state.users.get_mut(&pool_id).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "NotAuthorizedException",
+                "Invalid access token.",
+            )
+        })?;
+
+        if pool_users.remove(&username).is_none() {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "NotAuthorizedException",
+                "Invalid access token.",
+            ));
+        }
+
+        // Clean up access tokens for this user
+        state
+            .access_tokens
+            .retain(|_, v| !(v.user_pool_id == pool_id && v.username == username));
+
+        // Clean up refresh tokens for this user
+        state
+            .refresh_tokens
+            .retain(|_, v| !(v.user_pool_id == pool_id && v.username == username));
+
+        // Clean up sessions for this user
+        state
+            .sessions
+            .retain(|_, v| !(v.user_pool_id == pool_id && v.username == username));
+
+        // Clean up group memberships for the deleted user
+        if let Some(pool_groups) = state.user_groups.get_mut(&pool_id) {
+            pool_groups.remove(&username);
+        }
+
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    fn update_user_attributes(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let access_token = require_str(&body, "AccessToken")?;
+        let new_attrs = parse_user_attributes(&body["UserAttributes"]);
+
+        let mut state = self.state.write();
+
+        let token_data = state.access_tokens.get(access_token).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "NotAuthorizedException",
+                "Invalid access token.",
+            )
+        })?;
+        let pool_id = token_data.user_pool_id.clone();
+        let username = token_data.username.clone();
+
+        let user = state
+            .users
+            .get_mut(&pool_id)
+            .and_then(|users| users.get_mut(&username))
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "NotAuthorizedException",
+                    "Invalid access token.",
+                )
+            })?;
+
+        for new_attr in new_attrs {
+            if let Some(existing) = user.attributes.iter_mut().find(|a| a.name == new_attr.name) {
+                existing.value = new_attr.value;
+            } else {
+                user.attributes.push(new_attr);
+            }
+        }
+
+        user.user_last_modified_date = Utc::now();
+
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    fn delete_user_attributes(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let access_token = require_str(&body, "AccessToken")?;
+        let attr_names = parse_string_array(&body["UserAttributeNames"]);
+
+        let mut state = self.state.write();
+
+        let token_data = state.access_tokens.get(access_token).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "NotAuthorizedException",
+                "Invalid access token.",
+            )
+        })?;
+        let pool_id = token_data.user_pool_id.clone();
+        let username = token_data.username.clone();
+
+        let user = state
+            .users
+            .get_mut(&pool_id)
+            .and_then(|users| users.get_mut(&username))
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "NotAuthorizedException",
+                    "Invalid access token.",
+                )
+            })?;
+
+        user.attributes.retain(|a| !attr_names.contains(&a.name));
+        user.user_last_modified_date = Utc::now();
+
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    fn get_user_attribute_verification_code(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let access_token = require_str(&body, "AccessToken")?;
+        let attribute_name = require_str(&body, "AttributeName")?;
+
+        let mut state = self.state.write();
+
+        let token_data = state.access_tokens.get(access_token).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "NotAuthorizedException",
+                "Invalid access token.",
+            )
+        })?;
+        let pool_id = token_data.user_pool_id.clone();
+        let username = token_data.username.clone();
+
+        let user = state
+            .users
+            .get_mut(&pool_id)
+            .and_then(|users| users.get_mut(&username))
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "NotAuthorizedException",
+                    "Invalid access token.",
+                )
+            })?;
+
+        let code = generate_confirmation_code();
+        user.attribute_verification_codes
+            .insert(attribute_name.to_string(), code);
+
+        // Determine delivery details based on attribute
+        let (delivery_medium, destination) = if attribute_name == "phone_number" {
+            let phone = user
+                .attributes
+                .iter()
+                .find(|a| a.name == "phone_number")
+                .map(|a| {
+                    // Mask phone: show last 4 digits
+                    let len = a.value.len();
+                    if len > 4 {
+                        format!("{}***{}", &a.value[..1], &a.value[len - 4..])
+                    } else {
+                        "***".to_string()
+                    }
+                })
+                .unwrap_or_else(|| "***".to_string());
+            ("SMS", phone)
+        } else {
+            let email = user
+                .attributes
+                .iter()
+                .find(|a| a.name == "email")
+                .map(|a| {
+                    if let Some(at_pos) = a.value.find('@') {
+                        let first = &a.value[..1];
+                        let domain = &a.value[at_pos..];
+                        format!("{first}***{domain}")
+                    } else {
+                        "***".to_string()
+                    }
+                })
+                .unwrap_or_else(|| "***".to_string());
+            ("EMAIL", email)
+        };
+
+        Ok(AwsResponse::ok_json(json!({
+            "CodeDeliveryDetails": {
+                "Destination": destination,
+                "DeliveryMedium": delivery_medium,
+                "AttributeName": attribute_name
+            }
+        })))
+    }
+
+    fn verify_user_attribute(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let access_token = require_str(&body, "AccessToken")?;
+        let attribute_name = require_str(&body, "AttributeName")?;
+        let code = require_str(&body, "Code")?;
+
+        let mut state = self.state.write();
+
+        let token_data = state.access_tokens.get(access_token).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "NotAuthorizedException",
+                "Invalid access token.",
+            )
+        })?;
+        let pool_id = token_data.user_pool_id.clone();
+        let username = token_data.username.clone();
+
+        let user = state
+            .users
+            .get_mut(&pool_id)
+            .and_then(|users| users.get_mut(&username))
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "NotAuthorizedException",
+                    "Invalid access token.",
+                )
+            })?;
+
+        // Validate the code
+        let stored_code = user
+            .attribute_verification_codes
+            .get(attribute_name)
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "CodeMismatchException",
+                    "Invalid verification code provided, please try again.",
+                )
+            })?;
+
+        if stored_code != code {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "CodeMismatchException",
+                "Invalid verification code provided, please try again.",
+            ));
+        }
+
+        // Remove the used code
+        user.attribute_verification_codes.remove(attribute_name);
+
+        // Set the corresponding verified attribute to true
+        let verified_attr_name = format!("{attribute_name}_verified");
+        if let Some(existing) = user
+            .attributes
+            .iter_mut()
+            .find(|a| a.name == verified_attr_name)
+        {
+            existing.value = "true".to_string();
+        } else {
+            user.attributes.push(UserAttribute {
+                name: verified_attr_name,
+                value: "true".to_string(),
+            });
+        }
+
+        user.user_last_modified_date = Utc::now();
+
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    fn resend_confirmation_code(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let client_id = require_str(&body, "ClientId")?;
+        let username = require_str(&body, "Username")?;
+
+        let mut state = self.state.write();
+
+        // Find pool from client
+        let client = state.user_pool_clients.get(client_id).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("User pool client {client_id} does not exist."),
+            )
+        })?;
+        let pool_id = client.user_pool_id.clone();
+
+        let user = state
+            .users
+            .get_mut(&pool_id)
+            .and_then(|users| users.get_mut(username))
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "UserNotFoundException",
+                    "User does not exist.",
+                )
+            })?;
+
+        let code = generate_confirmation_code();
+        user.confirmation_code = Some(code);
+
+        // Find email from user attributes for CodeDeliveryDetails
+        let email = user
+            .attributes
+            .iter()
+            .find(|a| a.name == "email")
+            .map(|a| a.value.clone());
+
+        let destination = email
+            .map(|e| {
+                if let Some(at_pos) = e.find('@') {
+                    let first = &e[..1];
+                    let domain = &e[at_pos..];
+                    format!("{first}***{domain}")
+                } else {
+                    "***".to_string()
+                }
+            })
+            .unwrap_or_else(|| "***".to_string());
+
+        Ok(AwsResponse::ok_json(json!({
+            "CodeDeliveryDetails": {
+                "Destination": destination,
+                "DeliveryMedium": "EMAIL",
+                "AttributeName": "email"
+            }
+        })))
     }
 }
 
@@ -3939,6 +4345,7 @@ mod tests {
             password: None,
             temporary_password: None,
             confirmation_code: None,
+            attribute_verification_codes: HashMap::new(),
         };
 
         let filter = parse_filter_expression(r#"username = "testuser""#).unwrap();
@@ -3967,6 +4374,7 @@ mod tests {
             password: None,
             temporary_password: None,
             confirmation_code: None,
+            attribute_verification_codes: HashMap::new(),
         };
 
         let filter = parse_filter_expression(r#"email = "test@example.com""#).unwrap();
@@ -3992,6 +4400,7 @@ mod tests {
             password: None,
             temporary_password: None,
             confirmation_code: None,
+            attribute_verification_codes: HashMap::new(),
         };
 
         let filter =
@@ -4517,6 +4926,438 @@ mod tests {
             let groups = s.user_groups.get(&pool_id).unwrap();
             let user_groups = groups.get("testuser").unwrap();
             assert!(!user_groups.contains(&"admins".to_string()));
+        }
+    }
+
+    #[test]
+    fn self_service_get_user_via_access_token() {
+        let state = std::sync::Arc::new(parking_lot::RwLock::new(crate::state::CognitoState::new(
+            "123456789012",
+            "us-east-1",
+        )));
+        let svc = CognitoService::new(state.clone());
+
+        // Create pool
+        let req = AwsRequest {
+            service: "cognito-idp".to_string(),
+            action: "CreateUserPool".to_string(),
+            region: "us-east-1".to_string(),
+            account_id: "123456789012".to_string(),
+            request_id: "test".to_string(),
+            headers: http::HeaderMap::new(),
+            query_params: std::collections::HashMap::new(),
+            body: bytes::Bytes::from(r#"{"PoolName":"test"}"#),
+            path_segments: vec![],
+            raw_path: "/".to_string(),
+            raw_query: String::new(),
+            method: http::Method::POST,
+            is_query_protocol: false,
+            access_key_id: None,
+        };
+        let pool_resp = svc.create_user_pool(&req).unwrap();
+        let pool_json: Value =
+            serde_json::from_str(core::str::from_utf8(&pool_resp.body).unwrap()).unwrap();
+        let pool_id = pool_json["UserPool"]["Id"].as_str().unwrap().to_string();
+
+        // Create user
+        let req = AwsRequest {
+            service: "cognito-idp".to_string(),
+            action: "AdminCreateUser".to_string(),
+            region: "us-east-1".to_string(),
+            account_id: "123456789012".to_string(),
+            request_id: "test".to_string(),
+            headers: http::HeaderMap::new(),
+            query_params: std::collections::HashMap::new(),
+            body: bytes::Bytes::from(
+                serde_json::to_string(&json!({
+                    "UserPoolId": pool_id,
+                    "Username": "selfuser",
+                    "UserAttributes": [
+                        {"Name": "email", "Value": "self@example.com"}
+                    ]
+                }))
+                .unwrap(),
+            ),
+            path_segments: vec![],
+            raw_path: "/".to_string(),
+            raw_query: String::new(),
+            method: http::Method::POST,
+            is_query_protocol: false,
+            access_key_id: None,
+        };
+        svc.admin_create_user(&req).unwrap();
+
+        // Manually insert an access token
+        {
+            let mut s = state.write();
+            s.access_tokens.insert(
+                "test-access-token".to_string(),
+                crate::state::AccessTokenData {
+                    user_pool_id: pool_id.clone(),
+                    username: "selfuser".to_string(),
+                    client_id: "test-client".to_string(),
+                    issued_at: Utc::now(),
+                },
+            );
+        }
+
+        // GetUser with valid token
+        let req = AwsRequest {
+            service: "cognito-idp".to_string(),
+            action: "GetUser".to_string(),
+            region: "us-east-1".to_string(),
+            account_id: "123456789012".to_string(),
+            request_id: "test".to_string(),
+            headers: http::HeaderMap::new(),
+            query_params: std::collections::HashMap::new(),
+            body: bytes::Bytes::from(
+                serde_json::to_string(&json!({"AccessToken": "test-access-token"})).unwrap(),
+            ),
+            path_segments: vec![],
+            raw_path: "/".to_string(),
+            raw_query: String::new(),
+            method: http::Method::POST,
+            is_query_protocol: false,
+            access_key_id: None,
+        };
+        let resp = svc.get_user(&req).unwrap();
+        let resp_json: Value =
+            serde_json::from_str(core::str::from_utf8(&resp.body).unwrap()).unwrap();
+        assert_eq!(resp_json["Username"], "selfuser");
+
+        // GetUser with invalid token
+        let req = AwsRequest {
+            service: "cognito-idp".to_string(),
+            action: "GetUser".to_string(),
+            region: "us-east-1".to_string(),
+            account_id: "123456789012".to_string(),
+            request_id: "test".to_string(),
+            headers: http::HeaderMap::new(),
+            query_params: std::collections::HashMap::new(),
+            body: bytes::Bytes::from(
+                serde_json::to_string(&json!({"AccessToken": "invalid-token"})).unwrap(),
+            ),
+            path_segments: vec![],
+            raw_path: "/".to_string(),
+            raw_query: String::new(),
+            method: http::Method::POST,
+            is_query_protocol: false,
+            access_key_id: None,
+        };
+        match svc.get_user(&req) {
+            Err(e) => assert_eq!(e.code(), "NotAuthorizedException"),
+            Ok(_) => panic!("Expected NotAuthorizedException"),
+        }
+    }
+
+    #[test]
+    fn self_service_delete_user_cleans_up_tokens() {
+        let state = std::sync::Arc::new(parking_lot::RwLock::new(crate::state::CognitoState::new(
+            "123456789012",
+            "us-east-1",
+        )));
+        let svc = CognitoService::new(state.clone());
+
+        // Create pool
+        let req = AwsRequest {
+            service: "cognito-idp".to_string(),
+            action: "CreateUserPool".to_string(),
+            region: "us-east-1".to_string(),
+            account_id: "123456789012".to_string(),
+            request_id: "test".to_string(),
+            headers: http::HeaderMap::new(),
+            query_params: std::collections::HashMap::new(),
+            body: bytes::Bytes::from(r#"{"PoolName":"test"}"#),
+            path_segments: vec![],
+            raw_path: "/".to_string(),
+            raw_query: String::new(),
+            method: http::Method::POST,
+            is_query_protocol: false,
+            access_key_id: None,
+        };
+        let pool_resp = svc.create_user_pool(&req).unwrap();
+        let pool_json: Value =
+            serde_json::from_str(core::str::from_utf8(&pool_resp.body).unwrap()).unwrap();
+        let pool_id = pool_json["UserPool"]["Id"].as_str().unwrap().to_string();
+
+        // Create user
+        let req = AwsRequest {
+            service: "cognito-idp".to_string(),
+            action: "AdminCreateUser".to_string(),
+            region: "us-east-1".to_string(),
+            account_id: "123456789012".to_string(),
+            request_id: "test".to_string(),
+            headers: http::HeaderMap::new(),
+            query_params: std::collections::HashMap::new(),
+            body: bytes::Bytes::from(
+                serde_json::to_string(&json!({
+                    "UserPoolId": pool_id,
+                    "Username": "deluser"
+                }))
+                .unwrap(),
+            ),
+            path_segments: vec![],
+            raw_path: "/".to_string(),
+            raw_query: String::new(),
+            method: http::Method::POST,
+            is_query_protocol: false,
+            access_key_id: None,
+        };
+        svc.admin_create_user(&req).unwrap();
+
+        // Insert access token and refresh token
+        {
+            let mut s = state.write();
+            s.access_tokens.insert(
+                "del-token".to_string(),
+                crate::state::AccessTokenData {
+                    user_pool_id: pool_id.clone(),
+                    username: "deluser".to_string(),
+                    client_id: "test-client".to_string(),
+                    issued_at: Utc::now(),
+                },
+            );
+            s.refresh_tokens.insert(
+                "del-refresh".to_string(),
+                crate::state::RefreshTokenData {
+                    user_pool_id: pool_id.clone(),
+                    username: "deluser".to_string(),
+                    client_id: "test-client".to_string(),
+                    issued_at: Utc::now(),
+                },
+            );
+        }
+
+        // Delete user via self-service
+        let req = AwsRequest {
+            service: "cognito-idp".to_string(),
+            action: "DeleteUser".to_string(),
+            region: "us-east-1".to_string(),
+            account_id: "123456789012".to_string(),
+            request_id: "test".to_string(),
+            headers: http::HeaderMap::new(),
+            query_params: std::collections::HashMap::new(),
+            body: bytes::Bytes::from(
+                serde_json::to_string(&json!({"AccessToken": "del-token"})).unwrap(),
+            ),
+            path_segments: vec![],
+            raw_path: "/".to_string(),
+            raw_query: String::new(),
+            method: http::Method::POST,
+            is_query_protocol: false,
+            access_key_id: None,
+        };
+        svc.delete_user(&req).unwrap();
+
+        // Verify cleanup
+        let s = state.read();
+        assert!(s.access_tokens.is_empty());
+        assert!(s.refresh_tokens.is_empty());
+        assert!(s
+            .users
+            .get(&pool_id)
+            .and_then(|u| u.get("deluser"))
+            .is_none());
+    }
+
+    #[test]
+    fn verify_user_attribute_with_correct_code() {
+        let state = std::sync::Arc::new(parking_lot::RwLock::new(crate::state::CognitoState::new(
+            "123456789012",
+            "us-east-1",
+        )));
+        let svc = CognitoService::new(state.clone());
+
+        // Create pool
+        let req = AwsRequest {
+            service: "cognito-idp".to_string(),
+            action: "CreateUserPool".to_string(),
+            region: "us-east-1".to_string(),
+            account_id: "123456789012".to_string(),
+            request_id: "test".to_string(),
+            headers: http::HeaderMap::new(),
+            query_params: std::collections::HashMap::new(),
+            body: bytes::Bytes::from(r#"{"PoolName":"test"}"#),
+            path_segments: vec![],
+            raw_path: "/".to_string(),
+            raw_query: String::new(),
+            method: http::Method::POST,
+            is_query_protocol: false,
+            access_key_id: None,
+        };
+        let pool_resp = svc.create_user_pool(&req).unwrap();
+        let pool_json: Value =
+            serde_json::from_str(core::str::from_utf8(&pool_resp.body).unwrap()).unwrap();
+        let pool_id = pool_json["UserPool"]["Id"].as_str().unwrap().to_string();
+
+        // Create user with email
+        let req = AwsRequest {
+            service: "cognito-idp".to_string(),
+            action: "AdminCreateUser".to_string(),
+            region: "us-east-1".to_string(),
+            account_id: "123456789012".to_string(),
+            request_id: "test".to_string(),
+            headers: http::HeaderMap::new(),
+            query_params: std::collections::HashMap::new(),
+            body: bytes::Bytes::from(
+                serde_json::to_string(&json!({
+                    "UserPoolId": pool_id,
+                    "Username": "verifyuser",
+                    "UserAttributes": [{"Name": "email", "Value": "verify@example.com"}]
+                }))
+                .unwrap(),
+            ),
+            path_segments: vec![],
+            raw_path: "/".to_string(),
+            raw_query: String::new(),
+            method: http::Method::POST,
+            is_query_protocol: false,
+            access_key_id: None,
+        };
+        svc.admin_create_user(&req).unwrap();
+
+        // Insert access token
+        {
+            let mut s = state.write();
+            s.access_tokens.insert(
+                "verify-token".to_string(),
+                crate::state::AccessTokenData {
+                    user_pool_id: pool_id.clone(),
+                    username: "verifyuser".to_string(),
+                    client_id: "test-client".to_string(),
+                    issued_at: Utc::now(),
+                },
+            );
+        }
+
+        // Get verification code
+        let req = AwsRequest {
+            service: "cognito-idp".to_string(),
+            action: "GetUserAttributeVerificationCode".to_string(),
+            region: "us-east-1".to_string(),
+            account_id: "123456789012".to_string(),
+            request_id: "test".to_string(),
+            headers: http::HeaderMap::new(),
+            query_params: std::collections::HashMap::new(),
+            body: bytes::Bytes::from(
+                serde_json::to_string(&json!({
+                    "AccessToken": "verify-token",
+                    "AttributeName": "email"
+                }))
+                .unwrap(),
+            ),
+            path_segments: vec![],
+            raw_path: "/".to_string(),
+            raw_query: String::new(),
+            method: http::Method::POST,
+            is_query_protocol: false,
+            access_key_id: None,
+        };
+        let resp = svc.get_user_attribute_verification_code(&req).unwrap();
+        let resp_json: Value =
+            serde_json::from_str(core::str::from_utf8(&resp.body).unwrap()).unwrap();
+        assert_eq!(resp_json["CodeDeliveryDetails"]["DeliveryMedium"], "EMAIL");
+        assert_eq!(resp_json["CodeDeliveryDetails"]["AttributeName"], "email");
+
+        // Read the code from state
+        let code = {
+            let s = state.read();
+            let user = s.users.get(&pool_id).unwrap().get("verifyuser").unwrap();
+            user.attribute_verification_codes
+                .get("email")
+                .unwrap()
+                .clone()
+        };
+
+        // Verify with correct code
+        let req = AwsRequest {
+            service: "cognito-idp".to_string(),
+            action: "VerifyUserAttribute".to_string(),
+            region: "us-east-1".to_string(),
+            account_id: "123456789012".to_string(),
+            request_id: "test".to_string(),
+            headers: http::HeaderMap::new(),
+            query_params: std::collections::HashMap::new(),
+            body: bytes::Bytes::from(
+                serde_json::to_string(&json!({
+                    "AccessToken": "verify-token",
+                    "AttributeName": "email",
+                    "Code": code
+                }))
+                .unwrap(),
+            ),
+            path_segments: vec![],
+            raw_path: "/".to_string(),
+            raw_query: String::new(),
+            method: http::Method::POST,
+            is_query_protocol: false,
+            access_key_id: None,
+        };
+        svc.verify_user_attribute(&req).unwrap();
+
+        // Verify email_verified is set
+        let s = state.read();
+        let user = s.users.get(&pool_id).unwrap().get("verifyuser").unwrap();
+        let email_verified = user
+            .attributes
+            .iter()
+            .find(|a| a.name == "email_verified")
+            .unwrap();
+        assert_eq!(email_verified.value, "true");
+
+        // Verify with wrong code should fail
+        drop(s);
+        // First get a new code
+        let req = AwsRequest {
+            service: "cognito-idp".to_string(),
+            action: "GetUserAttributeVerificationCode".to_string(),
+            region: "us-east-1".to_string(),
+            account_id: "123456789012".to_string(),
+            request_id: "test".to_string(),
+            headers: http::HeaderMap::new(),
+            query_params: std::collections::HashMap::new(),
+            body: bytes::Bytes::from(
+                serde_json::to_string(&json!({
+                    "AccessToken": "verify-token",
+                    "AttributeName": "email"
+                }))
+                .unwrap(),
+            ),
+            path_segments: vec![],
+            raw_path: "/".to_string(),
+            raw_query: String::new(),
+            method: http::Method::POST,
+            is_query_protocol: false,
+            access_key_id: None,
+        };
+        svc.get_user_attribute_verification_code(&req).unwrap();
+
+        let req = AwsRequest {
+            service: "cognito-idp".to_string(),
+            action: "VerifyUserAttribute".to_string(),
+            region: "us-east-1".to_string(),
+            account_id: "123456789012".to_string(),
+            request_id: "test".to_string(),
+            headers: http::HeaderMap::new(),
+            query_params: std::collections::HashMap::new(),
+            body: bytes::Bytes::from(
+                serde_json::to_string(&json!({
+                    "AccessToken": "verify-token",
+                    "AttributeName": "email",
+                    "Code": "000000"
+                }))
+                .unwrap(),
+            ),
+            path_segments: vec![],
+            raw_path: "/".to_string(),
+            raw_query: String::new(),
+            method: http::Method::POST,
+            is_query_protocol: false,
+            access_key_id: None,
+        };
+        match svc.verify_user_attribute(&req) {
+            Err(e) => assert_eq!(e.code(), "CodeMismatchException"),
+            Ok(_) => panic!("Expected CodeMismatchException"),
         }
     }
 }
