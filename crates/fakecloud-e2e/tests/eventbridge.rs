@@ -1048,3 +1048,34 @@ async fn eb_update_event_bus() {
         .unwrap();
     assert_eq!(desc.description().unwrap(), "new desc");
 }
+
+#[tokio::test]
+async fn eventbridge_introspection_history() {
+    let server = TestServer::start().await;
+    let client = server.eventbridge_client().await;
+
+    let entry = PutEventsRequestEntry::builder()
+        .source("test.source")
+        .detail_type("TestDetail")
+        .detail(r#"{"key": "value"}"#)
+        .build();
+
+    client.put_events().entries(entry).send().await.unwrap();
+
+    let url = format!("{}/_fakecloud/events/history", server.endpoint());
+    let resp: serde_json::Value = reqwest::get(&url).await.unwrap().json().await.unwrap();
+    let events = resp["events"].as_array().unwrap();
+    assert!(!events.is_empty(), "expected at least one event");
+
+    let evt = &events[events.len() - 1];
+    assert_eq!(evt["source"], "test.source");
+    assert_eq!(evt["detailType"], "TestDetail");
+    assert_eq!(evt["detail"], r#"{"key": "value"}"#);
+    assert_eq!(evt["busName"], "default");
+    assert!(!evt["eventId"].as_str().unwrap().is_empty());
+    assert!(!evt["timestamp"].as_str().unwrap().is_empty());
+
+    // Verify deliveries structure exists
+    assert!(resp["deliveries"]["lambda"].is_array());
+    assert!(resp["deliveries"]["logs"].is_array());
+}

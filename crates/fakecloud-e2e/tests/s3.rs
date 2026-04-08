@@ -3837,3 +3837,92 @@ async fn s3_upload_part_copy() {
         "Copied part data should match source"
     );
 }
+
+#[tokio::test]
+async fn s3_introspection_notifications() {
+    let server = TestServer::start().await;
+    let s3 = server.s3_client().await;
+    let sqs = server.sqs_client().await;
+
+    // Create SQS queue for notification target
+    let queue = sqs
+        .create_queue()
+        .queue_name("s3-intro-events")
+        .send()
+        .await
+        .unwrap();
+    let queue_url = queue.queue_url().unwrap();
+
+    let attrs = sqs
+        .get_queue_attributes()
+        .queue_url(queue_url)
+        .attribute_names(aws_sdk_sqs::types::QueueAttributeName::QueueArn)
+        .send()
+        .await
+        .unwrap();
+    let queue_arn = attrs
+        .attributes()
+        .unwrap()
+        .get(&aws_sdk_sqs::types::QueueAttributeName::QueueArn)
+        .unwrap()
+        .clone();
+
+    // Create S3 bucket
+    s3.create_bucket()
+        .bucket("intro-notif-bucket")
+        .send()
+        .await
+        .unwrap();
+
+    // Set notification configuration
+    let notif_config = format!(
+        r#"{{
+            "QueueConfigurations": [{{
+                "QueueArn": "{}",
+                "Events": ["s3:ObjectCreated:*"]
+            }}]
+        }}"#,
+        queue_arn
+    );
+    let output = server
+        .aws_cli(&[
+            "s3api",
+            "put-bucket-notification-configuration",
+            "--bucket",
+            "intro-notif-bucket",
+            "--notification-configuration",
+            &notif_config,
+        ])
+        .await;
+    assert!(
+        output.success(),
+        "Failed to set notification: {}",
+        output.stderr_text()
+    );
+
+    // Put object to trigger notification
+    s3.put_object()
+        .bucket("intro-notif-bucket")
+        .key("intro-test.txt")
+        .body(ByteStream::from_static(b"hello introspection"))
+        .send()
+        .await
+        .unwrap();
+
+    // Query introspection endpoint
+    let url = format!("{}/_fakecloud/s3/notifications", server.endpoint());
+    let resp: serde_json::Value = reqwest::get(&url).await.unwrap().json().await.unwrap();
+    let notifications = resp["notifications"].as_array().unwrap();
+    assert!(
+        !notifications.is_empty(),
+        "expected at least one notification event"
+    );
+
+    let notif = notifications
+        .iter()
+        .find(|n| n["key"] == "intro-test.txt")
+        .expect("expected notification for intro-test.txt");
+    assert_eq!(notif["bucket"], "intro-notif-bucket");
+    assert_eq!(notif["eventType"], "s3:ObjectCreated:Put");
+    assert!(!notif["timestamp"].as_str().unwrap().is_empty());
+}

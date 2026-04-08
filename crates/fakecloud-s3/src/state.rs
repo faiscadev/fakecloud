@@ -156,10 +156,20 @@ impl S3Bucket {
     }
 }
 
+/// A recorded S3 notification event for introspection.
+#[derive(Debug, Clone)]
+pub struct S3NotificationEvent {
+    pub bucket: String,
+    pub key: String,
+    pub event_type: String,
+    pub timestamp: DateTime<Utc>,
+}
+
 pub struct S3State {
     pub account_id: String,
     pub region: String,
     pub buckets: HashMap<String, S3Bucket>,
+    pub notification_events: Vec<S3NotificationEvent>,
 }
 
 impl S3State {
@@ -168,11 +178,13 @@ impl S3State {
             account_id: account_id.to_string(),
             region: region.to_string(),
             buckets: HashMap::new(),
+            notification_events: Vec::new(),
         }
     }
 
     pub fn reset(&mut self) {
         self.buckets.clear();
+        self.notification_events.clear();
     }
 }
 
