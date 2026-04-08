@@ -67,8 +67,8 @@ def fakecloud_url() -> str:  # type: ignore[misc]
 
     proc = subprocess.Popen(
         [binary, "--addr", f"127.0.0.1:{port}"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
     )
     url = f"http://127.0.0.1:{port}"
     try:
