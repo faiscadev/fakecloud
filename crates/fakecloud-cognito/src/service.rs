@@ -9,8 +9,8 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceErr
 use crate::state::{
     default_schema_attributes, AccountRecoverySetting, AdminCreateUserConfig, EmailConfiguration,
     InviteMessageTemplate, PasswordPolicy, PoolPolicies, RecoveryOption, SchemaAttribute,
-    SharedCognitoState, SmsConfiguration, StringAttributeConstraints, TokenValidityUnits, UserPool,
-    UserPoolClient,
+    SharedCognitoState, SmsConfiguration, StringAttributeConstraints, TokenValidityUnits, User,
+    UserAttribute, UserPool, UserPoolClient,
 };
 
 pub struct CognitoService {
@@ -41,6 +41,14 @@ impl AwsService for CognitoService {
             "UpdateUserPoolClient" => self.update_user_pool_client(&req),
             "DeleteUserPoolClient" => self.delete_user_pool_client(&req),
             "ListUserPoolClients" => self.list_user_pool_clients(&req),
+            "AdminCreateUser" => self.admin_create_user(&req),
+            "AdminGetUser" => self.admin_get_user(&req),
+            "AdminDeleteUser" => self.admin_delete_user(&req),
+            "AdminDisableUser" => self.admin_disable_user(&req),
+            "AdminEnableUser" => self.admin_enable_user(&req),
+            "AdminUpdateUserAttributes" => self.admin_update_user_attributes(&req),
+            "AdminDeleteUserAttributes" => self.admin_delete_user_attributes(&req),
+            "ListUsers" => self.list_users(&req),
             _ => Err(AwsServiceError::action_not_implemented(
                 "cognito-idp",
                 &req.action,
@@ -60,6 +68,14 @@ impl AwsService for CognitoService {
             "UpdateUserPoolClient",
             "DeleteUserPoolClient",
             "ListUserPoolClients",
+            "AdminCreateUser",
+            "AdminGetUser",
+            "AdminDeleteUser",
+            "AdminDisableUser",
+            "AdminEnableUser",
+            "AdminUpdateUserAttributes",
+            "AdminDeleteUserAttributes",
+            "ListUsers",
         ]
     }
 }
@@ -728,6 +744,470 @@ impl CognitoService {
 
         Ok(AwsResponse::ok_json(response))
     }
+
+    fn admin_create_user(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+
+        let pool_id = body["UserPoolId"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterException",
+                    "UserPoolId is required",
+                )
+            })?;
+
+        let username = body["Username"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterException",
+                    "Username is required",
+                )
+            })?;
+
+        let mut state = self.state.write();
+
+        // Validate pool exists
+        if !state.user_pools.contains_key(pool_id) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("User pool {pool_id} does not exist."),
+            ));
+        }
+
+        // Check username doesn't already exist
+        let pool_users = state.users.entry(pool_id.to_string()).or_default();
+        if pool_users.contains_key(username) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "UsernameExistsException",
+                "User account already exists.",
+            ));
+        }
+
+        let now = Utc::now();
+        let sub = Uuid::new_v4().to_string();
+
+        // Parse user attributes
+        let mut attributes = parse_user_attributes(&body["UserAttributes"]);
+
+        // Ensure sub attribute is present
+        if !attributes.iter().any(|a| a.name == "sub") {
+            attributes.push(UserAttribute {
+                name: "sub".to_string(),
+                value: sub.clone(),
+            });
+        }
+
+        let temporary_password = body["TemporaryPassword"].as_str().map(|s| s.to_string());
+
+        let user = User {
+            username: username.to_string(),
+            sub: sub.clone(),
+            attributes,
+            enabled: true,
+            user_status: "FORCE_CHANGE_PASSWORD".to_string(),
+            user_create_date: now,
+            user_last_modified_date: now,
+            password: None,
+            temporary_password,
+        };
+
+        let response = user_to_json(&user);
+        pool_users.insert(username.to_string(), user);
+
+        Ok(AwsResponse::ok_json(json!({ "User": response })))
+    }
+
+    fn admin_get_user(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+
+        let pool_id = body["UserPoolId"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterException",
+                    "UserPoolId is required",
+                )
+            })?;
+
+        let username = body["Username"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterException",
+                    "Username is required",
+                )
+            })?;
+
+        let state = self.state.read();
+
+        // Validate pool exists
+        if !state.user_pools.contains_key(pool_id) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("User pool {pool_id} does not exist."),
+            ));
+        }
+
+        let user = state
+            .users
+            .get(pool_id)
+            .and_then(|users| users.get(username))
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "UserNotFoundException",
+                    "User does not exist.",
+                )
+            })?;
+
+        // AdminGetUser returns a flat response (not wrapped in User)
+        let response = json!({
+            "Username": user.username,
+            "UserAttributes": user.attributes.iter().map(|a| {
+                json!({ "Name": a.name, "Value": a.value })
+            }).collect::<Vec<Value>>(),
+            "UserCreateDate": user.user_create_date.timestamp() as f64,
+            "UserLastModifiedDate": user.user_last_modified_date.timestamp() as f64,
+            "UserStatus": user.user_status,
+            "Enabled": user.enabled,
+        });
+
+        Ok(AwsResponse::ok_json(response))
+    }
+
+    fn admin_delete_user(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+
+        let pool_id = body["UserPoolId"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterException",
+                    "UserPoolId is required",
+                )
+            })?;
+
+        let username = body["Username"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterException",
+                    "Username is required",
+                )
+            })?;
+
+        let mut state = self.state.write();
+
+        // Validate pool exists
+        if !state.user_pools.contains_key(pool_id) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("User pool {pool_id} does not exist."),
+            ));
+        }
+
+        let pool_users = state.users.get_mut(pool_id).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "UserNotFoundException",
+                "User does not exist.",
+            )
+        })?;
+
+        if pool_users.remove(username).is_none() {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "UserNotFoundException",
+                "User does not exist.",
+            ));
+        }
+
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    fn admin_disable_user(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+
+        let pool_id = body["UserPoolId"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterException",
+                    "UserPoolId is required",
+                )
+            })?;
+
+        let username = body["Username"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterException",
+                    "Username is required",
+                )
+            })?;
+
+        let mut state = self.state.write();
+
+        let user = state
+            .users
+            .get_mut(pool_id)
+            .and_then(|users| users.get_mut(username))
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "UserNotFoundException",
+                    "User does not exist.",
+                )
+            })?;
+
+        user.enabled = false;
+        user.user_last_modified_date = Utc::now();
+
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    fn admin_enable_user(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+
+        let pool_id = body["UserPoolId"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterException",
+                    "UserPoolId is required",
+                )
+            })?;
+
+        let username = body["Username"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterException",
+                    "Username is required",
+                )
+            })?;
+
+        let mut state = self.state.write();
+
+        let user = state
+            .users
+            .get_mut(pool_id)
+            .and_then(|users| users.get_mut(username))
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "UserNotFoundException",
+                    "User does not exist.",
+                )
+            })?;
+
+        user.enabled = true;
+        user.user_last_modified_date = Utc::now();
+
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    fn admin_update_user_attributes(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+
+        let pool_id = body["UserPoolId"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterException",
+                    "UserPoolId is required",
+                )
+            })?;
+
+        let username = body["Username"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterException",
+                    "Username is required",
+                )
+            })?;
+
+        let new_attrs = parse_user_attributes(&body["UserAttributes"]);
+
+        let mut state = self.state.write();
+
+        let user = state
+            .users
+            .get_mut(pool_id)
+            .and_then(|users| users.get_mut(username))
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "UserNotFoundException",
+                    "User does not exist.",
+                )
+            })?;
+
+        // Update or add attributes
+        for new_attr in new_attrs {
+            if let Some(existing) = user.attributes.iter_mut().find(|a| a.name == new_attr.name) {
+                existing.value = new_attr.value;
+            } else {
+                user.attributes.push(new_attr);
+            }
+        }
+
+        user.user_last_modified_date = Utc::now();
+
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    fn admin_delete_user_attributes(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+
+        let pool_id = body["UserPoolId"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterException",
+                    "UserPoolId is required",
+                )
+            })?;
+
+        let username = body["Username"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterException",
+                    "Username is required",
+                )
+            })?;
+
+        let attr_names = parse_string_array(&body["UserAttributeNames"]);
+
+        let mut state = self.state.write();
+
+        let user = state
+            .users
+            .get_mut(pool_id)
+            .and_then(|users| users.get_mut(username))
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "UserNotFoundException",
+                    "User does not exist.",
+                )
+            })?;
+
+        user.attributes.retain(|a| !attr_names.contains(&a.name));
+        user.user_last_modified_date = Utc::now();
+
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    fn list_users(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+
+        let pool_id = body["UserPoolId"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterException",
+                    "UserPoolId is required",
+                )
+            })?;
+
+        let limit = body["Limit"].as_i64().unwrap_or(60).clamp(1, 60) as usize;
+        let pagination_token = body["PaginationToken"].as_str();
+        let filter_str = body["Filter"].as_str();
+
+        let state = self.state.read();
+
+        // Validate pool exists
+        if !state.user_pools.contains_key(pool_id) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("User pool {pool_id} does not exist."),
+            ));
+        }
+
+        let empty = std::collections::HashMap::new();
+        let pool_users = state.users.get(pool_id).unwrap_or(&empty);
+
+        // Sort users by creation date for consistent pagination
+        let mut users: Vec<&User> = pool_users.values().collect();
+        users.sort_by_key(|u| u.user_create_date);
+
+        // Apply filter if present
+        if let Some(filter) = filter_str {
+            if let Some(parsed) = parse_filter_expression(filter) {
+                users.retain(|u| matches_filter(u, &parsed));
+            }
+        }
+
+        // Find start index from PaginationToken
+        let start_idx = if let Some(token) = pagination_token {
+            users.iter().position(|u| u.username == token).unwrap_or(0)
+        } else {
+            0
+        };
+
+        let page: Vec<Value> = users
+            .iter()
+            .skip(start_idx)
+            .take(limit)
+            .map(|u| user_to_json(u))
+            .collect();
+
+        let has_more = start_idx + limit < users.len();
+        let mut response = json!({ "Users": page });
+        if has_more {
+            if let Some(last_user) = users.get(start_idx + limit) {
+                response["PaginationToken"] = json!(last_user.username);
+            }
+        }
+
+        Ok(AwsResponse::ok_json(response))
+    }
 }
 
 /// Generate a pool ID in the format `{region}_{9 random alphanumeric chars}`.
@@ -984,6 +1464,100 @@ fn parse_account_recovery_setting(val: &Value) -> Option<AccountRecoverySetting>
     Some(AccountRecoverySetting {
         recovery_mechanisms: mechanisms,
     })
+}
+
+fn parse_user_attributes(val: &Value) -> Vec<UserAttribute> {
+    val.as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| {
+                    let name = v["Name"].as_str()?;
+                    let value = v["Value"].as_str().unwrap_or("");
+                    Some(UserAttribute {
+                        name: name.to_string(),
+                        value: value.to_string(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Convert a User to the JSON format AWS returns (for ListUsers and AdminCreateUser response).
+fn user_to_json(user: &User) -> Value {
+    json!({
+        "Username": user.username,
+        "Attributes": user.attributes.iter().map(|a| {
+            json!({ "Name": a.name, "Value": a.value })
+        }).collect::<Vec<Value>>(),
+        "UserCreateDate": user.user_create_date.timestamp() as f64,
+        "UserLastModifiedDate": user.user_last_modified_date.timestamp() as f64,
+        "UserStatus": user.user_status,
+        "Enabled": user.enabled,
+    })
+}
+
+/// A parsed filter expression for ListUsers.
+#[derive(Debug)]
+struct FilterExpression {
+    attribute: String,
+    operator: FilterOp,
+    value: String,
+}
+
+#[derive(Debug)]
+enum FilterOp {
+    Equals,
+    StartsWith,
+}
+
+/// Parse a Cognito ListUsers filter expression like `email = "foo@bar.com"` or `email ^= "foo"`.
+fn parse_filter_expression(filter: &str) -> Option<FilterExpression> {
+    let filter = filter.trim();
+
+    // Try ^= first (starts with)
+    if let Some((attr, val)) = filter.split_once("^=") {
+        let attribute = attr.trim().trim_matches('"').to_string();
+        let value = val.trim().trim_matches('"').to_string();
+        return Some(FilterExpression {
+            attribute,
+            operator: FilterOp::StartsWith,
+            value,
+        });
+    }
+
+    // Try = (equals)
+    if let Some((attr, val)) = filter.split_once('=') {
+        let attribute = attr.trim().trim_matches('"').to_string();
+        let value = val.trim().trim_matches('"').to_string();
+        return Some(FilterExpression {
+            attribute,
+            operator: FilterOp::Equals,
+            value,
+        });
+    }
+
+    None
+}
+
+/// Check if a user matches a filter expression.
+fn matches_filter(user: &User, filter: &FilterExpression) -> bool {
+    let user_value = match filter.attribute.as_str() {
+        "username" => Some(user.username.as_str()),
+        "sub" => Some(user.sub.as_str()),
+        "cognito:user_status" | "status" => Some(user.user_status.as_str()),
+        attr => user
+            .attributes
+            .iter()
+            .find(|a| a.name == attr)
+            .map(|a| a.value.as_str()),
+    };
+
+    match (&filter.operator, user_value) {
+        (FilterOp::Equals, Some(v)) => v == filter.value,
+        (FilterOp::StartsWith, Some(v)) => v.starts_with(&filter.value),
+        _ => false,
+    }
 }
 
 /// Convert a UserPool to the JSON format AWS returns.
@@ -1472,5 +2046,184 @@ mod tests {
             Err(e) => assert_eq!(e.code(), "ResourceNotFoundException"),
             Ok(_) => panic!("Expected ResourceNotFoundException"),
         }
+    }
+
+    #[test]
+    fn parse_user_attributes_from_json() {
+        let val = json!([
+            { "Name": "email", "Value": "test@example.com" },
+            { "Name": "name", "Value": "Test User" }
+        ]);
+        let attrs = parse_user_attributes(&val);
+        assert_eq!(attrs.len(), 2);
+        assert_eq!(attrs[0].name, "email");
+        assert_eq!(attrs[0].value, "test@example.com");
+        assert_eq!(attrs[1].name, "name");
+        assert_eq!(attrs[1].value, "Test User");
+    }
+
+    #[test]
+    fn parse_user_attributes_null() {
+        let attrs = parse_user_attributes(&Value::Null);
+        assert!(attrs.is_empty());
+    }
+
+    #[test]
+    fn parse_filter_expression_equals() {
+        let filter = parse_filter_expression(r#"email = "test@example.com""#).unwrap();
+        assert_eq!(filter.attribute, "email");
+        assert_eq!(filter.value, "test@example.com");
+        assert!(matches!(filter.operator, FilterOp::Equals));
+    }
+
+    #[test]
+    fn parse_filter_expression_starts_with() {
+        let filter = parse_filter_expression(r#"email ^= "test""#).unwrap();
+        assert_eq!(filter.attribute, "email");
+        assert_eq!(filter.value, "test");
+        assert!(matches!(filter.operator, FilterOp::StartsWith));
+    }
+
+    #[test]
+    fn filter_matches_username() {
+        let user = User {
+            username: "testuser".to_string(),
+            sub: Uuid::new_v4().to_string(),
+            attributes: vec![],
+            enabled: true,
+            user_status: "CONFIRMED".to_string(),
+            user_create_date: Utc::now(),
+            user_last_modified_date: Utc::now(),
+            password: None,
+            temporary_password: None,
+        };
+
+        let filter = parse_filter_expression(r#"username = "testuser""#).unwrap();
+        assert!(matches_filter(&user, &filter));
+
+        let filter = parse_filter_expression(r#"username = "other""#).unwrap();
+        assert!(!matches_filter(&user, &filter));
+
+        let filter = parse_filter_expression(r#"username ^= "test""#).unwrap();
+        assert!(matches_filter(&user, &filter));
+    }
+
+    #[test]
+    fn filter_matches_attribute() {
+        let user = User {
+            username: "testuser".to_string(),
+            sub: Uuid::new_v4().to_string(),
+            attributes: vec![UserAttribute {
+                name: "email".to_string(),
+                value: "test@example.com".to_string(),
+            }],
+            enabled: true,
+            user_status: "CONFIRMED".to_string(),
+            user_create_date: Utc::now(),
+            user_last_modified_date: Utc::now(),
+            password: None,
+            temporary_password: None,
+        };
+
+        let filter = parse_filter_expression(r#"email = "test@example.com""#).unwrap();
+        assert!(matches_filter(&user, &filter));
+
+        let filter = parse_filter_expression(r#"email ^= "test@""#).unwrap();
+        assert!(matches_filter(&user, &filter));
+
+        let filter = parse_filter_expression(r#"email = "other@example.com""#).unwrap();
+        assert!(!matches_filter(&user, &filter));
+    }
+
+    #[test]
+    fn filter_matches_user_status() {
+        let user = User {
+            username: "testuser".to_string(),
+            sub: Uuid::new_v4().to_string(),
+            attributes: vec![],
+            enabled: true,
+            user_status: "FORCE_CHANGE_PASSWORD".to_string(),
+            user_create_date: Utc::now(),
+            user_last_modified_date: Utc::now(),
+            password: None,
+            temporary_password: None,
+        };
+
+        let filter =
+            parse_filter_expression(r#"cognito:user_status = "FORCE_CHANGE_PASSWORD""#).unwrap();
+        assert!(matches_filter(&user, &filter));
+
+        let filter = parse_filter_expression(r#"status = "FORCE_CHANGE_PASSWORD""#).unwrap();
+        assert!(matches_filter(&user, &filter));
+    }
+
+    #[test]
+    fn user_default_status_is_force_change_password() {
+        // When a user is admin-created, the status should be FORCE_CHANGE_PASSWORD
+        let state = std::sync::Arc::new(parking_lot::RwLock::new(crate::state::CognitoState::new(
+            "123456789012",
+            "us-east-1",
+        )));
+        let svc = CognitoService::new(state.clone());
+
+        // Create a pool
+        let req = AwsRequest {
+            service: "cognito-idp".to_string(),
+            action: "CreateUserPool".to_string(),
+            region: "us-east-1".to_string(),
+            account_id: "123456789012".to_string(),
+            request_id: "test".to_string(),
+            headers: http::HeaderMap::new(),
+            query_params: std::collections::HashMap::new(),
+            body: bytes::Bytes::from(r#"{"PoolName":"test"}"#),
+            path_segments: vec![],
+            raw_path: "/".to_string(),
+            raw_query: String::new(),
+            method: http::Method::POST,
+            is_query_protocol: false,
+            access_key_id: None,
+        };
+        let pool_resp = svc.create_user_pool(&req).unwrap();
+        let pool_json: Value =
+            serde_json::from_str(core::str::from_utf8(&pool_resp.body).unwrap()).unwrap();
+        let pool_id = pool_json["UserPool"]["Id"].as_str().unwrap();
+
+        // Admin create user
+        let req = AwsRequest {
+            service: "cognito-idp".to_string(),
+            action: "AdminCreateUser".to_string(),
+            region: "us-east-1".to_string(),
+            account_id: "123456789012".to_string(),
+            request_id: "test".to_string(),
+            headers: http::HeaderMap::new(),
+            query_params: std::collections::HashMap::new(),
+            body: bytes::Bytes::from(
+                serde_json::to_string(&json!({
+                    "UserPoolId": pool_id,
+                    "Username": "testuser"
+                }))
+                .unwrap(),
+            ),
+            path_segments: vec![],
+            raw_path: "/".to_string(),
+            raw_query: String::new(),
+            method: http::Method::POST,
+            is_query_protocol: false,
+            access_key_id: None,
+        };
+        let resp = svc.admin_create_user(&req).unwrap();
+        let resp_json: Value =
+            serde_json::from_str(core::str::from_utf8(&resp.body).unwrap()).unwrap();
+
+        assert_eq!(
+            resp_json["User"]["UserStatus"].as_str().unwrap(),
+            "FORCE_CHANGE_PASSWORD"
+        );
+        assert!(resp_json["User"]["Enabled"].as_bool().unwrap());
+
+        // Verify sub is in attributes
+        let attrs = resp_json["User"]["Attributes"].as_array().unwrap();
+        let sub_attr = attrs.iter().find(|a| a["Name"] == "sub").unwrap();
+        assert!(!sub_attr["Value"].as_str().unwrap().is_empty());
     }
 }

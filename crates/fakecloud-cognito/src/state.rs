@@ -186,11 +186,14 @@ pub struct TokenValidityUnits {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct User {
     pub username: String,
+    pub sub: String,
     pub attributes: Vec<UserAttribute>,
     pub enabled: bool,
     pub user_status: String,
     pub user_create_date: DateTime<Utc>,
     pub user_last_modified_date: DateTime<Utc>,
+    pub password: Option<String>,
+    pub temporary_password: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -2,8 +2,8 @@ mod helpers;
 use helpers::TestServer;
 
 use aws_sdk_cognitoidentityprovider::types::{
-    AccountRecoverySettingType, ExplicitAuthFlowsType, PasswordPolicyType, RecoveryOptionNameType,
-    RecoveryOptionType, UserPoolPolicyType,
+    AccountRecoverySettingType, AttributeType, ExplicitAuthFlowsType, PasswordPolicyType,
+    RecoveryOptionNameType, RecoveryOptionType, UserPoolPolicyType,
 };
 
 #[tokio::test]
@@ -561,4 +561,392 @@ async fn cognito_delete_user_pool_client() {
         .send()
         .await;
     assert!(err.is_err(), "Describe should fail after delete");
+}
+
+#[tokio::test]
+async fn cognito_admin_create_get_user() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    // Create a pool
+    let pool_result = client
+        .create_user_pool()
+        .pool_name("user-mgmt-pool")
+        .send()
+        .await
+        .expect("create user pool");
+    let pool_id = pool_result.user_pool().unwrap().id().unwrap().to_string();
+
+    // Admin create user with email attribute
+    let create_result = client
+        .admin_create_user()
+        .user_pool_id(&pool_id)
+        .username("testuser")
+        .user_attributes(
+            AttributeType::builder()
+                .name("email")
+                .value("test@example.com")
+                .build()
+                .unwrap(),
+        )
+        .temporary_password("TempP@ss1!")
+        .send()
+        .await
+        .expect("admin create user");
+
+    let user = create_result.user().unwrap();
+    assert_eq!(user.username().unwrap(), "testuser");
+    assert_eq!(
+        user.user_status(),
+        Some(&aws_sdk_cognitoidentityprovider::types::UserStatusType::ForceChangePassword),
+    );
+    assert!(user.enabled(), "User should be enabled by default");
+
+    // Verify sub is in attributes
+    let attrs = user.attributes();
+    let sub_attr = attrs.iter().find(|a| a.name() == "sub");
+    assert!(sub_attr.is_some(), "User should have 'sub' attribute");
+    let sub_value = sub_attr.unwrap().value().unwrap();
+    assert!(!sub_value.is_empty(), "Sub should not be empty");
+
+    // Verify email is in attributes
+    let email_attr = attrs.iter().find(|a| a.name() == "email");
+    assert!(email_attr.is_some(), "User should have 'email' attribute");
+    assert_eq!(email_attr.unwrap().value().unwrap(), "test@example.com");
+
+    // AdminGetUser
+    let get_result = client
+        .admin_get_user()
+        .user_pool_id(&pool_id)
+        .username("testuser")
+        .send()
+        .await
+        .expect("admin get user");
+
+    assert_eq!(get_result.username(), "testuser");
+    assert_eq!(
+        get_result.user_status(),
+        Some(&aws_sdk_cognitoidentityprovider::types::UserStatusType::ForceChangePassword),
+    );
+    assert!(get_result.enabled(), "User should be enabled");
+
+    // Verify attributes from GetUser
+    let get_attrs = get_result.user_attributes();
+    let get_sub = get_attrs.iter().find(|a| a.name() == "sub");
+    assert!(get_sub.is_some(), "GetUser should return sub attribute");
+    assert_eq!(get_sub.unwrap().value().unwrap(), sub_value);
+}
+
+#[tokio::test]
+async fn cognito_admin_disable_enable_user() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool_result = client
+        .create_user_pool()
+        .pool_name("disable-enable-pool")
+        .send()
+        .await
+        .expect("create user pool");
+    let pool_id = pool_result.user_pool().unwrap().id().unwrap().to_string();
+
+    client
+        .admin_create_user()
+        .user_pool_id(&pool_id)
+        .username("toggleuser")
+        .send()
+        .await
+        .expect("admin create user");
+
+    // Disable user
+    client
+        .admin_disable_user()
+        .user_pool_id(&pool_id)
+        .username("toggleuser")
+        .send()
+        .await
+        .expect("admin disable user");
+
+    // Verify disabled
+    let get = client
+        .admin_get_user()
+        .user_pool_id(&pool_id)
+        .username("toggleuser")
+        .send()
+        .await
+        .expect("get disabled user");
+    assert!(!get.enabled(), "User should be disabled");
+
+    // Enable user
+    client
+        .admin_enable_user()
+        .user_pool_id(&pool_id)
+        .username("toggleuser")
+        .send()
+        .await
+        .expect("admin enable user");
+
+    // Verify enabled
+    let get = client
+        .admin_get_user()
+        .user_pool_id(&pool_id)
+        .username("toggleuser")
+        .send()
+        .await
+        .expect("get enabled user");
+    assert!(get.enabled(), "User should be enabled");
+}
+
+#[tokio::test]
+async fn cognito_admin_update_delete_user_attributes() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool_result = client
+        .create_user_pool()
+        .pool_name("attr-pool")
+        .send()
+        .await
+        .expect("create user pool");
+    let pool_id = pool_result.user_pool().unwrap().id().unwrap().to_string();
+
+    // Create user with email
+    client
+        .admin_create_user()
+        .user_pool_id(&pool_id)
+        .username("attruser")
+        .user_attributes(
+            AttributeType::builder()
+                .name("email")
+                .value("original@example.com")
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .expect("admin create user");
+
+    // Update email
+    client
+        .admin_update_user_attributes()
+        .user_pool_id(&pool_id)
+        .username("attruser")
+        .user_attributes(
+            AttributeType::builder()
+                .name("email")
+                .value("updated@example.com")
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .expect("admin update user attributes");
+
+    // Verify updated
+    let get = client
+        .admin_get_user()
+        .user_pool_id(&pool_id)
+        .username("attruser")
+        .send()
+        .await
+        .expect("get user after update");
+    let email_attr = get
+        .user_attributes()
+        .iter()
+        .find(|a| a.name() == "email")
+        .unwrap();
+    assert_eq!(email_attr.value().unwrap(), "updated@example.com");
+
+    // Delete email attribute
+    client
+        .admin_delete_user_attributes()
+        .user_pool_id(&pool_id)
+        .username("attruser")
+        .user_attribute_names("email")
+        .send()
+        .await
+        .expect("admin delete user attributes");
+
+    // Verify deleted
+    let get = client
+        .admin_get_user()
+        .user_pool_id(&pool_id)
+        .username("attruser")
+        .send()
+        .await
+        .expect("get user after delete attr");
+    let email_attr = get.user_attributes().iter().find(|a| a.name() == "email");
+    assert!(
+        email_attr.is_none(),
+        "Email attribute should be deleted: {:?}",
+        get.user_attributes()
+    );
+}
+
+#[tokio::test]
+async fn cognito_admin_delete_user() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool_result = client
+        .create_user_pool()
+        .pool_name("delete-user-pool")
+        .send()
+        .await
+        .expect("create user pool");
+    let pool_id = pool_result.user_pool().unwrap().id().unwrap().to_string();
+
+    client
+        .admin_create_user()
+        .user_pool_id(&pool_id)
+        .username("deleteuser")
+        .send()
+        .await
+        .expect("admin create user");
+
+    // Delete the user
+    client
+        .admin_delete_user()
+        .user_pool_id(&pool_id)
+        .username("deleteuser")
+        .send()
+        .await
+        .expect("admin delete user");
+
+    // Verify get returns UserNotFoundException
+    let err = client
+        .admin_get_user()
+        .user_pool_id(&pool_id)
+        .username("deleteuser")
+        .send()
+        .await;
+    assert!(err.is_err(), "Get should fail after delete");
+}
+
+#[tokio::test]
+async fn cognito_list_users() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool_result = client
+        .create_user_pool()
+        .pool_name("list-users-pool")
+        .send()
+        .await
+        .expect("create user pool");
+    let pool_id = pool_result.user_pool().unwrap().id().unwrap().to_string();
+
+    // Create 3 users
+    for i in 0..3 {
+        client
+            .admin_create_user()
+            .user_pool_id(&pool_id)
+            .username(format!("user{i}"))
+            .send()
+            .await
+            .expect("admin create user");
+    }
+
+    // List all users
+    let result = client
+        .list_users()
+        .user_pool_id(&pool_id)
+        .send()
+        .await
+        .expect("list users");
+
+    let users = result.users();
+    assert_eq!(users.len(), 3, "Should return 3 users");
+
+    // Verify all users are present
+    let usernames: Vec<&str> = users.iter().filter_map(|u| u.username()).collect();
+    assert!(usernames.contains(&"user0"));
+    assert!(usernames.contains(&"user1"));
+    assert!(usernames.contains(&"user2"));
+}
+
+#[tokio::test]
+async fn cognito_list_users_with_filter() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool_result = client
+        .create_user_pool()
+        .pool_name("filter-users-pool")
+        .send()
+        .await
+        .expect("create user pool");
+    let pool_id = pool_result.user_pool().unwrap().id().unwrap().to_string();
+
+    // Create users with different emails
+    client
+        .admin_create_user()
+        .user_pool_id(&pool_id)
+        .username("alice")
+        .user_attributes(
+            AttributeType::builder()
+                .name("email")
+                .value("alice@example.com")
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .expect("create alice");
+
+    client
+        .admin_create_user()
+        .user_pool_id(&pool_id)
+        .username("bob")
+        .user_attributes(
+            AttributeType::builder()
+                .name("email")
+                .value("bob@other.com")
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .expect("create bob");
+
+    client
+        .admin_create_user()
+        .user_pool_id(&pool_id)
+        .username("carol")
+        .user_attributes(
+            AttributeType::builder()
+                .name("email")
+                .value("carol@example.com")
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .expect("create carol");
+
+    // Filter by exact email
+    let result = client
+        .list_users()
+        .user_pool_id(&pool_id)
+        .filter(r#"email = "alice@example.com""#)
+        .send()
+        .await
+        .expect("list users with filter");
+
+    let users = result.users();
+    assert_eq!(users.len(), 1, "Filter should match exactly one user");
+    assert_eq!(users[0].username().unwrap(), "alice");
+
+    // Filter by email prefix
+    let result = client
+        .list_users()
+        .user_pool_id(&pool_id)
+        .filter(r#"email ^= "carol""#)
+        .send()
+        .await
+        .expect("list users with prefix filter");
+
+    let users = result.users();
+    assert_eq!(users.len(), 1, "Prefix filter should match one user");
+    assert_eq!(users[0].username().unwrap(), "carol");
 }
