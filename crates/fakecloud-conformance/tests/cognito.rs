@@ -680,3 +680,379 @@ async fn cognito_list_users() {
         .unwrap();
     assert_eq!(resp.users().len(), 2);
 }
+
+// ---------------------------------------------------------------------------
+// Authentication
+// ---------------------------------------------------------------------------
+
+#[test_action("cognito-idp", "AdminSetUserPassword", checksum = "d903c3d1")]
+#[tokio::test]
+async fn cognito_admin_set_user_password() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("pwd-pool")
+        .send()
+        .await
+        .unwrap();
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    client
+        .admin_create_user()
+        .user_pool_id(&pool_id)
+        .username("pwduser")
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .admin_set_user_password()
+        .user_pool_id(&pool_id)
+        .username("pwduser")
+        .password("Test1234!")
+        .permanent(true)
+        .send()
+        .await
+        .unwrap();
+
+    let user = client
+        .admin_get_user()
+        .user_pool_id(&pool_id)
+        .username("pwduser")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(user.user_status().unwrap().as_str(), "CONFIRMED");
+}
+
+#[test_action("cognito-idp", "AdminInitiateAuth", checksum = "8890cfdf")]
+#[tokio::test]
+async fn cognito_admin_initiate_auth() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("auth-pool")
+        .send()
+        .await
+        .unwrap();
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    let upc = client
+        .create_user_pool_client()
+        .user_pool_id(&pool_id)
+        .client_name("auth-client")
+        .explicit_auth_flows(
+            aws_sdk_cognitoidentityprovider::types::ExplicitAuthFlowsType::AdminNoSrpAuth,
+        )
+        .send()
+        .await
+        .unwrap();
+    let client_id = upc
+        .user_pool_client()
+        .unwrap()
+        .client_id()
+        .unwrap()
+        .to_string();
+
+    client
+        .admin_create_user()
+        .user_pool_id(&pool_id)
+        .username("authuser")
+        .send()
+        .await
+        .unwrap();
+    client
+        .admin_set_user_password()
+        .user_pool_id(&pool_id)
+        .username("authuser")
+        .password("Test1234!")
+        .permanent(true)
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .admin_initiate_auth()
+        .user_pool_id(&pool_id)
+        .client_id(&client_id)
+        .auth_flow(aws_sdk_cognitoidentityprovider::types::AuthFlowType::AdminNoSrpAuth)
+        .auth_parameters("USERNAME", "authuser")
+        .auth_parameters("PASSWORD", "Test1234!")
+        .send()
+        .await
+        .unwrap();
+
+    assert!(resp.authentication_result().unwrap().id_token().is_some());
+    assert!(resp
+        .authentication_result()
+        .unwrap()
+        .access_token()
+        .is_some());
+    assert!(resp
+        .authentication_result()
+        .unwrap()
+        .refresh_token()
+        .is_some());
+}
+
+#[test_action("cognito-idp", "InitiateAuth", checksum = "f2d9f8ac")]
+#[tokio::test]
+async fn cognito_initiate_auth() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("initauth-pool")
+        .send()
+        .await
+        .unwrap();
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    let upc = client
+        .create_user_pool_client()
+        .user_pool_id(&pool_id)
+        .client_name("initauth-client")
+        .explicit_auth_flows(
+            aws_sdk_cognitoidentityprovider::types::ExplicitAuthFlowsType::AllowUserPasswordAuth,
+        )
+        .send()
+        .await
+        .unwrap();
+    let client_id = upc
+        .user_pool_client()
+        .unwrap()
+        .client_id()
+        .unwrap()
+        .to_string();
+
+    client
+        .admin_create_user()
+        .user_pool_id(&pool_id)
+        .username("inituser")
+        .send()
+        .await
+        .unwrap();
+    client
+        .admin_set_user_password()
+        .user_pool_id(&pool_id)
+        .username("inituser")
+        .password("Test1234!")
+        .permanent(true)
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .initiate_auth()
+        .client_id(&client_id)
+        .auth_flow(aws_sdk_cognitoidentityprovider::types::AuthFlowType::UserPasswordAuth)
+        .auth_parameters("USERNAME", "inituser")
+        .auth_parameters("PASSWORD", "Test1234!")
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.authentication_result().unwrap().id_token().is_some());
+}
+
+#[test_action("cognito-idp", "AdminRespondToAuthChallenge", checksum = "6f8ae02b")]
+#[test_action("cognito-idp", "RespondToAuthChallenge", checksum = "4059d3bd")]
+#[tokio::test]
+async fn cognito_respond_to_auth_challenge() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("challenge-pool")
+        .send()
+        .await
+        .unwrap();
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    let upc = client
+        .create_user_pool_client()
+        .user_pool_id(&pool_id)
+        .client_name("challenge-client")
+        .explicit_auth_flows(
+            aws_sdk_cognitoidentityprovider::types::ExplicitAuthFlowsType::AdminNoSrpAuth,
+        )
+        .send()
+        .await
+        .unwrap();
+    let client_id = upc
+        .user_pool_client()
+        .unwrap()
+        .client_id()
+        .unwrap()
+        .to_string();
+
+    client
+        .admin_create_user()
+        .user_pool_id(&pool_id)
+        .username("challengeuser")
+        .temporary_password("TempPass1!")
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .admin_initiate_auth()
+        .user_pool_id(&pool_id)
+        .client_id(&client_id)
+        .auth_flow(aws_sdk_cognitoidentityprovider::types::AuthFlowType::AdminNoSrpAuth)
+        .auth_parameters("USERNAME", "challengeuser")
+        .auth_parameters("PASSWORD", "TempPass1!")
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.challenge_name(),
+        Some(&aws_sdk_cognitoidentityprovider::types::ChallengeNameType::NewPasswordRequired),
+    );
+    let session = resp.session().unwrap().to_string();
+
+    let resp2 = client
+        .admin_respond_to_auth_challenge()
+        .user_pool_id(&pool_id)
+        .client_id(&client_id)
+        .challenge_name(
+            aws_sdk_cognitoidentityprovider::types::ChallengeNameType::NewPasswordRequired,
+        )
+        .challenge_responses("USERNAME", "challengeuser")
+        .challenge_responses("NEW_PASSWORD", "NewPass1234!")
+        .session(&session)
+        .send()
+        .await
+        .unwrap();
+
+    assert!(resp2.authentication_result().unwrap().id_token().is_some());
+}
+
+#[test_action("cognito-idp", "SignUp", checksum = "295585cc")]
+#[test_action("cognito-idp", "ConfirmSignUp", checksum = "a2468bd2")]
+#[tokio::test]
+async fn cognito_sign_up_and_confirm() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("signup-pool")
+        .send()
+        .await
+        .unwrap();
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    let upc = client
+        .create_user_pool_client()
+        .user_pool_id(&pool_id)
+        .client_name("signup-client")
+        .explicit_auth_flows(
+            aws_sdk_cognitoidentityprovider::types::ExplicitAuthFlowsType::AllowUserPasswordAuth,
+        )
+        .send()
+        .await
+        .unwrap();
+    let client_id = upc
+        .user_pool_client()
+        .unwrap()
+        .client_id()
+        .unwrap()
+        .to_string();
+
+    let signup = client
+        .sign_up()
+        .client_id(&client_id)
+        .username("signupuser")
+        .password("SignUp1234!")
+        .send()
+        .await
+        .unwrap();
+    assert!(!signup.user_confirmed());
+    assert!(!signup.user_sub().is_empty());
+
+    client
+        .confirm_sign_up()
+        .client_id(&client_id)
+        .username("signupuser")
+        .confirmation_code("123456")
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .initiate_auth()
+        .client_id(&client_id)
+        .auth_flow(aws_sdk_cognitoidentityprovider::types::AuthFlowType::UserPasswordAuth)
+        .auth_parameters("USERNAME", "signupuser")
+        .auth_parameters("PASSWORD", "SignUp1234!")
+        .send()
+        .await
+        .unwrap();
+    assert!(resp
+        .authentication_result()
+        .unwrap()
+        .access_token()
+        .is_some());
+}
+
+#[test_action("cognito-idp", "AdminConfirmSignUp", checksum = "e13b133c")]
+#[tokio::test]
+async fn cognito_admin_confirm_sign_up() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("adminconfirm-pool")
+        .send()
+        .await
+        .unwrap();
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    let upc = client
+        .create_user_pool_client()
+        .user_pool_id(&pool_id)
+        .client_name("adminconfirm-client")
+        .send()
+        .await
+        .unwrap();
+    let client_id = upc
+        .user_pool_client()
+        .unwrap()
+        .client_id()
+        .unwrap()
+        .to_string();
+
+    client
+        .sign_up()
+        .client_id(&client_id)
+        .username("adminconfirm")
+        .password("Confirm1234!")
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .admin_confirm_sign_up()
+        .user_pool_id(&pool_id)
+        .username("adminconfirm")
+        .send()
+        .await
+        .unwrap();
+
+    let user = client
+        .admin_get_user()
+        .user_pool_id(&pool_id)
+        .username("adminconfirm")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(user.user_status().unwrap().as_str(), "CONFIRMED");
+}
