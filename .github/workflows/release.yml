@@ -150,23 +150,29 @@ jobs:
           # Layer 2: depends on fakecloud-aws
           publish fakecloud-core
 
-          # Layer 3: depend on aws + core
+          # Layer 3: depend on aws + core only
           publish fakecloud-sqs
           publish fakecloud-sns
-          publish fakecloud-eventbridge
           publish fakecloud-iam
-          publish fakecloud-ssm
-          publish fakecloud-dynamodb
           publish fakecloud-lambda
           publish fakecloud-secretsmanager
           publish fakecloud-logs
           publish fakecloud-kms
-          publish fakecloud-s3
+          publish fakecloud-ses
+          publish fakecloud-cognito
 
-          # Layer 4: depends on layer 3 services
+          # Layer 4: depend on layer 3 crates
+          publish fakecloud-s3             # depends on kms
+          publish fakecloud-ssm            # depends on secretsmanager
+          publish fakecloud-eventbridge    # depends on lambda, logs
+
+          # Layer 5: depends on layer 4
+          publish fakecloud-dynamodb       # depends on s3
+
+          # Layer 6: depends on all services
           publish fakecloud-cloudformation
 
-          # Layer 5: depends on all
+          # Layer 7: the binary
           publish fakecloud
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
