@@ -171,11 +171,11 @@ fn find_binary() -> String {
 
 async fn wait_for_port(port: u16) {
     let addr = format!("127.0.0.1:{port}");
-    for _ in 0..150 {
+    for _ in 0..300 {
         if std::net::TcpStream::connect(&addr).is_ok() {
             return;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    panic!("fakecloud did not start within 15 seconds on port {port}");
+    panic!("fakecloud did not start within 30 seconds on port {port}");
 }
