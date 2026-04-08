@@ -1133,6 +1133,28 @@ async fn cognito_change_password() {
         .send()
         .await
         .unwrap();
+
+    // Auth with old password should fail
+    let old_auth = client
+        .initiate_auth()
+        .client_id(&client_id)
+        .auth_flow(aws_sdk_cognitoidentityprovider::types::AuthFlowType::UserPasswordAuth)
+        .auth_parameters("USERNAME", "chguser")
+        .auth_parameters("PASSWORD", "OldPass1!")
+        .send()
+        .await;
+    assert!(old_auth.is_err(), "Old password should no longer work");
+
+    // Auth with new password should succeed
+    let new_auth = client
+        .initiate_auth()
+        .client_id(&client_id)
+        .auth_flow(aws_sdk_cognitoidentityprovider::types::AuthFlowType::UserPasswordAuth)
+        .auth_parameters("USERNAME", "chguser")
+        .auth_parameters("PASSWORD", "NewPass1!")
+        .send()
+        .await;
+    assert!(new_auth.is_ok(), "New password should work");
 }
 
 #[test_action("cognito-idp", "ForgotPassword", checksum = "e64c387b")]
@@ -1286,6 +1308,9 @@ async fn cognito_global_sign_out() {
         .explicit_auth_flows(
             aws_sdk_cognitoidentityprovider::types::ExplicitAuthFlowsType::AllowUserPasswordAuth,
         )
+        .explicit_auth_flows(
+            aws_sdk_cognitoidentityprovider::types::ExplicitAuthFlowsType::AllowRefreshTokenAuth,
+        )
         .send()
         .await
         .unwrap();
@@ -1322,12 +1347,9 @@ async fn cognito_global_sign_out() {
         .send()
         .await
         .unwrap();
-    let access_token = auth
-        .authentication_result()
-        .unwrap()
-        .access_token()
-        .unwrap()
-        .to_string();
+    let auth_result = auth.authentication_result().unwrap();
+    let access_token = auth_result.access_token().unwrap().to_string();
+    let refresh_token = auth_result.refresh_token().unwrap().to_string();
 
     client
         .global_sign_out()
@@ -1335,6 +1357,19 @@ async fn cognito_global_sign_out() {
         .send()
         .await
         .unwrap();
+
+    // Verify refresh token no longer works after sign out
+    let refresh_auth = client
+        .initiate_auth()
+        .client_id(&client_id)
+        .auth_flow(aws_sdk_cognitoidentityprovider::types::AuthFlowType::RefreshTokenAuth)
+        .auth_parameters("REFRESH_TOKEN", &refresh_token)
+        .send()
+        .await;
+    assert!(
+        refresh_auth.is_err(),
+        "Refresh token should be invalid after global sign out"
+    );
 }
 
 #[test_action("cognito-idp", "AdminUserGlobalSignOut", checksum = "8461322c")]
@@ -1351,6 +1386,26 @@ async fn cognito_admin_user_global_sign_out() {
         .unwrap();
     let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
 
+    let upc = client
+        .create_user_pool_client()
+        .user_pool_id(&pool_id)
+        .client_name("adminsignout-client")
+        .explicit_auth_flows(
+            aws_sdk_cognitoidentityprovider::types::ExplicitAuthFlowsType::AllowUserPasswordAuth,
+        )
+        .explicit_auth_flows(
+            aws_sdk_cognitoidentityprovider::types::ExplicitAuthFlowsType::AllowRefreshTokenAuth,
+        )
+        .send()
+        .await
+        .unwrap();
+    let client_id = upc
+        .user_pool_client()
+        .unwrap()
+        .client_id()
+        .unwrap()
+        .to_string();
+
     client
         .admin_create_user()
         .user_pool_id(&pool_id)
@@ -1358,6 +1413,32 @@ async fn cognito_admin_user_global_sign_out() {
         .send()
         .await
         .unwrap();
+    client
+        .admin_set_user_password()
+        .user_pool_id(&pool_id)
+        .username("adminsignout")
+        .password("Pass1234!")
+        .permanent(true)
+        .send()
+        .await
+        .unwrap();
+
+    // Authenticate to get a refresh token
+    let auth = client
+        .initiate_auth()
+        .client_id(&client_id)
+        .auth_flow(aws_sdk_cognitoidentityprovider::types::AuthFlowType::UserPasswordAuth)
+        .auth_parameters("USERNAME", "adminsignout")
+        .auth_parameters("PASSWORD", "Pass1234!")
+        .send()
+        .await
+        .unwrap();
+    let refresh_token = auth
+        .authentication_result()
+        .unwrap()
+        .refresh_token()
+        .unwrap()
+        .to_string();
 
     client
         .admin_user_global_sign_out()
@@ -1366,4 +1447,17 @@ async fn cognito_admin_user_global_sign_out() {
         .send()
         .await
         .unwrap();
+
+    // Verify refresh token no longer works after admin sign out
+    let refresh_auth = client
+        .initiate_auth()
+        .client_id(&client_id)
+        .auth_flow(aws_sdk_cognitoidentityprovider::types::AuthFlowType::RefreshTokenAuth)
+        .auth_parameters("REFRESH_TOKEN", &refresh_token)
+        .send()
+        .await;
+    assert!(
+        refresh_auth.is_err(),
+        "Refresh token should be invalid after admin global sign out"
+    );
 }

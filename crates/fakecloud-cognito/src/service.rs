@@ -2393,7 +2393,6 @@ fn generate_client_id() -> String {
         .to_lowercase()
 }
 
-/// Generate a client secret: 51 base64 characters (like AWS).
 /// Generate a 6-digit confirmation code for password reset flows.
 fn generate_confirmation_code() -> String {
     // Use UUID bytes to generate a numeric code
@@ -2403,6 +2402,7 @@ fn generate_confirmation_code() -> String {
     format!("{:06}", num % 1_000_000)
 }
 
+/// Generate a client secret: 51 base64 characters (like AWS).
 fn generate_client_secret() -> String {
     use base64::Engine;
     // Generate enough random bytes via UUIDs to produce 51+ base64 chars

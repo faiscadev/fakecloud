@@ -1731,17 +1731,20 @@ async fn cognito_forgot_password_flow() {
     assert_eq!(code.len(), 6, "Code should be 6 digits");
 
     // Confirm forgot password with wrong code should fail
+    let wrong_code = if code.starts_with('9') {
+        "000001".to_string()
+    } else {
+        "999999".to_string()
+    };
     let bad_confirm = client
         .confirm_forgot_password()
         .client_id(&client_id)
         .username("forgotuser")
-        .confirmation_code("000000")
+        .confirmation_code(&wrong_code)
         .password("newpass")
         .send()
         .await;
-    if code != "000000" {
-        assert!(bad_confirm.is_err(), "Wrong code should fail");
-    }
+    assert!(bad_confirm.is_err(), "Wrong code should fail");
 
     // Confirm forgot password with correct code
     client
