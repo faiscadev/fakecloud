@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Optional
-
 import httpx
 
 from fakecloud.types import (
@@ -270,9 +268,7 @@ class CognitoClient:
         return ExpireTokensResponse.from_dict(resp.json())
 
     async def get_auth_events(self) -> AuthEventsResponse:
-        resp = await self._client.get(
-            f"{self._base}/_fakecloud/cognito/auth-events"
-        )
+        resp = await self._client.get(f"{self._base}/_fakecloud/cognito/auth-events")
         _check(resp)
         return AuthEventsResponse.from_dict(resp.json())
 
@@ -365,9 +361,7 @@ class _SyncSqsClient:
         return ExpirationTickResponse.from_dict(resp.json())
 
     def force_dlq(self, queue_name: str) -> ForceDlqResponse:
-        resp = self._client.post(
-            f"{self._base}/_fakecloud/sqs/{queue_name}/force-dlq"
-        )
+        resp = self._client.post(f"{self._base}/_fakecloud/sqs/{queue_name}/force-dlq")
         _check(resp)
         return ForceDlqResponse.from_dict(resp.json())
 
@@ -401,9 +395,7 @@ class _SyncS3Client:
         return S3NotificationsResponse.from_dict(resp.json())
 
     def tick_lifecycle(self) -> LifecycleTickResponse:
-        resp = self._client.post(
-            f"{self._base}/_fakecloud/s3/lifecycle-processor/tick"
-        )
+        resp = self._client.post(f"{self._base}/_fakecloud/s3/lifecycle-processor/tick")
         _check(resp)
         return LifecycleTickResponse.from_dict(resp.json())
 
@@ -414,9 +406,7 @@ class _SyncDynamoDbClient:
         self._base = base_url
 
     def tick_ttl(self) -> TtlTickResponse:
-        resp = self._client.post(
-            f"{self._base}/_fakecloud/dynamodb/ttl-processor/tick"
-        )
+        resp = self._client.post(f"{self._base}/_fakecloud/dynamodb/ttl-processor/tick")
         _check(resp)
         return TtlTickResponse.from_dict(resp.json())
 
@@ -447,9 +437,7 @@ class _SyncCognitoClient:
         return UserConfirmationCodes.from_dict(resp.json())
 
     def get_confirmation_codes(self) -> ConfirmationCodesResponse:
-        resp = self._client.get(
-            f"{self._base}/_fakecloud/cognito/confirmation-codes"
-        )
+        resp = self._client.get(f"{self._base}/_fakecloud/cognito/confirmation-codes")
         _check(resp)
         return ConfirmationCodesResponse.from_dict(resp.json())
 
@@ -515,9 +503,7 @@ class FakeCloud:
 
     async def reset_service(self, service: str) -> ResetServiceResponse:
         """Reset a single service's state."""
-        resp = await self._client.post(
-            f"{self._base}/_fakecloud/reset/{service}"
-        )
+        resp = await self._client.post(f"{self._base}/_fakecloud/reset/{service}")
         _check(resp)
         return ResetServiceResponse.from_dict(resp.json())
 

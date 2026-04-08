@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import pytest
 import httpx
+import pytest
 import respx
 
 from fakecloud import FakeCloud, FakeCloudSync
@@ -85,7 +85,9 @@ async def test_lambda_invocations():
             json={
                 "invocations": [
                     {
-                        "functionArn": "arn:aws:lambda:us-east-1:000000000000:function:my-fn",
+                        "functionArn": (
+                            "arn:aws:lambda:us-east-1:000000000000:function:my-fn"
+                        ),
                         "payload": '{"key": "val"}',
                         "source": "api",
                         "timestamp": "2026-01-01T00:00:00Z",
@@ -182,9 +184,7 @@ async def test_ses_simulate_inbound():
             json={
                 "messageId": "msg-2",
                 "matchedRules": ["rule1"],
-                "actionsExecuted": [
-                    {"rule": "rule1", "actionType": "Lambda"}
-                ],
+                "actionsExecuted": [{"rule": "rule1", "actionType": "Lambda"}],
             },
         )
     )
@@ -446,9 +446,7 @@ async def test_dynamodb_tick_ttl():
 @pytest.mark.asyncio
 async def test_secretsmanager_tick_rotation():
     respx.post(f"{BASE}/_fakecloud/secretsmanager/rotation-scheduler/tick").mock(
-        return_value=httpx.Response(
-            200, json={"rotatedSecrets": ["secret-1"]}
-        )
+        return_value=httpx.Response(200, json={"rotatedSecrets": ["secret-1"]})
     )
     async with FakeCloud(BASE) as fc:
         r = await fc.secretsmanager.tick_rotation()
@@ -461,9 +459,7 @@ async def test_secretsmanager_tick_rotation():
 @respx.mock
 @pytest.mark.asyncio
 async def test_cognito_get_user_codes():
-    respx.get(
-        f"{BASE}/_fakecloud/cognito/confirmation-codes/pool-1/alice"
-    ).mock(
+    respx.get(f"{BASE}/_fakecloud/cognito/confirmation-codes/pool-1/alice").mock(
         return_value=httpx.Response(
             200,
             json={

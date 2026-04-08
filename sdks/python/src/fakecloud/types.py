@@ -15,9 +15,9 @@ def _camel_to_snake(name: str) -> str:
     return s.lower()
 
 
-def _convert_keys(data: dict) -> dict:
+def _convert_keys(data: Dict[str, Any]) -> Dict[str, Any]:
     """Recursively convert camelCase dict keys to snake_case."""
-    result = {}
+    result: Dict[str, Any] = {}
     for key, value in data.items():
         snake_key = _camel_to_snake(key)
         if isinstance(value, dict):
@@ -38,7 +38,7 @@ class HealthResponse:
     services: List[str]
 
     @classmethod
-    def from_dict(cls, data: dict) -> HealthResponse:
+    def from_dict(cls, data: Dict[str, Any]) -> HealthResponse:
         d = _convert_keys(data)
         return cls(**d)
 
@@ -48,7 +48,7 @@ class ResetResponse:
     status: str
 
     @classmethod
-    def from_dict(cls, data: dict) -> ResetResponse:
+    def from_dict(cls, data: Dict[str, Any]) -> ResetResponse:
         d = _convert_keys(data)
         return cls(**d)
 
@@ -58,7 +58,7 @@ class ResetServiceResponse:
     reset: str
 
     @classmethod
-    def from_dict(cls, data: dict) -> ResetServiceResponse:
+    def from_dict(cls, data: Dict[str, Any]) -> ResetServiceResponse:
         d = _convert_keys(data)
         return cls(**d)
 
@@ -74,7 +74,7 @@ class LambdaInvocation:
     timestamp: str
 
     @classmethod
-    def from_dict(cls, data: dict) -> LambdaInvocation:
+    def from_dict(cls, data: Dict[str, Any]) -> LambdaInvocation:
         d = _convert_keys(data)
         return cls(**d)
 
@@ -84,10 +84,11 @@ class LambdaInvocationsResponse:
     invocations: List[LambdaInvocation]
 
     @classmethod
-    def from_dict(cls, data: dict) -> LambdaInvocationsResponse:
-        d = _convert_keys(data)
+    def from_dict(cls, data: Dict[str, Any]) -> LambdaInvocationsResponse:
         return cls(
-            invocations=[LambdaInvocation.from_dict(i) for i in data.get("invocations", [])],
+            invocations=[
+                LambdaInvocation.from_dict(i) for i in data.get("invocations", [])
+            ],
         )
 
 
@@ -99,7 +100,7 @@ class WarmContainer:
     last_used_secs_ago: int
 
     @classmethod
-    def from_dict(cls, data: dict) -> WarmContainer:
+    def from_dict(cls, data: Dict[str, Any]) -> WarmContainer:
         d = _convert_keys(data)
         return cls(**d)
 
@@ -109,7 +110,7 @@ class WarmContainersResponse:
     containers: List[WarmContainer]
 
     @classmethod
-    def from_dict(cls, data: dict) -> WarmContainersResponse:
+    def from_dict(cls, data: Dict[str, Any]) -> WarmContainersResponse:
         return cls(
             containers=[WarmContainer.from_dict(c) for c in data.get("containers", [])],
         )
@@ -120,7 +121,7 @@ class EvictContainerResponse:
     evicted: bool
 
     @classmethod
-    def from_dict(cls, data: dict) -> EvictContainerResponse:
+    def from_dict(cls, data: Dict[str, Any]) -> EvictContainerResponse:
         d = _convert_keys(data)
         return cls(**d)
 
@@ -144,7 +145,7 @@ class SentEmail:
     timestamp: str = ""
 
     @classmethod
-    def from_dict(cls, data: dict) -> SentEmail:
+    def from_dict(cls, data: Dict[str, Any]) -> SentEmail:
         d = _convert_keys(data)
         # The JSON field is "from" but that's a Python keyword, so we map it.
         if "from" in data:
@@ -158,7 +159,7 @@ class SesEmailsResponse:
     emails: List[SentEmail]
 
     @classmethod
-    def from_dict(cls, data: dict) -> SesEmailsResponse:
+    def from_dict(cls, data: Dict[str, Any]) -> SesEmailsResponse:
         return cls(
             emails=[SentEmail.from_dict(e) for e in data.get("emails", [])],
         )
@@ -171,7 +172,7 @@ class InboundEmailRequest:
     subject: str
     body: str
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> Dict[str, Any]:
         return {
             "from": self.from_addr,
             "to": self.to,
@@ -186,7 +187,7 @@ class InboundActionExecuted:
     action_type: str
 
     @classmethod
-    def from_dict(cls, data: dict) -> InboundActionExecuted:
+    def from_dict(cls, data: Dict[str, Any]) -> InboundActionExecuted:
         d = _convert_keys(data)
         return cls(**d)
 
@@ -198,7 +199,7 @@ class InboundEmailResponse:
     actions_executed: List[InboundActionExecuted]
 
     @classmethod
-    def from_dict(cls, data: dict) -> InboundEmailResponse:
+    def from_dict(cls, data: Dict[str, Any]) -> InboundEmailResponse:
         d = _convert_keys(data)
         return cls(
             message_id=d["message_id"],
@@ -222,7 +223,7 @@ class SnsMessage:
     timestamp: str = ""
 
     @classmethod
-    def from_dict(cls, data: dict) -> SnsMessage:
+    def from_dict(cls, data: Dict[str, Any]) -> SnsMessage:
         d = _convert_keys(data)
         return cls(**d)
 
@@ -232,7 +233,7 @@ class SnsMessagesResponse:
     messages: List[SnsMessage]
 
     @classmethod
-    def from_dict(cls, data: dict) -> SnsMessagesResponse:
+    def from_dict(cls, data: Dict[str, Any]) -> SnsMessagesResponse:
         return cls(
             messages=[SnsMessage.from_dict(m) for m in data.get("messages", [])],
         )
@@ -247,7 +248,7 @@ class PendingConfirmation:
     token: Optional[str] = None
 
     @classmethod
-    def from_dict(cls, data: dict) -> PendingConfirmation:
+    def from_dict(cls, data: Dict[str, Any]) -> PendingConfirmation:
         d = _convert_keys(data)
         return cls(**d)
 
@@ -257,7 +258,7 @@ class PendingConfirmationsResponse:
     pending_confirmations: List[PendingConfirmation]
 
     @classmethod
-    def from_dict(cls, data: dict) -> PendingConfirmationsResponse:
+    def from_dict(cls, data: Dict[str, Any]) -> PendingConfirmationsResponse:
         return cls(
             pending_confirmations=[
                 PendingConfirmation.from_dict(p)
@@ -270,7 +271,7 @@ class PendingConfirmationsResponse:
 class ConfirmSubscriptionRequest:
     subscription_arn: str
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> Dict[str, Any]:
         return {"subscriptionArn": self.subscription_arn}
 
 
@@ -279,7 +280,7 @@ class ConfirmSubscriptionResponse:
     confirmed: bool
 
     @classmethod
-    def from_dict(cls, data: dict) -> ConfirmSubscriptionResponse:
+    def from_dict(cls, data: Dict[str, Any]) -> ConfirmSubscriptionResponse:
         d = _convert_keys(data)
         return cls(**d)
 
@@ -296,7 +297,7 @@ class SqsMessageInfo:
     created_at: str
 
     @classmethod
-    def from_dict(cls, data: dict) -> SqsMessageInfo:
+    def from_dict(cls, data: Dict[str, Any]) -> SqsMessageInfo:
         d = _convert_keys(data)
         return cls(**d)
 
@@ -308,7 +309,7 @@ class SqsQueueMessages:
     messages: List[SqsMessageInfo]
 
     @classmethod
-    def from_dict(cls, data: dict) -> SqsQueueMessages:
+    def from_dict(cls, data: Dict[str, Any]) -> SqsQueueMessages:
         d = _convert_keys(data)
         return cls(
             queue_url=d["queue_url"],
@@ -322,7 +323,7 @@ class SqsMessagesResponse:
     queues: List[SqsQueueMessages]
 
     @classmethod
-    def from_dict(cls, data: dict) -> SqsMessagesResponse:
+    def from_dict(cls, data: Dict[str, Any]) -> SqsMessagesResponse:
         return cls(
             queues=[SqsQueueMessages.from_dict(q) for q in data.get("queues", [])],
         )
@@ -333,7 +334,7 @@ class ExpirationTickResponse:
     expired_messages: int
 
     @classmethod
-    def from_dict(cls, data: dict) -> ExpirationTickResponse:
+    def from_dict(cls, data: Dict[str, Any]) -> ExpirationTickResponse:
         d = _convert_keys(data)
         return cls(**d)
 
@@ -343,7 +344,7 @@ class ForceDlqResponse:
     moved_messages: int
 
     @classmethod
-    def from_dict(cls, data: dict) -> ForceDlqResponse:
+    def from_dict(cls, data: Dict[str, Any]) -> ForceDlqResponse:
         d = _convert_keys(data)
         return cls(**d)
 
@@ -361,7 +362,7 @@ class EventBridgeEvent:
     timestamp: str
 
     @classmethod
-    def from_dict(cls, data: dict) -> EventBridgeEvent:
+    def from_dict(cls, data: Dict[str, Any]) -> EventBridgeEvent:
         d = _convert_keys(data)
         return cls(**d)
 
@@ -373,7 +374,7 @@ class EventBridgeLambdaDelivery:
     timestamp: str
 
     @classmethod
-    def from_dict(cls, data: dict) -> EventBridgeLambdaDelivery:
+    def from_dict(cls, data: Dict[str, Any]) -> EventBridgeLambdaDelivery:
         d = _convert_keys(data)
         return cls(**d)
 
@@ -385,7 +386,7 @@ class EventBridgeLogDelivery:
     timestamp: str
 
     @classmethod
-    def from_dict(cls, data: dict) -> EventBridgeLogDelivery:
+    def from_dict(cls, data: Dict[str, Any]) -> EventBridgeLogDelivery:
         d = _convert_keys(data)
         return cls(**d)
 
@@ -396,11 +397,10 @@ class EventBridgeDeliveries:
     log_deliveries: List[EventBridgeLogDelivery] = field(default_factory=list)
 
     @classmethod
-    def from_dict(cls, data: dict) -> EventBridgeDeliveries:
+    def from_dict(cls, data: Dict[str, Any]) -> EventBridgeDeliveries:
         return cls(
             lambda_deliveries=[
-                EventBridgeLambdaDelivery.from_dict(d)
-                for d in data.get("lambda", [])
+                EventBridgeLambdaDelivery.from_dict(d) for d in data.get("lambda", [])
             ],
             log_deliveries=[
                 EventBridgeLogDelivery.from_dict(d) for d in data.get("logs", [])
@@ -414,7 +414,7 @@ class EventHistoryResponse:
     deliveries: EventBridgeDeliveries
 
     @classmethod
-    def from_dict(cls, data: dict) -> EventHistoryResponse:
+    def from_dict(cls, data: Dict[str, Any]) -> EventHistoryResponse:
         return cls(
             events=[EventBridgeEvent.from_dict(e) for e in data.get("events", [])],
             deliveries=EventBridgeDeliveries.from_dict(data.get("deliveries", {})),
@@ -426,7 +426,7 @@ class FireRuleRequest:
     rule_name: str
     bus_name: Optional[str] = None
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> Dict[str, Any]:
         d: Dict[str, Any] = {"ruleName": self.rule_name}
         if self.bus_name is not None:
             d["busName"] = self.bus_name
@@ -439,7 +439,7 @@ class FireRuleTarget:
     arn: str
 
     @classmethod
-    def from_dict(cls, data: dict) -> FireRuleTarget:
+    def from_dict(cls, data: Dict[str, Any]) -> FireRuleTarget:
         return cls(target_type=data.get("type", ""), arn=data.get("arn", ""))
 
 
@@ -448,7 +448,7 @@ class FireRuleResponse:
     targets: List[FireRuleTarget]
 
     @classmethod
-    def from_dict(cls, data: dict) -> FireRuleResponse:
+    def from_dict(cls, data: Dict[str, Any]) -> FireRuleResponse:
         return cls(
             targets=[FireRuleTarget.from_dict(t) for t in data.get("targets", [])],
         )
@@ -465,7 +465,7 @@ class S3Notification:
     timestamp: str
 
     @classmethod
-    def from_dict(cls, data: dict) -> S3Notification:
+    def from_dict(cls, data: Dict[str, Any]) -> S3Notification:
         d = _convert_keys(data)
         return cls(**d)
 
@@ -475,7 +475,7 @@ class S3NotificationsResponse:
     notifications: List[S3Notification]
 
     @classmethod
-    def from_dict(cls, data: dict) -> S3NotificationsResponse:
+    def from_dict(cls, data: Dict[str, Any]) -> S3NotificationsResponse:
         return cls(
             notifications=[
                 S3Notification.from_dict(n) for n in data.get("notifications", [])
@@ -490,7 +490,7 @@ class LifecycleTickResponse:
     transitioned_objects: int
 
     @classmethod
-    def from_dict(cls, data: dict) -> LifecycleTickResponse:
+    def from_dict(cls, data: Dict[str, Any]) -> LifecycleTickResponse:
         d = _convert_keys(data)
         return cls(**d)
 
@@ -503,7 +503,7 @@ class TtlTickResponse:
     expired_items: int
 
     @classmethod
-    def from_dict(cls, data: dict) -> TtlTickResponse:
+    def from_dict(cls, data: Dict[str, Any]) -> TtlTickResponse:
         d = _convert_keys(data)
         return cls(**d)
 
@@ -516,7 +516,7 @@ class RotationTickResponse:
     rotated_secrets: List[str]
 
     @classmethod
-    def from_dict(cls, data: dict) -> RotationTickResponse:
+    def from_dict(cls, data: Dict[str, Any]) -> RotationTickResponse:
         d = _convert_keys(data)
         return cls(**d)
 
@@ -530,7 +530,7 @@ class UserConfirmationCodes:
     attribute_verification_codes: Any = None
 
     @classmethod
-    def from_dict(cls, data: dict) -> UserConfirmationCodes:
+    def from_dict(cls, data: Dict[str, Any]) -> UserConfirmationCodes:
         d = _convert_keys(data)
         return cls(**d)
 
@@ -544,7 +544,7 @@ class ConfirmationCode:
     attribute: Optional[str] = None
 
     @classmethod
-    def from_dict(cls, data: dict) -> ConfirmationCode:
+    def from_dict(cls, data: Dict[str, Any]) -> ConfirmationCode:
         d = _convert_keys(data)
         # JSON uses "type" which maps to "code_type"
         if "type" in data:
@@ -558,7 +558,7 @@ class ConfirmationCodesResponse:
     codes: List[ConfirmationCode]
 
     @classmethod
-    def from_dict(cls, data: dict) -> ConfirmationCodesResponse:
+    def from_dict(cls, data: Dict[str, Any]) -> ConfirmationCodesResponse:
         return cls(
             codes=[ConfirmationCode.from_dict(c) for c in data.get("codes", [])],
         )
@@ -569,7 +569,7 @@ class ConfirmUserRequest:
     user_pool_id: str
     username: str
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> Dict[str, Any]:
         return {"userPoolId": self.user_pool_id, "username": self.username}
 
 
@@ -579,7 +579,7 @@ class ConfirmUserResponse:
     error: Optional[str] = None
 
     @classmethod
-    def from_dict(cls, data: dict) -> ConfirmUserResponse:
+    def from_dict(cls, data: Dict[str, Any]) -> ConfirmUserResponse:
         d = _convert_keys(data)
         return cls(**d)
 
@@ -593,7 +593,7 @@ class TokenInfo:
     issued_at: float
 
     @classmethod
-    def from_dict(cls, data: dict) -> TokenInfo:
+    def from_dict(cls, data: Dict[str, Any]) -> TokenInfo:
         d = _convert_keys(data)
         # JSON uses "type" which maps to "token_type"
         if "type" in data:
@@ -607,7 +607,7 @@ class TokensResponse:
     tokens: List[TokenInfo]
 
     @classmethod
-    def from_dict(cls, data: dict) -> TokensResponse:
+    def from_dict(cls, data: Dict[str, Any]) -> TokensResponse:
         return cls(
             tokens=[TokenInfo.from_dict(t) for t in data.get("tokens", [])],
         )
@@ -618,7 +618,7 @@ class ExpireTokensRequest:
     user_pool_id: Optional[str] = None
     username: Optional[str] = None
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> Dict[str, Any]:
         d: Dict[str, Any] = {}
         if self.user_pool_id is not None:
             d["userPoolId"] = self.user_pool_id
@@ -632,7 +632,7 @@ class ExpireTokensResponse:
     expired_tokens: int
 
     @classmethod
-    def from_dict(cls, data: dict) -> ExpireTokensResponse:
+    def from_dict(cls, data: Dict[str, Any]) -> ExpireTokensResponse:
         d = _convert_keys(data)
         return cls(**d)
 
@@ -647,7 +647,7 @@ class AuthEvent:
     success: bool = False
 
     @classmethod
-    def from_dict(cls, data: dict) -> AuthEvent:
+    def from_dict(cls, data: Dict[str, Any]) -> AuthEvent:
         d = _convert_keys(data)
         return cls(**d)
 
@@ -657,7 +657,7 @@ class AuthEventsResponse:
     events: List[AuthEvent]
 
     @classmethod
-    def from_dict(cls, data: dict) -> AuthEventsResponse:
+    def from_dict(cls, data: Dict[str, Any]) -> AuthEventsResponse:
         return cls(
             events=[AuthEvent.from_dict(e) for e in data.get("events", [])],
         )
