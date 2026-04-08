@@ -75,9 +75,11 @@ pub fn force_dlq(state: &SharedSqsState, queue_name: &str) -> u64 {
     let queue = state.queues.get_mut(&queue_url).unwrap();
     let mut to_move = Vec::new();
 
+    // force-dlq intentionally uses >= (not >) to move messages at the threshold,
+    // since the purpose is to force DLQ delivery without waiting for another receive
     let mut remaining = std::collections::VecDeque::new();
     while let Some(msg) = queue.messages.pop_front() {
-        if msg.receive_count > max_receive_count {
+        if msg.receive_count >= max_receive_count {
             to_move.push(msg);
         } else {
             remaining.push_back(msg);
@@ -88,7 +90,7 @@ pub fn force_dlq(state: &SharedSqsState, queue_name: &str) -> u64 {
     // Also check in-flight messages
     let mut remaining_inflight = Vec::new();
     for msg in queue.inflight.drain(..) {
-        if msg.receive_count > max_receive_count {
+        if msg.receive_count >= max_receive_count {
             to_move.push(msg);
         } else {
             remaining_inflight.push(msg);

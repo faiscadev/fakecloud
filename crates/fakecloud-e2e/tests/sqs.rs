@@ -1312,17 +1312,15 @@ async fn sqs_simulation_force_dlq() {
         .await
         .unwrap();
 
-    // Receive the message twice to exceed maxReceiveCount (count goes to 2 > 1)
-    for _ in 0..2 {
-        let recv = client
-            .receive_message()
-            .queue_url(&src_url)
-            .max_number_of_messages(1)
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(recv.messages().len(), 1);
-    }
+    // Receive the message once so receive_count reaches maxReceiveCount (1 >= 1)
+    let recv = client
+        .receive_message()
+        .queue_url(&src_url)
+        .max_number_of_messages(1)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(recv.messages().len(), 1);
 
     // Call force-dlq endpoint
     let url = format!("{}/_fakecloud/sqs/src-queue/force-dlq", server.endpoint());
