@@ -1843,3 +1843,282 @@ async fn cognito_list_users_in_group() {
         .unwrap();
     assert_eq!(resp.users().len(), 2);
 }
+
+// ---------------------------------------------------------------------------
+// Self-service user operations
+// ---------------------------------------------------------------------------
+
+/// Helper: create pool + client + confirmed user, return (pool_id, client_id, access_token)
+async fn setup_authenticated_user(
+    client: &aws_sdk_cognitoidentityprovider::Client,
+    pool_name: &str,
+) -> (String, String, String) {
+    let pool = client
+        .create_user_pool()
+        .pool_name(pool_name)
+        .send()
+        .await
+        .unwrap();
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    let upc = client
+        .create_user_pool_client()
+        .user_pool_id(&pool_id)
+        .client_name("self-client")
+        .explicit_auth_flows(
+            aws_sdk_cognitoidentityprovider::types::ExplicitAuthFlowsType::AllowUserPasswordAuth,
+        )
+        .send()
+        .await
+        .unwrap();
+    let client_id = upc
+        .user_pool_client()
+        .unwrap()
+        .client_id()
+        .unwrap()
+        .to_string();
+
+    client
+        .admin_create_user()
+        .user_pool_id(&pool_id)
+        .username("selfuser")
+        .send()
+        .await
+        .unwrap();
+    client
+        .admin_set_user_password()
+        .user_pool_id(&pool_id)
+        .username("selfuser")
+        .password("SelfPass1!")
+        .permanent(true)
+        .send()
+        .await
+        .unwrap();
+
+    let auth = client
+        .initiate_auth()
+        .client_id(&client_id)
+        .auth_flow(aws_sdk_cognitoidentityprovider::types::AuthFlowType::UserPasswordAuth)
+        .auth_parameters("USERNAME", "selfuser")
+        .auth_parameters("PASSWORD", "SelfPass1!")
+        .send()
+        .await
+        .unwrap();
+    let access_token = auth
+        .authentication_result()
+        .unwrap()
+        .access_token()
+        .unwrap()
+        .to_string();
+
+    (pool_id, client_id, access_token)
+}
+
+#[test_action("cognito-idp", "GetUser", checksum = "43ac140c")]
+#[tokio::test]
+async fn cognito_get_user_self() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+    let (_pool_id, _client_id, access_token) =
+        setup_authenticated_user(&client, "getuser-self-pool").await;
+
+    let resp = client
+        .get_user()
+        .access_token(&access_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.username(), "selfuser");
+}
+
+#[test_action("cognito-idp", "DeleteUser", checksum = "f81d91ec")]
+#[tokio::test]
+async fn cognito_delete_user_self() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+    let (_pool_id, _client_id, access_token) =
+        setup_authenticated_user(&client, "deluser-self-pool").await;
+
+    client
+        .delete_user()
+        .access_token(&access_token)
+        .send()
+        .await
+        .unwrap();
+
+    let err = client
+        .get_user()
+        .access_token(&access_token)
+        .send()
+        .await
+        .unwrap_err();
+    assert!(err.into_service_error().is_not_authorized_exception());
+}
+
+#[test_action("cognito-idp", "UpdateUserAttributes", checksum = "23608e20")]
+#[test_action("cognito-idp", "DeleteUserAttributes", checksum = "f40bb25d")]
+#[tokio::test]
+async fn cognito_update_delete_user_attributes_self() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+    let (_pool_id, _client_id, access_token) =
+        setup_authenticated_user(&client, "attrs-self-pool").await;
+
+    client
+        .update_user_attributes()
+        .access_token(&access_token)
+        .user_attributes(
+            aws_sdk_cognitoidentityprovider::types::AttributeType::builder()
+                .name("email")
+                .value("self@example.com")
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let user = client
+        .get_user()
+        .access_token(&access_token)
+        .send()
+        .await
+        .unwrap();
+    assert!(user
+        .user_attributes()
+        .iter()
+        .any(|a| a.name() == "email" && a.value() == Some("self@example.com")));
+
+    client
+        .delete_user_attributes()
+        .access_token(&access_token)
+        .user_attribute_names("email")
+        .send()
+        .await
+        .unwrap();
+
+    let user2 = client
+        .get_user()
+        .access_token(&access_token)
+        .send()
+        .await
+        .unwrap();
+    assert!(!user2.user_attributes().iter().any(|a| a.name() == "email"));
+}
+
+#[test_action(
+    "cognito-idp",
+    "GetUserAttributeVerificationCode",
+    checksum = "717d600d"
+)]
+#[test_action("cognito-idp", "VerifyUserAttribute", checksum = "fc368ddf")]
+#[tokio::test]
+async fn cognito_verify_user_attribute() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+    let (pool_id, _client_id, access_token) =
+        setup_authenticated_user(&client, "verify-attr-pool").await;
+
+    // Set an email first
+    client
+        .update_user_attributes()
+        .access_token(&access_token)
+        .user_attributes(
+            aws_sdk_cognitoidentityprovider::types::AttributeType::builder()
+                .name("email")
+                .value("verify@example.com")
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .get_user_attribute_verification_code()
+        .access_token(&access_token)
+        .attribute_name("email")
+        .send()
+        .await
+        .unwrap();
+
+    // Get code via introspection
+    let code_resp: serde_json::Value = reqwest::get(format!(
+        "{}/_fakecloud/cognito/confirmation-codes/{}/selfuser",
+        server.endpoint(),
+        pool_id
+    ))
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    let code = code_resp["confirmationCode"].as_str().unwrap().to_string();
+
+    client
+        .verify_user_attribute()
+        .access_token(&access_token)
+        .attribute_name("email")
+        .code(&code)
+        .send()
+        .await
+        .unwrap();
+
+    let user = client
+        .get_user()
+        .access_token(&access_token)
+        .send()
+        .await
+        .unwrap();
+    assert!(user
+        .user_attributes()
+        .iter()
+        .any(|a| a.name() == "email_verified" && a.value() == Some("true")));
+}
+
+#[test_action("cognito-idp", "ResendConfirmationCode", checksum = "7cece340")]
+#[tokio::test]
+async fn cognito_resend_confirmation_code() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("resend-pool")
+        .send()
+        .await
+        .unwrap();
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    let upc = client
+        .create_user_pool_client()
+        .user_pool_id(&pool_id)
+        .client_name("resend-client")
+        .send()
+        .await
+        .unwrap();
+    let client_id = upc
+        .user_pool_client()
+        .unwrap()
+        .client_id()
+        .unwrap()
+        .to_string();
+
+    client
+        .sign_up()
+        .client_id(&client_id)
+        .username("resenduser")
+        .password("Resend1234!")
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .resend_confirmation_code()
+        .client_id(&client_id)
+        .username("resenduser")
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.code_delivery_details().is_some());
+}
