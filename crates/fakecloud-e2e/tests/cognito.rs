@@ -2059,3 +2059,433 @@ async fn cognito_admin_user_global_sign_out() {
         "Refresh token should be invalidated after admin sign out"
     );
 }
+
+// ── Group management E2E tests ──────────────────────────────────────
+
+#[tokio::test]
+async fn cognito_create_get_group() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("group-pool")
+        .send()
+        .await
+        .expect("create pool");
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    // Create a group with all fields
+    let result = client
+        .create_group()
+        .user_pool_id(&pool_id)
+        .group_name("admins")
+        .description("Admin group")
+        .precedence(1)
+        .role_arn("arn:aws:iam::123456789012:role/AdminRole")
+        .send()
+        .await
+        .expect("create group");
+
+    let group = result.group().unwrap();
+    assert_eq!(group.group_name().unwrap(), "admins");
+    assert_eq!(group.user_pool_id().unwrap(), pool_id);
+    assert_eq!(group.description().unwrap(), "Admin group");
+    assert_eq!(group.precedence(), Some(1));
+    assert_eq!(
+        group.role_arn().unwrap(),
+        "arn:aws:iam::123456789012:role/AdminRole"
+    );
+
+    // Get the group
+    let get_result = client
+        .get_group()
+        .user_pool_id(&pool_id)
+        .group_name("admins")
+        .send()
+        .await
+        .expect("get group");
+
+    let got = get_result.group().unwrap();
+    assert_eq!(got.group_name().unwrap(), "admins");
+    assert_eq!(got.description().unwrap(), "Admin group");
+    assert_eq!(got.precedence(), Some(1));
+
+    // Get non-existent group should fail
+    let err = client
+        .get_group()
+        .user_pool_id(&pool_id)
+        .group_name("nonexistent")
+        .send()
+        .await;
+    assert!(err.is_err(), "Getting non-existent group should fail");
+
+    // Creating duplicate group should fail with GroupExistsException
+    let dup_err = client
+        .create_group()
+        .user_pool_id(&pool_id)
+        .group_name("admins")
+        .send()
+        .await;
+    assert!(dup_err.is_err(), "Duplicate group should fail");
+}
+
+#[tokio::test]
+async fn cognito_update_delete_group() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("upd-group-pool")
+        .send()
+        .await
+        .expect("create pool");
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    client
+        .create_group()
+        .user_pool_id(&pool_id)
+        .group_name("editors")
+        .description("Editor group")
+        .precedence(5)
+        .send()
+        .await
+        .expect("create group");
+
+    // Update the group
+    let updated = client
+        .update_group()
+        .user_pool_id(&pool_id)
+        .group_name("editors")
+        .description("Updated editors")
+        .precedence(10)
+        .role_arn("arn:aws:iam::123456789012:role/EditorRole")
+        .send()
+        .await
+        .expect("update group");
+
+    let g = updated.group().unwrap();
+    assert_eq!(g.description().unwrap(), "Updated editors");
+    assert_eq!(g.precedence(), Some(10));
+    assert_eq!(
+        g.role_arn().unwrap(),
+        "arn:aws:iam::123456789012:role/EditorRole"
+    );
+
+    // Delete the group
+    client
+        .delete_group()
+        .user_pool_id(&pool_id)
+        .group_name("editors")
+        .send()
+        .await
+        .expect("delete group");
+
+    // Getting deleted group should fail
+    let err = client
+        .get_group()
+        .user_pool_id(&pool_id)
+        .group_name("editors")
+        .send()
+        .await;
+    assert!(err.is_err(), "Deleted group should not be found");
+
+    // Deleting again should fail
+    let del_err = client
+        .delete_group()
+        .user_pool_id(&pool_id)
+        .group_name("editors")
+        .send()
+        .await;
+    assert!(del_err.is_err(), "Double delete should fail");
+}
+
+#[tokio::test]
+async fn cognito_list_groups() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("list-groups-pool")
+        .send()
+        .await
+        .expect("create pool");
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    // Create several groups
+    for name in &["alpha", "beta", "gamma", "delta"] {
+        client
+            .create_group()
+            .user_pool_id(&pool_id)
+            .group_name(*name)
+            .send()
+            .await
+            .expect("create group");
+    }
+
+    // List all groups
+    let list = client
+        .list_groups()
+        .user_pool_id(&pool_id)
+        .send()
+        .await
+        .expect("list groups");
+
+    let groups = list.groups();
+    assert_eq!(groups.len(), 4, "Should have 4 groups");
+
+    // List with limit for pagination
+    let page1 = client
+        .list_groups()
+        .user_pool_id(&pool_id)
+        .limit(2)
+        .send()
+        .await
+        .expect("list groups page 1");
+
+    assert_eq!(page1.groups().len(), 2);
+    assert!(
+        page1.next_token().is_some(),
+        "Should have next token for page 2"
+    );
+
+    let page2 = client
+        .list_groups()
+        .user_pool_id(&pool_id)
+        .limit(2)
+        .next_token(page1.next_token().unwrap())
+        .send()
+        .await
+        .expect("list groups page 2");
+
+    assert_eq!(page2.groups().len(), 2);
+
+    // Collect all group names across pages
+    let mut all_names: Vec<String> = page1
+        .groups()
+        .iter()
+        .chain(page2.groups().iter())
+        .map(|g| g.group_name().unwrap().to_string())
+        .collect();
+    all_names.sort();
+    assert_eq!(all_names, vec!["alpha", "beta", "delta", "gamma"]);
+}
+
+#[tokio::test]
+async fn cognito_add_remove_user_to_group() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("user-group-pool")
+        .send()
+        .await
+        .expect("create pool");
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    // Create user and group
+    client
+        .admin_create_user()
+        .user_pool_id(&pool_id)
+        .username("groupuser")
+        .send()
+        .await
+        .expect("create user");
+
+    client
+        .create_group()
+        .user_pool_id(&pool_id)
+        .group_name("testers")
+        .send()
+        .await
+        .expect("create group");
+
+    // Add user to group
+    client
+        .admin_add_user_to_group()
+        .user_pool_id(&pool_id)
+        .username("groupuser")
+        .group_name("testers")
+        .send()
+        .await
+        .expect("add user to group");
+
+    // List users in group
+    let users_in_group = client
+        .list_users_in_group()
+        .user_pool_id(&pool_id)
+        .group_name("testers")
+        .send()
+        .await
+        .expect("list users in group");
+
+    assert_eq!(users_in_group.users().len(), 1);
+    assert_eq!(users_in_group.users()[0].username().unwrap(), "groupuser");
+
+    // Adding same user again should be idempotent
+    client
+        .admin_add_user_to_group()
+        .user_pool_id(&pool_id)
+        .username("groupuser")
+        .group_name("testers")
+        .send()
+        .await
+        .expect("add user to group again (idempotent)");
+
+    // Still only 1 user
+    let users_again = client
+        .list_users_in_group()
+        .user_pool_id(&pool_id)
+        .group_name("testers")
+        .send()
+        .await
+        .expect("list users");
+    assert_eq!(users_again.users().len(), 1);
+
+    // Remove user from group
+    client
+        .admin_remove_user_from_group()
+        .user_pool_id(&pool_id)
+        .username("groupuser")
+        .group_name("testers")
+        .send()
+        .await
+        .expect("remove user from group");
+
+    // List users in group should be empty
+    let users_empty = client
+        .list_users_in_group()
+        .user_pool_id(&pool_id)
+        .group_name("testers")
+        .send()
+        .await
+        .expect("list users after removal");
+    assert!(
+        users_empty.users().is_empty(),
+        "Group should be empty after removal"
+    );
+
+    // Adding user to non-existent group should fail
+    let err = client
+        .admin_add_user_to_group()
+        .user_pool_id(&pool_id)
+        .username("groupuser")
+        .group_name("nonexistent")
+        .send()
+        .await;
+    assert!(err.is_err(), "Adding to non-existent group should fail");
+
+    // Adding non-existent user to group should fail
+    let err2 = client
+        .admin_add_user_to_group()
+        .user_pool_id(&pool_id)
+        .username("nosuchuser")
+        .group_name("testers")
+        .send()
+        .await;
+    assert!(err2.is_err(), "Adding non-existent user should fail");
+}
+
+#[tokio::test]
+async fn cognito_list_groups_for_user() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("multi-group-pool")
+        .send()
+        .await
+        .expect("create pool");
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    // Create user
+    client
+        .admin_create_user()
+        .user_pool_id(&pool_id)
+        .username("multiuser")
+        .send()
+        .await
+        .expect("create user");
+
+    // Create multiple groups and add user to them
+    for name in &["group-a", "group-b", "group-c"] {
+        client
+            .create_group()
+            .user_pool_id(&pool_id)
+            .group_name(*name)
+            .send()
+            .await
+            .expect("create group");
+
+        client
+            .admin_add_user_to_group()
+            .user_pool_id(&pool_id)
+            .username("multiuser")
+            .group_name(*name)
+            .send()
+            .await
+            .expect("add user to group");
+    }
+
+    // List groups for user
+    let result = client
+        .admin_list_groups_for_user()
+        .user_pool_id(&pool_id)
+        .username("multiuser")
+        .send()
+        .await
+        .expect("list groups for user");
+
+    let groups = result.groups();
+    assert_eq!(groups.len(), 3, "User should be in 3 groups");
+
+    let mut names: Vec<String> = groups
+        .iter()
+        .map(|g| g.group_name().unwrap().to_string())
+        .collect();
+    names.sort();
+    assert_eq!(names, vec!["group-a", "group-b", "group-c"]);
+
+    // Remove user from one group and verify
+    client
+        .admin_remove_user_from_group()
+        .user_pool_id(&pool_id)
+        .username("multiuser")
+        .group_name("group-b")
+        .send()
+        .await
+        .expect("remove from group-b");
+
+    let result2 = client
+        .admin_list_groups_for_user()
+        .user_pool_id(&pool_id)
+        .username("multiuser")
+        .send()
+        .await
+        .expect("list groups for user after removal");
+
+    assert_eq!(result2.groups().len(), 2);
+    let mut names2: Vec<String> = result2
+        .groups()
+        .iter()
+        .map(|g| g.group_name().unwrap().to_string())
+        .collect();
+    names2.sort();
+    assert_eq!(names2, vec!["group-a", "group-c"]);
+
+    // List groups for non-existent user should fail
+    let err = client
+        .admin_list_groups_for_user()
+        .user_pool_id(&pool_id)
+        .username("nosuchuser")
+        .send()
+        .await;
+    assert!(
+        err.is_err(),
+        "Listing groups for non-existent user should fail"
+    );
+}
