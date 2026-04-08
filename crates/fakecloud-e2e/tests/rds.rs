@@ -98,6 +98,80 @@ async fn rds_create_and_describe_db_instance() {
     assert_eq!(value, 1);
 }
 
+#[tokio::test]
+async fn rds_tag_roundtrip() {
+    let server = TestServer::start().await;
+    let client = server.rds_client().await;
+
+    let create = create_instance(&client).await;
+    let arn = create
+        .db_instance()
+        .and_then(|instance| instance.db_instance_arn())
+        .expect("db instance arn");
+
+    client
+        .add_tags_to_resource()
+        .resource_name(arn)
+        .tags(
+            aws_sdk_rds::types::Tag::builder()
+                .key("env")
+                .value("dev")
+                .build(),
+        )
+        .tags(
+            aws_sdk_rds::types::Tag::builder()
+                .key("team")
+                .value("core")
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let listed = client
+        .list_tags_for_resource()
+        .resource_name(arn)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(listed.tag_list().len(), 2);
+
+    client
+        .remove_tags_from_resource()
+        .resource_name(arn)
+        .tag_keys("env")
+        .send()
+        .await
+        .unwrap();
+
+    let listed = client
+        .list_tags_for_resource()
+        .resource_name(arn)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(listed.tag_list().len(), 1);
+    assert_eq!(listed.tag_list()[0].key(), Some("team"));
+}
+
+async fn create_instance(
+    client: &aws_sdk_rds::Client,
+) -> aws_sdk_rds::operation::create_db_instance::CreateDbInstanceOutput {
+    client
+        .create_db_instance()
+        .db_instance_identifier("orders-db")
+        .allocated_storage(20)
+        .db_instance_class("db.t3.micro")
+        .engine("postgres")
+        .engine_version("16.3")
+        .master_username("admin")
+        .master_user_password("secret123")
+        .db_name("appdb")
+        .send()
+        .await
+        .unwrap()
+}
+
 async fn connect_with_retry(
     host: &str,
     port: i32,

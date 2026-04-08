@@ -108,3 +108,152 @@ async fn rds_describe_db_instances() {
         Some("127.0.0.1")
     );
 }
+
+#[test_action("rds", "AddTagsToResource", checksum = "79e71104")]
+#[tokio::test]
+async fn rds_add_tags_to_resource() {
+    let server = TestServer::start().await;
+    let client = server.rds_client().await;
+
+    let create = create_instance(&client).await;
+    let arn = create
+        .db_instance()
+        .and_then(|instance| instance.db_instance_arn())
+        .expect("db instance arn");
+
+    client
+        .add_tags_to_resource()
+        .resource_name(arn)
+        .tags(
+            aws_sdk_rds::types::Tag::builder()
+                .key("env")
+                .value("dev")
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let response = client
+        .list_tags_for_resource()
+        .resource_name(arn)
+        .send()
+        .await
+        .unwrap();
+    let tags = response.tag_list();
+    assert_eq!(tags.len(), 1);
+    assert_eq!(tags[0].key(), Some("env"));
+    assert_eq!(tags[0].value(), Some("dev"));
+}
+
+#[test_action("rds", "ListTagsForResource", checksum = "28355104")]
+#[tokio::test]
+async fn rds_list_tags_for_resource() {
+    let server = TestServer::start().await;
+    let client = server.rds_client().await;
+
+    let create = create_instance(&client).await;
+    let arn = create
+        .db_instance()
+        .and_then(|instance| instance.db_instance_arn())
+        .expect("db instance arn");
+
+    client
+        .add_tags_to_resource()
+        .resource_name(arn)
+        .tags(
+            aws_sdk_rds::types::Tag::builder()
+                .key("env")
+                .value("dev")
+                .build(),
+        )
+        .tags(
+            aws_sdk_rds::types::Tag::builder()
+                .key("team")
+                .value("core")
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let response = client
+        .list_tags_for_resource()
+        .resource_name(arn)
+        .send()
+        .await
+        .unwrap();
+
+    let tags = response.tag_list();
+    assert_eq!(tags.len(), 2);
+    assert_eq!(tags[0].key(), Some("env"));
+    assert_eq!(tags[1].key(), Some("team"));
+}
+
+#[test_action("rds", "RemoveTagsFromResource", checksum = "8bc51a12")]
+#[tokio::test]
+async fn rds_remove_tags_from_resource() {
+    let server = TestServer::start().await;
+    let client = server.rds_client().await;
+
+    let create = create_instance(&client).await;
+    let arn = create
+        .db_instance()
+        .and_then(|instance| instance.db_instance_arn())
+        .expect("db instance arn");
+
+    client
+        .add_tags_to_resource()
+        .resource_name(arn)
+        .tags(
+            aws_sdk_rds::types::Tag::builder()
+                .key("env")
+                .value("dev")
+                .build(),
+        )
+        .tags(
+            aws_sdk_rds::types::Tag::builder()
+                .key("team")
+                .value("core")
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .remove_tags_from_resource()
+        .resource_name(arn)
+        .tag_keys("env")
+        .send()
+        .await
+        .unwrap();
+
+    let response = client
+        .list_tags_for_resource()
+        .resource_name(arn)
+        .send()
+        .await
+        .unwrap();
+    let tags = response.tag_list();
+    assert_eq!(tags.len(), 1);
+    assert_eq!(tags[0].key(), Some("team"));
+}
+
+async fn create_instance(
+    client: &aws_sdk_rds::Client,
+) -> aws_sdk_rds::operation::create_db_instance::CreateDbInstanceOutput {
+    client
+        .create_db_instance()
+        .db_instance_identifier("conf-rds-db")
+        .allocated_storage(20)
+        .db_instance_class("db.t3.micro")
+        .engine("postgres")
+        .engine_version("16.3")
+        .master_username("admin")
+        .master_user_password("secret123")
+        .db_name("appdb")
+        .send()
+        .await
+        .unwrap()
+}

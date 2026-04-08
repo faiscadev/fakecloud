@@ -1246,6 +1246,7 @@ mod tests {
                 master_user_password: "secret123".to_string(),
                 container_id: "container-id".to_string(),
                 host_port: 15432,
+                tags: Vec::new(),
             },
         );
 

@@ -10,15 +10,18 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceErr
 use crate::runtime::{RdsRuntime, RuntimeError};
 use crate::state::{
     default_engine_versions, default_orderable_options, DbInstance, EngineVersionInfo,
-    OrderableDbInstanceOption, SharedRdsState,
+    OrderableDbInstanceOption, RdsTag, SharedRdsState,
 };
 
 const RDS_NS: &str = "http://rds.amazonaws.com/doc/2014-10-31/";
 const SUPPORTED_ACTIONS: &[&str] = &[
+    "AddTagsToResource",
     "CreateDBInstance",
     "DescribeDBEngineVersions",
     "DescribeDBInstances",
     "DescribeOrderableDBInstanceOptions",
+    "ListTagsForResource",
+    "RemoveTagsFromResource",
 ];
 
 pub struct RdsService {
@@ -48,12 +51,15 @@ impl AwsService for RdsService {
 
     async fn handle(&self, request: AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         match request.action.as_str() {
+            "AddTagsToResource" => self.add_tags_to_resource(&request),
             "CreateDBInstance" => self.create_db_instance(&request).await,
             "DescribeDBEngineVersions" => self.describe_db_engine_versions(&request),
             "DescribeDBInstances" => self.describe_db_instances(&request),
             "DescribeOrderableDBInstanceOptions" => {
                 self.describe_orderable_db_instance_options(&request)
             }
+            "ListTagsForResource" => self.list_tags_for_resource(&request),
+            "RemoveTagsFromResource" => self.remove_tags_from_resource(&request),
             _ => Err(AwsServiceError::action_not_implemented(
                 self.service_name(),
                 &request.action,
@@ -152,6 +158,7 @@ impl RdsService {
             master_user_password,
             container_id: running.container_id,
             host_port: running.host_port,
+            tags: Vec::new(),
         };
         state.finish_instance_creation(instance.clone());
 
@@ -280,6 +287,79 @@ impl RdsService {
             ),
         ))
     }
+
+    fn add_tags_to_resource(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let resource_name = required_param(request, "ResourceName")?;
+        let tags = parse_tags(request)?;
+
+        if tags.is_empty() {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "MissingParameter",
+                "The request must contain the parameter Tags.",
+            ));
+        }
+
+        let mut state = self.state.write();
+        let instance = find_instance_by_arn_mut(&mut state, &resource_name)?;
+        merge_tags(&mut instance.tags, &tags);
+
+        Ok(AwsResponse::xml(
+            StatusCode::OK,
+            xml_wrap("AddTagsToResource", "", &request.request_id),
+        ))
+    }
+
+    fn list_tags_for_resource(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let resource_name = required_param(request, "ResourceName")?;
+        if query_param_prefix_exists(request, "Filters.") {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterValue",
+                "Filters are not yet supported for ListTagsForResource.",
+            ));
+        }
+
+        let state = self.state.read();
+        let instance = find_instance_by_arn(&state, &resource_name)?;
+        let tag_xml = instance.tags.iter().map(tag_xml).collect::<String>();
+
+        Ok(AwsResponse::xml(
+            StatusCode::OK,
+            xml_wrap(
+                "ListTagsForResource",
+                &format!("<TagList>{tag_xml}</TagList>"),
+                &request.request_id,
+            ),
+        ))
+    }
+
+    fn remove_tags_from_resource(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let resource_name = required_param(request, "ResourceName")?;
+        let tag_keys = parse_tag_keys(request)?;
+
+        if tag_keys.is_empty() {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "MissingParameter",
+                "The request must contain the parameter TagKeys.",
+            ));
+        }
+
+        let mut state = self.state.write();
+        let instance = find_instance_by_arn_mut(&mut state, &resource_name)?;
+        instance
+            .tags
+            .retain(|tag| !tag_keys.iter().any(|key| key == &tag.key));
+
+        Ok(AwsResponse::xml(
+            StatusCode::OK,
+            xml_wrap("RemoveTagsFromResource", "", &request.request_id),
+        ))
+    }
 }
 
 fn optional_param(req: &AwsRequest, name: &str) -> Option<String> {
@@ -322,6 +402,47 @@ fn optional_i32_param(req: &AwsRequest, name: &str) -> Result<Option<i32>, AwsSe
             })
         })
         .transpose()
+}
+
+fn parse_tags(req: &AwsRequest) -> Result<Vec<RdsTag>, AwsServiceError> {
+    let mut tags = Vec::new();
+    for index in 1.. {
+        let key_name = format!("Tags.Tag.{index}.Key");
+        let value_name = format!("Tags.Tag.{index}.Value");
+        let key = optional_param(req, &key_name);
+        let value = optional_param(req, &value_name);
+
+        match (key, value) {
+            (Some(key), Some(value)) => tags.push(RdsTag { key, value }),
+            (None, None) => break,
+            _ => {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterValue",
+                    "Each tag must include both Key and Value.",
+                ));
+            }
+        }
+    }
+
+    Ok(tags)
+}
+
+fn parse_tag_keys(req: &AwsRequest) -> Result<Vec<String>, AwsServiceError> {
+    let mut keys = Vec::new();
+    for index in 1.. {
+        let key_name = format!("TagKeys.member.{index}");
+        match optional_param(req, &key_name) {
+            Some(key) => keys.push(key),
+            None => break,
+        }
+    }
+
+    Ok(keys)
+}
+
+fn query_param_prefix_exists(req: &AwsRequest, prefix: &str) -> bool {
+    req.query_params.keys().any(|key| key.starts_with(prefix))
 }
 
 fn parse_optional_bool(value: Option<&str>) -> Result<Option<bool>, AwsServiceError> {
@@ -513,6 +634,14 @@ fn orderable_option_xml(option: &OrderableDbInstanceOption) -> String {
     )
 }
 
+fn tag_xml(tag: &RdsTag) -> String {
+    format!(
+        "<Tag><Key>{}</Key><Value>{}</Value></Tag>",
+        xml_escape(&tag.key),
+        xml_escape(&tag.value),
+    )
+}
+
 fn db_instance_xml(instance: &DbInstance, status_override: Option<&str>) -> String {
     let status = status_override.unwrap_or(&instance.db_instance_status);
     let db_name_xml = instance
@@ -585,6 +714,49 @@ fn db_instance_not_found(identifier: &str) -> AwsServiceError {
     )
 }
 
+fn db_instance_not_found_by_arn(resource_name: &str) -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::NOT_FOUND,
+        "DBInstanceNotFound",
+        format!("DBInstance {resource_name} not found."),
+    )
+}
+
+fn find_instance_by_arn<'a>(
+    state: &'a crate::state::RdsState,
+    resource_name: &str,
+) -> Result<&'a DbInstance, AwsServiceError> {
+    state
+        .instances
+        .values()
+        .find(|instance| instance.db_instance_arn == resource_name)
+        .ok_or_else(|| db_instance_not_found_by_arn(resource_name))
+}
+
+fn find_instance_by_arn_mut<'a>(
+    state: &'a mut crate::state::RdsState,
+    resource_name: &str,
+) -> Result<&'a mut DbInstance, AwsServiceError> {
+    state
+        .instances
+        .values_mut()
+        .find(|instance| instance.db_instance_arn == resource_name)
+        .ok_or_else(|| db_instance_not_found_by_arn(resource_name))
+}
+
+fn merge_tags(existing: &mut Vec<RdsTag>, incoming: &[RdsTag]) {
+    for tag in incoming {
+        if let Some(existing_tag) = existing
+            .iter_mut()
+            .find(|candidate| candidate.key == tag.key)
+        {
+            existing_tag.value = tag.value.clone();
+        } else {
+            existing.push(tag.clone());
+        }
+    }
+}
+
 fn runtime_error_to_service_error(error: RuntimeError) -> AwsServiceError {
     match error {
         RuntimeError::Unavailable => AwsServiceError::aws_error(
@@ -612,10 +784,12 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        db_instance_xml, filter_engine_versions, filter_orderable_options, optional_i32_param,
-        validate_create_request, RdsService,
+        db_instance_xml, filter_engine_versions, filter_orderable_options, merge_tags,
+        optional_i32_param, parse_tag_keys, parse_tags, validate_create_request, RdsService,
     };
-    use crate::state::{default_engine_versions, default_orderable_options, DbInstance, RdsState};
+    use crate::state::{
+        default_engine_versions, default_orderable_options, DbInstance, RdsState, RdsTag,
+    };
     use fakecloud_core::service::{AwsRequest, AwsService};
 
     #[test]
@@ -684,6 +858,7 @@ mod tests {
             master_user_password: "secret123".to_string(),
             container_id: "container".to_string(),
             host_port: 15432,
+            tags: Vec::new(),
         };
 
         let xml = db_instance_xml(&instance, Some("creating"));
@@ -691,6 +866,73 @@ mod tests {
         assert!(xml.contains("<DBInstanceIdentifier>test-db</DBInstanceIdentifier>"));
         assert!(xml.contains("<DBInstanceStatus>creating</DBInstanceStatus>"));
         assert!(xml.contains("<Address>127.0.0.1</Address><Port>15432</Port>"));
+    }
+
+    #[test]
+    fn parse_tags_reads_rds_query_shape() {
+        let request = request(
+            "AddTagsToResource",
+            &[
+                ("Tags.Tag.1.Key", "env"),
+                ("Tags.Tag.1.Value", "dev"),
+                ("Tags.Tag.2.Key", "team"),
+                ("Tags.Tag.2.Value", "core"),
+            ],
+        );
+
+        let tags = parse_tags(&request).expect("tags");
+
+        assert_eq!(
+            tags,
+            vec![
+                RdsTag {
+                    key: "env".to_string(),
+                    value: "dev".to_string(),
+                },
+                RdsTag {
+                    key: "team".to_string(),
+                    value: "core".to_string(),
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_tag_keys_reads_member_shape() {
+        let request = request(
+            "RemoveTagsFromResource",
+            &[("TagKeys.member.1", "env"), ("TagKeys.member.2", "team")],
+        );
+
+        let tag_keys = parse_tag_keys(&request).expect("tag keys");
+
+        assert_eq!(tag_keys, vec!["env".to_string(), "team".to_string()]);
+    }
+
+    #[test]
+    fn merge_tags_updates_existing_values() {
+        let mut tags = vec![RdsTag {
+            key: "env".to_string(),
+            value: "dev".to_string(),
+        }];
+
+        merge_tags(
+            &mut tags,
+            &[
+                RdsTag {
+                    key: "env".to_string(),
+                    value: "prod".to_string(),
+                },
+                RdsTag {
+                    key: "team".to_string(),
+                    value: "core".to_string(),
+                },
+            ],
+        );
+
+        assert_eq!(tags.len(), 2);
+        assert_eq!(tags[0].value, "prod");
+        assert_eq!(tags[1].key, "team");
     }
 
     #[tokio::test]
