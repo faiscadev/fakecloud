@@ -437,18 +437,24 @@ impl CognitoService {
     fn describe_user_pool_client(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
 
-        let pool_id = body["UserPoolId"].as_str().ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "InvalidParameterException",
-                "UserPoolId is required",
-            )
-        })?;
+        let pool_id = body["UserPoolId"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterException",
+                    "UserPoolId is required",
+                )
+            })?;
 
-        let client_id = body["ClientId"].as_str().ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "InvalidParameterException",
+        let client_id = body["ClientId"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterException",
                 "ClientId is required",
             )
         })?;
@@ -488,21 +494,27 @@ impl CognitoService {
     fn update_user_pool_client(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
 
-        let pool_id = body["UserPoolId"].as_str().ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "InvalidParameterException",
-                "UserPoolId is required",
-            )
-        })?;
+        let pool_id = body["UserPoolId"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterException",
+                    "UserPoolId is required",
+                )
+            })?;
 
-        let client_id = body["ClientId"].as_str().ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "InvalidParameterException",
-                "ClientId is required",
-            )
-        })?;
+        let client_id = body["ClientId"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterException",
+                    "ClientId is required",
+                )
+            })?;
 
         let mut state = self.state.write();
 
@@ -533,6 +545,13 @@ impl CognitoService {
 
         // Update fields that are present
         if let Some(name) = body["ClientName"].as_str() {
+            if name.is_empty() {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterException",
+                    "ClientName cannot be empty",
+                ));
+            }
             client.client_name = name.to_string();
         }
         if body["ExplicitAuthFlows"].is_array() {
@@ -594,21 +613,27 @@ impl CognitoService {
     fn delete_user_pool_client(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
 
-        let pool_id = body["UserPoolId"].as_str().ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "InvalidParameterException",
-                "UserPoolId is required",
-            )
-        })?;
+        let pool_id = body["UserPoolId"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterException",
+                    "UserPoolId is required",
+                )
+            })?;
 
-        let client_id = body["ClientId"].as_str().ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "InvalidParameterException",
-                "ClientId is required",
-            )
-        })?;
+        let client_id = body["ClientId"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterException",
+                    "ClientId is required",
+                )
+            })?;
 
         let mut state = self.state.write();
 
