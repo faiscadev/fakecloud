@@ -155,6 +155,32 @@ pub struct UserPoolClient {
     pub client_id: String,
     pub client_name: String,
     pub user_pool_id: String,
+    pub client_secret: Option<String>,
+    pub explicit_auth_flows: Vec<String>,
+    pub token_validity_units: Option<TokenValidityUnits>,
+    pub access_token_validity: Option<i64>,
+    pub id_token_validity: Option<i64>,
+    pub refresh_token_validity: Option<i64>,
+    pub callback_urls: Vec<String>,
+    pub logout_urls: Vec<String>,
+    pub supported_identity_providers: Vec<String>,
+    pub allowed_o_auth_flows: Vec<String>,
+    pub allowed_o_auth_scopes: Vec<String>,
+    pub allowed_o_auth_flows_user_pool_client: bool,
+    pub prevent_user_existence_errors: Option<String>,
+    pub read_attributes: Vec<String>,
+    pub write_attributes: Vec<String>,
+    pub creation_date: DateTime<Utc>,
+    pub last_modified_date: DateTime<Utc>,
+    pub enable_token_revocation: bool,
+    pub auth_session_validity: Option<i64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TokenValidityUnits {
+    pub access_token: Option<String>,
+    pub id_token: Option<String>,
+    pub refresh_token: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

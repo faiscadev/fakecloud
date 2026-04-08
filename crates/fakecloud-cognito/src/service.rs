@@ -9,7 +9,8 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceErr
 use crate::state::{
     default_schema_attributes, AccountRecoverySetting, AdminCreateUserConfig, EmailConfiguration,
     InviteMessageTemplate, PasswordPolicy, PoolPolicies, RecoveryOption, SchemaAttribute,
-    SharedCognitoState, SmsConfiguration, StringAttributeConstraints, UserPool,
+    SharedCognitoState, SmsConfiguration, StringAttributeConstraints, TokenValidityUnits, UserPool,
+    UserPoolClient,
 };
 
 pub struct CognitoService {
@@ -35,6 +36,11 @@ impl AwsService for CognitoService {
             "UpdateUserPool" => self.update_user_pool(&req),
             "DeleteUserPool" => self.delete_user_pool(&req),
             "ListUserPools" => self.list_user_pools(&req),
+            "CreateUserPoolClient" => self.create_user_pool_client(&req),
+            "DescribeUserPoolClient" => self.describe_user_pool_client(&req),
+            "UpdateUserPoolClient" => self.update_user_pool_client(&req),
+            "DeleteUserPoolClient" => self.delete_user_pool_client(&req),
+            "ListUserPoolClients" => self.list_user_pool_clients(&req),
             _ => Err(AwsServiceError::action_not_implemented(
                 "cognito-idp",
                 &req.action,
@@ -49,6 +55,11 @@ impl AwsService for CognitoService {
             "UpdateUserPool",
             "DeleteUserPool",
             "ListUserPools",
+            "CreateUserPoolClient",
+            "DescribeUserPoolClient",
+            "UpdateUserPoolClient",
+            "DeleteUserPoolClient",
+            "ListUserPoolClients",
         ]
     }
 }
@@ -341,6 +352,357 @@ impl CognitoService {
 
         Ok(AwsResponse::ok_json(response))
     }
+
+    fn create_user_pool_client(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+
+        let pool_id = body["UserPoolId"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterException",
+                    "UserPoolId is required",
+                )
+            })?;
+
+        let client_name = body["ClientName"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterException",
+                    "ClientName is required",
+                )
+            })?;
+
+        let mut state = self.state.write();
+
+        // Validate pool exists
+        if !state.user_pools.contains_key(pool_id) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("User pool {pool_id} does not exist."),
+            ));
+        }
+
+        let client_id = generate_client_id();
+        let generate_secret = body["GenerateSecret"].as_bool().unwrap_or(false);
+        let client_secret = if generate_secret {
+            Some(generate_client_secret())
+        } else {
+            None
+        };
+
+        let now = Utc::now();
+
+        let client = UserPoolClient {
+            client_id: client_id.clone(),
+            client_name: client_name.to_string(),
+            user_pool_id: pool_id.to_string(),
+            client_secret,
+            explicit_auth_flows: parse_string_array(&body["ExplicitAuthFlows"]),
+            token_validity_units: parse_token_validity_units(&body["TokenValidityUnits"]),
+            access_token_validity: body["AccessTokenValidity"].as_i64(),
+            id_token_validity: body["IdTokenValidity"].as_i64(),
+            refresh_token_validity: body["RefreshTokenValidity"].as_i64(),
+            callback_urls: parse_string_array(&body["CallbackURLs"]),
+            logout_urls: parse_string_array(&body["LogoutURLs"]),
+            supported_identity_providers: parse_string_array(&body["SupportedIdentityProviders"]),
+            allowed_o_auth_flows: parse_string_array(&body["AllowedOAuthFlows"]),
+            allowed_o_auth_scopes: parse_string_array(&body["AllowedOAuthScopes"]),
+            allowed_o_auth_flows_user_pool_client: body["AllowedOAuthFlowsUserPoolClient"]
+                .as_bool()
+                .unwrap_or(false),
+            prevent_user_existence_errors: body["PreventUserExistenceErrors"]
+                .as_str()
+                .map(|s| s.to_string()),
+            read_attributes: parse_string_array(&body["ReadAttributes"]),
+            write_attributes: parse_string_array(&body["WriteAttributes"]),
+            creation_date: now,
+            last_modified_date: now,
+            enable_token_revocation: body["EnableTokenRevocation"].as_bool().unwrap_or(true),
+            auth_session_validity: body["AuthSessionValidity"].as_i64(),
+        };
+
+        let response = user_pool_client_to_json(&client);
+        state.user_pool_clients.insert(client_id, client);
+
+        Ok(AwsResponse::ok_json(json!({ "UserPoolClient": response })))
+    }
+
+    fn describe_user_pool_client(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+
+        let pool_id = body["UserPoolId"].as_str().ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterException",
+                "UserPoolId is required",
+            )
+        })?;
+
+        let client_id = body["ClientId"].as_str().ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterException",
+                "ClientId is required",
+            )
+        })?;
+
+        let state = self.state.read();
+
+        // Validate pool exists
+        if !state.user_pools.contains_key(pool_id) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("User pool {pool_id} does not exist."),
+            ));
+        }
+
+        let client = state.user_pool_clients.get(client_id).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("User pool client {client_id} does not exist."),
+            )
+        })?;
+
+        // Validate client belongs to the specified pool
+        if client.user_pool_id != pool_id {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("User pool client {client_id} does not exist."),
+            ));
+        }
+
+        let response = user_pool_client_to_json(client);
+        Ok(AwsResponse::ok_json(json!({ "UserPoolClient": response })))
+    }
+
+    fn update_user_pool_client(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+
+        let pool_id = body["UserPoolId"].as_str().ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterException",
+                "UserPoolId is required",
+            )
+        })?;
+
+        let client_id = body["ClientId"].as_str().ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterException",
+                "ClientId is required",
+            )
+        })?;
+
+        let mut state = self.state.write();
+
+        // Validate pool exists
+        if !state.user_pools.contains_key(pool_id) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("User pool {pool_id} does not exist."),
+            ));
+        }
+
+        let client = state.user_pool_clients.get_mut(client_id).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("User pool client {client_id} does not exist."),
+            )
+        })?;
+
+        if client.user_pool_id != pool_id {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("User pool client {client_id} does not exist."),
+            ));
+        }
+
+        // Update fields that are present
+        if let Some(name) = body["ClientName"].as_str() {
+            client.client_name = name.to_string();
+        }
+        if body["ExplicitAuthFlows"].is_array() {
+            client.explicit_auth_flows = parse_string_array(&body["ExplicitAuthFlows"]);
+        }
+        if body["TokenValidityUnits"].is_object() {
+            client.token_validity_units = parse_token_validity_units(&body["TokenValidityUnits"]);
+        }
+        if let Some(v) = body["AccessTokenValidity"].as_i64() {
+            client.access_token_validity = Some(v);
+        }
+        if let Some(v) = body["IdTokenValidity"].as_i64() {
+            client.id_token_validity = Some(v);
+        }
+        if let Some(v) = body["RefreshTokenValidity"].as_i64() {
+            client.refresh_token_validity = Some(v);
+        }
+        if body["CallbackURLs"].is_array() {
+            client.callback_urls = parse_string_array(&body["CallbackURLs"]);
+        }
+        if body["LogoutURLs"].is_array() {
+            client.logout_urls = parse_string_array(&body["LogoutURLs"]);
+        }
+        if body["SupportedIdentityProviders"].is_array() {
+            client.supported_identity_providers =
+                parse_string_array(&body["SupportedIdentityProviders"]);
+        }
+        if body["AllowedOAuthFlows"].is_array() {
+            client.allowed_o_auth_flows = parse_string_array(&body["AllowedOAuthFlows"]);
+        }
+        if body["AllowedOAuthScopes"].is_array() {
+            client.allowed_o_auth_scopes = parse_string_array(&body["AllowedOAuthScopes"]);
+        }
+        if let Some(v) = body["AllowedOAuthFlowsUserPoolClient"].as_bool() {
+            client.allowed_o_auth_flows_user_pool_client = v;
+        }
+        if let Some(v) = body["PreventUserExistenceErrors"].as_str() {
+            client.prevent_user_existence_errors = Some(v.to_string());
+        }
+        if body["ReadAttributes"].is_array() {
+            client.read_attributes = parse_string_array(&body["ReadAttributes"]);
+        }
+        if body["WriteAttributes"].is_array() {
+            client.write_attributes = parse_string_array(&body["WriteAttributes"]);
+        }
+        if let Some(v) = body["EnableTokenRevocation"].as_bool() {
+            client.enable_token_revocation = v;
+        }
+        if let Some(v) = body["AuthSessionValidity"].as_i64() {
+            client.auth_session_validity = Some(v);
+        }
+
+        client.last_modified_date = Utc::now();
+
+        let response = user_pool_client_to_json(client);
+        Ok(AwsResponse::ok_json(json!({ "UserPoolClient": response })))
+    }
+
+    fn delete_user_pool_client(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+
+        let pool_id = body["UserPoolId"].as_str().ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterException",
+                "UserPoolId is required",
+            )
+        })?;
+
+        let client_id = body["ClientId"].as_str().ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterException",
+                "ClientId is required",
+            )
+        })?;
+
+        let mut state = self.state.write();
+
+        // Validate pool exists
+        if !state.user_pools.contains_key(pool_id) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("User pool {pool_id} does not exist."),
+            ));
+        }
+
+        // Check client exists and belongs to the pool
+        match state.user_pool_clients.get(client_id) {
+            Some(c) if c.user_pool_id == pool_id => {}
+            _ => {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ResourceNotFoundException",
+                    format!("User pool client {client_id} does not exist."),
+                ));
+            }
+        }
+
+        state.user_pool_clients.remove(client_id);
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    fn list_user_pool_clients(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+
+        let pool_id = body["UserPoolId"].as_str().ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterException",
+                "UserPoolId is required",
+            )
+        })?;
+
+        let max_results = body["MaxResults"].as_i64().unwrap_or(60).clamp(1, 60) as usize;
+        let next_token = body["NextToken"].as_str();
+
+        let state = self.state.read();
+
+        // Validate pool exists
+        if !state.user_pools.contains_key(pool_id) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("User pool {pool_id} does not exist."),
+            ));
+        }
+
+        // Filter clients for this pool, sort by creation date
+        let mut clients: Vec<&UserPoolClient> = state
+            .user_pool_clients
+            .values()
+            .filter(|c| c.user_pool_id == pool_id)
+            .collect();
+        clients.sort_by_key(|c| c.creation_date);
+
+        // Find start index from NextToken
+        let start_idx = if let Some(token) = next_token {
+            clients
+                .iter()
+                .position(|c| c.client_id == token)
+                .unwrap_or(0)
+        } else {
+            0
+        };
+
+        let page: Vec<Value> = clients
+            .iter()
+            .skip(start_idx)
+            .take(max_results)
+            .map(|c| {
+                json!({
+                    "ClientId": c.client_id,
+                    "ClientName": c.client_name,
+                    "UserPoolId": c.user_pool_id,
+                })
+            })
+            .collect();
+
+        let has_more = start_idx + max_results < clients.len();
+        let mut response = json!({ "UserPoolClients": page });
+        if has_more {
+            if let Some(last_client) = clients.get(start_idx + max_results) {
+                response["NextToken"] = json!(last_client.client_id);
+            }
+        }
+
+        Ok(AwsResponse::ok_json(response))
+    }
 }
 
 /// Generate a pool ID in the format `{region}_{9 random alphanumeric chars}`.
@@ -354,6 +716,111 @@ fn generate_pool_id(region: &str) -> String {
         .collect();
     // Ensure we always have exactly 9 chars (UUID v4 hex is 32 chars, so this is safe)
     format!("{}_{}", region, random_part)
+}
+
+/// Generate a client ID: 26 lowercase alphanumeric characters (like AWS).
+fn generate_client_id() -> String {
+    // Use two UUIDs to get enough alphanumeric chars (each UUID gives 32 hex chars)
+    let uuid1 = Uuid::new_v4().to_string().replace('-', "");
+    let uuid2 = Uuid::new_v4().to_string().replace('-', "");
+    format!("{}{}", uuid1, uuid2)
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .take(26)
+        .collect::<String>()
+        .to_lowercase()
+}
+
+/// Generate a client secret: 51 base64 characters (like AWS).
+fn generate_client_secret() -> String {
+    use base64::Engine;
+    // Generate enough random bytes via UUIDs to produce 51+ base64 chars
+    let mut bytes = Vec::with_capacity(48);
+    for _ in 0..3 {
+        bytes.extend_from_slice(Uuid::new_v4().as_bytes());
+    }
+    let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    encoded.chars().take(51).collect()
+}
+
+fn parse_token_validity_units(val: &Value) -> Option<TokenValidityUnits> {
+    if !val.is_object() {
+        return None;
+    }
+    Some(TokenValidityUnits {
+        access_token: val["AccessToken"].as_str().map(|s| s.to_string()),
+        id_token: val["IdToken"].as_str().map(|s| s.to_string()),
+        refresh_token: val["RefreshToken"].as_str().map(|s| s.to_string()),
+    })
+}
+
+/// Convert a UserPoolClient to the JSON format AWS returns.
+fn user_pool_client_to_json(client: &UserPoolClient) -> Value {
+    let mut obj = json!({
+        "ClientId": client.client_id,
+        "ClientName": client.client_name,
+        "UserPoolId": client.user_pool_id,
+        "CreationDate": client.creation_date.timestamp() as f64,
+        "LastModifiedDate": client.last_modified_date.timestamp() as f64,
+        "ExplicitAuthFlows": client.explicit_auth_flows,
+        "AllowedOAuthFlowsUserPoolClient": client.allowed_o_auth_flows_user_pool_client,
+        "EnableTokenRevocation": client.enable_token_revocation,
+    });
+
+    if let Some(ref secret) = client.client_secret {
+        obj["ClientSecret"] = json!(secret);
+    }
+    if let Some(ref tvu) = client.token_validity_units {
+        let mut units = json!({});
+        if let Some(ref v) = tvu.access_token {
+            units["AccessToken"] = json!(v);
+        }
+        if let Some(ref v) = tvu.id_token {
+            units["IdToken"] = json!(v);
+        }
+        if let Some(ref v) = tvu.refresh_token {
+            units["RefreshToken"] = json!(v);
+        }
+        obj["TokenValidityUnits"] = units;
+    }
+    if let Some(v) = client.access_token_validity {
+        obj["AccessTokenValidity"] = json!(v);
+    }
+    if let Some(v) = client.id_token_validity {
+        obj["IdTokenValidity"] = json!(v);
+    }
+    if let Some(v) = client.refresh_token_validity {
+        obj["RefreshTokenValidity"] = json!(v);
+    }
+    if !client.callback_urls.is_empty() {
+        obj["CallbackURLs"] = json!(client.callback_urls);
+    }
+    if !client.logout_urls.is_empty() {
+        obj["LogoutURLs"] = json!(client.logout_urls);
+    }
+    if !client.supported_identity_providers.is_empty() {
+        obj["SupportedIdentityProviders"] = json!(client.supported_identity_providers);
+    }
+    if !client.allowed_o_auth_flows.is_empty() {
+        obj["AllowedOAuthFlows"] = json!(client.allowed_o_auth_flows);
+    }
+    if !client.allowed_o_auth_scopes.is_empty() {
+        obj["AllowedOAuthScopes"] = json!(client.allowed_o_auth_scopes);
+    }
+    if let Some(ref v) = client.prevent_user_existence_errors {
+        obj["PreventUserExistenceErrors"] = json!(v);
+    }
+    if !client.read_attributes.is_empty() {
+        obj["ReadAttributes"] = json!(client.read_attributes);
+    }
+    if !client.write_attributes.is_empty() {
+        obj["WriteAttributes"] = json!(client.write_attributes);
+    }
+    if let Some(v) = client.auth_session_validity {
+        obj["AuthSessionValidity"] = json!(v);
+    }
+
+    obj
 }
 
 fn parse_password_policy(val: &Value) -> PasswordPolicy {
@@ -730,6 +1197,255 @@ mod tests {
         match svc.create_user_pool(&req) {
             Err(e) => assert_eq!(e.code(), "InvalidParameterException"),
             Ok(_) => panic!("Expected InvalidParameterException error"),
+        }
+    }
+
+    #[test]
+    fn client_id_format() {
+        let id = generate_client_id();
+        assert_eq!(id.len(), 26, "Client ID should be 26 chars: {id}");
+        assert!(
+            id.chars().all(|c| c.is_ascii_alphanumeric()),
+            "Client ID should be alphanumeric: {id}"
+        );
+        assert!(
+            id.chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()),
+            "Client ID should be lowercase: {id}"
+        );
+    }
+
+    #[test]
+    fn client_id_uniqueness() {
+        let id1 = generate_client_id();
+        let id2 = generate_client_id();
+        assert_ne!(id1, id2, "Client IDs should be unique");
+    }
+
+    #[test]
+    fn client_secret_format() {
+        let secret = generate_client_secret();
+        assert_eq!(
+            secret.len(),
+            51,
+            "Client secret should be 51 chars: {secret}"
+        );
+    }
+
+    #[test]
+    fn client_secret_not_generated_by_default() {
+        let state = std::sync::Arc::new(parking_lot::RwLock::new(crate::state::CognitoState::new(
+            "123456789012",
+            "us-east-1",
+        )));
+        let svc = CognitoService::new(state.clone());
+
+        // First create a pool
+        let create_pool_req = AwsRequest {
+            service: "cognito-idp".to_string(),
+            action: "CreateUserPool".to_string(),
+            region: "us-east-1".to_string(),
+            account_id: "123456789012".to_string(),
+            request_id: "test".to_string(),
+            headers: http::HeaderMap::new(),
+            query_params: std::collections::HashMap::new(),
+            body: bytes::Bytes::from(r#"{"PoolName":"test"}"#),
+            path_segments: vec![],
+            raw_path: "/".to_string(),
+            raw_query: String::new(),
+            method: http::Method::POST,
+            is_query_protocol: false,
+            access_key_id: None,
+        };
+        let pool_resp = svc.create_user_pool(&create_pool_req).unwrap();
+        let pool_json: Value =
+            serde_json::from_str(core::str::from_utf8(&pool_resp.body).unwrap()).unwrap();
+        let pool_id = pool_json["UserPool"]["Id"].as_str().unwrap();
+
+        // Create client without GenerateSecret
+        let req = AwsRequest {
+            service: "cognito-idp".to_string(),
+            action: "CreateUserPoolClient".to_string(),
+            region: "us-east-1".to_string(),
+            account_id: "123456789012".to_string(),
+            request_id: "test".to_string(),
+            headers: http::HeaderMap::new(),
+            query_params: std::collections::HashMap::new(),
+            body: bytes::Bytes::from(
+                serde_json::to_string(&json!({
+                    "UserPoolId": pool_id,
+                    "ClientName": "test-client"
+                }))
+                .unwrap(),
+            ),
+            path_segments: vec![],
+            raw_path: "/".to_string(),
+            raw_query: String::new(),
+            method: http::Method::POST,
+            is_query_protocol: false,
+            access_key_id: None,
+        };
+        let resp = svc.create_user_pool_client(&req).unwrap();
+        let resp_json: Value =
+            serde_json::from_str(core::str::from_utf8(&resp.body).unwrap()).unwrap();
+        assert!(resp_json["UserPoolClient"]["ClientSecret"].is_null());
+    }
+
+    #[test]
+    fn client_secret_generated_when_requested() {
+        let state = std::sync::Arc::new(parking_lot::RwLock::new(crate::state::CognitoState::new(
+            "123456789012",
+            "us-east-1",
+        )));
+        let svc = CognitoService::new(state.clone());
+
+        // Create a pool
+        let create_pool_req = AwsRequest {
+            service: "cognito-idp".to_string(),
+            action: "CreateUserPool".to_string(),
+            region: "us-east-1".to_string(),
+            account_id: "123456789012".to_string(),
+            request_id: "test".to_string(),
+            headers: http::HeaderMap::new(),
+            query_params: std::collections::HashMap::new(),
+            body: bytes::Bytes::from(r#"{"PoolName":"test"}"#),
+            path_segments: vec![],
+            raw_path: "/".to_string(),
+            raw_query: String::new(),
+            method: http::Method::POST,
+            is_query_protocol: false,
+            access_key_id: None,
+        };
+        let pool_resp = svc.create_user_pool(&create_pool_req).unwrap();
+        let pool_json: Value =
+            serde_json::from_str(core::str::from_utf8(&pool_resp.body).unwrap()).unwrap();
+        let pool_id = pool_json["UserPool"]["Id"].as_str().unwrap();
+
+        // Create client with GenerateSecret=true
+        let req = AwsRequest {
+            service: "cognito-idp".to_string(),
+            action: "CreateUserPoolClient".to_string(),
+            region: "us-east-1".to_string(),
+            account_id: "123456789012".to_string(),
+            request_id: "test".to_string(),
+            headers: http::HeaderMap::new(),
+            query_params: std::collections::HashMap::new(),
+            body: bytes::Bytes::from(
+                serde_json::to_string(&json!({
+                    "UserPoolId": pool_id,
+                    "ClientName": "secret-client",
+                    "GenerateSecret": true
+                }))
+                .unwrap(),
+            ),
+            path_segments: vec![],
+            raw_path: "/".to_string(),
+            raw_query: String::new(),
+            method: http::Method::POST,
+            is_query_protocol: false,
+            access_key_id: None,
+        };
+        let resp = svc.create_user_pool_client(&req).unwrap();
+        let resp_json: Value =
+            serde_json::from_str(core::str::from_utf8(&resp.body).unwrap()).unwrap();
+        let secret = resp_json["UserPoolClient"]["ClientSecret"]
+            .as_str()
+            .unwrap();
+        assert_eq!(secret.len(), 51);
+    }
+
+    #[test]
+    fn client_belongs_to_correct_pool() {
+        let state = std::sync::Arc::new(parking_lot::RwLock::new(crate::state::CognitoState::new(
+            "123456789012",
+            "us-east-1",
+        )));
+        let svc = CognitoService::new(state.clone());
+
+        // Create two pools
+        for name in &["pool-a", "pool-b"] {
+            let req = AwsRequest {
+                service: "cognito-idp".to_string(),
+                action: "CreateUserPool".to_string(),
+                region: "us-east-1".to_string(),
+                account_id: "123456789012".to_string(),
+                request_id: "test".to_string(),
+                headers: http::HeaderMap::new(),
+                query_params: std::collections::HashMap::new(),
+                body: bytes::Bytes::from(
+                    serde_json::to_string(&json!({"PoolName": name})).unwrap(),
+                ),
+                path_segments: vec![],
+                raw_path: "/".to_string(),
+                raw_query: String::new(),
+                method: http::Method::POST,
+                is_query_protocol: false,
+                access_key_id: None,
+            };
+            svc.create_user_pool(&req).unwrap();
+        }
+
+        let s = state.read();
+        let pool_ids: Vec<String> = s.user_pools.keys().cloned().collect();
+        drop(s);
+
+        // Create client in pool A
+        let req = AwsRequest {
+            service: "cognito-idp".to_string(),
+            action: "CreateUserPoolClient".to_string(),
+            region: "us-east-1".to_string(),
+            account_id: "123456789012".to_string(),
+            request_id: "test".to_string(),
+            headers: http::HeaderMap::new(),
+            query_params: std::collections::HashMap::new(),
+            body: bytes::Bytes::from(
+                serde_json::to_string(&json!({
+                    "UserPoolId": pool_ids[0],
+                    "ClientName": "client-a"
+                }))
+                .unwrap(),
+            ),
+            path_segments: vec![],
+            raw_path: "/".to_string(),
+            raw_query: String::new(),
+            method: http::Method::POST,
+            is_query_protocol: false,
+            access_key_id: None,
+        };
+        let resp = svc.create_user_pool_client(&req).unwrap();
+        let resp_json: Value =
+            serde_json::from_str(core::str::from_utf8(&resp.body).unwrap()).unwrap();
+        let client_id = resp_json["UserPoolClient"]["ClientId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // Describe client with pool B should fail
+        let req = AwsRequest {
+            service: "cognito-idp".to_string(),
+            action: "DescribeUserPoolClient".to_string(),
+            region: "us-east-1".to_string(),
+            account_id: "123456789012".to_string(),
+            request_id: "test".to_string(),
+            headers: http::HeaderMap::new(),
+            query_params: std::collections::HashMap::new(),
+            body: bytes::Bytes::from(
+                serde_json::to_string(&json!({
+                    "UserPoolId": pool_ids[1],
+                    "ClientId": client_id
+                }))
+                .unwrap(),
+            ),
+            path_segments: vec![],
+            raw_path: "/".to_string(),
+            raw_query: String::new(),
+            method: http::Method::POST,
+            is_query_protocol: false,
+            access_key_id: None,
+        };
+        match svc.describe_user_pool_client(&req) {
+            Err(e) => assert_eq!(e.code(), "ResourceNotFoundException"),
+            Ok(_) => panic!("Expected ResourceNotFoundException"),
         }
     }
 }
