@@ -618,15 +618,61 @@ async fn sns_confirm_subscription() {
         .unwrap();
     let topic_arn = topic.topic_arn().unwrap().to_string();
 
-    // ConfirmSubscription with a fake token should succeed (stub)
+    // Subscribe an HTTP endpoint (starts as pending confirmation)
+    client
+        .subscribe()
+        .topic_arn(&topic_arn)
+        .protocol("http")
+        .endpoint("http://example.com/hook")
+        .send()
+        .await
+        .unwrap();
+
+    // Get the token from the pending-confirmations simulation endpoint
+    let http = reqwest::Client::new();
+    let pending_url = format!(
+        "{}/_fakecloud/sns/pending-confirmations",
+        server.endpoint()
+    );
+    let pending: serde_json::Value = http
+        .get(&pending_url)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let token = pending["pendingConfirmations"][0]["token"]
+        .as_str()
+        .expect("pending subscription should have a token")
+        .to_string();
+
+    // ConfirmSubscription with the real token
     let resp = client
         .confirm_subscription()
         .topic_arn(&topic_arn)
-        .token("fake-confirmation-token")
+        .token(&token)
         .send()
         .await
         .unwrap();
     assert!(resp.subscription_arn().is_some());
+
+    // Verify no more pending confirmations
+    let pending: serde_json::Value = http
+        .get(&pending_url)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        pending["pendingConfirmations"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "subscription should no longer be pending after confirmation"
+    );
 }
 
 /// Regression: binary message attributes should be preserved when delivered to SQS

@@ -668,6 +668,13 @@ impl SnsService {
             "pending confirmation".to_string()
         };
 
+        // Generate a confirmation token for pending subscriptions
+        let confirmation_token = if !confirmed {
+            Some(uuid::Uuid::new_v4().to_string())
+        } else {
+            None
+        };
+
         let sub = SnsSubscription {
             subscription_arn: sub_arn.clone(),
             topic_arn,
@@ -676,6 +683,7 @@ impl SnsService {
             owner: account_id,
             attributes,
             confirmed,
+            confirmation_token,
         };
 
         state.subscriptions.insert(sub_arn.clone(), sub);
@@ -698,15 +706,25 @@ impl SnsService {
 
     fn confirm_subscription(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let topic_arn = required(req, "TopicArn")?;
-        let _token = required(req, "Token")?;
+        let token = required(req, "Token")?;
 
         let mut state = self.state.write();
         let sub_arn = state
             .subscriptions
             .values()
-            .find(|s| s.topic_arn == topic_arn && !s.confirmed)
+            .find(|s| {
+                s.topic_arn == topic_arn
+                    && !s.confirmed
+                    && s.confirmation_token.as_deref() == Some(&token)
+            })
             .map(|s| s.subscription_arn.clone())
-            .unwrap_or_else(|| format!("{}:{}", topic_arn, uuid::Uuid::new_v4()));
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::NOT_FOUND,
+                    "NotFound",
+                    format!("No pending subscription found for token: {token}"),
+                )
+            })?;
 
         // Mark the subscription as confirmed
         if let Some(sub) = state.subscriptions.get_mut(&sub_arn) {
@@ -4404,13 +4422,36 @@ mod tests {
 
     #[test]
     fn confirm_subscription_returns_arn() {
-        let (svc, _state) = make_sns();
+        let (svc, state) = make_sns();
         assert_ok(&svc.create_topic(&sns_request("CreateTopic", vec![("Name", "confirm-topic")])));
 
         let topic_arn = "arn:aws:sns:us-east-1:123456789012:confirm-topic";
+
+        // Subscribe an HTTP endpoint (starts as pending)
+        assert_ok(&svc.subscribe(&sns_request(
+            "Subscribe",
+            vec![
+                ("TopicArn", topic_arn),
+                ("Protocol", "http"),
+                ("Endpoint", "http://example.com/hook"),
+            ],
+        )));
+
+        // Get the token from the pending subscription
+        let token = {
+            let s = state.read();
+            s.subscriptions
+                .values()
+                .find(|sub| sub.topic_arn == topic_arn && !sub.confirmed)
+                .expect("should have a pending subscription")
+                .confirmation_token
+                .clone()
+                .expect("pending subscription should have a token")
+        };
+
         let req = sns_request(
             "ConfirmSubscription",
-            vec![("TopicArn", topic_arn), ("Token", "fake-token")],
+            vec![("TopicArn", topic_arn), ("Token", &token)],
         );
         let result = svc.confirm_subscription(&req);
         assert_ok(&result);
@@ -4419,6 +4460,104 @@ mod tests {
             body.contains("<SubscriptionArn>"),
             "Should return a SubscriptionArn"
         );
+
+        // Verify the subscription is now confirmed
+        let s = state.read();
+        let sub = s
+            .subscriptions
+            .values()
+            .find(|sub| sub.topic_arn == topic_arn)
+            .expect("subscription should exist");
+        assert!(sub.confirmed, "subscription should be confirmed");
+    }
+
+    #[test]
+    fn confirm_subscription_rejects_invalid_token() {
+        let (svc, _state) = make_sns();
+        assert_ok(&svc.create_topic(&sns_request("CreateTopic", vec![("Name", "confirm-topic")])));
+
+        let topic_arn = "arn:aws:sns:us-east-1:123456789012:confirm-topic";
+
+        // Subscribe an HTTP endpoint (starts as pending)
+        assert_ok(&svc.subscribe(&sns_request(
+            "Subscribe",
+            vec![
+                ("TopicArn", topic_arn),
+                ("Protocol", "http"),
+                ("Endpoint", "http://example.com/hook"),
+            ],
+        )));
+
+        // Try to confirm with wrong token
+        let req = sns_request(
+            "ConfirmSubscription",
+            vec![("TopicArn", topic_arn), ("Token", "wrong-token")],
+        );
+        let result = svc.confirm_subscription(&req);
+        assert!(result.is_err(), "Should reject invalid token");
+    }
+
+    #[test]
+    fn confirm_subscription_matches_correct_pending_sub() {
+        let (svc, state) = make_sns();
+        assert_ok(&svc.create_topic(&sns_request("CreateTopic", vec![("Name", "multi-topic")])));
+
+        let topic_arn = "arn:aws:sns:us-east-1:123456789012:multi-topic";
+
+        // Subscribe two HTTP endpoints (both start as pending)
+        assert_ok(&svc.subscribe(&sns_request(
+            "Subscribe",
+            vec![
+                ("TopicArn", topic_arn),
+                ("Protocol", "http"),
+                ("Endpoint", "http://first.example.com/hook"),
+            ],
+        )));
+        assert_ok(&svc.subscribe(&sns_request(
+            "Subscribe",
+            vec![
+                ("TopicArn", topic_arn),
+                ("Protocol", "http"),
+                ("Endpoint", "http://second.example.com/hook"),
+            ],
+        )));
+
+        // Get the token for the second subscription
+        let (second_arn, second_token) = {
+            let s = state.read();
+            let sub = s
+                .subscriptions
+                .values()
+                .find(|sub| sub.endpoint == "http://second.example.com/hook")
+                .expect("should have second subscription");
+            (
+                sub.subscription_arn.clone(),
+                sub.confirmation_token.clone().unwrap(),
+            )
+        };
+
+        // Confirm using the second subscription's token
+        let req = sns_request(
+            "ConfirmSubscription",
+            vec![("TopicArn", topic_arn), ("Token", &second_token)],
+        );
+        let result = svc.confirm_subscription(&req);
+        assert_ok(&result);
+        let body = response_body(&result);
+        assert!(
+            body.contains(&second_arn),
+            "Should return the second subscription's ARN"
+        );
+
+        // Verify only the second subscription is confirmed
+        let s = state.read();
+        for sub in s.subscriptions.values() {
+            if sub.endpoint == "http://second.example.com/hook" {
+                assert!(sub.confirmed, "second subscription should be confirmed");
+            } else {
+                assert!(!sub.confirmed, "first subscription should still be pending");
+            }
+        }
     }
 
     // --- CreateTopic / DeleteTopic / ListTopics ---

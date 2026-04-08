@@ -22,6 +22,8 @@ pub struct SnsSubscription {
     pub owner: String,
     pub attributes: HashMap<String, String>,
     pub confirmed: bool,
+    /// Token used for HTTP/HTTPS subscription confirmation.
+    pub confirmation_token: Option<String>,
 }
 
 /// An SNS message attribute (key-value with a data type).

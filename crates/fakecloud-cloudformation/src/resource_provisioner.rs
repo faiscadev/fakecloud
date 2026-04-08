@@ -230,6 +230,7 @@ impl ResourceProvisioner {
             owner: state.account_id.clone(),
             attributes: HashMap::new(),
             confirmed: true,
+            confirmation_token: None,
         };
 
         state.subscriptions.insert(sub_arn.clone(), subscription);

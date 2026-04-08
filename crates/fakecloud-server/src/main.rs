@@ -792,6 +792,7 @@ async fn main() {
                                 "topicArn": p.topic_arn,
                                 "protocol": p.protocol,
                                 "endpoint": p.endpoint,
+                                "token": p.token,
                             })
                         })
                         .collect();

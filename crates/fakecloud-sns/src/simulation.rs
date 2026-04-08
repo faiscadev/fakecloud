@@ -7,6 +7,7 @@ pub struct PendingConfirmation {
     pub topic_arn: String,
     pub protocol: String,
     pub endpoint: String,
+    pub token: Option<String>,
 }
 
 /// List all subscriptions that are pending confirmation.
@@ -20,6 +21,7 @@ pub fn list_pending_confirmations(state: &SharedSnsState) -> Vec<PendingConfirma
             topic_arn: sub.topic_arn.clone(),
             protocol: sub.protocol.clone(),
             endpoint: sub.endpoint.clone(),
+            token: sub.confirmation_token.clone(),
         })
         .collect()
 }
@@ -72,6 +74,11 @@ mod tests {
                 owner: "123456789012".to_string(),
                 attributes: HashMap::new(),
                 confirmed,
+                confirmation_token: if confirmed {
+                    None
+                } else {
+                    Some(uuid::Uuid::new_v4().to_string())
+                },
             },
         );
         sub_arn
