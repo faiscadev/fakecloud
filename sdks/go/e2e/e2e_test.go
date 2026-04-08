@@ -1,4 +1,4 @@
-package fakecloud
+package e2e
 
 import (
 	"bytes"
@@ -28,6 +28,8 @@ import (
 	sestypes "github.com/aws/aws-sdk-go-v2/service/sesv2/types"
 	"github.com/aws/aws-sdk-go-v2/service/sns"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
+
+	fakecloud "github.com/faiscadev/fakecloud/sdks/go"
 )
 
 var (
@@ -42,7 +44,7 @@ func TestMain(m *testing.M) {
 
 	// Find the fakecloud binary
 	_, thisFile, _, _ := runtime.Caller(0)
-	repoRoot := filepath.Join(filepath.Dir(thisFile), "..", "..")
+	repoRoot := filepath.Join(filepath.Dir(thisFile), "..", "..", "..")
 	binary := filepath.Join(repoRoot, "target", "release", "fakecloud")
 
 	if _, err := os.Stat(binary); os.IsNotExist(err) {
@@ -100,7 +102,7 @@ func waitForReady(baseURL string, timeout time.Duration) error {
 
 func resetState(t *testing.T) {
 	t.Helper()
-	fc := New(fakecloudURL)
+	fc := fakecloud.New(fakecloudURL)
 	if err := fc.Reset(context.Background()); err != nil {
 		t.Fatalf("failed to reset fakecloud state: %v", err)
 	}
@@ -121,7 +123,7 @@ func awsConfig(t *testing.T) aws.Config {
 // ── Health ────────────────────────────────────────────────────────
 
 func TestE2EHealth(t *testing.T) {
-	fc := New(fakecloudURL)
+	fc := fakecloud.New(fakecloudURL)
 	resp, err := fc.Health(context.Background())
 	if err != nil {
 		t.Fatalf("Health() failed: %v", err)
@@ -152,7 +154,7 @@ func TestE2EReset(t *testing.T) {
 	}
 
 	// Verify queue exists via introspection
-	fc := New(fakecloudURL)
+	fc := fakecloud.New(fakecloudURL)
 	msgs, err := fc.SQS().GetMessages(ctx)
 	if err != nil {
 		t.Fatalf("GetMessages failed: %v", err)
@@ -213,7 +215,7 @@ func TestE2ESQS(t *testing.T) {
 	}
 
 	// Verify via introspection
-	fc := New(fakecloudURL)
+	fc := fakecloud.New(fakecloudURL)
 	msgs, err := fc.SQS().GetMessages(ctx)
 	if err != nil {
 		t.Fatalf("SQS().GetMessages() failed: %v", err)
@@ -264,7 +266,7 @@ func TestE2ESNS(t *testing.T) {
 	}
 
 	// Verify via introspection
-	fc := New(fakecloudURL)
+	fc := fakecloud.New(fakecloudURL)
 	resp, err := fc.SNS().GetMessages(ctx)
 	if err != nil {
 		t.Fatalf("SNS().GetMessages() failed: %v", err)
@@ -315,7 +317,7 @@ func TestE2ESES(t *testing.T) {
 	}
 
 	// Verify via introspection
-	fc := New(fakecloudURL)
+	fc := fakecloud.New(fakecloudURL)
 	resp, err := fc.SES().GetEmails(ctx)
 	if err != nil {
 		t.Fatalf("SES().GetEmails() failed: %v", err)
@@ -369,7 +371,7 @@ func TestE2ES3(t *testing.T) {
 	}
 
 	// Verify via introspection
-	fc := New(fakecloudURL)
+	fc := fakecloud.New(fakecloudURL)
 	resp, err := fc.S3().GetNotifications(ctx)
 	if err != nil {
 		t.Fatalf("S3().GetNotifications() failed: %v", err)
@@ -421,7 +423,7 @@ func TestE2EDynamoDB(t *testing.T) {
 	}
 
 	// Tick TTL processor (should succeed even with no TTL configured)
-	fc := New(fakecloudURL)
+	fc := fakecloud.New(fakecloudURL)
 	resp, err := fc.DynamoDB().TickTTL(ctx)
 	if err != nil {
 		t.Fatalf("DynamoDB().TickTTL() failed: %v", err)
@@ -492,7 +494,7 @@ func TestE2ECognito(t *testing.T) {
 	}
 
 	// Check confirmation codes via introspection
-	fc := New(fakecloudURL)
+	fc := fakecloud.New(fakecloudURL)
 	codesResp, err := fc.Cognito().GetConfirmationCodes(ctx)
 	if err != nil {
 		t.Fatalf("Cognito().GetConfirmationCodes() failed: %v", err)
@@ -544,7 +546,7 @@ func TestE2EEventBridge(t *testing.T) {
 	}
 
 	// Verify via introspection
-	fc := New(fakecloudURL)
+	fc := fakecloud.New(fakecloudURL)
 	resp, err := fc.Events().GetHistory(ctx)
 	if err != nil {
 		t.Fatalf("Events().GetHistory() failed: %v", err)
