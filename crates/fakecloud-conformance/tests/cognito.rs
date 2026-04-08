@@ -2368,7 +2368,10 @@ async fn cognito_update_identity_provider() {
         .unwrap();
     let idp = resp.identity_provider().unwrap();
     assert_eq!(
-        idp.provider_details().unwrap().get("client_id").map(|v| v.as_str()),
+        idp.provider_details()
+            .unwrap()
+            .get("client_id")
+            .map(|v| v.as_str()),
         Some("updated-client")
     );
 }
