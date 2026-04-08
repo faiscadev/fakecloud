@@ -1,0 +1,48 @@
+name: SDK Go
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "sdks/go/**"
+  pull_request:
+    branches: [main]
+    paths:
+      - "sdks/go/**"
+
+defaults:
+  run:
+    working-directory: sdks/go
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+          cache-dependency-path: sdks/go/go.sum
+      - run: go build ./...
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+          cache-dependency-path: sdks/go/go.sum
+      - run: go test ./...
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+          cache-dependency-path: sdks/go/go.sum
+      - uses: golangci/golangci-lint-action@v6
+        with:
+          working-directory: sdks/go
