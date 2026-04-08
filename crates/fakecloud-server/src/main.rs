@@ -330,7 +330,19 @@ async fn main() {
     registry.register(Arc::new(
         SesV2Service::new(ses_state).with_delivery(ses_delivery_ctx),
     ));
-    registry.register(Arc::new(CognitoService::new(cognito_state.clone())));
+    let delivery_for_cognito = {
+        let mut bus = DeliveryBus::new();
+        if let Some(ref ld) = lambda_delivery {
+            bus = bus.with_lambda(ld.clone());
+        }
+        Arc::new(bus)
+    };
+    let cognito_delivery_ctx = fakecloud_cognito::triggers::CognitoDeliveryContext {
+        delivery_bus: delivery_for_cognito,
+    };
+    registry.register(Arc::new(
+        CognitoService::new(cognito_state.clone()).with_delivery(cognito_delivery_ctx),
+    ));
 
     // Spawn background tasks
     let lifecycle_processor = fakecloud_s3::lifecycle::LifecycleProcessor::new(s3_state);

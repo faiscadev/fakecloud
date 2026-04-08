@@ -19,14 +19,25 @@ use crate::state::{
     StringAttributeConstraints, TokenValidityUnits, User, UserAttribute, UserImportJob, UserPool,
     UserPoolClient, UserPoolDomain,
 };
+use crate::triggers::{self, CognitoDeliveryContext, TriggerSource};
 
 pub struct CognitoService {
     state: SharedCognitoState,
+    delivery_ctx: Option<CognitoDeliveryContext>,
 }
 
 impl CognitoService {
     pub fn new(state: SharedCognitoState) -> Self {
-        Self { state }
+        Self {
+            state,
+            delivery_ctx: None,
+        }
+    }
+
+    /// Attach a delivery context for Lambda trigger invocation.
+    pub fn with_delivery(mut self, ctx: CognitoDeliveryContext) -> Self {
+        self.delivery_ctx = Some(ctx);
+        self
     }
 }
 
@@ -48,7 +59,7 @@ impl AwsService for CognitoService {
             "UpdateUserPoolClient" => self.update_user_pool_client(&req),
             "DeleteUserPoolClient" => self.delete_user_pool_client(&req),
             "ListUserPoolClients" => self.list_user_pool_clients(&req),
-            "AdminCreateUser" => self.admin_create_user(&req),
+            "AdminCreateUser" => self.admin_create_user(&req).await,
             "AdminGetUser" => self.admin_get_user(&req),
             "AdminDeleteUser" => self.admin_delete_user(&req),
             "AdminDisableUser" => self.admin_disable_user(&req),
@@ -57,15 +68,15 @@ impl AwsService for CognitoService {
             "AdminDeleteUserAttributes" => self.admin_delete_user_attributes(&req),
             "ListUsers" => self.list_users(&req),
             "AdminSetUserPassword" => self.admin_set_user_password(&req),
-            "AdminInitiateAuth" => self.admin_initiate_auth(&req),
-            "InitiateAuth" => self.initiate_auth(&req),
+            "AdminInitiateAuth" => self.admin_initiate_auth(&req).await,
+            "InitiateAuth" => self.initiate_auth(&req).await,
             "RespondToAuthChallenge" => self.respond_to_auth_challenge(&req),
             "AdminRespondToAuthChallenge" => self.admin_respond_to_auth_challenge(&req),
-            "SignUp" => self.sign_up(&req),
-            "ConfirmSignUp" => self.confirm_sign_up(&req),
-            "AdminConfirmSignUp" => self.admin_confirm_sign_up(&req),
+            "SignUp" => self.sign_up(&req).await,
+            "ConfirmSignUp" => self.confirm_sign_up(&req).await,
+            "AdminConfirmSignUp" => self.admin_confirm_sign_up(&req).await,
             "ChangePassword" => self.change_password(&req),
-            "ForgotPassword" => self.forgot_password(&req),
+            "ForgotPassword" => self.forgot_password(&req).await,
             "ConfirmForgotPassword" => self.confirm_forgot_password(&req),
             "AdminResetUserPassword" => self.admin_reset_user_password(&req),
             "GlobalSignOut" => self.global_sign_out(&req),
@@ -901,7 +912,7 @@ impl CognitoService {
         Ok(AwsResponse::ok_json(response))
     }
 
-    fn admin_create_user(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+    async fn admin_create_user(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
 
         let pool_id = body["UserPoolId"]
@@ -926,63 +937,110 @@ impl CognitoService {
                 )
             })?;
 
-        let mut state = self.state.write();
+        let (response, user_clone, region, account_id, pool_id_owned, username_owned) = {
+            let mut state = self.state.write();
 
-        // Validate pool exists
-        if !state.user_pools.contains_key(pool_id) {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "ResourceNotFoundException",
-                format!("User pool {pool_id} does not exist."),
-            ));
-        }
+            // Validate pool exists
+            if !state.user_pools.contains_key(pool_id) {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ResourceNotFoundException",
+                    format!("User pool {pool_id} does not exist."),
+                ));
+            }
 
-        // Check username doesn't already exist
-        let pool_users = state.users.entry(pool_id.to_string()).or_default();
-        if pool_users.contains_key(username) {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "UsernameExistsException",
-                "User account already exists.",
-            ));
-        }
+            // Check username doesn't already exist
+            let pool_users = state.users.entry(pool_id.to_string()).or_default();
+            if pool_users.contains_key(username) {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "UsernameExistsException",
+                    "User account already exists.",
+                ));
+            }
 
-        let now = Utc::now();
-        let sub = Uuid::new_v4().to_string();
+            let now = Utc::now();
+            let sub_val = Uuid::new_v4().to_string();
 
-        // Parse user attributes
-        let mut attributes = parse_user_attributes(&body["UserAttributes"]);
+            // Parse user attributes
+            let mut attributes = parse_user_attributes(&body["UserAttributes"]);
 
-        // Ensure sub attribute is present
-        if !attributes.iter().any(|a| a.name == "sub") {
-            attributes.push(UserAttribute {
-                name: "sub".to_string(),
-                value: sub.clone(),
-            });
-        }
+            // Ensure sub attribute is present
+            if !attributes.iter().any(|a| a.name == "sub") {
+                attributes.push(UserAttribute {
+                    name: "sub".to_string(),
+                    value: sub_val.clone(),
+                });
+            }
 
-        let temporary_password = body["TemporaryPassword"].as_str().map(|s| s.to_string());
+            let temporary_password = body["TemporaryPassword"].as_str().map(|s| s.to_string());
 
-        let user = User {
-            username: username.to_string(),
-            sub: sub.clone(),
-            attributes,
-            enabled: true,
-            user_status: "FORCE_CHANGE_PASSWORD".to_string(),
-            user_create_date: now,
-            user_last_modified_date: now,
-            password: None,
-            temporary_password,
-            confirmation_code: None,
-            attribute_verification_codes: HashMap::new(),
-            mfa_preferences: None,
-            totp_secret: None,
-            totp_verified: false,
-            devices: HashMap::new(),
+            let user = User {
+                username: username.to_string(),
+                sub: sub_val,
+                attributes,
+                enabled: true,
+                user_status: "FORCE_CHANGE_PASSWORD".to_string(),
+                user_create_date: now,
+                user_last_modified_date: now,
+                password: None,
+                temporary_password,
+                confirmation_code: None,
+                attribute_verification_codes: HashMap::new(),
+                mfa_preferences: None,
+                totp_secret: None,
+                totp_verified: false,
+                devices: HashMap::new(),
+            };
+
+            let resp = user_to_json(&user);
+            let uc = user.clone();
+            pool_users.insert(username.to_string(), user);
+
+            let region = state.region.clone();
+            let account_id = state.account_id.clone();
+
+            (
+                resp,
+                uc,
+                region,
+                account_id,
+                pool_id.to_string(),
+                username.to_string(),
+            )
         };
 
-        let response = user_to_json(&user);
-        pool_users.insert(username.to_string(), user);
+        // PreSignUp_AdminCreateUser trigger (synchronous)
+        if let Some(ref ctx) = self.delivery_ctx {
+            if let Some(function_arn) = triggers::get_trigger_arn(
+                &self.state,
+                &pool_id_owned,
+                TriggerSource::PreSignUpAdminCreateUser,
+            ) {
+                let event = triggers::build_trigger_event(
+                    TriggerSource::PreSignUpAdminCreateUser,
+                    &pool_id_owned,
+                    None,
+                    &username_owned,
+                    &triggers::collect_user_attributes(&user_clone),
+                    &region,
+                    &account_id,
+                );
+                if let Some(response) = triggers::invoke_trigger(ctx, &function_arn, &event).await {
+                    if response["response"]["autoConfirmUser"].as_bool() == Some(true) {
+                        let mut state = self.state.write();
+                        if let Some(u) = state
+                            .users
+                            .get_mut(&pool_id_owned)
+                            .and_then(|users| users.get_mut(&username_owned))
+                        {
+                            u.user_status = "CONFIRMED".to_string();
+                            u.user_last_modified_date = Utc::now();
+                        }
+                    }
+                }
+            }
+        }
 
         Ok(AwsResponse::ok_json(json!({ "User": response })))
     }
@@ -1429,7 +1487,7 @@ impl CognitoService {
         Ok(AwsResponse::ok_json(json!({})))
     }
 
-    fn admin_initiate_auth(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+    async fn admin_initiate_auth(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
 
         let pool_id = require_str(&body, "UserPoolId")?;
@@ -1477,155 +1535,217 @@ impl CognitoService {
                 )
             })?;
 
-        let mut state = self.state.write();
+        let (
+            tokens,
+            user_attrs,
+            region,
+            account_id,
+            pool_id_owned,
+            username_owned,
+            client_id_owned,
+        ) = {
+            let mut state = self.state.write();
 
-        // Validate pool exists
-        if !state.user_pools.contains_key(pool_id) {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "ResourceNotFoundException",
-                format!("User pool {pool_id} does not exist."),
-            ));
-        }
+            // Validate pool exists
+            if !state.user_pools.contains_key(pool_id) {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ResourceNotFoundException",
+                    format!("User pool {pool_id} does not exist."),
+                ));
+            }
 
-        // Validate client exists and belongs to pool
-        let client = state.user_pool_clients.get(client_id).ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "ResourceNotFoundException",
-                format!("User pool client {client_id} does not exist."),
-            )
-        })?;
-        if client.user_pool_id != pool_id {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "ResourceNotFoundException",
-                format!("User pool client {client_id} does not exist."),
-            ));
-        }
-
-        // Validate ExplicitAuthFlows allows this auth flow
-        let allowed = match auth_flow {
-            "ADMIN_NO_SRP_AUTH" => client
-                .explicit_auth_flows
-                .iter()
-                .any(|f| f == "ADMIN_NO_SRP_AUTH" || f == "ALLOW_ADMIN_USER_PASSWORD_AUTH"),
-            "ADMIN_USER_PASSWORD_AUTH" => client
-                .explicit_auth_flows
-                .iter()
-                .any(|f| f == "ADMIN_USER_PASSWORD_AUTH" || f == "ALLOW_ADMIN_USER_PASSWORD_AUTH"),
-            _ => false,
-        };
-        if !allowed {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "InvalidParameterException",
-                "Client is not allowed for this auth flow.",
-            ));
-        }
-
-        // Validate user exists and is enabled
-        let user = state
-            .users
-            .get(pool_id)
-            .and_then(|users| users.get(username))
-            .ok_or_else(|| {
+            // Validate client exists and belongs to pool
+            let client = state.user_pool_clients.get(client_id).ok_or_else(|| {
                 AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
-                    "UserNotFoundException",
-                    "User does not exist.",
+                    "ResourceNotFoundException",
+                    format!("User pool client {client_id} does not exist."),
                 )
             })?;
+            if client.user_pool_id != pool_id {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ResourceNotFoundException",
+                    format!("User pool client {client_id} does not exist."),
+                ));
+            }
 
-        if !user.enabled {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "NotAuthorizedException",
-                "User is disabled.",
-            ));
-        }
+            // Validate ExplicitAuthFlows allows this auth flow
+            let allowed = match auth_flow {
+                "ADMIN_NO_SRP_AUTH" => client
+                    .explicit_auth_flows
+                    .iter()
+                    .any(|f| f == "ADMIN_NO_SRP_AUTH" || f == "ALLOW_ADMIN_USER_PASSWORD_AUTH"),
+                "ADMIN_USER_PASSWORD_AUTH" => client.explicit_auth_flows.iter().any(|f| {
+                    f == "ADMIN_USER_PASSWORD_AUTH" || f == "ALLOW_ADMIN_USER_PASSWORD_AUTH"
+                }),
+                _ => false,
+            };
+            if !allowed {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterException",
+                    "Client is not allowed for this auth flow.",
+                ));
+            }
 
-        // Validate password
-        let password_matches = match (&user.password, &user.temporary_password) {
-            (Some(p), _) if p == password => true,
-            (_, Some(tp)) if tp == password => true,
-            _ => false,
-        };
-        if !password_matches {
+            // Validate user exists and is enabled
+            let user = state
+                .users
+                .get(pool_id)
+                .and_then(|users| users.get(username))
+                .ok_or_else(|| {
+                    AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "UserNotFoundException",
+                        "User does not exist.",
+                    )
+                })?;
+
+            if !user.enabled {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "NotAuthorizedException",
+                    "User is disabled.",
+                ));
+            }
+
+            // Collect user attributes for triggers
+            let user_attrs = triggers::collect_user_attributes(user);
+            let region = state.region.clone();
+            let account_id = state.account_id.clone();
+
+            // Validate password
+            let password_matches = match (&user.password, &user.temporary_password) {
+                (Some(p), _) if p == password => true,
+                (_, Some(tp)) if tp == password => true,
+                _ => false,
+            };
+            if !password_matches {
+                state.auth_events.push(AuthEvent {
+                    event_type: "SIGN_IN_FAILURE".to_string(),
+                    username: username.to_string(),
+                    user_pool_id: pool_id.to_string(),
+                    client_id: Some(client_id.to_string()),
+                    timestamp: Utc::now(),
+                    success: false,
+                });
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "NotAuthorizedException",
+                    "Incorrect username or password.",
+                ));
+            }
+
+            // Check if user needs to change password
+            if user.user_status == "FORCE_CHANGE_PASSWORD" {
+                let session = Uuid::new_v4().to_string();
+                state.sessions.insert(
+                    session.clone(),
+                    SessionData {
+                        user_pool_id: pool_id.to_string(),
+                        username: username.to_string(),
+                        client_id: client_id.to_string(),
+                        challenge_name: "NEW_PASSWORD_REQUIRED".to_string(),
+                    },
+                );
+                return Ok(AwsResponse::ok_json(json!({
+                    "ChallengeName": "NEW_PASSWORD_REQUIRED",
+                    "Session": session,
+                    "ChallengeParameters": {
+                        "USER_ID_FOR_SRP": username,
+                        "requiredAttributes": "[]",
+                        "userAttributes": "{}"
+                    }
+                })));
+            }
+
+            // Generate tokens
+            let sub = user.sub.clone();
+            let tokens = generate_tokens(pool_id, client_id, &sub, username, &region);
+
+            // Store refresh token
+            state.refresh_tokens.insert(
+                tokens.refresh_token.clone(),
+                RefreshTokenData {
+                    user_pool_id: pool_id.to_string(),
+                    username: username.to_string(),
+                    client_id: client_id.to_string(),
+                    issued_at: Utc::now(),
+                },
+            );
+
+            // Store access token
+            state.access_tokens.insert(
+                tokens.access_token.clone(),
+                AccessTokenData {
+                    user_pool_id: pool_id.to_string(),
+                    username: username.to_string(),
+                    client_id: client_id.to_string(),
+                    issued_at: Utc::now(),
+                },
+            );
+
             state.auth_events.push(AuthEvent {
-                event_type: "SIGN_IN_FAILURE".to_string(),
+                event_type: "SIGN_IN".to_string(),
                 username: username.to_string(),
                 user_pool_id: pool_id.to_string(),
                 client_id: Some(client_id.to_string()),
                 timestamp: Utc::now(),
-                success: false,
+                success: true,
             });
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "NotAuthorizedException",
-                "Incorrect username or password.",
-            ));
+
+            (
+                tokens,
+                user_attrs,
+                region,
+                account_id,
+                pool_id.to_string(),
+                username.to_string(),
+                client_id.to_string(),
+            )
+        };
+
+        // PreAuthentication_Authentication trigger (synchronous)
+        if let Some(ref ctx) = self.delivery_ctx {
+            if let Some(function_arn) = triggers::get_trigger_arn(
+                &self.state,
+                &pool_id_owned,
+                TriggerSource::PreAuthenticationAuthentication,
+            ) {
+                let event = triggers::build_trigger_event(
+                    TriggerSource::PreAuthenticationAuthentication,
+                    &pool_id_owned,
+                    Some(&client_id_owned),
+                    &username_owned,
+                    &user_attrs,
+                    &region,
+                    &account_id,
+                );
+                let _ = triggers::invoke_trigger(ctx, &function_arn, &event).await;
+            }
         }
 
-        let region = state.region.clone();
-
-        // Check if user needs to change password
-        if user.user_status == "FORCE_CHANGE_PASSWORD" {
-            let session = Uuid::new_v4().to_string();
-            state.sessions.insert(
-                session.clone(),
-                SessionData {
-                    user_pool_id: pool_id.to_string(),
-                    username: username.to_string(),
-                    client_id: client_id.to_string(),
-                    challenge_name: "NEW_PASSWORD_REQUIRED".to_string(),
-                },
-            );
-            return Ok(AwsResponse::ok_json(json!({
-                "ChallengeName": "NEW_PASSWORD_REQUIRED",
-                "Session": session,
-                "ChallengeParameters": {
-                    "USER_ID_FOR_SRP": username,
-                    "requiredAttributes": "[]",
-                    "userAttributes": "{}"
-                }
-            })));
+        // PostAuthentication_Authentication trigger (fire-and-forget)
+        if let Some(ref ctx) = self.delivery_ctx {
+            if let Some(function_arn) = triggers::get_trigger_arn(
+                &self.state,
+                &pool_id_owned,
+                TriggerSource::PostAuthenticationAuthentication,
+            ) {
+                let event = triggers::build_trigger_event(
+                    TriggerSource::PostAuthenticationAuthentication,
+                    &pool_id_owned,
+                    Some(&client_id_owned),
+                    &username_owned,
+                    &user_attrs,
+                    &region,
+                    &account_id,
+                );
+                triggers::invoke_trigger_fire_and_forget(ctx, function_arn, event);
+            }
         }
-
-        // Generate tokens
-        let sub = user.sub.clone();
-        let tokens = generate_tokens(pool_id, client_id, &sub, username, &region);
-
-        // Store refresh token
-        state.refresh_tokens.insert(
-            tokens.refresh_token.clone(),
-            RefreshTokenData {
-                user_pool_id: pool_id.to_string(),
-                username: username.to_string(),
-                client_id: client_id.to_string(),
-                issued_at: Utc::now(),
-            },
-        );
-
-        // Store access token
-        state.access_tokens.insert(
-            tokens.access_token.clone(),
-            AccessTokenData {
-                user_pool_id: pool_id.to_string(),
-                username: username.to_string(),
-                client_id: client_id.to_string(),
-                issued_at: Utc::now(),
-            },
-        );
-
-        state.auth_events.push(AuthEvent {
-            event_type: "SIGN_IN".to_string(),
-            username: username.to_string(),
-            user_pool_id: pool_id.to_string(),
-            client_id: Some(client_id.to_string()),
-            timestamp: Utc::now(),
-            success: true,
-        });
 
         Ok(AwsResponse::ok_json(json!({
             "AuthenticationResult": {
@@ -1638,25 +1758,27 @@ impl CognitoService {
         })))
     }
 
-    fn initiate_auth(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+    async fn initiate_auth(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
 
         let client_id = require_str(&body, "ClientId")?;
         let auth_flow = require_str(&body, "AuthFlow")?;
 
-        let mut state = self.state.write();
-
-        // Find client
-        let client = state.user_pool_clients.get(client_id).ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "ResourceNotFoundException",
-                format!("User pool client {client_id} does not exist."),
+        // Resolve pool_id and auth flows from client in a scoped lock
+        let (pool_id, explicit_auth_flows) = {
+            let state = self.state.read();
+            let client = state.user_pool_clients.get(client_id).ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ResourceNotFoundException",
+                    format!("User pool client {client_id} does not exist."),
+                )
+            })?;
+            (
+                client.user_pool_id.clone(),
+                client.explicit_auth_flows.clone(),
             )
-        })?;
-
-        let pool_id = client.user_pool_id.clone();
-        let explicit_auth_flows = client.explicit_auth_flows.clone();
+        };
 
         match auth_flow {
             "USER_PASSWORD_AUTH" => {
@@ -1699,102 +1821,155 @@ impl CognitoService {
                         )
                     })?;
 
-                let user = state
-                    .users
-                    .get(&pool_id)
-                    .and_then(|users| users.get(username))
-                    .ok_or_else(|| {
-                        AwsServiceError::aws_error(
+                // All state work in a scoped block so the lock is dropped before await
+                let (tokens, user_attrs, region, account_id) = {
+                    let mut state = self.state.write();
+
+                    let user = state
+                        .users
+                        .get(&pool_id)
+                        .and_then(|users| users.get(username))
+                        .ok_or_else(|| {
+                            AwsServiceError::aws_error(
+                                StatusCode::BAD_REQUEST,
+                                "NotAuthorizedException",
+                                "Incorrect username or password.",
+                            )
+                        })?;
+
+                    if !user.enabled {
+                        return Err(AwsServiceError::aws_error(
+                            StatusCode::BAD_REQUEST,
+                            "NotAuthorizedException",
+                            "User is disabled.",
+                        ));
+                    }
+
+                    // Collect user attributes for triggers
+                    let user_attrs = triggers::collect_user_attributes(user);
+                    let region = state.region.clone();
+                    let account_id = state.account_id.clone();
+
+                    let password_matches = match (&user.password, &user.temporary_password) {
+                        (Some(p), _) if p == password => true,
+                        (_, Some(tp)) if tp == password => true,
+                        _ => false,
+                    };
+                    if !password_matches {
+                        state.auth_events.push(AuthEvent {
+                            event_type: "SIGN_IN_FAILURE".to_string(),
+                            username: username.to_string(),
+                            user_pool_id: pool_id.to_string(),
+                            client_id: Some(client_id.to_string()),
+                            timestamp: Utc::now(),
+                            success: false,
+                        });
+                        return Err(AwsServiceError::aws_error(
                             StatusCode::BAD_REQUEST,
                             "NotAuthorizedException",
                             "Incorrect username or password.",
-                        )
-                    })?;
+                        ));
+                    }
 
-                if !user.enabled {
-                    return Err(AwsServiceError::aws_error(
-                        StatusCode::BAD_REQUEST,
-                        "NotAuthorizedException",
-                        "User is disabled.",
-                    ));
-                }
+                    if user.user_status == "FORCE_CHANGE_PASSWORD" {
+                        let session = Uuid::new_v4().to_string();
+                        state.sessions.insert(
+                            session.clone(),
+                            SessionData {
+                                user_pool_id: pool_id.to_string(),
+                                username: username.to_string(),
+                                client_id: client_id.to_string(),
+                                challenge_name: "NEW_PASSWORD_REQUIRED".to_string(),
+                            },
+                        );
+                        return Ok(AwsResponse::ok_json(json!({
+                            "ChallengeName": "NEW_PASSWORD_REQUIRED",
+                            "Session": session,
+                            "ChallengeParameters": {
+                                "USER_ID_FOR_SRP": username,
+                                "requiredAttributes": "[]",
+                                "userAttributes": "{}"
+                            }
+                        })));
+                    }
 
-                let password_matches = match (&user.password, &user.temporary_password) {
-                    (Some(p), _) if p == password => true,
-                    (_, Some(tp)) if tp == password => true,
-                    _ => false,
-                };
-                if !password_matches {
+                    let sub = user.sub.clone();
+                    let tokens = generate_tokens(&pool_id, client_id, &sub, username, &region);
+
+                    state.refresh_tokens.insert(
+                        tokens.refresh_token.clone(),
+                        RefreshTokenData {
+                            user_pool_id: pool_id.to_string(),
+                            username: username.to_string(),
+                            client_id: client_id.to_string(),
+                            issued_at: Utc::now(),
+                        },
+                    );
+
+                    state.access_tokens.insert(
+                        tokens.access_token.clone(),
+                        AccessTokenData {
+                            user_pool_id: pool_id.to_string(),
+                            username: username.to_string(),
+                            client_id: client_id.to_string(),
+                            issued_at: Utc::now(),
+                        },
+                    );
+
                     state.auth_events.push(AuthEvent {
-                        event_type: "SIGN_IN_FAILURE".to_string(),
+                        event_type: "SIGN_IN".to_string(),
                         username: username.to_string(),
                         user_pool_id: pool_id.to_string(),
                         client_id: Some(client_id.to_string()),
                         timestamp: Utc::now(),
-                        success: false,
+                        success: true,
                     });
-                    return Err(AwsServiceError::aws_error(
-                        StatusCode::BAD_REQUEST,
-                        "NotAuthorizedException",
-                        "Incorrect username or password.",
-                    ));
+
+                    (tokens, user_attrs, region, account_id)
+                };
+
+                let username_owned = username.to_string();
+                let client_id_owned = client_id.to_string();
+
+                // PreAuthentication_Authentication trigger (synchronous)
+                if let Some(ref ctx) = self.delivery_ctx {
+                    if let Some(function_arn) = triggers::get_trigger_arn(
+                        &self.state,
+                        &pool_id,
+                        TriggerSource::PreAuthenticationAuthentication,
+                    ) {
+                        let event = triggers::build_trigger_event(
+                            TriggerSource::PreAuthenticationAuthentication,
+                            &pool_id,
+                            Some(&client_id_owned),
+                            &username_owned,
+                            &user_attrs,
+                            &region,
+                            &account_id,
+                        );
+                        let _ = triggers::invoke_trigger(ctx, &function_arn, &event).await;
+                    }
                 }
 
-                let region = state.region.clone();
-
-                if user.user_status == "FORCE_CHANGE_PASSWORD" {
-                    let session = Uuid::new_v4().to_string();
-                    state.sessions.insert(
-                        session.clone(),
-                        SessionData {
-                            user_pool_id: pool_id.to_string(),
-                            username: username.to_string(),
-                            client_id: client_id.to_string(),
-                            challenge_name: "NEW_PASSWORD_REQUIRED".to_string(),
-                        },
-                    );
-                    return Ok(AwsResponse::ok_json(json!({
-                        "ChallengeName": "NEW_PASSWORD_REQUIRED",
-                        "Session": session,
-                        "ChallengeParameters": {
-                            "USER_ID_FOR_SRP": username,
-                            "requiredAttributes": "[]",
-                            "userAttributes": "{}"
-                        }
-                    })));
+                // PostAuthentication_Authentication trigger (fire-and-forget)
+                if let Some(ref ctx) = self.delivery_ctx {
+                    if let Some(function_arn) = triggers::get_trigger_arn(
+                        &self.state,
+                        &pool_id,
+                        TriggerSource::PostAuthenticationAuthentication,
+                    ) {
+                        let event = triggers::build_trigger_event(
+                            TriggerSource::PostAuthenticationAuthentication,
+                            &pool_id,
+                            Some(&client_id_owned),
+                            &username_owned,
+                            &user_attrs,
+                            &region,
+                            &account_id,
+                        );
+                        triggers::invoke_trigger_fire_and_forget(ctx, function_arn, event);
+                    }
                 }
-
-                let sub = user.sub.clone();
-                let tokens = generate_tokens(&pool_id, client_id, &sub, username, &region);
-
-                state.refresh_tokens.insert(
-                    tokens.refresh_token.clone(),
-                    RefreshTokenData {
-                        user_pool_id: pool_id.to_string(),
-                        username: username.to_string(),
-                        client_id: client_id.to_string(),
-                        issued_at: Utc::now(),
-                    },
-                );
-
-                state.access_tokens.insert(
-                    tokens.access_token.clone(),
-                    AccessTokenData {
-                        user_pool_id: pool_id.to_string(),
-                        username: username.to_string(),
-                        client_id: client_id.to_string(),
-                        issued_at: Utc::now(),
-                    },
-                );
-
-                state.auth_events.push(AuthEvent {
-                    event_type: "SIGN_IN".to_string(),
-                    username: username.to_string(),
-                    user_pool_id: pool_id.to_string(),
-                    client_id: Some(client_id.to_string()),
-                    timestamp: Utc::now(),
-                    success: true,
-                });
 
                 Ok(AwsResponse::ok_json(json!({
                     "AuthenticationResult": {
@@ -1834,6 +2009,8 @@ impl CognitoService {
                             "REFRESH_TOKEN is required in AuthParameters",
                         )
                     })?;
+
+                let mut state = self.state.write();
 
                 let token_data = state.refresh_tokens.get(refresh_token).ok_or_else(|| {
                     AwsServiceError::aws_error(
@@ -2063,7 +2240,7 @@ impl CognitoService {
         }
     }
 
-    fn sign_up(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+    async fn sign_up(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
 
         let client_id = require_str(&body, "ClientId")?;
@@ -2079,87 +2256,129 @@ impl CognitoService {
                 )
             })?;
 
-        let mut state = self.state.write();
+        let (pool_id, sub, user, region, account_id) = {
+            let mut state = self.state.write();
 
-        // Find pool from client
-        let client = state.user_pool_clients.get(client_id).ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "ResourceNotFoundException",
-                format!("User pool client {client_id} does not exist."),
-            )
-        })?;
-        let pool_id = client.user_pool_id.clone();
+            // Find pool from client
+            let client = state.user_pool_clients.get(client_id).ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ResourceNotFoundException",
+                    format!("User pool client {client_id} does not exist."),
+                )
+            })?;
+            let pool_id = client.user_pool_id.clone();
 
-        // Validate password against pool policy
-        let pool = state.user_pools.get(&pool_id).ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "ResourceNotFoundException",
-                "User pool does not exist.",
-            )
-        })?;
-        validate_password(password, &pool.policies.password_policy)?;
+            // Validate password against pool policy
+            let pool = state.user_pools.get(&pool_id).ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ResourceNotFoundException",
+                    "User pool does not exist.",
+                )
+            })?;
+            validate_password(password, &pool.policies.password_policy)?;
 
-        // Check username unique
-        let pool_users = state.users.entry(pool_id.clone()).or_default();
-        if pool_users.contains_key(username) {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "UsernameExistsException",
-                "User account already exists.",
-            ));
-        }
+            // Check username unique
+            let pool_users = state.users.entry(pool_id.clone()).or_default();
+            if pool_users.contains_key(username) {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "UsernameExistsException",
+                    "User account already exists.",
+                ));
+            }
 
-        let now = Utc::now();
-        let sub = Uuid::new_v4().to_string();
+            let now = Utc::now();
+            let sub = Uuid::new_v4().to_string();
 
-        let mut attributes = parse_user_attributes(&body["UserAttributes"]);
+            let mut attributes = parse_user_attributes(&body["UserAttributes"]);
 
-        // Ensure sub attribute
-        if !attributes.iter().any(|a| a.name == "sub") {
-            attributes.push(UserAttribute {
-                name: "sub".to_string(),
-                value: sub.clone(),
+            // Ensure sub attribute
+            if !attributes.iter().any(|a| a.name == "sub") {
+                attributes.push(UserAttribute {
+                    name: "sub".to_string(),
+                    value: sub.clone(),
+                });
+            }
+
+            let user = User {
+                username: username.to_string(),
+                sub: sub.clone(),
+                attributes,
+                enabled: true,
+                user_status: "UNCONFIRMED".to_string(),
+                user_create_date: now,
+                user_last_modified_date: now,
+                password: Some(password.to_string()),
+                temporary_password: None,
+                confirmation_code: None,
+                attribute_verification_codes: HashMap::new(),
+                mfa_preferences: None,
+                totp_secret: None,
+                totp_verified: false,
+                devices: HashMap::new(),
+            };
+
+            pool_users.insert(username.to_string(), user.clone());
+
+            let region = state.region.clone();
+            let account_id = state.account_id.clone();
+
+            state.auth_events.push(AuthEvent {
+                event_type: "SIGN_UP".to_string(),
+                username: username.to_string(),
+                user_pool_id: pool_id.clone(),
+                client_id: Some(client_id.to_string()),
+                timestamp: Utc::now(),
+                success: true,
             });
-        }
 
-        let user = User {
-            username: username.to_string(),
-            sub: sub.clone(),
-            attributes,
-            enabled: true,
-            user_status: "UNCONFIRMED".to_string(),
-            user_create_date: now,
-            user_last_modified_date: now,
-            password: Some(password.to_string()),
-            temporary_password: None,
-            confirmation_code: None,
-            attribute_verification_codes: HashMap::new(),
-            mfa_preferences: None,
-            totp_secret: None,
-            totp_verified: false,
-            devices: HashMap::new(),
+            (pool_id, sub, user, region, account_id)
         };
 
-        pool_users.insert(username.to_string(), user);
+        // PreSignUp_SignUp trigger (synchronous — response can auto-confirm)
+        let mut auto_confirm = false;
+        if let Some(ref ctx) = self.delivery_ctx {
+            if let Some(function_arn) =
+                triggers::get_trigger_arn(&self.state, &pool_id, TriggerSource::PreSignUpSignUp)
+            {
+                let event = triggers::build_trigger_event(
+                    TriggerSource::PreSignUpSignUp,
+                    &pool_id,
+                    Some(client_id),
+                    username,
+                    &triggers::collect_user_attributes(&user),
+                    &region,
+                    &account_id,
+                );
+                if let Some(response) = triggers::invoke_trigger(ctx, &function_arn, &event).await {
+                    if response["response"]["autoConfirmUser"].as_bool() == Some(true) {
+                        auto_confirm = true;
+                    }
+                }
+            }
+        }
 
-        state.auth_events.push(AuthEvent {
-            event_type: "SIGN_UP".to_string(),
-            username: username.to_string(),
-            user_pool_id: pool_id,
-            client_id: Some(client_id.to_string()),
-            timestamp: Utc::now(),
-            success: true,
-        });
+        if auto_confirm {
+            let mut state = self.state.write();
+            if let Some(u) = state
+                .users
+                .get_mut(&pool_id)
+                .and_then(|users| users.get_mut(username))
+            {
+                u.user_status = "CONFIRMED".to_string();
+                u.user_last_modified_date = Utc::now();
+            }
+        }
 
         Ok(AwsResponse::ok_json(json!({
-            "UserConfirmed": false,
+            "UserConfirmed": auto_confirm,
             "UserSub": sub
         })))
     }
 
-    fn confirm_sign_up(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+    async fn confirm_sign_up(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
 
         let client_id = require_str(&body, "ClientId")?;
@@ -2200,10 +2419,38 @@ impl CognitoService {
         user.user_status = "CONFIRMED".to_string();
         user.user_last_modified_date = Utc::now();
 
+        let user_attrs = triggers::collect_user_attributes(user);
+        let region = state.region.clone();
+        let account_id = state.account_id.clone();
+        drop(state);
+
+        // PostConfirmation_ConfirmSignUp trigger (fire-and-forget)
+        if let Some(ref ctx) = self.delivery_ctx {
+            if let Some(function_arn) = triggers::get_trigger_arn(
+                &self.state,
+                &pool_id,
+                TriggerSource::PostConfirmationConfirmSignUp,
+            ) {
+                let event = triggers::build_trigger_event(
+                    TriggerSource::PostConfirmationConfirmSignUp,
+                    &pool_id,
+                    Some(client_id),
+                    username,
+                    &user_attrs,
+                    &region,
+                    &account_id,
+                );
+                triggers::invoke_trigger_fire_and_forget(ctx, function_arn, event);
+            }
+        }
+
         Ok(AwsResponse::ok_json(json!({})))
     }
 
-    fn admin_confirm_sign_up(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+    async fn admin_confirm_sign_up(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
 
         let pool_id = require_str(&body, "UserPoolId")?;
@@ -2234,6 +2481,31 @@ impl CognitoService {
 
         user.user_status = "CONFIRMED".to_string();
         user.user_last_modified_date = Utc::now();
+
+        let user_attrs = triggers::collect_user_attributes(user);
+        let region = state.region.clone();
+        let account_id = state.account_id.clone();
+        drop(state);
+
+        // PostConfirmation_AdminConfirmSignUp trigger (fire-and-forget)
+        if let Some(ref ctx) = self.delivery_ctx {
+            if let Some(function_arn) = triggers::get_trigger_arn(
+                &self.state,
+                pool_id,
+                TriggerSource::PostConfirmationAdminConfirmSignUp,
+            ) {
+                let event = triggers::build_trigger_event(
+                    TriggerSource::PostConfirmationAdminConfirmSignUp,
+                    pool_id,
+                    None,
+                    username,
+                    &user_attrs,
+                    &region,
+                    &account_id,
+                );
+                triggers::invoke_trigger_fire_and_forget(ctx, function_arn, event);
+            }
+        }
 
         Ok(AwsResponse::ok_json(json!({})))
     }
@@ -2317,7 +2589,7 @@ impl CognitoService {
         Ok(AwsResponse::ok_json(json!({})))
     }
 
-    fn forgot_password(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+    async fn forgot_password(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
 
         let client_id = require_str(&body, "ClientId")?;
@@ -2357,6 +2629,8 @@ impl CognitoService {
             .find(|a| a.name == "email")
             .map(|a| a.value.clone());
 
+        let user_attrs = triggers::collect_user_attributes(user);
+
         let destination = email
             .map(|e| {
                 // Mask email: show first char + *** + @domain
@@ -2370,14 +2644,39 @@ impl CognitoService {
             })
             .unwrap_or_else(|| "***".to_string());
 
+        let region = state.region.clone();
+        let account_id = state.account_id.clone();
+
         state.auth_events.push(AuthEvent {
             event_type: "FORGOT_PASSWORD".to_string(),
             username: username.to_string(),
-            user_pool_id: pool_id,
+            user_pool_id: pool_id.clone(),
             client_id: Some(client_id.to_string()),
             timestamp: Utc::now(),
             success: true,
         });
+
+        drop(state);
+
+        // CustomMessage_ForgotPassword trigger (fire-and-forget)
+        if let Some(ref ctx) = self.delivery_ctx {
+            if let Some(function_arn) = triggers::get_trigger_arn(
+                &self.state,
+                &pool_id,
+                TriggerSource::CustomMessageForgotPassword,
+            ) {
+                let event = triggers::build_trigger_event(
+                    TriggerSource::CustomMessageForgotPassword,
+                    &pool_id,
+                    Some(client_id),
+                    username,
+                    &user_attrs,
+                    &region,
+                    &account_id,
+                );
+                triggers::invoke_trigger_fire_and_forget(ctx, function_arn, event);
+            }
+        }
 
         Ok(AwsResponse::ok_json(json!({
             "CodeDeliveryDetails": {
@@ -5645,6 +5944,11 @@ fn sign_jwt(
 mod tests {
     use super::*;
 
+    /// Helper to run an async fn in sync test context.
+    fn block_on<F: std::future::Future>(f: F) -> F::Output {
+        tokio::runtime::Runtime::new().unwrap().block_on(f)
+    }
+
     #[test]
     fn pool_id_format() {
         let id = generate_pool_id("us-east-1");
@@ -6176,7 +6480,7 @@ mod tests {
             is_query_protocol: false,
             access_key_id: None,
         };
-        let resp = svc.admin_create_user(&req).unwrap();
+        let resp = block_on(svc.admin_create_user(&req)).unwrap();
         let resp_json: Value =
             serde_json::from_str(core::str::from_utf8(&resp.body).unwrap()).unwrap();
 
@@ -6544,7 +6848,7 @@ mod tests {
             is_query_protocol: false,
             access_key_id: None,
         };
-        svc.admin_create_user(&create_user_req).unwrap();
+        block_on(svc.admin_create_user(&create_user_req)).unwrap();
 
         // Create a group
         let create_group_req = AwsRequest {
@@ -6696,7 +7000,7 @@ mod tests {
             is_query_protocol: false,
             access_key_id: None,
         };
-        svc.admin_create_user(&req).unwrap();
+        block_on(svc.admin_create_user(&req)).unwrap();
 
         // Manually insert an access token
         {
@@ -6814,7 +7118,7 @@ mod tests {
             is_query_protocol: false,
             access_key_id: None,
         };
-        svc.admin_create_user(&req).unwrap();
+        block_on(svc.admin_create_user(&req)).unwrap();
 
         // Insert access token and refresh token
         {
@@ -6925,7 +7229,7 @@ mod tests {
             is_query_protocol: false,
             access_key_id: None,
         };
-        svc.admin_create_user(&req).unwrap();
+        block_on(svc.admin_create_user(&req)).unwrap();
 
         // Insert access token
         {
@@ -7147,7 +7451,7 @@ mod tests {
             is_query_protocol: false,
             access_key_id: None,
         };
-        svc.admin_create_user(&create_user_req).unwrap();
+        block_on(svc.admin_create_user(&create_user_req)).unwrap();
 
         // Set MFA preference via admin
         let set_pref_req = AwsRequest {
@@ -7350,7 +7654,7 @@ mod tests {
         }))
         .unwrap();
         let req = make_req("AdminCreateUser", &body);
-        svc.admin_create_user(&req).unwrap();
+        block_on(svc.admin_create_user(&req)).unwrap();
         (svc, pool_id, "deviceuser".to_string())
     }
 
@@ -7526,7 +7830,7 @@ mod tests {
         }))
         .unwrap();
         let req = make_req("SignUp", &body);
-        svc.sign_up(&req).unwrap();
+        block_on(svc.sign_up(&req)).unwrap();
 
         // Check auth events
         let st = state.read();
@@ -7572,7 +7876,7 @@ mod tests {
         }))
         .unwrap();
         let req = make_req("AdminCreateUser", &body);
-        svc.admin_create_user(&req).unwrap();
+        block_on(svc.admin_create_user(&req)).unwrap();
 
         let body = serde_json::to_string(&json!({
             "UserPoolId": pool_id,
@@ -7593,7 +7897,7 @@ mod tests {
         }))
         .unwrap();
         let req = make_req("AdminInitiateAuth", &body);
-        svc.admin_initiate_auth(&req).unwrap();
+        block_on(svc.admin_initiate_auth(&req)).unwrap();
 
         // Failed auth
         let body = serde_json::to_string(&json!({
@@ -7604,7 +7908,7 @@ mod tests {
         }))
         .unwrap();
         let req = make_req("AdminInitiateAuth", &body);
-        let _ = svc.admin_initiate_auth(&req);
+        let _ = block_on(svc.admin_initiate_auth(&req));
 
         // Check events
         let st = state.read();
