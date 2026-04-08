@@ -1482,6 +1482,7 @@ dependencies = [
  "fakecloud-dynamodb",
  "fakecloud-eventbridge",
  "fakecloud-iam",
+ "fakecloud-kinesis",
  "fakecloud-kms",
  "fakecloud-lambda",
  "fakecloud-logs",
@@ -1711,6 +1712,18 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "uuid",
+]
+
+[[package]]
+name = "fakecloud-kinesis"
+version = "0.5.1"
+dependencies = [
+ "async-trait",
+ "fakecloud-core",
+ "http 1.4.0",
+ "parking_lot",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

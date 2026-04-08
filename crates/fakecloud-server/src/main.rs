@@ -21,6 +21,7 @@ use fakecloud_dynamodb::service::DynamoDbService;
 use fakecloud_eventbridge::service::EventBridgeService;
 use fakecloud_iam::iam_service::IamService;
 use fakecloud_iam::sts_service::StsService;
+use fakecloud_kinesis::service::KinesisService;
 use fakecloud_kms::service::KmsService;
 use fakecloud_lambda::service::LambdaService;
 use fakecloud_logs::service::LogsService;
@@ -137,6 +138,9 @@ async fn main() {
     let cognito_state = Arc::new(parking_lot::RwLock::new(
         fakecloud_cognito::state::CognitoState::new(&cli.account_id, &cli.region),
     ));
+    let kinesis_state = Arc::new(parking_lot::RwLock::new(
+        fakecloud_kinesis::state::KinesisState::new(&cli.account_id, &cli.region),
+    ));
 
     // Cross-service delivery bus
     // Step 1: SQS delivery (SNS and EventBridge can push messages into SQS queues)
@@ -237,6 +241,7 @@ async fn main() {
         cloudformation: cloudformation_state.clone(),
         ses: ses_state.clone(),
         cognito: cognito_state.clone(),
+        kinesis: kinesis_state.clone(),
         container_runtime: container_runtime.clone(),
     };
 
@@ -344,6 +349,7 @@ async fn main() {
     registry.register(Arc::new(
         CognitoService::new(cognito_state.clone()).with_delivery(cognito_delivery_ctx),
     ));
+    registry.register(Arc::new(KinesisService::new(kinesis_state)));
 
     // Spawn background tasks
     let lifecycle_processor = fakecloud_s3::lifecycle::LifecycleProcessor::new(s3_state);
@@ -1040,6 +1046,7 @@ struct ResetState {
     cloudformation: fakecloud_cloudformation::state::SharedCloudFormationState,
     ses: fakecloud_ses::state::SharedSesState,
     cognito: fakecloud_cognito::state::SharedCognitoState,
+    kinesis: fakecloud_kinesis::state::SharedKinesisState,
     container_runtime: Option<Arc<fakecloud_lambda::runtime::ContainerRuntime>>,
 }
 
@@ -1106,6 +1113,9 @@ impl ResetState {
             "cognito" => {
                 self.cognito.write().reset();
             }
+            "kinesis" => {
+                self.kinesis.write().reset();
+            }
             _ => {
                 return Err(format!("Unknown service: {service}"));
             }
@@ -1151,6 +1161,7 @@ impl ResetState {
         self.cloudformation.write().reset();
         self.ses.write().reset();
         self.cognito.write().reset();
+        self.kinesis.write().reset();
         tracing::info!("state reset via reset API");
         axum::Json(types::ResetResponse {
             status: "ok".to_string(),

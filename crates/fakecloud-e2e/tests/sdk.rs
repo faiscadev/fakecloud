@@ -24,6 +24,10 @@ async fn sdk_health() {
         resp.services.contains(&"sqs".to_string()),
         "should contain sqs"
     );
+    assert!(
+        resp.services.contains(&"kinesis".to_string()),
+        "should contain kinesis"
+    );
 }
 
 // ── Reset (global) ─────────────────────────────────────────────────
@@ -101,6 +105,15 @@ async fn sdk_reset_service_sqs() {
         msgs.queues.is_empty(),
         "SQS should be empty after reset_service"
     );
+}
+
+#[tokio::test]
+async fn sdk_reset_service_kinesis() {
+    let server = TestServer::start().await;
+    let fc = FakeCloud::new(server.endpoint());
+
+    let resp = fc.reset_service("kinesis").await.expect("reset kinesis");
+    assert_eq!(resp.reset, "kinesis");
 }
 
 // ── SQS ────────────────────────────────────────────────────────────
