@@ -346,3 +346,337 @@ async fn cognito_list_user_pool_clients() {
         .unwrap();
     assert_eq!(resp.user_pool_clients().len(), 2);
 }
+
+// ---------------------------------------------------------------------------
+// User management
+// ---------------------------------------------------------------------------
+
+#[test_action("cognito-idp", "AdminCreateUser", checksum = "59b00da9")]
+#[tokio::test]
+async fn cognito_admin_create_user() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("user-mgmt-pool")
+        .send()
+        .await
+        .unwrap();
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    let resp = client
+        .admin_create_user()
+        .user_pool_id(&pool_id)
+        .username("testuser")
+        .user_attributes(
+            aws_sdk_cognitoidentityprovider::types::AttributeType::builder()
+                .name("email")
+                .value("test@example.com")
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let user = resp.user().unwrap();
+    assert_eq!(user.username().unwrap(), "testuser");
+}
+
+#[test_action("cognito-idp", "AdminGetUser", checksum = "07298034")]
+#[tokio::test]
+async fn cognito_admin_get_user() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("get-user-pool")
+        .send()
+        .await
+        .unwrap();
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    client
+        .admin_create_user()
+        .user_pool_id(&pool_id)
+        .username("getme")
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .admin_get_user()
+        .user_pool_id(&pool_id)
+        .username("getme")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.username(), "getme");
+}
+
+#[test_action("cognito-idp", "AdminDeleteUser", checksum = "df0f38e1")]
+#[tokio::test]
+async fn cognito_admin_delete_user() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("del-user-pool")
+        .send()
+        .await
+        .unwrap();
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    client
+        .admin_create_user()
+        .user_pool_id(&pool_id)
+        .username("delme")
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .admin_delete_user()
+        .user_pool_id(&pool_id)
+        .username("delme")
+        .send()
+        .await
+        .unwrap();
+
+    let err = client
+        .admin_get_user()
+        .user_pool_id(&pool_id)
+        .username("delme")
+        .send()
+        .await
+        .unwrap_err();
+    assert!(err.into_service_error().is_user_not_found_exception());
+}
+
+#[test_action("cognito-idp", "AdminDisableUser", checksum = "dea29c0e")]
+#[tokio::test]
+async fn cognito_admin_disable_user() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("disable-pool")
+        .send()
+        .await
+        .unwrap();
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    client
+        .admin_create_user()
+        .user_pool_id(&pool_id)
+        .username("disableme")
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .admin_disable_user()
+        .user_pool_id(&pool_id)
+        .username("disableme")
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .admin_get_user()
+        .user_pool_id(&pool_id)
+        .username("disableme")
+        .send()
+        .await
+        .unwrap();
+    assert!(!resp.enabled());
+}
+
+#[test_action("cognito-idp", "AdminEnableUser", checksum = "4bf631d2")]
+#[tokio::test]
+async fn cognito_admin_enable_user() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("enable-pool")
+        .send()
+        .await
+        .unwrap();
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    client
+        .admin_create_user()
+        .user_pool_id(&pool_id)
+        .username("enableme")
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .admin_disable_user()
+        .user_pool_id(&pool_id)
+        .username("enableme")
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .admin_enable_user()
+        .user_pool_id(&pool_id)
+        .username("enableme")
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .admin_get_user()
+        .user_pool_id(&pool_id)
+        .username("enableme")
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.enabled());
+}
+
+#[test_action("cognito-idp", "AdminUpdateUserAttributes", checksum = "52c6f704")]
+#[tokio::test]
+async fn cognito_admin_update_user_attributes() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("update-attrs-pool")
+        .send()
+        .await
+        .unwrap();
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    client
+        .admin_create_user()
+        .user_pool_id(&pool_id)
+        .username("attruser")
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .admin_update_user_attributes()
+        .user_pool_id(&pool_id)
+        .username("attruser")
+        .user_attributes(
+            aws_sdk_cognitoidentityprovider::types::AttributeType::builder()
+                .name("email")
+                .value("new@example.com")
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .admin_get_user()
+        .user_pool_id(&pool_id)
+        .username("attruser")
+        .send()
+        .await
+        .unwrap();
+    let email = resp
+        .user_attributes()
+        .iter()
+        .find(|a| a.name() == "email")
+        .unwrap();
+    assert_eq!(email.value().unwrap(), "new@example.com");
+}
+
+#[test_action("cognito-idp", "AdminDeleteUserAttributes", checksum = "b27f67be")]
+#[tokio::test]
+async fn cognito_admin_delete_user_attributes() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("del-attrs-pool")
+        .send()
+        .await
+        .unwrap();
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    client
+        .admin_create_user()
+        .user_pool_id(&pool_id)
+        .username("delattr")
+        .user_attributes(
+            aws_sdk_cognitoidentityprovider::types::AttributeType::builder()
+                .name("email")
+                .value("del@example.com")
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .admin_delete_user_attributes()
+        .user_pool_id(&pool_id)
+        .username("delattr")
+        .user_attribute_names("email")
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .admin_get_user()
+        .user_pool_id(&pool_id)
+        .username("delattr")
+        .send()
+        .await
+        .unwrap();
+    assert!(!resp.user_attributes().iter().any(|a| a.name() == "email"));
+}
+
+#[test_action("cognito-idp", "ListUsers", checksum = "3bf0c621")]
+#[tokio::test]
+async fn cognito_list_users() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("list-users-pool")
+        .send()
+        .await
+        .unwrap();
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    client
+        .admin_create_user()
+        .user_pool_id(&pool_id)
+        .username("user1")
+        .send()
+        .await
+        .unwrap();
+    client
+        .admin_create_user()
+        .user_pool_id(&pool_id)
+        .username("user2")
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .list_users()
+        .user_pool_id(&pool_id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.users().len(), 2);
+}
