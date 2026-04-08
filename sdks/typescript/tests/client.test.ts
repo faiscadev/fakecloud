@@ -287,10 +287,10 @@ describe("CognitoClient", () => {
   it("getUserCodes() encodes pool ID and username in URL", async () => {
     const fc = new FakeCloud(BASE);
     mockFetch({ confirmationCode: "123456", attributeVerificationCodes: {} });
-    const result = await fc.cognito.getUserCodes("us-east-1_abc", "john");
+    const result = await fc.cognito.getUserCodes("us-east-1/pool", "user@name");
     expect(result.confirmationCode).toBe("123456");
     expect(lastFetchCall().url).toBe(
-      `${BASE}/_fakecloud/cognito/confirmation-codes/us-east-1_abc/john`,
+      `${BASE}/_fakecloud/cognito/confirmation-codes/us-east-1%2Fpool/user%40name`,
     );
   });
 
