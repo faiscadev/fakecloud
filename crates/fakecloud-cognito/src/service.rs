@@ -4219,7 +4219,7 @@ impl CognitoService {
     fn update_user_pool_domain(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
 
-        let _pool_id = require_str(&body, "UserPoolId")?;
+        let pool_id = require_str(&body, "UserPoolId")?;
         let domain = require_str(&body, "Domain")?;
 
         let custom_domain_config =
@@ -4239,6 +4239,14 @@ impl CognitoService {
             )
         })?;
 
+        if d.user_pool_id != pool_id {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("Domain {domain} does not exist."),
+            ));
+        }
+
         d.custom_domain_config = custom_domain_config;
 
         Ok(AwsResponse::ok_json(json!({})))
@@ -4247,17 +4255,22 @@ impl CognitoService {
     fn delete_user_pool_domain(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
 
-        let _pool_id = require_str(&body, "UserPoolId")?;
+        let pool_id = require_str(&body, "UserPoolId")?;
         let domain = require_str(&body, "Domain")?;
 
         let mut state = self.state.write();
 
-        if state.domains.remove(domain).is_none() {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "ResourceNotFoundException",
-                format!("Domain {domain} does not exist."),
-            ));
+        match state.domains.get(domain) {
+            Some(d) if d.user_pool_id == pool_id => {
+                state.domains.remove(domain);
+            }
+            _ => {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ResourceNotFoundException",
+                    format!("Domain {domain} does not exist."),
+                ));
+            }
         }
 
         Ok(AwsResponse::ok_json(json!({})))
