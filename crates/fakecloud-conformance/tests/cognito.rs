@@ -2053,7 +2053,10 @@ async fn cognito_verify_user_attribute() {
     .json()
     .await
     .unwrap();
-    let code = code_resp["confirmationCode"].as_str().unwrap().to_string();
+    let code = code_resp["attributeVerificationCodes"]["email"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     client
         .verify_user_attribute()

@@ -719,12 +719,18 @@ async fn main() {
                     let cs = cs.clone();
                     async move {
                         let state = cs.read();
-                        let code = state
+                        let user = state
                             .users
                             .get(&pool_id)
-                            .and_then(|users| users.get(&username))
-                            .and_then(|user| user.confirmation_code.clone());
-                        axum::Json(serde_json::json!({ "confirmationCode": code }))
+                            .and_then(|users| users.get(&username));
+                        let code = user.and_then(|u| u.confirmation_code.clone());
+                        let attr_codes: serde_json::Value = user
+                            .map(|u| serde_json::json!(u.attribute_verification_codes))
+                            .unwrap_or(serde_json::json!({}));
+                        axum::Json(serde_json::json!({
+                            "confirmationCode": code,
+                            "attributeVerificationCodes": attr_codes
+                        }))
                     }
                 }
             }),
