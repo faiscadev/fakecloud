@@ -17,6 +17,7 @@ members = [
     "crates/fakecloud-cloudformation",
     "crates/fakecloud-ses",
     "crates/fakecloud-cognito",
+    "crates/fakecloud-kinesis",
     "crates/fakecloud-sdk",
     "crates/fakecloud-e2e",
     "crates/fakecloud-conformance",
@@ -82,4 +83,5 @@ fakecloud-kms = { path = "crates/fakecloud-kms", version = "0.5.1" }
 fakecloud-cloudformation = { path = "crates/fakecloud-cloudformation", version = "0.5.1" }
 fakecloud-ses = { path = "crates/fakecloud-ses", version = "0.5.1" }
 fakecloud-cognito = { path = "crates/fakecloud-cognito", version = "0.5.1" }
+fakecloud-kinesis = { path = "crates/fakecloud-kinesis", version = "0.5.1" }
 fakecloud-sdk = { path = "crates/fakecloud-sdk", version = "0.5.1" }

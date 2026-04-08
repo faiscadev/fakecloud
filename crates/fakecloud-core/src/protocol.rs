@@ -133,6 +133,7 @@ fn parse_amz_target(target: &str) -> Option<DetectedRequest> {
         s if s.starts_with("secretsmanager") => "secretsmanager",
         s if s.starts_with("TrentService") => "kms",
         s if s.starts_with("AWSCognitoIdentityProviderService") => "cognito-idp",
+        s if s.starts_with("Kinesis_20131202") => "kinesis",
         _ => return None,
     };
 
@@ -295,6 +296,14 @@ mod tests {
         let result = parse_amz_target("AmazonSSM.GetParameter").unwrap();
         assert_eq!(result.service, "ssm");
         assert_eq!(result.action, "GetParameter");
+    }
+
+    #[test]
+    fn parse_amz_target_kinesis() {
+        let result = parse_amz_target("Kinesis_20131202.ListStreams").unwrap();
+        assert_eq!(result.service, "kinesis");
+        assert_eq!(result.action, "ListStreams");
+        assert_eq!(result.protocol, AwsProtocol::Json);
     }
 
     #[test]
