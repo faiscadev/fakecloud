@@ -1355,6 +1355,26 @@ impl CognitoService {
             ));
         }
 
+        // Validate ExplicitAuthFlows allows this auth flow
+        let allowed = match auth_flow {
+            "ADMIN_NO_SRP_AUTH" => client
+                .explicit_auth_flows
+                .iter()
+                .any(|f| f == "ADMIN_NO_SRP_AUTH" || f == "ALLOW_ADMIN_USER_PASSWORD_AUTH"),
+            "ADMIN_USER_PASSWORD_AUTH" => client
+                .explicit_auth_flows
+                .iter()
+                .any(|f| f == "ADMIN_USER_PASSWORD_AUTH" || f == "ALLOW_ADMIN_USER_PASSWORD_AUTH"),
+            _ => false,
+        };
+        if !allowed {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterException",
+                "Client is not allowed for this auth flow.",
+            ));
+        }
+
         // Validate user exists and is enabled
         let user = state
             .users
@@ -1680,10 +1700,25 @@ impl CognitoService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
 
-        let _pool_id = require_str(&body, "UserPoolId")?;
+        let pool_id = require_str(&body, "UserPoolId")?;
         let client_id = require_str(&body, "ClientId")?;
         let challenge_name = require_str(&body, "ChallengeName")?;
         let session = require_str(&body, "Session")?;
+
+        // Validate session's pool ID matches the provided one
+        {
+            let state = self.state.read();
+            if let Some(session_data) = state.sessions.get(session) {
+                if session_data.user_pool_id != pool_id {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "NotAuthorizedException",
+                        "Invalid session.",
+                    ));
+                }
+            }
+            // If session doesn't exist, handle_auth_challenge_response will return the error
+        }
 
         self.handle_auth_challenge_response(client_id, challenge_name, session, &body)
     }
