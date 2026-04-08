@@ -2,65 +2,65 @@
   "variants_passed": 42164,
   "total_variants": 42193,
   "per_service": {
-    "iam": {
-      "passed": 5962,
-      "total": 5962
-    },
-    "sns": {
-      "passed": 1027,
-      "total": 1027
-    },
     "s3": {
       "passed": 3620,
       "total": 3620
-    },
-    "events": {
-      "passed": 2108,
-      "total": 2108
-    },
-    "logs": {
-      "passed": 3911,
-      "total": 3911
-    },
-    "sts": {
-      "passed": 438,
-      "total": 438
-    },
-    "cloudformation": {
-      "passed": 3420,
-      "total": 3420
-    },
-    "dynamodb": {
-      "passed": 2123,
-      "total": 2123
-    },
-    "lambda": {
-      "passed": 3347,
-      "total": 3347
-    },
-    "cognito-idp": {
-      "passed": 4450,
-      "total": 4479
     },
     "secretsmanager": {
       "passed": 852,
       "total": 852
     },
-    "ses": {
-      "passed": 2858,
-      "total": 2858
+    "cloudformation": {
+      "passed": 3420,
+      "total": 3420
     },
-    "sqs": {
-      "passed": 549,
-      "total": 549
+    "cognito-idp": {
+      "passed": 4450,
+      "total": 4479
+    },
+    "logs": {
+      "passed": 3911,
+      "total": 3911
+    },
+    "events": {
+      "passed": 2108,
+      "total": 2108
     },
     "kms": {
       "passed": 2196,
       "total": 2196
     },
+    "sns": {
+      "passed": 1027,
+      "total": 1027
+    },
+    "lambda": {
+      "passed": 3347,
+      "total": 3347
+    },
+    "iam": {
+      "passed": 5962,
+      "total": 5962
+    },
+    "sts": {
+      "passed": 438,
+      "total": 438
+    },
+    "dynamodb": {
+      "passed": 2123,
+      "total": 2123
+    },
+    "sqs": {
+      "passed": 549,
+      "total": 549
+    },
     "ssm": {
       "passed": 5303,
       "total": 5303
+    },
+    "ses": {
+      "passed": 2858,
+      "total": 2858
     }
   }
 }
