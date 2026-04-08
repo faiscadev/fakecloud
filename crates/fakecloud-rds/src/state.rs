@@ -29,6 +29,7 @@ pub struct DbInstance {
     pub master_user_password: String,
     pub container_id: String,
     pub host_port: u16,
+    pub tags: Vec<RdsTag>,
 }
 
 impl fmt::Debug for DbInstance {
@@ -52,8 +53,15 @@ impl fmt::Debug for DbInstance {
             .field("master_user_password", &"<redacted>")
             .field("container_id", &self.container_id)
             .field("host_port", &self.host_port)
+            .field("tags", &self.tags)
             .finish()
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RdsTag {
+    pub key: String,
+    pub value: String,
 }
 
 #[derive(Debug)]
@@ -203,6 +211,7 @@ mod tests {
                 master_user_password: "secret123".to_string(),
                 container_id: "container-id".to_string(),
                 host_port: 15432,
+                tags: Vec::new(),
             },
         );
 
