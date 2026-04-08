@@ -30,7 +30,7 @@ license = "AGPL-3.0-or-later"
 repository = "https://github.com/faiscadev/fakecloud"
 homepage = "https://fakecloud.dev"
 rust-version = "1.94"
-version = "0.5.1"
+version = "0.5.0"
 
 [workspace.dependencies]
 tokio = { version = "1", features = ["full"] }
@@ -66,20 +66,20 @@ tempfile = "3"
 regex = "1"
 
 # Internal crates
-fakecloud-core = { path = "crates/fakecloud-core", version = "0.5.1" }
-fakecloud-aws = { path = "crates/fakecloud-aws", version = "0.5.1" }
-fakecloud-sqs = { path = "crates/fakecloud-sqs", version = "0.5.1" }
-fakecloud-sns = { path = "crates/fakecloud-sns", version = "0.5.1" }
-fakecloud-eventbridge = { path = "crates/fakecloud-eventbridge", version = "0.5.1" }
-fakecloud-iam = { path = "crates/fakecloud-iam", version = "0.5.1" }
-fakecloud-ssm = { path = "crates/fakecloud-ssm", version = "0.5.1" }
-fakecloud-s3 = { path = "crates/fakecloud-s3", version = "0.5.1" }
-fakecloud-dynamodb = { path = "crates/fakecloud-dynamodb", version = "0.5.1" }
-fakecloud-lambda = { path = "crates/fakecloud-lambda", version = "0.5.1" }
-fakecloud-secretsmanager = { path = "crates/fakecloud-secretsmanager", version = "0.5.1" }
-fakecloud-logs = { path = "crates/fakecloud-logs", version = "0.5.1" }
-fakecloud-kms = { path = "crates/fakecloud-kms", version = "0.5.1" }
-fakecloud-cloudformation = { path = "crates/fakecloud-cloudformation", version = "0.5.1" }
-fakecloud-ses = { path = "crates/fakecloud-ses", version = "0.5.1" }
-fakecloud-cognito = { path = "crates/fakecloud-cognito", version = "0.5.1" }
-fakecloud-sdk = { path = "crates/fakecloud-sdk", version = "0.5.1" }
+fakecloud-core = { path = "crates/fakecloud-core", version = "0.5.0" }
+fakecloud-aws = { path = "crates/fakecloud-aws", version = "0.5.0" }
+fakecloud-sqs = { path = "crates/fakecloud-sqs", version = "0.5.0" }
+fakecloud-sns = { path = "crates/fakecloud-sns", version = "0.5.0" }
+fakecloud-eventbridge = { path = "crates/fakecloud-eventbridge", version = "0.5.0" }
+fakecloud-iam = { path = "crates/fakecloud-iam", version = "0.5.0" }
+fakecloud-ssm = { path = "crates/fakecloud-ssm", version = "0.5.0" }
+fakecloud-s3 = { path = "crates/fakecloud-s3", version = "0.5.0" }
+fakecloud-dynamodb = { path = "crates/fakecloud-dynamodb", version = "0.5.0" }
+fakecloud-lambda = { path = "crates/fakecloud-lambda", version = "0.5.0" }
+fakecloud-secretsmanager = { path = "crates/fakecloud-secretsmanager", version = "0.5.0" }
+fakecloud-logs = { path = "crates/fakecloud-logs", version = "0.5.0" }
+fakecloud-kms = { path = "crates/fakecloud-kms", version = "0.5.0" }
+fakecloud-cloudformation = { path = "crates/fakecloud-cloudformation", version = "0.5.0" }
+fakecloud-ses = { path = "crates/fakecloud-ses", version = "0.5.0" }
+fakecloud-cognito = { path = "crates/fakecloud-cognito", version = "0.5.0" }
+fakecloud-sdk = { path = "crates/fakecloud-sdk", version = "0.5.0" }
