@@ -20,6 +20,10 @@ pub struct CognitoState {
     pub sessions: HashMap<String, SessionData>,
     /// access_token -> AccessTokenData
     pub access_tokens: HashMap<String, AccessTokenData>,
+    /// pool_id -> (group_name -> Group)
+    pub groups: HashMap<String, HashMap<String, Group>>,
+    /// pool_id -> (username -> [group_names])
+    pub user_groups: HashMap<String, HashMap<String, Vec<String>>>,
 }
 
 impl CognitoState {
@@ -33,6 +37,8 @@ impl CognitoState {
             refresh_tokens: HashMap::new(),
             sessions: HashMap::new(),
             access_tokens: HashMap::new(),
+            groups: HashMap::new(),
+            user_groups: HashMap::new(),
         }
     }
 
@@ -43,6 +49,8 @@ impl CognitoState {
         self.refresh_tokens.clear();
         self.sessions.clear();
         self.access_tokens.clear();
+        self.groups.clear();
+        self.user_groups.clear();
     }
 }
 
@@ -234,6 +242,17 @@ pub struct User {
 pub struct UserAttribute {
     pub name: String,
     pub value: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Group {
+    pub group_name: String,
+    pub user_pool_id: String,
+    pub description: Option<String>,
+    pub precedence: Option<i64>,
+    pub role_arn: Option<String>,
+    pub creation_date: DateTime<Utc>,
+    pub last_modified_date: DateTime<Utc>,
 }
 
 /// Generate default schema attributes that AWS adds to every user pool.

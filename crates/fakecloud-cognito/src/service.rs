@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use async_trait::async_trait;
 use base64::Engine;
 use chrono::Utc;
@@ -10,7 +12,7 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceErr
 
 use crate::state::{
     default_schema_attributes, AccessTokenData, AccountRecoverySetting, AdminCreateUserConfig,
-    EmailConfiguration, InviteMessageTemplate, PasswordPolicy, PoolPolicies, RecoveryOption,
+    EmailConfiguration, Group, InviteMessageTemplate, PasswordPolicy, PoolPolicies, RecoveryOption,
     RefreshTokenData, SchemaAttribute, SessionData, SharedCognitoState, SmsConfiguration,
     StringAttributeConstraints, TokenValidityUnits, User, UserAttribute, UserPool, UserPoolClient,
 };
@@ -65,6 +67,15 @@ impl AwsService for CognitoService {
             "AdminResetUserPassword" => self.admin_reset_user_password(&req),
             "GlobalSignOut" => self.global_sign_out(&req),
             "AdminUserGlobalSignOut" => self.admin_user_global_sign_out(&req),
+            "CreateGroup" => self.create_group(&req),
+            "DeleteGroup" => self.delete_group(&req),
+            "GetGroup" => self.get_group(&req),
+            "UpdateGroup" => self.update_group(&req),
+            "ListGroups" => self.list_groups(&req),
+            "AdminAddUserToGroup" => self.admin_add_user_to_group(&req),
+            "AdminRemoveUserFromGroup" => self.admin_remove_user_from_group(&req),
+            "AdminListGroupsForUser" => self.admin_list_groups_for_user(&req),
+            "ListUsersInGroup" => self.list_users_in_group(&req),
             _ => Err(AwsServiceError::action_not_implemented(
                 "cognito-idp",
                 &req.action,
@@ -106,6 +117,15 @@ impl AwsService for CognitoService {
             "AdminResetUserPassword",
             "GlobalSignOut",
             "AdminUserGlobalSignOut",
+            "CreateGroup",
+            "DeleteGroup",
+            "GetGroup",
+            "UpdateGroup",
+            "ListGroups",
+            "AdminAddUserToGroup",
+            "AdminRemoveUserFromGroup",
+            "AdminListGroupsForUser",
+            "ListUsersInGroup",
         ]
     }
 }
@@ -345,6 +365,10 @@ impl CognitoService {
         state
             .user_pool_clients
             .retain(|_, c| c.user_pool_id != pool_id);
+
+        // Remove associated groups and user-group associations
+        state.groups.remove(pool_id);
+        state.user_groups.remove(pool_id);
 
         Ok(AwsResponse::ok_json(json!({})))
     }
@@ -2365,6 +2389,493 @@ impl CognitoService {
 
         Ok(AwsResponse::ok_json(json!({})))
     }
+
+    // ── Group management ────────────────────────────────────────────────
+
+    fn create_group(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+
+        let group_name = require_str(&body, "GroupName")?;
+        let pool_id = require_str(&body, "UserPoolId")?;
+        let description = body["Description"].as_str().map(|s| s.to_string());
+        let precedence = body["Precedence"].as_i64();
+        let role_arn = body["RoleArn"].as_str().map(|s| s.to_string());
+
+        let mut state = self.state.write();
+
+        if !state.user_pools.contains_key(pool_id) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("User pool {pool_id} does not exist."),
+            ));
+        }
+
+        let pool_groups = state.groups.entry(pool_id.to_string()).or_default();
+        if pool_groups.contains_key(group_name) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "GroupExistsException",
+                format!("A group with the name {group_name} already exists."),
+            ));
+        }
+
+        let now = Utc::now();
+        let group = Group {
+            group_name: group_name.to_string(),
+            user_pool_id: pool_id.to_string(),
+            description: description.clone(),
+            precedence,
+            role_arn: role_arn.clone(),
+            creation_date: now,
+            last_modified_date: now,
+        };
+
+        pool_groups.insert(group_name.to_string(), group.clone());
+
+        Ok(AwsResponse::ok_json(json!({
+            "Group": group_to_json(&group)
+        })))
+    }
+
+    fn delete_group(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+
+        let group_name = require_str(&body, "GroupName")?;
+        let pool_id = require_str(&body, "UserPoolId")?;
+
+        let mut state = self.state.write();
+
+        if !state.user_pools.contains_key(pool_id) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("User pool {pool_id} does not exist."),
+            ));
+        }
+
+        let removed = state
+            .groups
+            .get_mut(pool_id)
+            .and_then(|groups| groups.remove(group_name));
+
+        if removed.is_none() {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                "Group not found.",
+            ));
+        }
+
+        // Remove group from all user-group associations in this pool
+        if let Some(pool_user_groups) = state.user_groups.get_mut(pool_id) {
+            for group_list in pool_user_groups.values_mut() {
+                group_list.retain(|g| g != group_name);
+            }
+        }
+
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    fn get_group(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+
+        let group_name = require_str(&body, "GroupName")?;
+        let pool_id = require_str(&body, "UserPoolId")?;
+
+        let state = self.state.read();
+
+        if !state.user_pools.contains_key(pool_id) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("User pool {pool_id} does not exist."),
+            ));
+        }
+
+        let group = state
+            .groups
+            .get(pool_id)
+            .and_then(|groups| groups.get(group_name))
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ResourceNotFoundException",
+                    "Group not found.",
+                )
+            })?;
+
+        Ok(AwsResponse::ok_json(json!({
+            "Group": group_to_json(group)
+        })))
+    }
+
+    fn update_group(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+
+        let group_name = require_str(&body, "GroupName")?;
+        let pool_id = require_str(&body, "UserPoolId")?;
+
+        let mut state = self.state.write();
+
+        if !state.user_pools.contains_key(pool_id) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("User pool {pool_id} does not exist."),
+            ));
+        }
+
+        let group = state
+            .groups
+            .get_mut(pool_id)
+            .and_then(|groups| groups.get_mut(group_name))
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ResourceNotFoundException",
+                    "Group not found.",
+                )
+            })?;
+
+        if let Some(desc) = body["Description"].as_str() {
+            group.description = Some(desc.to_string());
+        }
+        if let Some(prec) = body["Precedence"].as_i64() {
+            group.precedence = Some(prec);
+        }
+        if let Some(arn) = body["RoleArn"].as_str() {
+            group.role_arn = Some(arn.to_string());
+        }
+
+        group.last_modified_date = Utc::now();
+
+        let group_json = group_to_json(group);
+
+        Ok(AwsResponse::ok_json(json!({
+            "Group": group_json
+        })))
+    }
+
+    fn list_groups(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+
+        let pool_id = require_str(&body, "UserPoolId")?;
+        let limit = body["Limit"].as_i64().unwrap_or(60).clamp(1, 60) as usize;
+        let next_token = body["NextToken"].as_str();
+
+        let state = self.state.read();
+
+        if !state.user_pools.contains_key(pool_id) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("User pool {pool_id} does not exist."),
+            ));
+        }
+
+        let empty = std::collections::HashMap::new();
+        let pool_groups = state.groups.get(pool_id).unwrap_or(&empty);
+
+        let mut groups: Vec<&Group> = pool_groups.values().collect();
+        groups.sort_by_key(|g| g.creation_date);
+
+        let start_idx = if let Some(token) = next_token {
+            groups
+                .iter()
+                .position(|g| g.group_name == token)
+                .unwrap_or(0)
+        } else {
+            0
+        };
+
+        let page: Vec<Value> = groups
+            .iter()
+            .skip(start_idx)
+            .take(limit)
+            .map(|g| group_to_json(g))
+            .collect();
+
+        let has_more = start_idx + limit < groups.len();
+        let mut response = json!({ "Groups": page });
+        if has_more {
+            if let Some(last_group) = groups.get(start_idx + limit) {
+                response["NextToken"] = json!(last_group.group_name);
+            }
+        }
+
+        Ok(AwsResponse::ok_json(response))
+    }
+
+    fn admin_add_user_to_group(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+
+        let pool_id = require_str(&body, "UserPoolId")?;
+        let username = require_str(&body, "Username")?;
+        let group_name = require_str(&body, "GroupName")?;
+
+        let mut state = self.state.write();
+
+        if !state.user_pools.contains_key(pool_id) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("User pool {pool_id} does not exist."),
+            ));
+        }
+
+        // Validate user exists
+        if !state
+            .users
+            .get(pool_id)
+            .is_some_and(|users| users.contains_key(username))
+        {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "UserNotFoundException",
+                "User does not exist.",
+            ));
+        }
+
+        // Validate group exists
+        if !state
+            .groups
+            .get(pool_id)
+            .is_some_and(|groups| groups.contains_key(group_name))
+        {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                "Group not found.",
+            ));
+        }
+
+        let user_group_list = state
+            .user_groups
+            .entry(pool_id.to_string())
+            .or_default()
+            .entry(username.to_string())
+            .or_default();
+
+        if !user_group_list.contains(&group_name.to_string()) {
+            user_group_list.push(group_name.to_string());
+        }
+
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    fn admin_remove_user_from_group(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+
+        let pool_id = require_str(&body, "UserPoolId")?;
+        let username = require_str(&body, "Username")?;
+        let group_name = require_str(&body, "GroupName")?;
+
+        let mut state = self.state.write();
+
+        if !state.user_pools.contains_key(pool_id) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("User pool {pool_id} does not exist."),
+            ));
+        }
+
+        // Validate user exists
+        if !state
+            .users
+            .get(pool_id)
+            .is_some_and(|users| users.contains_key(username))
+        {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "UserNotFoundException",
+                "User does not exist.",
+            ));
+        }
+
+        // Validate group exists
+        if !state
+            .groups
+            .get(pool_id)
+            .is_some_and(|groups| groups.contains_key(group_name))
+        {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                "Group not found.",
+            ));
+        }
+
+        if let Some(user_group_list) = state
+            .user_groups
+            .get_mut(pool_id)
+            .and_then(|m| m.get_mut(username))
+        {
+            user_group_list.retain(|g| g != group_name);
+        }
+
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    fn admin_list_groups_for_user(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+
+        let pool_id = require_str(&body, "UserPoolId")?;
+        let username = require_str(&body, "Username")?;
+        let limit = body["Limit"].as_i64().unwrap_or(60).clamp(1, 60) as usize;
+        let next_token = body["NextToken"].as_str();
+
+        let state = self.state.read();
+
+        if !state.user_pools.contains_key(pool_id) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("User pool {pool_id} does not exist."),
+            ));
+        }
+
+        // Validate user exists
+        if !state
+            .users
+            .get(pool_id)
+            .is_some_and(|users| users.contains_key(username))
+        {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "UserNotFoundException",
+                "User does not exist.",
+            ));
+        }
+
+        let empty_user_groups: HashMap<String, Vec<String>> = HashMap::new();
+        let empty_group_list: Vec<String> = Vec::new();
+        let user_group_names = state
+            .user_groups
+            .get(pool_id)
+            .unwrap_or(&empty_user_groups)
+            .get(username)
+            .unwrap_or(&empty_group_list);
+
+        let empty_groups: HashMap<String, Group> = HashMap::new();
+        let pool_groups = state.groups.get(pool_id).unwrap_or(&empty_groups);
+
+        // Collect and sort groups by creation date
+        let mut groups: Vec<&Group> = user_group_names
+            .iter()
+            .filter_map(|name| pool_groups.get(name))
+            .collect();
+        groups.sort_by_key(|g| g.creation_date);
+
+        let start_idx = if let Some(token) = next_token {
+            groups
+                .iter()
+                .position(|g| g.group_name == token)
+                .unwrap_or(0)
+        } else {
+            0
+        };
+
+        let page: Vec<Value> = groups
+            .iter()
+            .skip(start_idx)
+            .take(limit)
+            .map(|g| group_to_json(g))
+            .collect();
+
+        let has_more = start_idx + limit < groups.len();
+        let mut response = json!({ "Groups": page });
+        if has_more {
+            if let Some(last_group) = groups.get(start_idx + limit) {
+                response["NextToken"] = json!(last_group.group_name);
+            }
+        }
+
+        Ok(AwsResponse::ok_json(response))
+    }
+
+    fn list_users_in_group(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+
+        let pool_id = require_str(&body, "UserPoolId")?;
+        let group_name = require_str(&body, "GroupName")?;
+        let limit = body["Limit"].as_i64().unwrap_or(60).clamp(1, 60) as usize;
+        let next_token = body["NextToken"].as_str();
+
+        let state = self.state.read();
+
+        if !state.user_pools.contains_key(pool_id) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("User pool {pool_id} does not exist."),
+            ));
+        }
+
+        // Validate group exists
+        if !state
+            .groups
+            .get(pool_id)
+            .is_some_and(|groups| groups.contains_key(group_name))
+        {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                "Group not found.",
+            ));
+        }
+
+        let empty_user_groups: HashMap<String, Vec<String>> = HashMap::new();
+        let pool_user_groups = state.user_groups.get(pool_id).unwrap_or(&empty_user_groups);
+
+        // Find all usernames that belong to this group
+        let mut usernames_in_group: Vec<&str> = pool_user_groups
+            .iter()
+            .filter(|(_, groups)| groups.contains(&group_name.to_string()))
+            .map(|(username, _)| username.as_str())
+            .collect();
+        usernames_in_group.sort();
+
+        let empty_users = std::collections::HashMap::new();
+        let pool_users = state.users.get(pool_id).unwrap_or(&empty_users);
+
+        // Sort by creation date for consistent pagination
+        let mut users_in_group: Vec<&User> = usernames_in_group
+            .iter()
+            .filter_map(|username| pool_users.get(*username))
+            .collect();
+        users_in_group.sort_by_key(|u| u.user_create_date);
+
+        let start_idx = if let Some(token) = next_token {
+            users_in_group
+                .iter()
+                .position(|u| u.username == token)
+                .unwrap_or(0)
+        } else {
+            0
+        };
+
+        let page: Vec<Value> = users_in_group
+            .iter()
+            .skip(start_idx)
+            .take(limit)
+            .map(|u| user_to_json(u))
+            .collect();
+
+        let has_more = start_idx + limit < users_in_group.len();
+        let mut response = json!({ "Users": page });
+        if has_more {
+            if let Some(last_user) = users_in_group.get(start_idx + limit) {
+                response["NextToken"] = json!(last_user.username);
+            }
+        }
+
+        Ok(AwsResponse::ok_json(response))
+    }
 }
 
 /// Generate a pool ID in the format `{region}_{9 random alphanumeric chars}`.
@@ -2650,6 +3161,25 @@ fn parse_user_attributes(val: &Value) -> Vec<UserAttribute> {
 }
 
 /// Convert a User to the JSON format AWS returns (for ListUsers and AdminCreateUser response).
+fn group_to_json(group: &Group) -> Value {
+    let mut val = json!({
+        "GroupName": group.group_name,
+        "UserPoolId": group.user_pool_id,
+        "CreationDate": group.creation_date.timestamp() as f64,
+        "LastModifiedDate": group.last_modified_date.timestamp() as f64,
+    });
+    if let Some(ref desc) = group.description {
+        val["Description"] = json!(desc);
+    }
+    if let Some(prec) = group.precedence {
+        val["Precedence"] = json!(prec);
+    }
+    if let Some(ref arn) = group.role_arn {
+        val["RoleArn"] = json!(arn);
+    }
+    val
+}
+
 fn user_to_json(user: &User) -> Value {
     json!({
         "Username": user.username,
@@ -3759,5 +4289,228 @@ mod tests {
 
         // Non-existent token returns None
         assert!(!s.access_tokens.contains_key("nonexistent"));
+    }
+
+    #[test]
+    fn group_name_uniqueness() {
+        let state = std::sync::Arc::new(parking_lot::RwLock::new(crate::state::CognitoState::new(
+            "123456789012",
+            "us-east-1",
+        )));
+        let svc = CognitoService::new(state.clone());
+
+        // Create a pool first
+        let create_pool_req = AwsRequest {
+            service: "cognito-idp".to_string(),
+            action: "CreateUserPool".to_string(),
+            region: "us-east-1".to_string(),
+            account_id: "123456789012".to_string(),
+            request_id: "test".to_string(),
+            headers: http::HeaderMap::new(),
+            query_params: std::collections::HashMap::new(),
+            body: bytes::Bytes::from(
+                serde_json::to_string(&json!({ "PoolName": "test-pool" })).unwrap(),
+            ),
+            path_segments: vec![],
+            raw_path: "/".to_string(),
+            raw_query: String::new(),
+            method: http::Method::POST,
+            is_query_protocol: false,
+            access_key_id: None,
+        };
+        let resp = svc.create_user_pool(&create_pool_req).unwrap();
+        let resp_json: Value =
+            serde_json::from_str(core::str::from_utf8(&resp.body).unwrap()).unwrap();
+        let pool_id = resp_json["UserPool"]["Id"].as_str().unwrap().to_string();
+
+        // Create a group
+        let create_group_req = AwsRequest {
+            service: "cognito-idp".to_string(),
+            action: "CreateGroup".to_string(),
+            region: "us-east-1".to_string(),
+            account_id: "123456789012".to_string(),
+            request_id: "test".to_string(),
+            headers: http::HeaderMap::new(),
+            query_params: std::collections::HashMap::new(),
+            body: bytes::Bytes::from(
+                serde_json::to_string(&json!({
+                    "UserPoolId": pool_id,
+                    "GroupName": "admins"
+                }))
+                .unwrap(),
+            ),
+            path_segments: vec![],
+            raw_path: "/".to_string(),
+            raw_query: String::new(),
+            method: http::Method::POST,
+            is_query_protocol: false,
+            access_key_id: None,
+        };
+        let result = svc.create_group(&create_group_req);
+        assert!(result.is_ok());
+
+        // Creating the same group again should fail with GroupExistsException
+        let result = svc.create_group(&create_group_req);
+        match result {
+            Err(e) => {
+                let msg = format!("{e:?}");
+                assert!(
+                    msg.contains("GroupExistsException"),
+                    "Should be GroupExistsException: {msg}"
+                );
+            }
+            Ok(_) => panic!("Expected GroupExistsException"),
+        }
+    }
+
+    #[test]
+    fn user_group_association() {
+        let state = std::sync::Arc::new(parking_lot::RwLock::new(crate::state::CognitoState::new(
+            "123456789012",
+            "us-east-1",
+        )));
+        let svc = CognitoService::new(state.clone());
+
+        // Create a pool
+        let create_pool_req = AwsRequest {
+            service: "cognito-idp".to_string(),
+            action: "CreateUserPool".to_string(),
+            region: "us-east-1".to_string(),
+            account_id: "123456789012".to_string(),
+            request_id: "test".to_string(),
+            headers: http::HeaderMap::new(),
+            query_params: std::collections::HashMap::new(),
+            body: bytes::Bytes::from(
+                serde_json::to_string(&json!({ "PoolName": "test-pool" })).unwrap(),
+            ),
+            path_segments: vec![],
+            raw_path: "/".to_string(),
+            raw_query: String::new(),
+            method: http::Method::POST,
+            is_query_protocol: false,
+            access_key_id: None,
+        };
+        let resp = svc.create_user_pool(&create_pool_req).unwrap();
+        let resp_json: Value =
+            serde_json::from_str(core::str::from_utf8(&resp.body).unwrap()).unwrap();
+        let pool_id = resp_json["UserPool"]["Id"].as_str().unwrap().to_string();
+
+        // Create a user
+        let create_user_req = AwsRequest {
+            service: "cognito-idp".to_string(),
+            action: "AdminCreateUser".to_string(),
+            region: "us-east-1".to_string(),
+            account_id: "123456789012".to_string(),
+            request_id: "test".to_string(),
+            headers: http::HeaderMap::new(),
+            query_params: std::collections::HashMap::new(),
+            body: bytes::Bytes::from(
+                serde_json::to_string(&json!({
+                    "UserPoolId": pool_id,
+                    "Username": "testuser"
+                }))
+                .unwrap(),
+            ),
+            path_segments: vec![],
+            raw_path: "/".to_string(),
+            raw_query: String::new(),
+            method: http::Method::POST,
+            is_query_protocol: false,
+            access_key_id: None,
+        };
+        svc.admin_create_user(&create_user_req).unwrap();
+
+        // Create a group
+        let create_group_req = AwsRequest {
+            service: "cognito-idp".to_string(),
+            action: "CreateGroup".to_string(),
+            region: "us-east-1".to_string(),
+            account_id: "123456789012".to_string(),
+            request_id: "test".to_string(),
+            headers: http::HeaderMap::new(),
+            query_params: std::collections::HashMap::new(),
+            body: bytes::Bytes::from(
+                serde_json::to_string(&json!({
+                    "UserPoolId": pool_id,
+                    "GroupName": "admins"
+                }))
+                .unwrap(),
+            ),
+            path_segments: vec![],
+            raw_path: "/".to_string(),
+            raw_query: String::new(),
+            method: http::Method::POST,
+            is_query_protocol: false,
+            access_key_id: None,
+        };
+        svc.create_group(&create_group_req).unwrap();
+
+        // Add user to group
+        let add_req = AwsRequest {
+            service: "cognito-idp".to_string(),
+            action: "AdminAddUserToGroup".to_string(),
+            region: "us-east-1".to_string(),
+            account_id: "123456789012".to_string(),
+            request_id: "test".to_string(),
+            headers: http::HeaderMap::new(),
+            query_params: std::collections::HashMap::new(),
+            body: bytes::Bytes::from(
+                serde_json::to_string(&json!({
+                    "UserPoolId": pool_id,
+                    "Username": "testuser",
+                    "GroupName": "admins"
+                }))
+                .unwrap(),
+            ),
+            path_segments: vec![],
+            raw_path: "/".to_string(),
+            raw_query: String::new(),
+            method: http::Method::POST,
+            is_query_protocol: false,
+            access_key_id: None,
+        };
+        svc.admin_add_user_to_group(&add_req).unwrap();
+
+        // Verify membership via state
+        {
+            let s = state.read();
+            let groups = s.user_groups.get(&pool_id).unwrap();
+            let user_groups = groups.get("testuser").unwrap();
+            assert!(user_groups.contains(&"admins".to_string()));
+        }
+
+        // Remove user from group
+        let remove_req = AwsRequest {
+            service: "cognito-idp".to_string(),
+            action: "AdminRemoveUserFromGroup".to_string(),
+            region: "us-east-1".to_string(),
+            account_id: "123456789012".to_string(),
+            request_id: "test".to_string(),
+            headers: http::HeaderMap::new(),
+            query_params: std::collections::HashMap::new(),
+            body: bytes::Bytes::from(
+                serde_json::to_string(&json!({
+                    "UserPoolId": pool_id,
+                    "Username": "testuser",
+                    "GroupName": "admins"
+                }))
+                .unwrap(),
+            ),
+            path_segments: vec![],
+            raw_path: "/".to_string(),
+            raw_query: String::new(),
+            method: http::Method::POST,
+            is_query_protocol: false,
+            access_key_id: None,
+        };
+        svc.admin_remove_user_from_group(&remove_req).unwrap();
+
+        // Verify no longer in group
+        {
+            let s = state.read();
+            let groups = s.user_groups.get(&pool_id).unwrap();
+            let user_groups = groups.get("testuser").unwrap();
+            assert!(!user_groups.contains(&"admins".to_string()));
+        }
     }
 }
