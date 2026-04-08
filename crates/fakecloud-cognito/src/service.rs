@@ -2213,7 +2213,7 @@ impl CognitoService {
             .map(|e| {
                 // Mask email: show first char + *** + @domain
                 if let Some(at_pos) = e.find('@') {
-                    let first = &e[..1];
+                    let first = e.chars().next().unwrap_or('*');
                     let domain = &e[at_pos..];
                     format!("{first}***{domain}")
                 } else {
@@ -3121,7 +3121,9 @@ impl CognitoService {
                     // Mask phone: show last 4 digits
                     let len = a.value.len();
                     if len > 4 {
-                        format!("{}***{}", &a.value[..1], &a.value[len - 4..])
+                        let first: String = a.value.chars().take(1).collect();
+                        let last4: String = a.value.chars().skip(len.saturating_sub(4)).collect();
+                        format!("{first}***{last4}")
                     } else {
                         "***".to_string()
                     }
@@ -3135,7 +3137,7 @@ impl CognitoService {
                 .find(|a| a.name == "email")
                 .map(|a| {
                     if let Some(at_pos) = a.value.find('@') {
-                        let first = &a.value[..1];
+                        let first = a.value.chars().next().unwrap_or('*');
                         let domain = &a.value[at_pos..];
                         format!("{first}***{domain}")
                     } else {
@@ -3270,7 +3272,7 @@ impl CognitoService {
         let destination = email
             .map(|e| {
                 if let Some(at_pos) = e.find('@') {
-                    let first = &e[..1];
+                    let first = e.chars().next().unwrap_or('*');
                     let domain = &e[at_pos..];
                     format!("{first}***{domain}")
                 } else {
