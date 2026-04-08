@@ -140,3 +140,209 @@ async fn cognito_list_user_pools() {
         .unwrap();
     assert!(resp.user_pools().len() >= 2);
 }
+
+// ---------------------------------------------------------------------------
+// User Pool Client lifecycle
+// ---------------------------------------------------------------------------
+
+#[test_action("cognito-idp", "CreateUserPoolClient", checksum = "74d65959")]
+#[tokio::test]
+async fn cognito_create_user_pool_client() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("client-test-pool")
+        .send()
+        .await
+        .unwrap();
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    let resp = client
+        .create_user_pool_client()
+        .user_pool_id(&pool_id)
+        .client_name("test-client")
+        .send()
+        .await
+        .unwrap();
+    let upc = resp.user_pool_client().unwrap();
+    assert!(!upc.client_id().unwrap().is_empty());
+    assert_eq!(upc.client_name().unwrap(), "test-client");
+}
+
+#[test_action("cognito-idp", "DescribeUserPoolClient", checksum = "7dc2fb48")]
+#[tokio::test]
+async fn cognito_describe_user_pool_client() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("desc-client-pool")
+        .send()
+        .await
+        .unwrap();
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    let created = client
+        .create_user_pool_client()
+        .user_pool_id(&pool_id)
+        .client_name("desc-client")
+        .send()
+        .await
+        .unwrap();
+    let client_id = created
+        .user_pool_client()
+        .unwrap()
+        .client_id()
+        .unwrap()
+        .to_string();
+
+    let resp = client
+        .describe_user_pool_client()
+        .user_pool_id(&pool_id)
+        .client_id(&client_id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.user_pool_client().unwrap().client_name().unwrap(),
+        "desc-client"
+    );
+}
+
+#[test_action("cognito-idp", "UpdateUserPoolClient", checksum = "8ba26c73")]
+#[tokio::test]
+async fn cognito_update_user_pool_client() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("upd-client-pool")
+        .send()
+        .await
+        .unwrap();
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    let created = client
+        .create_user_pool_client()
+        .user_pool_id(&pool_id)
+        .client_name("upd-client")
+        .send()
+        .await
+        .unwrap();
+    let client_id = created
+        .user_pool_client()
+        .unwrap()
+        .client_id()
+        .unwrap()
+        .to_string();
+
+    client
+        .update_user_pool_client()
+        .user_pool_id(&pool_id)
+        .client_id(&client_id)
+        .client_name("renamed-client")
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .describe_user_pool_client()
+        .user_pool_id(&pool_id)
+        .client_id(&client_id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.user_pool_client().unwrap().client_name().unwrap(),
+        "renamed-client"
+    );
+}
+
+#[test_action("cognito-idp", "DeleteUserPoolClient", checksum = "954e5fa3")]
+#[tokio::test]
+async fn cognito_delete_user_pool_client() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("del-client-pool")
+        .send()
+        .await
+        .unwrap();
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    let created = client
+        .create_user_pool_client()
+        .user_pool_id(&pool_id)
+        .client_name("del-client")
+        .send()
+        .await
+        .unwrap();
+    let client_id = created
+        .user_pool_client()
+        .unwrap()
+        .client_id()
+        .unwrap()
+        .to_string();
+
+    client
+        .delete_user_pool_client()
+        .user_pool_id(&pool_id)
+        .client_id(&client_id)
+        .send()
+        .await
+        .unwrap();
+
+    let err = client
+        .describe_user_pool_client()
+        .user_pool_id(&pool_id)
+        .client_id(&client_id)
+        .send()
+        .await
+        .unwrap_err();
+    assert!(err.into_service_error().is_resource_not_found_exception());
+}
+
+#[test_action("cognito-idp", "ListUserPoolClients", checksum = "3946c12e")]
+#[tokio::test]
+async fn cognito_list_user_pool_clients() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("list-client-pool")
+        .send()
+        .await
+        .unwrap();
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    client
+        .create_user_pool_client()
+        .user_pool_id(&pool_id)
+        .client_name("c1")
+        .send()
+        .await
+        .unwrap();
+    client
+        .create_user_pool_client()
+        .user_pool_id(&pool_id)
+        .client_name("c2")
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .list_user_pool_clients()
+        .user_pool_id(&pool_id)
+        .max_results(10)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.user_pool_clients().len(), 2);
+}
