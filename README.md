@@ -165,6 +165,21 @@ curl http://localhost:4566/_fakecloud/health
 }
 ```
 
+## Simulation Endpoints
+
+fakecloud exposes `/_fakecloud/*` endpoints for testing behaviors that AWS runs asynchronously (TTL expiration, scheduled rotation, etc.). Call these to advance time-dependent processes on demand.
+
+| Endpoint | Method | Description |
+|---|---|---|
+| `/_fakecloud/dynamodb/ttl-processor/tick` | POST | Expire DynamoDB items whose TTL attribute is in the past. Returns `{"expiredItems": N}`. |
+| `/_fakecloud/secretsmanager/rotation-scheduler/tick` | POST | Rotate secrets whose rotation schedule is due. Returns `{"rotatedSecrets": ["name", ...]}`. |
+| `/_fakecloud/lambda/invocations` | GET | List all Lambda invocations (introspection). |
+| `/_fakecloud/sns/messages` | GET | List all published SNS messages. |
+| `/_fakecloud/sqs/messages` | GET | List all SQS messages across queues. |
+| `/_fakecloud/events/history` | GET | List all EventBridge events and deliveries. |
+| `/_fakecloud/s3/notifications` | GET | List all S3 notification events. |
+| `/_fakecloud/ses/emails` | GET | List all sent SES emails. |
+
 ## Architecture
 
 fakecloud is organized as a Cargo workspace:

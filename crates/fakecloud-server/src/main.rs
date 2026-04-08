@@ -195,6 +195,8 @@ async fn main() {
     let sqs_introspection_state = sqs_state.clone();
     let eb_introspection_state = eb_state.clone();
     let s3_introspection_state = s3_state.clone();
+    let dynamodb_ttl_state = dynamodb_state.clone();
+    let secretsmanager_rotation_state = secretsmanager_state.clone();
 
     // Clone state for reset endpoint before moving into services
     let reset_state = ResetState {
@@ -278,6 +280,7 @@ async fn main() {
         }
         Arc::new(bus)
     };
+    let delivery_for_rotation_scheduler = delivery_for_secretsmanager.clone();
     registry.register(Arc::new(
         SecretsManagerService::new(secretsmanager_state).with_delivery(delivery_for_secretsmanager),
     ));
@@ -598,6 +601,29 @@ async fn main() {
                         })
                         .collect();
                     axum::Json(serde_json::json!({ "notifications": notifications }))
+                }
+            }),
+        )
+        .route(
+            "/_fakecloud/dynamodb/ttl-processor/tick",
+            axum::routing::post({
+                let ds = dynamodb_ttl_state;
+                move || async move {
+                    let count = fakecloud_dynamodb::ttl::process_ttl_expirations(&ds);
+                    axum::Json(serde_json::json!({ "expiredItems": count }))
+                }
+            }),
+        )
+        .route(
+            "/_fakecloud/secretsmanager/rotation-scheduler/tick",
+            axum::routing::post({
+                let ss = secretsmanager_rotation_state;
+                let bus = delivery_for_rotation_scheduler;
+                move || async move {
+                    let rotated =
+                        fakecloud_secretsmanager::rotation::check_and_rotate(&ss, Some(&bus))
+                            .await;
+                    axum::Json(serde_json::json!({ "rotatedSecrets": rotated }))
                 }
             }),
         )

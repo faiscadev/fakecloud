@@ -489,3 +489,68 @@ async fn secretsmanager_put_get_resource_policy() {
         .unwrap();
     assert!(resp.resource_policy().is_none());
 }
+
+/// Rotation scheduler simulation: secrets with due rotation are rotated.
+#[tokio::test]
+async fn secretsmanager_rotation_scheduler_tick() {
+    let server = TestServer::start().await;
+    let client = server.secretsmanager_client().await;
+
+    // Create a secret
+    client
+        .create_secret()
+        .name("rotate-test")
+        .secret_string("original-value")
+        .send()
+        .await
+        .unwrap();
+
+    // Enable rotation with a 1-day interval (no Lambda ARN → simple rotation)
+    client
+        .rotate_secret()
+        .secret_id("rotate-test")
+        .rotation_rules(
+            aws_sdk_secretsmanager::types::RotationRulesType::builder()
+                .automatically_after_days(1)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    // At this point last_rotated_at is "now", so a tick should NOT rotate again
+    let http = reqwest::Client::new();
+    let resp = http
+        .post(format!(
+            "{}/_fakecloud/secretsmanager/rotation-scheduler/tick",
+            server.endpoint()
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let rotated = body["rotatedSecrets"].as_array().unwrap();
+    assert!(
+        rotated.is_empty(),
+        "rotation just happened, should not be due yet"
+    );
+
+    // Verify the response shape is correct
+    assert!(body.get("rotatedSecrets").is_some());
+    assert!(body["rotatedSecrets"].is_array());
+
+    // Verify describe shows rotation is enabled
+    let desc = client
+        .describe_secret()
+        .secret_id("rotate-test")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(desc.rotation_enabled(), Some(true));
+    assert!(desc.rotation_rules().is_some());
+    assert_eq!(
+        desc.rotation_rules().unwrap().automatically_after_days(),
+        Some(1)
+    );
+}

@@ -2253,3 +2253,139 @@ async fn dynamodb_gsi_query_pagination() {
         "GSI pagination should return all items without duplicates"
     );
 }
+
+/// TTL processor simulation: expired items are deleted, future items remain.
+#[tokio::test]
+async fn dynamodb_ttl_processor_tick() {
+    let server = TestServer::start().await;
+    let client = server.dynamodb_client().await;
+
+    // Create table
+    client
+        .create_table()
+        .table_name("TtlTickTable")
+        .key_schema(
+            KeySchemaElement::builder()
+                .attribute_name("pk")
+                .key_type(KeyType::Hash)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            AttributeDefinition::builder()
+                .attribute_name("pk")
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .billing_mode(BillingMode::PayPerRequest)
+        .send()
+        .await
+        .unwrap();
+
+    // Enable TTL on "ttl" attribute
+    client
+        .update_time_to_live()
+        .table_name("TtlTickTable")
+        .time_to_live_specification(
+            TimeToLiveSpecification::builder()
+                .attribute_name("ttl")
+                .enabled(true)
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    // Put item with TTL far in the past (epoch 0)
+    client
+        .put_item()
+        .table_name("TtlTickTable")
+        .item("pk", AttributeValue::S("expired".to_string()))
+        .item("ttl", AttributeValue::N("0".to_string()))
+        .send()
+        .await
+        .unwrap();
+
+    // Put item with TTL far in the future (year ~2100)
+    client
+        .put_item()
+        .table_name("TtlTickTable")
+        .item("pk", AttributeValue::S("future".to_string()))
+        .item("ttl", AttributeValue::N("4102444800".to_string()))
+        .send()
+        .await
+        .unwrap();
+
+    // Put item without TTL attribute
+    client
+        .put_item()
+        .table_name("TtlTickTable")
+        .item("pk", AttributeValue::S("no-ttl".to_string()))
+        .send()
+        .await
+        .unwrap();
+
+    // Call the TTL processor tick endpoint
+    let http = reqwest::Client::new();
+    let resp = http
+        .post(format!(
+            "{}/_fakecloud/dynamodb/ttl-processor/tick",
+            server.endpoint()
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(
+        body["expiredItems"], 1,
+        "one expired item should be deleted"
+    );
+
+    // Verify the expired item is gone
+    let resp = client
+        .get_item()
+        .table_name("TtlTickTable")
+        .key("pk", AttributeValue::S("expired".to_string()))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.item().is_none(), "expired item should be deleted");
+
+    // Verify the future item still exists
+    let resp = client
+        .get_item()
+        .table_name("TtlTickTable")
+        .key("pk", AttributeValue::S("future".to_string()))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.item().is_some(), "future item should still exist");
+
+    // Verify the no-ttl item still exists
+    let resp = client
+        .get_item()
+        .table_name("TtlTickTable")
+        .key("pk", AttributeValue::S("no-ttl".to_string()))
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        resp.item().is_some(),
+        "item without TTL attribute should still exist"
+    );
+
+    // Second tick should find nothing to expire
+    let resp = http
+        .post(format!(
+            "{}/_fakecloud/dynamodb/ttl-processor/tick",
+            server.endpoint()
+        ))
+        .send()
+        .await
+        .unwrap();
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["expiredItems"], 0, "no more items to expire");
+}
