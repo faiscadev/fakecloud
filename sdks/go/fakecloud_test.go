@@ -262,13 +262,17 @@ func TestEventsFireRule(t *testing.T) {
 			t.Errorf("expected path /_fakecloud/events/fire-rule, got %s", r.URL.Path)
 		}
 		var req FireRuleRequest
-		json.NewDecoder(r.Body).Decode(&req)
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatal(err)
+		}
 		if req.RuleName != "my-rule" {
 			t.Errorf("expected rule name my-rule, got %s", req.RuleName)
 		}
-		json.NewEncoder(w).Encode(FireRuleResponse{
+		if err := json.NewEncoder(w).Encode(FireRuleResponse{
 			Targets: []FireRuleTarget{{Type: "lambda", Arn: "arn:aws:lambda:us-east-1:000000000000:function:fn"}},
-		})
+		}); err != nil {
+			t.Fatal(err)
+		}
 	}))
 	defer ts.Close()
 
@@ -386,7 +390,9 @@ func TestCognitoGetConfirmationCodes(t *testing.T) {
 func TestCognitoConfirmUser(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req ConfirmUserRequest
-		json.NewDecoder(r.Body).Decode(&req)
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatal(err)
+		}
 		if req.Username != "bob" {
 			t.Errorf("expected username bob, got %s", req.Username)
 		}
