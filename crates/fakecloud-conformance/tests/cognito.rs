@@ -2125,3 +2125,136 @@ async fn cognito_resend_confirmation_code() {
         .unwrap();
     assert!(resp.code_delivery_details().is_some());
 }
+
+// ---------------------------------------------------------------------------
+// MFA / Software Tokens
+// ---------------------------------------------------------------------------
+
+#[test_action("cognito-idp", "SetUserPoolMfaConfig", checksum = "590320fb")]
+#[test_action("cognito-idp", "GetUserPoolMfaConfig", checksum = "de56204f")]
+#[tokio::test]
+async fn cognito_set_get_user_pool_mfa_config() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("mfa-pool")
+        .send()
+        .await
+        .unwrap();
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    client
+        .set_user_pool_mfa_config()
+        .user_pool_id(&pool_id)
+        .mfa_configuration(aws_sdk_cognitoidentityprovider::types::UserPoolMfaType::Optional)
+        .software_token_mfa_configuration(
+            aws_sdk_cognitoidentityprovider::types::SoftwareTokenMfaConfigType::builder()
+                .enabled(true)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .get_user_pool_mfa_config()
+        .user_pool_id(&pool_id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.mfa_configuration(),
+        Some(&aws_sdk_cognitoidentityprovider::types::UserPoolMfaType::Optional),
+    );
+}
+
+#[test_action("cognito-idp", "AdminSetUserMFAPreference", checksum = "e45639ae")]
+#[tokio::test]
+async fn cognito_admin_set_user_mfa_preference() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("mfapref-pool")
+        .send()
+        .await
+        .unwrap();
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    client
+        .admin_create_user()
+        .user_pool_id(&pool_id)
+        .username("mfauser")
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .admin_set_user_mfa_preference()
+        .user_pool_id(&pool_id)
+        .username("mfauser")
+        .software_token_mfa_settings(
+            aws_sdk_cognitoidentityprovider::types::SoftwareTokenMfaSettingsType::builder()
+                .enabled(true)
+                .preferred_mfa(true)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("cognito-idp", "SetUserMFAPreference", checksum = "c0f29c1b")]
+#[tokio::test]
+async fn cognito_set_user_mfa_preference() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+    let (_pool_id, _client_id, access_token) =
+        setup_authenticated_user(&client, "setmfapref-pool").await;
+
+    client
+        .set_user_mfa_preference()
+        .access_token(&access_token)
+        .software_token_mfa_settings(
+            aws_sdk_cognitoidentityprovider::types::SoftwareTokenMfaSettingsType::builder()
+                .enabled(true)
+                .preferred_mfa(false)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("cognito-idp", "AssociateSoftwareToken", checksum = "d4a0b55a")]
+#[test_action("cognito-idp", "VerifySoftwareToken", checksum = "a56ac88e")]
+#[tokio::test]
+async fn cognito_associate_verify_software_token() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+    let (_pool_id, _client_id, access_token) = setup_authenticated_user(&client, "totp-pool").await;
+
+    let resp = client
+        .associate_software_token()
+        .access_token(&access_token)
+        .send()
+        .await
+        .unwrap();
+    let secret = resp.secret_code().unwrap();
+    assert_eq!(secret.len(), 32);
+
+    let verify = client
+        .verify_software_token()
+        .access_token(&access_token)
+        .user_code("123456")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        verify.status(),
+        Some(&aws_sdk_cognitoidentityprovider::types::VerifySoftwareTokenResponseType::Success),
+    );
+}
