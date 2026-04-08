@@ -1461,3 +1461,383 @@ async fn cognito_admin_user_global_sign_out() {
         "Refresh token should be invalid after admin global sign out"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Groups
+// ---------------------------------------------------------------------------
+
+#[test_action("cognito-idp", "CreateGroup", checksum = "8458f036")]
+#[tokio::test]
+async fn cognito_create_group() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("grp-pool")
+        .send()
+        .await
+        .unwrap();
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    let resp = client
+        .create_group()
+        .user_pool_id(&pool_id)
+        .group_name("admins")
+        .description("Admin group")
+        .precedence(1)
+        .send()
+        .await
+        .unwrap();
+    let group = resp.group().unwrap();
+    assert_eq!(group.group_name().unwrap(), "admins");
+    assert_eq!(group.description().unwrap(), "Admin group");
+}
+
+#[test_action("cognito-idp", "GetGroup", checksum = "a81d68fe")]
+#[tokio::test]
+async fn cognito_get_group() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("getgrp-pool")
+        .send()
+        .await
+        .unwrap();
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    client
+        .create_group()
+        .user_pool_id(&pool_id)
+        .group_name("readers")
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .get_group()
+        .user_pool_id(&pool_id)
+        .group_name("readers")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.group().unwrap().group_name().unwrap(), "readers");
+}
+
+#[test_action("cognito-idp", "UpdateGroup", checksum = "8c9b60d7")]
+#[tokio::test]
+async fn cognito_update_group() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("updgrp-pool")
+        .send()
+        .await
+        .unwrap();
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    client
+        .create_group()
+        .user_pool_id(&pool_id)
+        .group_name("editors")
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .update_group()
+        .user_pool_id(&pool_id)
+        .group_name("editors")
+        .description("Updated editors")
+        .precedence(5)
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .get_group()
+        .user_pool_id(&pool_id)
+        .group_name("editors")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.group().unwrap().description().unwrap(),
+        "Updated editors"
+    );
+}
+
+#[test_action("cognito-idp", "DeleteGroup", checksum = "ac33ddbb")]
+#[tokio::test]
+async fn cognito_delete_group() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("delgrp-pool")
+        .send()
+        .await
+        .unwrap();
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    client
+        .create_group()
+        .user_pool_id(&pool_id)
+        .group_name("tempgrp")
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .delete_group()
+        .user_pool_id(&pool_id)
+        .group_name("tempgrp")
+        .send()
+        .await
+        .unwrap();
+
+    let err = client
+        .get_group()
+        .user_pool_id(&pool_id)
+        .group_name("tempgrp")
+        .send()
+        .await
+        .unwrap_err();
+    assert!(err.into_service_error().is_resource_not_found_exception());
+}
+
+#[test_action("cognito-idp", "ListGroups", checksum = "75858aba")]
+#[tokio::test]
+async fn cognito_list_groups() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("listgrp-pool")
+        .send()
+        .await
+        .unwrap();
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    client
+        .create_group()
+        .user_pool_id(&pool_id)
+        .group_name("g1")
+        .send()
+        .await
+        .unwrap();
+    client
+        .create_group()
+        .user_pool_id(&pool_id)
+        .group_name("g2")
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .list_groups()
+        .user_pool_id(&pool_id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.groups().len(), 2);
+}
+
+#[test_action("cognito-idp", "AdminAddUserToGroup", checksum = "5fec870a")]
+#[test_action("cognito-idp", "AdminRemoveUserFromGroup", checksum = "90421bbd")]
+#[tokio::test]
+async fn cognito_admin_add_remove_user_to_group() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("usergrp-pool")
+        .send()
+        .await
+        .unwrap();
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    client
+        .admin_create_user()
+        .user_pool_id(&pool_id)
+        .username("grpuser")
+        .send()
+        .await
+        .unwrap();
+    client
+        .create_group()
+        .user_pool_id(&pool_id)
+        .group_name("devs")
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .admin_add_user_to_group()
+        .user_pool_id(&pool_id)
+        .username("grpuser")
+        .group_name("devs")
+        .send()
+        .await
+        .unwrap();
+
+    let users = client
+        .list_users_in_group()
+        .user_pool_id(&pool_id)
+        .group_name("devs")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(users.users().len(), 1);
+
+    client
+        .admin_remove_user_from_group()
+        .user_pool_id(&pool_id)
+        .username("grpuser")
+        .group_name("devs")
+        .send()
+        .await
+        .unwrap();
+
+    let users2 = client
+        .list_users_in_group()
+        .user_pool_id(&pool_id)
+        .group_name("devs")
+        .send()
+        .await
+        .unwrap();
+    assert!(users2.users().is_empty());
+}
+
+#[test_action("cognito-idp", "AdminListGroupsForUser", checksum = "ab20831c")]
+#[tokio::test]
+async fn cognito_admin_list_groups_for_user() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("grpforuser-pool")
+        .send()
+        .await
+        .unwrap();
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    client
+        .admin_create_user()
+        .user_pool_id(&pool_id)
+        .username("multigrp")
+        .send()
+        .await
+        .unwrap();
+    client
+        .create_group()
+        .user_pool_id(&pool_id)
+        .group_name("team-a")
+        .send()
+        .await
+        .unwrap();
+    client
+        .create_group()
+        .user_pool_id(&pool_id)
+        .group_name("team-b")
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .admin_add_user_to_group()
+        .user_pool_id(&pool_id)
+        .username("multigrp")
+        .group_name("team-a")
+        .send()
+        .await
+        .unwrap();
+    client
+        .admin_add_user_to_group()
+        .user_pool_id(&pool_id)
+        .username("multigrp")
+        .group_name("team-b")
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .admin_list_groups_for_user()
+        .user_pool_id(&pool_id)
+        .username("multigrp")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.groups().len(), 2);
+}
+
+#[test_action("cognito-idp", "ListUsersInGroup", checksum = "c3ee8bcd")]
+#[tokio::test]
+async fn cognito_list_users_in_group() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("usrsingrp-pool")
+        .send()
+        .await
+        .unwrap();
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    client
+        .create_group()
+        .user_pool_id(&pool_id)
+        .group_name("qa")
+        .send()
+        .await
+        .unwrap();
+    client
+        .admin_create_user()
+        .user_pool_id(&pool_id)
+        .username("qa1")
+        .send()
+        .await
+        .unwrap();
+    client
+        .admin_create_user()
+        .user_pool_id(&pool_id)
+        .username("qa2")
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .admin_add_user_to_group()
+        .user_pool_id(&pool_id)
+        .username("qa1")
+        .group_name("qa")
+        .send()
+        .await
+        .unwrap();
+    client
+        .admin_add_user_to_group()
+        .user_pool_id(&pool_id)
+        .username("qa2")
+        .group_name("qa")
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .list_users_in_group()
+        .user_pool_id(&pool_id)
+        .group_name("qa")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.users().len(), 2);
+}
