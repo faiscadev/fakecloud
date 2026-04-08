@@ -1535,16 +1535,9 @@ impl CognitoService {
                 )
             })?;
 
-        let (
-            tokens,
-            user_attrs,
-            region,
-            account_id,
-            pool_id_owned,
-            username_owned,
-            client_id_owned,
-        ) = {
-            let mut state = self.state.write();
+        // First lock scope: validate user exists, extract trigger data, then drop lock
+        let (user_attrs, region, account_id, pool_id_owned, username_owned, client_id_owned) = {
+            let state = self.state.read();
 
             // Validate pool exists
             if !state.user_pools.contains_key(pool_id) {
@@ -1615,6 +1608,62 @@ impl CognitoService {
             let user_attrs = triggers::collect_user_attributes(user);
             let region = state.region.clone();
             let account_id = state.account_id.clone();
+
+            (
+                user_attrs,
+                region,
+                account_id,
+                pool_id.to_string(),
+                username.to_string(),
+                client_id.to_string(),
+            )
+        };
+
+        // PreAuthentication_Authentication trigger (synchronous — can reject auth)
+        if let Some(ref ctx) = self.delivery_ctx {
+            if let Some(function_arn) = triggers::get_trigger_arn(
+                &self.state,
+                &pool_id_owned,
+                TriggerSource::PreAuthenticationAuthentication,
+            ) {
+                let event = triggers::build_trigger_event(
+                    TriggerSource::PreAuthenticationAuthentication,
+                    &pool_id_owned,
+                    Some(&client_id_owned),
+                    &username_owned,
+                    &user_attrs,
+                    &region,
+                    &account_id,
+                );
+                if triggers::invoke_trigger(ctx, &function_arn, &event)
+                    .await
+                    .is_none()
+                {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "NotAuthorizedException",
+                        "PreAuthentication Lambda trigger rejected the request.",
+                    ));
+                }
+            }
+        }
+
+        // Second lock scope: password check, token generation, state mutations
+        let tokens = {
+            let mut state = self.state.write();
+
+            // Re-validate user exists (could have been modified between lock scopes)
+            let user = state
+                .users
+                .get(pool_id)
+                .and_then(|users| users.get(username))
+                .ok_or_else(|| {
+                    AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "UserNotFoundException",
+                        "User does not exist.",
+                    )
+                })?;
 
             // Validate password
             let password_matches = match (&user.password, &user.temporary_password) {
@@ -1696,45 +1745,8 @@ impl CognitoService {
                 success: true,
             });
 
-            (
-                tokens,
-                user_attrs,
-                region,
-                account_id,
-                pool_id.to_string(),
-                username.to_string(),
-                client_id.to_string(),
-            )
+            tokens
         };
-
-        // PreAuthentication_Authentication trigger (synchronous — can reject auth)
-        if let Some(ref ctx) = self.delivery_ctx {
-            if let Some(function_arn) = triggers::get_trigger_arn(
-                &self.state,
-                &pool_id_owned,
-                TriggerSource::PreAuthenticationAuthentication,
-            ) {
-                let event = triggers::build_trigger_event(
-                    TriggerSource::PreAuthenticationAuthentication,
-                    &pool_id_owned,
-                    Some(&client_id_owned),
-                    &username_owned,
-                    &user_attrs,
-                    &region,
-                    &account_id,
-                );
-                if triggers::invoke_trigger(ctx, &function_arn, &event)
-                    .await
-                    .is_none()
-                {
-                    return Err(AwsServiceError::aws_error(
-                        StatusCode::BAD_REQUEST,
-                        "NotAuthorizedException",
-                        "PreAuthentication Lambda trigger rejected the request.",
-                    ));
-                }
-            }
-        }
 
         // PostAuthentication_Authentication trigger (fire-and-forget)
         if let Some(ref ctx) = self.delivery_ctx {
@@ -1830,9 +1842,9 @@ impl CognitoService {
                         )
                     })?;
 
-                // All state work in a scoped block so the lock is dropped before await
-                let (tokens, user_attrs, region, account_id) = {
-                    let mut state = self.state.write();
+                // First lock scope: validate user exists, extract trigger data, then drop lock
+                let (user_attrs, region, account_id) = {
+                    let state = self.state.read();
 
                     let user = state
                         .users
@@ -1858,6 +1870,58 @@ impl CognitoService {
                     let user_attrs = triggers::collect_user_attributes(user);
                     let region = state.region.clone();
                     let account_id = state.account_id.clone();
+
+                    (user_attrs, region, account_id)
+                };
+
+                let username_owned = username.to_string();
+                let client_id_owned = client_id.to_string();
+
+                // PreAuthentication_Authentication trigger (synchronous — can reject auth)
+                if let Some(ref ctx) = self.delivery_ctx {
+                    if let Some(function_arn) = triggers::get_trigger_arn(
+                        &self.state,
+                        &pool_id,
+                        TriggerSource::PreAuthenticationAuthentication,
+                    ) {
+                        let event = triggers::build_trigger_event(
+                            TriggerSource::PreAuthenticationAuthentication,
+                            &pool_id,
+                            Some(&client_id_owned),
+                            &username_owned,
+                            &user_attrs,
+                            &region,
+                            &account_id,
+                        );
+                        if triggers::invoke_trigger(ctx, &function_arn, &event)
+                            .await
+                            .is_none()
+                        {
+                            return Err(AwsServiceError::aws_error(
+                                StatusCode::BAD_REQUEST,
+                                "NotAuthorizedException",
+                                "PreAuthentication Lambda trigger rejected the request.",
+                            ));
+                        }
+                    }
+                }
+
+                // Second lock scope: password check, token generation, state mutations
+                let tokens = {
+                    let mut state = self.state.write();
+
+                    // Re-validate user exists (could have been modified between lock scopes)
+                    let user = state
+                        .users
+                        .get(&pool_id)
+                        .and_then(|users| users.get(username))
+                        .ok_or_else(|| {
+                            AwsServiceError::aws_error(
+                                StatusCode::BAD_REQUEST,
+                                "NotAuthorizedException",
+                                "Incorrect username or password.",
+                            )
+                        })?;
 
                     let password_matches = match (&user.password, &user.temporary_password) {
                         (Some(p), _) if p == password => true,
@@ -1934,40 +1998,8 @@ impl CognitoService {
                         success: true,
                     });
 
-                    (tokens, user_attrs, region, account_id)
+                    tokens
                 };
-
-                let username_owned = username.to_string();
-                let client_id_owned = client_id.to_string();
-
-                // PreAuthentication_Authentication trigger (synchronous — can reject auth)
-                if let Some(ref ctx) = self.delivery_ctx {
-                    if let Some(function_arn) = triggers::get_trigger_arn(
-                        &self.state,
-                        &pool_id,
-                        TriggerSource::PreAuthenticationAuthentication,
-                    ) {
-                        let event = triggers::build_trigger_event(
-                            TriggerSource::PreAuthenticationAuthentication,
-                            &pool_id,
-                            Some(&client_id_owned),
-                            &username_owned,
-                            &user_attrs,
-                            &region,
-                            &account_id,
-                        );
-                        if triggers::invoke_trigger(ctx, &function_arn, &event)
-                            .await
-                            .is_none()
-                        {
-                            return Err(AwsServiceError::aws_error(
-                                StatusCode::BAD_REQUEST,
-                                "NotAuthorizedException",
-                                "PreAuthentication Lambda trigger rejected the request.",
-                            ));
-                        }
-                    }
-                }
 
                 // PostAuthentication_Authentication trigger (fire-and-forget)
                 if let Some(ref ctx) = self.delivery_ctx {
