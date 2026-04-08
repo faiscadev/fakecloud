@@ -1492,6 +1492,7 @@ async fn cognito_create_group() {
     let group = resp.group().unwrap();
     assert_eq!(group.group_name().unwrap(), "admins");
     assert_eq!(group.description().unwrap(), "Admin group");
+    assert_eq!(group.precedence().unwrap(), 1);
 }
 
 #[test_action("cognito-idp", "GetGroup", checksum = "a81d68fe")]
@@ -1569,6 +1570,7 @@ async fn cognito_update_group() {
         resp.group().unwrap().description().unwrap(),
         "Updated editors"
     );
+    assert_eq!(resp.group().unwrap().precedence().unwrap(), 5);
 }
 
 #[test_action("cognito-idp", "DeleteGroup", checksum = "ac33ddbb")]

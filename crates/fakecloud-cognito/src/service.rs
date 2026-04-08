@@ -995,6 +995,11 @@ impl CognitoService {
             ));
         }
 
+        // Clean up group memberships for the deleted user
+        if let Some(pool_groups) = state.user_groups.get_mut(pool_id) {
+            pool_groups.remove(username);
+        }
+
         Ok(AwsResponse::ok_json(json!({})))
     }
 
@@ -3160,7 +3165,7 @@ fn parse_user_attributes(val: &Value) -> Vec<UserAttribute> {
         .unwrap_or_default()
 }
 
-/// Convert a User to the JSON format AWS returns (for ListUsers and AdminCreateUser response).
+/// Convert a Group to the JSON format AWS returns.
 fn group_to_json(group: &Group) -> Value {
     let mut val = json!({
         "GroupName": group.group_name,
@@ -3180,6 +3185,7 @@ fn group_to_json(group: &Group) -> Value {
     val
 }
 
+/// Convert a User to the JSON format AWS returns (for ListUsers and AdminCreateUser response).
 fn user_to_json(user: &User) -> Value {
     json!({
         "Username": user.username,
