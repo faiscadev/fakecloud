@@ -295,11 +295,15 @@ impl KinesisService {
             })
             .collect();
 
+        let millis_behind_latest = if end_index < shard.records.len() {
+            1
+        } else {
+            0
+        };
         let next_iterator = state.insert_iterator(&lease.stream_name, &lease.shard_id, end_index);
-        state.iterators.remove(&iterator);
 
         Ok(AwsResponse::ok_json(json!({
-            "MillisBehindLatest": 0,
+            "MillisBehindLatest": millis_behind_latest,
             "NextShardIterator": next_iterator,
             "Records": records,
         })))
@@ -799,5 +803,25 @@ mod tests {
 
         let index = shard_iterator_start_index(&shard, "LATEST", &json!({})).unwrap();
         assert_eq!(index, 2);
+    }
+
+    #[test]
+    fn insert_iterator_purges_expired_leases() {
+        let mut state = crate::state::KinesisState::new("123456789012", "us-east-1");
+        state.iterators.insert(
+            "expired".to_string(),
+            crate::state::ShardIteratorLease {
+                iterator_token: "expired".to_string(),
+                stream_name: "stream".to_string(),
+                shard_id: "shardId-000000000000".to_string(),
+                next_record_index: 0,
+                expires_at: Utc::now() - chrono::Duration::minutes(1),
+            },
+        );
+
+        let token = state.insert_iterator("stream", "shardId-000000000000", 0);
+
+        assert!(state.iterators.contains_key(&token));
+        assert!(!state.iterators.contains_key("expired"));
     }
 }

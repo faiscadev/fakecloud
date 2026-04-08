@@ -302,3 +302,105 @@ async fn kinesis_latest_iterator_starts_after_existing_records() {
     assert_eq!(records.records().len(), 1);
     assert_eq!(records.records()[0].partition_key(), "key");
 }
+
+#[tokio::test]
+async fn kinesis_iterator_can_be_retried_before_expiry() {
+    let server = TestServer::start().await;
+    let client = server.kinesis_client().await;
+
+    client
+        .create_stream()
+        .stream_name("retryable")
+        .shard_count(1)
+        .send()
+        .await
+        .unwrap();
+
+    let write = client
+        .put_record()
+        .stream_name("retryable")
+        .partition_key("key")
+        .data(Blob::new(b"payload"))
+        .send()
+        .await
+        .unwrap();
+
+    let iterator = client
+        .get_shard_iterator()
+        .stream_name("retryable")
+        .shard_id(write.shard_id())
+        .shard_iterator_type(ShardIteratorType::TrimHorizon)
+        .send()
+        .await
+        .unwrap();
+    let shard_iterator = iterator.shard_iterator().unwrap().to_string();
+
+    let first = client
+        .get_records()
+        .shard_iterator(&shard_iterator)
+        .limit(1)
+        .send()
+        .await
+        .unwrap();
+    let retried = client
+        .get_records()
+        .shard_iterator(&shard_iterator)
+        .limit(1)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(first.records().len(), 1);
+    assert_eq!(retried.records().len(), 1);
+}
+
+#[tokio::test]
+async fn kinesis_reports_millis_behind_latest_when_limit_truncates() {
+    let server = TestServer::start().await;
+    let client = server.kinesis_client().await;
+
+    client
+        .create_stream()
+        .stream_name("lag")
+        .shard_count(1)
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .put_record()
+        .stream_name("lag")
+        .partition_key("key")
+        .data(Blob::new(b"one"))
+        .send()
+        .await
+        .unwrap();
+    let write = client
+        .put_record()
+        .stream_name("lag")
+        .partition_key("key")
+        .data(Blob::new(b"two"))
+        .send()
+        .await
+        .unwrap();
+
+    let iterator = client
+        .get_shard_iterator()
+        .stream_name("lag")
+        .shard_id(write.shard_id())
+        .shard_iterator_type(ShardIteratorType::TrimHorizon)
+        .send()
+        .await
+        .unwrap();
+
+    let records = client
+        .get_records()
+        .shard_iterator(iterator.shard_iterator().unwrap())
+        .limit(1)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(records.records().len(), 1);
+    assert!(records.millis_behind_latest().unwrap_or_default() > 0);
+}
