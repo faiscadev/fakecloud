@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
@@ -11,6 +11,7 @@ pub struct KinesisState {
     pub account_id: String,
     pub region: String,
     pub streams: HashMap<String, KinesisStream>,
+    pub iterators: HashMap<String, ShardIteratorLease>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,17 +44,28 @@ pub struct KinesisRecord {
     pub approximate_arrival_timestamp: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShardIteratorLease {
+    pub iterator_token: String,
+    pub stream_name: String,
+    pub shard_id: String,
+    pub next_record_index: usize,
+    pub expires_at: DateTime<Utc>,
+}
+
 impl KinesisState {
     pub fn new(account_id: &str, region: &str) -> Self {
         Self {
             account_id: account_id.to_string(),
             region: region.to_string(),
             streams: HashMap::new(),
+            iterators: HashMap::new(),
         }
     }
 
     pub fn reset(&mut self) {
         self.streams.clear();
+        self.iterators.clear();
     }
 
     pub fn stream_arn(&self, stream_name: &str) -> String {
@@ -61,5 +73,32 @@ impl KinesisState {
             "arn:aws:kinesis:{}:{}:stream/{}",
             self.region, self.account_id, stream_name
         )
+    }
+
+    pub fn insert_iterator(
+        &mut self,
+        stream_name: &str,
+        shard_id: &str,
+        next_record_index: usize,
+    ) -> String {
+        let token = format!(
+            "{}:{}:{}:{}:{}",
+            stream_name,
+            shard_id,
+            next_record_index,
+            Utc::now().timestamp_millis(),
+            self.iterators.len() + 1
+        );
+        self.iterators.insert(
+            token.clone(),
+            ShardIteratorLease {
+                iterator_token: token.clone(),
+                stream_name: stream_name.to_string(),
+                shard_id: shard_id.to_string(),
+                next_record_index,
+                expires_at: Utc::now() + Duration::minutes(5),
+            },
+        );
+        token
     }
 }

@@ -2,6 +2,7 @@ mod helpers;
 
 use aws_sdk_kinesis::primitives::Blob;
 use aws_sdk_kinesis::types::PutRecordsRequestEntry;
+use aws_sdk_kinesis::types::ShardIteratorType;
 use helpers::TestServer;
 
 #[tokio::test]
@@ -198,4 +199,106 @@ async fn kinesis_put_records_reports_partial_failures() {
         response.records()[1].error_code(),
         Some("InvalidArgumentException")
     );
+}
+
+#[tokio::test]
+async fn kinesis_get_records_with_trim_horizon_iterator() {
+    let server = TestServer::start().await;
+    let client = server.kinesis_client().await;
+
+    client
+        .create_stream()
+        .stream_name("reads")
+        .shard_count(1)
+        .send()
+        .await
+        .unwrap();
+
+    let write_one = client
+        .put_record()
+        .stream_name("reads")
+        .partition_key("key")
+        .data(Blob::new(b"first"))
+        .send()
+        .await
+        .unwrap();
+    client
+        .put_record()
+        .stream_name("reads")
+        .partition_key("key")
+        .data(Blob::new(b"second"))
+        .send()
+        .await
+        .unwrap();
+
+    let iterator = client
+        .get_shard_iterator()
+        .stream_name("reads")
+        .shard_id(write_one.shard_id())
+        .shard_iterator_type(ShardIteratorType::TrimHorizon)
+        .send()
+        .await
+        .unwrap();
+
+    let records = client
+        .get_records()
+        .shard_iterator(iterator.shard_iterator().unwrap())
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(records.records().len(), 2);
+    assert_eq!(records.records()[0].partition_key(), "key");
+    assert!(records.next_shard_iterator().is_some());
+}
+
+#[tokio::test]
+async fn kinesis_latest_iterator_starts_after_existing_records() {
+    let server = TestServer::start().await;
+    let client = server.kinesis_client().await;
+
+    client
+        .create_stream()
+        .stream_name("latest")
+        .shard_count(1)
+        .send()
+        .await
+        .unwrap();
+
+    let first = client
+        .put_record()
+        .stream_name("latest")
+        .partition_key("key")
+        .data(Blob::new(b"before"))
+        .send()
+        .await
+        .unwrap();
+
+    let iterator = client
+        .get_shard_iterator()
+        .stream_name("latest")
+        .shard_id(first.shard_id())
+        .shard_iterator_type(ShardIteratorType::Latest)
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .put_record()
+        .stream_name("latest")
+        .partition_key("key")
+        .data(Blob::new(b"after"))
+        .send()
+        .await
+        .unwrap();
+
+    let records = client
+        .get_records()
+        .shard_iterator(iterator.shard_iterator().unwrap())
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(records.records().len(), 1);
+    assert_eq!(records.records()[0].partition_key(), "key");
 }
