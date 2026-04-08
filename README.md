@@ -190,6 +190,12 @@ fakecloud exposes `/_fakecloud/*` endpoints for testing behaviors that AWS runs 
 | `/_fakecloud/s3/notifications` | GET | List all S3 notification events. |
 | `/_fakecloud/ses/emails` | GET | List all sent SES emails. |
 | `/_fakecloud/ses/inbound` | POST | Simulate receiving an inbound email. Evaluates receipt rules and executes actions. |
+| `/_fakecloud/cognito/confirmation-codes` | GET | List all pending confirmation codes across all pools and users. |
+| `/_fakecloud/cognito/confirmation-codes/{pool_id}/{username}` | GET | Get confirmation codes for a specific user. |
+| `/_fakecloud/cognito/confirm-user` | POST | Force-confirm a user. Body: `{"userPoolId": "...", "username": "..."}`. |
+| `/_fakecloud/cognito/tokens` | GET | List all active access and refresh tokens (without exposing token strings). |
+| `/_fakecloud/cognito/expire-tokens` | POST | Expire tokens. Body: `{"userPoolId": "...", "username": "..."}` (both optional). |
+| `/_fakecloud/cognito/auth-events` | GET | List all auth events (sign-up, sign-in, failures, password changes). |
 | `/_fakecloud/reset` | POST | Reset all state across all services. |
 | `/_fakecloud/reset/{service}` | POST | Reset only the specified service's state. Returns `{"reset": "service_name"}`. |
 

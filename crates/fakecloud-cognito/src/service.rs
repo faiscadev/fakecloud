@@ -12,12 +12,12 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceErr
 
 use crate::state::{
     default_schema_attributes, AccessTokenData, AccountRecoverySetting, AdminCreateUserConfig,
-    CustomDomainConfig, Device, EmailConfiguration, Group, IdentityProvider, InviteMessageTemplate,
-    MfaPreferences, PasswordPolicy, PoolPolicies, RecoveryOption, RefreshTokenData, ResourceServer,
-    ResourceServerScope, SchemaAttribute, SessionData, SharedCognitoState, SmsConfiguration,
-    SmsMfaConfiguration, SoftwareTokenMfaConfiguration, StringAttributeConstraints,
-    TokenValidityUnits, User, UserAttribute, UserImportJob, UserPool, UserPoolClient,
-    UserPoolDomain,
+    AuthEvent, CustomDomainConfig, Device, EmailConfiguration, Group, IdentityProvider,
+    InviteMessageTemplate, MfaPreferences, PasswordPolicy, PoolPolicies, RecoveryOption,
+    RefreshTokenData, ResourceServer, ResourceServerScope, SchemaAttribute, SessionData,
+    SharedCognitoState, SmsConfiguration, SmsMfaConfiguration, SoftwareTokenMfaConfiguration,
+    StringAttributeConstraints, TokenValidityUnits, User, UserAttribute, UserImportJob, UserPool,
+    UserPoolClient, UserPoolDomain,
 };
 
 pub struct CognitoService {
@@ -1552,6 +1552,14 @@ impl CognitoService {
             _ => false,
         };
         if !password_matches {
+            state.auth_events.push(AuthEvent {
+                event_type: "SIGN_IN_FAILURE".to_string(),
+                username: username.to_string(),
+                user_pool_id: pool_id.to_string(),
+                client_id: Some(client_id.to_string()),
+                timestamp: Utc::now(),
+                success: false,
+            });
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "NotAuthorizedException",
@@ -1609,6 +1617,15 @@ impl CognitoService {
                 issued_at: Utc::now(),
             },
         );
+
+        state.auth_events.push(AuthEvent {
+            event_type: "SIGN_IN".to_string(),
+            username: username.to_string(),
+            user_pool_id: pool_id.to_string(),
+            client_id: Some(client_id.to_string()),
+            timestamp: Utc::now(),
+            success: true,
+        });
 
         Ok(AwsResponse::ok_json(json!({
             "AuthenticationResult": {
@@ -1708,6 +1725,14 @@ impl CognitoService {
                     _ => false,
                 };
                 if !password_matches {
+                    state.auth_events.push(AuthEvent {
+                        event_type: "SIGN_IN_FAILURE".to_string(),
+                        username: username.to_string(),
+                        user_pool_id: pool_id.to_string(),
+                        client_id: Some(client_id.to_string()),
+                        timestamp: Utc::now(),
+                        success: false,
+                    });
                     return Err(AwsServiceError::aws_error(
                         StatusCode::BAD_REQUEST,
                         "NotAuthorizedException",
@@ -1761,6 +1786,15 @@ impl CognitoService {
                         issued_at: Utc::now(),
                     },
                 );
+
+                state.auth_events.push(AuthEvent {
+                    event_type: "SIGN_IN".to_string(),
+                    username: username.to_string(),
+                    user_pool_id: pool_id.to_string(),
+                    client_id: Some(client_id.to_string()),
+                    timestamp: Utc::now(),
+                    success: true,
+                });
 
                 Ok(AwsResponse::ok_json(json!({
                     "AuthenticationResult": {
@@ -2110,6 +2144,15 @@ impl CognitoService {
 
         pool_users.insert(username.to_string(), user);
 
+        state.auth_events.push(AuthEvent {
+            event_type: "SIGN_UP".to_string(),
+            username: username.to_string(),
+            user_pool_id: pool_id,
+            client_id: Some(client_id.to_string()),
+            timestamp: Utc::now(),
+            success: true,
+        });
+
         Ok(AwsResponse::ok_json(json!({
             "UserConfirmed": false,
             "UserSub": sub
@@ -2262,6 +2305,15 @@ impl CognitoService {
         user.temporary_password = None;
         user.user_last_modified_date = Utc::now();
 
+        state.auth_events.push(AuthEvent {
+            event_type: "PASSWORD_CHANGE".to_string(),
+            username,
+            user_pool_id: pool_id,
+            client_id: None,
+            timestamp: Utc::now(),
+            success: true,
+        });
+
         Ok(AwsResponse::ok_json(json!({})))
     }
 
@@ -2317,6 +2369,15 @@ impl CognitoService {
                 }
             })
             .unwrap_or_else(|| "***".to_string());
+
+        state.auth_events.push(AuthEvent {
+            event_type: "FORGOT_PASSWORD".to_string(),
+            username: username.to_string(),
+            user_pool_id: pool_id,
+            client_id: Some(client_id.to_string()),
+            timestamp: Utc::now(),
+            success: true,
+        });
 
         Ok(AwsResponse::ok_json(json!({
             "CodeDeliveryDetails": {
@@ -7426,5 +7487,150 @@ mod tests {
         let resp = svc.list_user_import_jobs(&req).unwrap();
         let resp_body: Value = serde_json::from_slice(&resp.body).unwrap();
         assert_eq!(resp_body["UserImportJobs"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn auth_events_recorded_on_sign_up() {
+        let state = std::sync::Arc::new(parking_lot::RwLock::new(crate::state::CognitoState::new(
+            "123456789012",
+            "us-east-1",
+        )));
+        let svc = CognitoService::new(state.clone());
+
+        // Create pool and client
+        let req = make_req("CreateUserPool", r#"{"PoolName": "evpool"}"#);
+        let resp = svc.create_user_pool(&req).unwrap();
+        let resp_body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let pool_id = resp_body["UserPool"]["Id"].as_str().unwrap().to_string();
+
+        let body = serde_json::to_string(&json!({
+            "UserPoolId": pool_id,
+            "ClientName": "evclient",
+            "ExplicitAuthFlows": ["ALLOW_USER_PASSWORD_AUTH", "ALLOW_REFRESH_TOKEN_AUTH"]
+        }))
+        .unwrap();
+        let req = make_req("CreateUserPoolClient", &body);
+        let resp = svc.create_user_pool_client(&req).unwrap();
+        let resp_body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let client_id = resp_body["UserPoolClient"]["ClientId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // Sign up
+        let body = serde_json::to_string(&json!({
+            "ClientId": client_id,
+            "Username": "testevuser",
+            "Password": "P@ssw0rd!",
+            "UserAttributes": [{"Name": "email", "Value": "test@example.com"}]
+        }))
+        .unwrap();
+        let req = make_req("SignUp", &body);
+        svc.sign_up(&req).unwrap();
+
+        // Check auth events
+        let st = state.read();
+        assert_eq!(st.auth_events.len(), 1);
+        assert_eq!(st.auth_events[0].event_type, "SIGN_UP");
+        assert_eq!(st.auth_events[0].username, "testevuser");
+        assert!(st.auth_events[0].success);
+    }
+
+    #[test]
+    fn auth_events_recorded_on_sign_in_and_failure() {
+        let state = std::sync::Arc::new(parking_lot::RwLock::new(crate::state::CognitoState::new(
+            "123456789012",
+            "us-east-1",
+        )));
+        let svc = CognitoService::new(state.clone());
+
+        // Create pool, client, user
+        let req = make_req("CreateUserPool", r#"{"PoolName": "authpool"}"#);
+        let resp = svc.create_user_pool(&req).unwrap();
+        let resp_body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let pool_id = resp_body["UserPool"]["Id"].as_str().unwrap().to_string();
+
+        let body = serde_json::to_string(&json!({
+            "UserPoolId": pool_id,
+            "ClientName": "authclient",
+            "ExplicitAuthFlows": ["ALLOW_ADMIN_USER_PASSWORD_AUTH", "ALLOW_REFRESH_TOKEN_AUTH"]
+        }))
+        .unwrap();
+        let req = make_req("CreateUserPoolClient", &body);
+        let resp = svc.create_user_pool_client(&req).unwrap();
+        let resp_body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let client_id = resp_body["UserPoolClient"]["ClientId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // Create user and set permanent password
+        let body = serde_json::to_string(&json!({
+            "UserPoolId": pool_id,
+            "Username": "authuser",
+            "TemporaryPassword": "TempP@ss1!"
+        }))
+        .unwrap();
+        let req = make_req("AdminCreateUser", &body);
+        svc.admin_create_user(&req).unwrap();
+
+        let body = serde_json::to_string(&json!({
+            "UserPoolId": pool_id,
+            "Username": "authuser",
+            "Password": "P@ssw0rd!",
+            "Permanent": true
+        }))
+        .unwrap();
+        let req = make_req("AdminSetUserPassword", &body);
+        svc.admin_set_user_password(&req).unwrap();
+
+        // Successful auth
+        let body = serde_json::to_string(&json!({
+            "UserPoolId": pool_id,
+            "ClientId": client_id,
+            "AuthFlow": "ADMIN_USER_PASSWORD_AUTH",
+            "AuthParameters": {"USERNAME": "authuser", "PASSWORD": "P@ssw0rd!"}
+        }))
+        .unwrap();
+        let req = make_req("AdminInitiateAuth", &body);
+        svc.admin_initiate_auth(&req).unwrap();
+
+        // Failed auth
+        let body = serde_json::to_string(&json!({
+            "UserPoolId": pool_id,
+            "ClientId": client_id,
+            "AuthFlow": "ADMIN_USER_PASSWORD_AUTH",
+            "AuthParameters": {"USERNAME": "authuser", "PASSWORD": "WrongPass!"}
+        }))
+        .unwrap();
+        let req = make_req("AdminInitiateAuth", &body);
+        let _ = svc.admin_initiate_auth(&req);
+
+        // Check events
+        let st = state.read();
+        assert_eq!(st.auth_events.len(), 2);
+        assert_eq!(st.auth_events[0].event_type, "SIGN_IN");
+        assert!(st.auth_events[0].success);
+        assert_eq!(st.auth_events[1].event_type, "SIGN_IN_FAILURE");
+        assert!(!st.auth_events[1].success);
+    }
+
+    #[test]
+    fn auth_events_cleared_on_reset() {
+        let state = std::sync::Arc::new(parking_lot::RwLock::new(crate::state::CognitoState::new(
+            "123456789012",
+            "us-east-1",
+        )));
+        state.write().auth_events.push(AuthEvent {
+            event_type: "SIGN_UP".to_string(),
+            username: "test".to_string(),
+            user_pool_id: "pool".to_string(),
+            client_id: None,
+            timestamp: Utc::now(),
+            success: true,
+        });
+        assert_eq!(state.read().auth_events.len(), 1);
+        state.write().reset();
+        assert!(state.read().auth_events.is_empty());
     }
 }

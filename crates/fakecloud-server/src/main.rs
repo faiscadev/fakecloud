@@ -213,6 +213,13 @@ async fn main() {
     let sns_sim_pending_state = sns_state.clone();
     let sns_sim_confirm_state = sns_state.clone();
 
+    // Clone state refs for Cognito simulation endpoints
+    let cognito_codes_state = cognito_state.clone();
+    let cognito_confirm_state = cognito_state.clone();
+    let cognito_tokens_state = cognito_state.clone();
+    let cognito_expire_state = cognito_state.clone();
+    let cognito_events_state = cognito_state.clone();
+
     // Clone state for reset endpoint before moving into services
     let reset_state = ResetState {
         iam: iam_state.clone(),
@@ -737,6 +744,176 @@ async fn main() {
                             "confirmationCode": code,
                             "attributeVerificationCodes": attr_codes
                         }))
+                    }
+                }
+            }),
+        )
+        .route(
+            "/_fakecloud/cognito/confirmation-codes",
+            axum::routing::get({
+                let cs = cognito_codes_state;
+                move || {
+                    let cs = cs.clone();
+                    async move {
+                        let state = cs.read();
+                        let mut codes = Vec::new();
+                        for (pool_id, users) in &state.users {
+                            for (username, user) in users {
+                                if let Some(code) = &user.confirmation_code {
+                                    codes.push(serde_json::json!({
+                                        "poolId": pool_id,
+                                        "username": username,
+                                        "code": code,
+                                        "type": "signup"
+                                    }));
+                                }
+                                for (attr, code) in &user.attribute_verification_codes {
+                                    codes.push(serde_json::json!({
+                                        "poolId": pool_id,
+                                        "username": username,
+                                        "code": code,
+                                        "type": "attribute_verification",
+                                        "attribute": attr
+                                    }));
+                                }
+                            }
+                        }
+                        axum::Json(serde_json::json!({ "codes": codes }))
+                    }
+                }
+            }),
+        )
+        .route(
+            "/_fakecloud/cognito/confirm-user",
+            axum::routing::post({
+                let cs = cognito_confirm_state;
+                move |axum::Json(body): axum::Json<serde_json::Value>| {
+                    let cs = cs.clone();
+                    async move {
+                        let pool_id = body["userPoolId"].as_str().unwrap_or("").to_string();
+                        let username = body["username"].as_str().unwrap_or("").to_string();
+                        let mut state = cs.write();
+                        let user = state
+                            .users
+                            .get_mut(&pool_id)
+                            .and_then(|users| users.get_mut(&username));
+                        match user {
+                            Some(user) => {
+                                user.user_status = "CONFIRMED".to_string();
+                                user.confirmation_code = None;
+                                user.user_last_modified_date = chrono::Utc::now();
+                                (
+                                    axum::http::StatusCode::OK,
+                                    axum::Json(serde_json::json!({ "confirmed": true })),
+                                )
+                            }
+                            None => (
+                                axum::http::StatusCode::NOT_FOUND,
+                                axum::Json(serde_json::json!({
+                                    "confirmed": false,
+                                    "error": "User not found"
+                                })),
+                            ),
+                        }
+                    }
+                }
+            }),
+        )
+        .route(
+            "/_fakecloud/cognito/tokens",
+            axum::routing::get({
+                let cs = cognito_tokens_state;
+                move || {
+                    let cs = cs.clone();
+                    async move {
+                        let state = cs.read();
+                        let mut tokens = Vec::new();
+                        for data in state.access_tokens.values() {
+                            tokens.push(serde_json::json!({
+                                "type": "access",
+                                "username": data.username,
+                                "poolId": data.user_pool_id,
+                                "clientId": data.client_id,
+                                "issuedAt": data.issued_at.timestamp()
+                            }));
+                        }
+                        for data in state.refresh_tokens.values() {
+                            tokens.push(serde_json::json!({
+                                "type": "refresh",
+                                "username": data.username,
+                                "poolId": data.user_pool_id,
+                                "clientId": data.client_id,
+                                "issuedAt": data.issued_at.timestamp()
+                            }));
+                        }
+                        axum::Json(serde_json::json!({ "tokens": tokens }))
+                    }
+                }
+            }),
+        )
+        .route(
+            "/_fakecloud/cognito/expire-tokens",
+            axum::routing::post({
+                let cs = cognito_expire_state;
+                move |axum::Json(body): axum::Json<serde_json::Value>| {
+                    let cs = cs.clone();
+                    async move {
+                        let pool_id = body["userPoolId"].as_str().map(|s| s.to_string());
+                        let username = body["username"].as_str().map(|s| s.to_string());
+                        let mut state = cs.write();
+                        let mut expired = 0usize;
+
+                        let matches = |p: &str, u: &str| -> bool {
+                            pool_id.as_ref().is_none_or(|pid| pid == p)
+                                && username.as_ref().is_none_or(|un| un == u)
+                        };
+
+                        let before_access = state.access_tokens.len();
+                        state
+                            .access_tokens
+                            .retain(|_, v| !matches(&v.user_pool_id, &v.username));
+                        expired += before_access - state.access_tokens.len();
+
+                        let before_refresh = state.refresh_tokens.len();
+                        state
+                            .refresh_tokens
+                            .retain(|_, v| !matches(&v.user_pool_id, &v.username));
+                        expired += before_refresh - state.refresh_tokens.len();
+
+                        let before_sessions = state.sessions.len();
+                        state
+                            .sessions
+                            .retain(|_, v| !matches(&v.user_pool_id, &v.username));
+                        expired += before_sessions - state.sessions.len();
+
+                        axum::Json(serde_json::json!({ "expiredTokens": expired }))
+                    }
+                }
+            }),
+        )
+        .route(
+            "/_fakecloud/cognito/auth-events",
+            axum::routing::get({
+                let cs = cognito_events_state;
+                move || {
+                    let cs = cs.clone();
+                    async move {
+                        let state = cs.read();
+                        let events: Vec<serde_json::Value> = state
+                            .auth_events
+                            .iter()
+                            .map(|e| {
+                                serde_json::json!({
+                                    "eventType": e.event_type,
+                                    "username": e.username,
+                                    "userPoolId": e.user_pool_id,
+                                    "clientId": e.client_id,
+                                    "timestamp": e.timestamp.timestamp(),
+                                    "success": e.success
+                                })
+                            })
+                            .collect();
+                        axum::Json(serde_json::json!({ "events": events }))
                     }
                 }
             }),

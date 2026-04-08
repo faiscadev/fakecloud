@@ -34,6 +34,18 @@ pub struct CognitoState {
     pub tags: HashMap<String, HashMap<String, String>>,
     /// pool_id -> (job_id -> UserImportJob)
     pub import_jobs: HashMap<String, HashMap<String, UserImportJob>>,
+    /// Auth events for introspection
+    pub auth_events: Vec<AuthEvent>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AuthEvent {
+    pub event_type: String,
+    pub username: String,
+    pub user_pool_id: String,
+    pub client_id: Option<String>,
+    pub timestamp: DateTime<Utc>,
+    pub success: bool,
 }
 
 impl CognitoState {
@@ -54,6 +66,7 @@ impl CognitoState {
             domains: HashMap::new(),
             tags: HashMap::new(),
             import_jobs: HashMap::new(),
+            auth_events: Vec::new(),
         }
     }
 
@@ -71,6 +84,7 @@ impl CognitoState {
         self.domains.clear();
         self.tags.clear();
         self.import_jobs.clear();
+        self.auth_events.clear();
     }
 }
 

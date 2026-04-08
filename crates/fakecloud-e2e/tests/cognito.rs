@@ -4226,3 +4226,399 @@ async fn cognito_get_csv_header() {
         .await;
     assert!(err.is_err(), "Should fail for non-existent pool");
 }
+
+// --- Simulation / Testing API tests ---
+
+#[tokio::test]
+async fn cognito_simulation_confirmation_codes_and_force_confirm() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+    let http = reqwest::Client::new();
+
+    // Create pool + client
+    let pool = client
+        .create_user_pool()
+        .pool_name("sim-pool")
+        .send()
+        .await
+        .expect("create pool");
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    let upc = client
+        .create_user_pool_client()
+        .user_pool_id(&pool_id)
+        .client_name("sim-client")
+        .explicit_auth_flows(ExplicitAuthFlowsType::AllowUserPasswordAuth)
+        .explicit_auth_flows(ExplicitAuthFlowsType::AllowRefreshTokenAuth)
+        .send()
+        .await
+        .expect("create client");
+    let client_id = upc
+        .user_pool_client()
+        .unwrap()
+        .client_id()
+        .unwrap()
+        .to_string();
+
+    // Sign up a user
+    client
+        .sign_up()
+        .client_id(&client_id)
+        .username("simuser")
+        .password("P@ssw0rd!")
+        .user_attributes(
+            AttributeType::builder()
+                .name("email")
+                .value("sim@example.com")
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .expect("sign up");
+
+    // List all confirmation codes (should be empty initially since SignUp doesn't auto-generate codes)
+    let resp: serde_json::Value = http
+        .get(format!(
+            "{}/_fakecloud/cognito/confirmation-codes",
+            server.endpoint()
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let codes = resp["codes"].as_array().unwrap();
+    assert!(
+        codes.is_empty(),
+        "Should have no codes before ForgotPassword"
+    );
+
+    // Force-confirm user so we can then trigger ForgotPassword
+    let confirm_resp: serde_json::Value = http
+        .post(format!(
+            "{}/_fakecloud/cognito/confirm-user",
+            server.endpoint()
+        ))
+        .json(&serde_json::json!({
+            "userPoolId": pool_id,
+            "username": "simuser"
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(confirm_resp["confirmed"], true);
+
+    // Verify user is now CONFIRMED via AdminGetUser
+    let user = client
+        .admin_get_user()
+        .user_pool_id(&pool_id)
+        .username("simuser")
+        .send()
+        .await
+        .expect("get user");
+    assert_eq!(
+        user.user_status(),
+        Some(&UserStatusType::Confirmed),
+        "User should be CONFIRMED after force-confirm"
+    );
+
+    // Trigger ForgotPassword to create a confirmation code
+    client
+        .forgot_password()
+        .client_id(&client_id)
+        .username("simuser")
+        .send()
+        .await
+        .expect("forgot password");
+
+    // List codes again - should now have the forgot password code
+    let resp: serde_json::Value = http
+        .get(format!(
+            "{}/_fakecloud/cognito/confirmation-codes",
+            server.endpoint()
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let codes = resp["codes"].as_array().unwrap();
+    assert!(
+        codes.iter().any(|c| c["username"] == "simuser"),
+        "Should have simuser's code: {codes:?}"
+    );
+
+    // Force-confirm non-existent user should 404
+    let resp = http
+        .post(format!(
+            "{}/_fakecloud/cognito/confirm-user",
+            server.endpoint()
+        ))
+        .json(&serde_json::json!({
+            "userPoolId": pool_id,
+            "username": "nonexistent"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+}
+
+#[tokio::test]
+async fn cognito_simulation_tokens_and_expire() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+    let http = reqwest::Client::new();
+
+    // Create pool + client
+    let pool = client
+        .create_user_pool()
+        .pool_name("token-pool")
+        .send()
+        .await
+        .expect("create pool");
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    let upc = client
+        .create_user_pool_client()
+        .user_pool_id(&pool_id)
+        .client_name("token-client")
+        .explicit_auth_flows(ExplicitAuthFlowsType::AllowAdminUserPasswordAuth)
+        .explicit_auth_flows(ExplicitAuthFlowsType::AllowRefreshTokenAuth)
+        .send()
+        .await
+        .expect("create client");
+    let client_id = upc
+        .user_pool_client()
+        .unwrap()
+        .client_id()
+        .unwrap()
+        .to_string();
+
+    // Create and confirm user
+    client
+        .admin_create_user()
+        .user_pool_id(&pool_id)
+        .username("tokenuser")
+        .temporary_password("TempP@ss1!")
+        .send()
+        .await
+        .expect("create user");
+
+    client
+        .admin_set_user_password()
+        .user_pool_id(&pool_id)
+        .username("tokenuser")
+        .password("P@ssw0rd!")
+        .permanent(true)
+        .send()
+        .await
+        .expect("set password");
+
+    // Authenticate user
+    client
+        .admin_initiate_auth()
+        .user_pool_id(&pool_id)
+        .client_id(&client_id)
+        .auth_flow(aws_sdk_cognitoidentityprovider::types::AuthFlowType::AdminUserPasswordAuth)
+        .auth_parameters("USERNAME", "tokenuser")
+        .auth_parameters("PASSWORD", "P@ssw0rd!")
+        .send()
+        .await
+        .expect("auth");
+
+    // List tokens
+    let resp: serde_json::Value = http
+        .get(format!("{}/_fakecloud/cognito/tokens", server.endpoint()))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let tokens = resp["tokens"].as_array().unwrap();
+    let access_count = tokens.iter().filter(|t| t["type"] == "access").count();
+    let refresh_count = tokens.iter().filter(|t| t["type"] == "refresh").count();
+    assert!(access_count >= 1, "Should have at least 1 access token");
+    assert!(refresh_count >= 1, "Should have at least 1 refresh token");
+
+    // All tokens should belong to tokenuser
+    for t in tokens {
+        assert_eq!(t["username"], "tokenuser");
+        assert_eq!(t["poolId"], pool_id);
+        assert!(t["issuedAt"].as_i64().unwrap() > 0);
+    }
+
+    // Expire tokens for this user
+    let resp: serde_json::Value = http
+        .post(format!(
+            "{}/_fakecloud/cognito/expire-tokens",
+            server.endpoint()
+        ))
+        .json(&serde_json::json!({
+            "userPoolId": pool_id,
+            "username": "tokenuser"
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let expired = resp["expiredTokens"].as_u64().unwrap();
+    assert!(
+        expired >= 2,
+        "Should expire at least access + refresh token, got {expired}"
+    );
+
+    // Verify tokens are gone
+    let resp: serde_json::Value = http
+        .get(format!("{}/_fakecloud/cognito/tokens", server.endpoint()))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let tokens = resp["tokens"].as_array().unwrap();
+    assert!(tokens.is_empty(), "Tokens should be empty after expiration");
+}
+
+#[tokio::test]
+async fn cognito_simulation_auth_events() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+    let http = reqwest::Client::new();
+
+    // Create pool + client
+    let pool = client
+        .create_user_pool()
+        .pool_name("events-pool")
+        .send()
+        .await
+        .expect("create pool");
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    let upc = client
+        .create_user_pool_client()
+        .user_pool_id(&pool_id)
+        .client_name("events-client")
+        .explicit_auth_flows(ExplicitAuthFlowsType::AllowAdminUserPasswordAuth)
+        .explicit_auth_flows(ExplicitAuthFlowsType::AllowRefreshTokenAuth)
+        .send()
+        .await
+        .expect("create client");
+    let client_id = upc
+        .user_pool_client()
+        .unwrap()
+        .client_id()
+        .unwrap()
+        .to_string();
+
+    // Sign up user
+    client
+        .sign_up()
+        .client_id(&client_id)
+        .username("evuser")
+        .password("P@ssw0rd!")
+        .user_attributes(
+            AttributeType::builder()
+                .name("email")
+                .value("ev@example.com")
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .expect("sign up");
+
+    // Confirm user
+    client
+        .admin_confirm_sign_up()
+        .user_pool_id(&pool_id)
+        .username("evuser")
+        .send()
+        .await
+        .expect("confirm");
+
+    // Successful sign in
+    client
+        .admin_initiate_auth()
+        .user_pool_id(&pool_id)
+        .client_id(&client_id)
+        .auth_flow(aws_sdk_cognitoidentityprovider::types::AuthFlowType::AdminUserPasswordAuth)
+        .auth_parameters("USERNAME", "evuser")
+        .auth_parameters("PASSWORD", "P@ssw0rd!")
+        .send()
+        .await
+        .expect("sign in");
+
+    // Failed sign in with wrong password
+    let _err = client
+        .admin_initiate_auth()
+        .user_pool_id(&pool_id)
+        .client_id(&client_id)
+        .auth_flow(aws_sdk_cognitoidentityprovider::types::AuthFlowType::AdminUserPasswordAuth)
+        .auth_parameters("USERNAME", "evuser")
+        .auth_parameters("PASSWORD", "WrongPass1!")
+        .send()
+        .await;
+
+    // List auth events
+    let resp: serde_json::Value = http
+        .get(format!(
+            "{}/_fakecloud/cognito/auth-events",
+            server.endpoint()
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let events = resp["events"].as_array().unwrap();
+
+    // Should have: SIGN_UP, SIGN_IN, SIGN_IN_FAILURE
+    let event_types: Vec<&str> = events
+        .iter()
+        .map(|e| e["eventType"].as_str().unwrap())
+        .collect();
+
+    assert!(
+        event_types.contains(&"SIGN_UP"),
+        "Should have SIGN_UP event: {event_types:?}"
+    );
+    assert!(
+        event_types.contains(&"SIGN_IN"),
+        "Should have SIGN_IN event: {event_types:?}"
+    );
+    assert!(
+        event_types.contains(&"SIGN_IN_FAILURE"),
+        "Should have SIGN_IN_FAILURE event: {event_types:?}"
+    );
+
+    // Verify event details
+    let signup = events.iter().find(|e| e["eventType"] == "SIGN_UP").unwrap();
+    assert_eq!(signup["username"], "evuser");
+    assert_eq!(signup["userPoolId"], pool_id);
+    assert_eq!(signup["success"], true);
+    assert!(signup["timestamp"].as_i64().unwrap() > 0);
+
+    let failure = events
+        .iter()
+        .find(|e| e["eventType"] == "SIGN_IN_FAILURE")
+        .unwrap();
+    assert_eq!(failure["username"], "evuser");
+    assert_eq!(failure["success"], false);
+}
