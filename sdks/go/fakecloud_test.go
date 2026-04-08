@@ -19,7 +19,9 @@ func newTestServer(t *testing.T, method, path string, response interface{}) (*ht
 			t.Errorf("expected path %s, got %s", path, r.URL.Path)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(response)
+		if err := json.NewEncoder(w).Encode(response); err != nil {
+			t.Fatal(err)
+		}
 	}))
 	fc := New(ts.URL)
 	return ts, fc
@@ -74,7 +76,7 @@ func TestResetService(t *testing.T) {
 func TestAPIError(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte("internal error"))
+		_, _ = w.Write([]byte("internal error"))
 	}))
 	defer ts.Close()
 
@@ -138,17 +140,21 @@ func TestSESSimulateInbound(t *testing.T) {
 			t.Errorf("expected content-type application/json, got %s", r.Header.Get("Content-Type"))
 		}
 		var req InboundEmailRequest
-		json.NewDecoder(r.Body).Decode(&req)
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatal(err)
+		}
 		if req.From != "sender@test.com" {
 			t.Errorf("expected from sender@test.com, got %s", req.From)
 		}
-		json.NewEncoder(w).Encode(InboundEmailResponse{
+		if err := json.NewEncoder(w).Encode(InboundEmailResponse{
 			MessageID:    "msg-2",
 			MatchedRules: []string{"rule-1"},
 			ActionsExecuted: []InboundActionExecuted{
 				{Rule: "rule-1", ActionType: "Lambda"},
 			},
-		})
+		}); err != nil {
+			t.Fatal(err)
+		}
 	}))
 	defer ts.Close()
 
@@ -396,7 +402,9 @@ func TestCognitoConfirmUser(t *testing.T) {
 		if req.Username != "bob" {
 			t.Errorf("expected username bob, got %s", req.Username)
 		}
-		json.NewEncoder(w).Encode(ConfirmUserResponse{Confirmed: true})
+		if err := json.NewEncoder(w).Encode(ConfirmUserResponse{Confirmed: true}); err != nil {
+			t.Fatal(err)
+		}
 	}))
 	defer ts.Close()
 
@@ -417,7 +425,9 @@ func TestCognitoConfirmUserNotFound(t *testing.T) {
 	errMsg := "user not found"
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
-		json.NewEncoder(w).Encode(ConfirmUserResponse{Confirmed: false, Error: &errMsg})
+		if err := json.NewEncoder(w).Encode(ConfirmUserResponse{Confirmed: false, Error: &errMsg}); err != nil {
+			t.Fatal(err)
+		}
 	}))
 	defer ts.Close()
 
@@ -461,8 +471,12 @@ func TestCognitoGetTokens(t *testing.T) {
 func TestCognitoExpireTokens(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req ExpireTokensRequest
-		json.NewDecoder(r.Body).Decode(&req)
-		json.NewEncoder(w).Encode(ExpireTokensResponse{ExpiredTokens: 2})
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatal(err)
+		}
+		if err := json.NewEncoder(w).Encode(ExpireTokensResponse{ExpiredTokens: 2}); err != nil {
+			t.Fatal(err)
+		}
 	}))
 	defer ts.Close()
 
@@ -512,11 +526,15 @@ func TestSNSConfirmSubscription(t *testing.T) {
 			t.Errorf("unexpected path: %s", r.URL.Path)
 		}
 		var req ConfirmSubscriptionRequest
-		json.NewDecoder(r.Body).Decode(&req)
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatal(err)
+		}
 		if req.SubscriptionArn != "arn:aws:sns:us-east-1:000000000000:topic1:sub-1" {
 			t.Errorf("unexpected subscription arn: %s", req.SubscriptionArn)
 		}
-		json.NewEncoder(w).Encode(ConfirmSubscriptionResponse{Confirmed: true})
+		if err := json.NewEncoder(w).Encode(ConfirmSubscriptionResponse{Confirmed: true}); err != nil {
+			t.Fatal(err)
+		}
 	}))
 	defer ts.Close()
 
