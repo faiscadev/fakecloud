@@ -267,7 +267,7 @@ impl KinesisService {
         let hours = body["RetentionPeriodHours"]
             .as_i64()
             .ok_or_else(|| invalid_argument("RetentionPeriodHours is required"))?;
-        if hours < 24 || hours > 8760 {
+        if !(24..=8760).contains(&hours) {
             return Err(invalid_argument(
                 "RetentionPeriodHours must be between 24 and 8760",
             ));
