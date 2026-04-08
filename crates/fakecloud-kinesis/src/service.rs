@@ -15,6 +15,8 @@ const SUPPORTED_ACTIONS: &[&str] = &[
     "DescribeStreamSummary",
     "ListStreams",
     "DeleteStream",
+    "GetRecords",
+    "GetShardIterator",
     "PutRecord",
     "PutRecords",
     "AddTagsToStream",
@@ -47,6 +49,8 @@ impl AwsService for KinesisService {
             "DescribeStreamSummary" => self.describe_stream_summary(&request),
             "ListStreams" => self.list_streams(&request),
             "DeleteStream" => self.delete_stream(&request),
+            "GetRecords" => self.get_records(&request),
+            "GetShardIterator" => self.get_shard_iterator(&request),
             "PutRecord" => self.put_record(&request),
             "PutRecords" => self.put_records(&request),
             "AddTagsToStream" => self.add_tags_to_stream(&request),
@@ -216,6 +220,89 @@ impl KinesisService {
         }
 
         Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    fn get_shard_iterator(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        let mut state = self.state.write();
+        let stream_name = resolve_stream_name(&state, &body)?;
+        let shard_id = require_shard_id(&body)?;
+        let iterator_type = body["ShardIteratorType"]
+            .as_str()
+            .ok_or_else(|| invalid_argument("ShardIteratorType is required"))?;
+
+        let stream = state
+            .streams
+            .get(&stream_name)
+            .ok_or_else(|| stream_not_found(&state.account_id, &stream_name))?;
+        let shard = stream
+            .shards
+            .iter()
+            .find(|candidate| candidate.shard_id == shard_id)
+            .ok_or_else(|| invalid_argument("ShardId is invalid"))?;
+
+        let next_record_index = shard_iterator_start_index(shard, iterator_type, &body)?;
+        let iterator = state.insert_iterator(&stream_name, shard_id, next_record_index);
+
+        Ok(AwsResponse::ok_json(json!({
+            "ShardIterator": iterator,
+        })))
+    }
+
+    fn get_records(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        let mut state = self.state.write();
+        let iterator = body["ShardIterator"]
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| invalid_argument("ShardIterator is required"))?
+            .to_string();
+        let limit = body["Limit"].as_u64().unwrap_or(10_000) as usize;
+
+        let lease = state
+            .iterators
+            .get(&iterator)
+            .cloned()
+            .ok_or_else(expired_iterator)?;
+        if lease.expires_at < Utc::now() {
+            state.iterators.remove(&iterator);
+            return Err(expired_iterator());
+        }
+
+        let stream = state
+            .streams
+            .get(&lease.stream_name)
+            .ok_or_else(|| stream_not_found(&state.account_id, &lease.stream_name))?;
+        let shard = stream
+            .shards
+            .iter()
+            .find(|candidate| candidate.shard_id == lease.shard_id)
+            .ok_or_else(|| invalid_argument("ShardId is invalid"))?;
+
+        let end_index = shard
+            .records
+            .len()
+            .min(lease.next_record_index.saturating_add(limit));
+        let records: Vec<Value> = shard.records[lease.next_record_index..end_index]
+            .iter()
+            .map(|record| {
+                json!({
+                    "ApproximateArrivalTimestamp": record.approximate_arrival_timestamp.timestamp_millis() as f64 / 1000.0,
+                    "Data": base64::engine::general_purpose::STANDARD.encode(&record.data),
+                    "PartitionKey": record.partition_key,
+                    "SequenceNumber": record.sequence_number,
+                })
+            })
+            .collect();
+
+        let next_iterator = state.insert_iterator(&lease.stream_name, &lease.shard_id, end_index);
+        state.iterators.remove(&iterator);
+
+        Ok(AwsResponse::ok_json(json!({
+            "MillisBehindLatest": 0,
+            "NextShardIterator": next_iterator,
+            "Records": records,
+        })))
     }
 
     fn put_record(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
@@ -451,6 +538,13 @@ fn require_partition_key(body: &Value) -> Result<&str, AwsServiceError> {
         .ok_or_else(|| invalid_argument("PartitionKey is required"))
 }
 
+fn require_shard_id(body: &Value) -> Result<&str, AwsServiceError> {
+    body["ShardId"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| invalid_argument("ShardId is required"))
+}
+
 fn decode_record_data(value: &Value) -> Result<Vec<u8>, AwsServiceError> {
     let encoded = value
         .as_str()
@@ -501,6 +595,44 @@ fn put_records_entry(
     Ok((shard.shard_id.clone(), sequence_number))
 }
 
+fn shard_iterator_start_index(
+    shard: &KinesisShard,
+    iterator_type: &str,
+    body: &Value,
+) -> Result<usize, AwsServiceError> {
+    match iterator_type {
+        "TRIM_HORIZON" => Ok(0),
+        "LATEST" => Ok(shard.records.len()),
+        "AT_SEQUENCE_NUMBER" => {
+            let sequence_number = require_starting_sequence_number(body)?;
+            find_record_index_by_sequence_number(shard, sequence_number)
+        }
+        "AFTER_SEQUENCE_NUMBER" => {
+            let sequence_number = require_starting_sequence_number(body)?;
+            Ok(find_record_index_by_sequence_number(shard, sequence_number)? + 1)
+        }
+        _ => Err(invalid_argument("Unsupported ShardIteratorType")),
+    }
+}
+
+fn require_starting_sequence_number(body: &Value) -> Result<&str, AwsServiceError> {
+    body["StartingSequenceNumber"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| invalid_argument("StartingSequenceNumber is required"))
+}
+
+fn find_record_index_by_sequence_number(
+    shard: &KinesisShard,
+    sequence_number: &str,
+) -> Result<usize, AwsServiceError> {
+    shard
+        .records
+        .iter()
+        .position(|record| record.sequence_number == sequence_number)
+        .ok_or_else(|| invalid_argument("StartingSequenceNumber is invalid"))
+}
+
 fn invalid_argument(message: impl Into<String>) -> AwsServiceError {
     AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "InvalidArgumentException", message)
 }
@@ -510,6 +642,14 @@ fn stream_not_found(account_id: &str, stream_name: &str) -> AwsServiceError {
         StatusCode::BAD_REQUEST,
         "ResourceNotFoundException",
         format!("Stream {stream_name} under account {account_id} not found."),
+    )
+}
+
+fn expired_iterator() -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::BAD_REQUEST,
+        "ExpiredIteratorException",
+        "Shard iterator is expired or invalid.",
     )
 }
 
@@ -632,5 +772,32 @@ mod tests {
         assert_eq!(first, "00000000000000000001");
         assert_eq!(second, "00000000000000000002");
         assert_eq!(shard.records.len(), 2);
+    }
+
+    #[test]
+    fn trim_horizon_iterator_starts_at_zero() {
+        let mut shard = KinesisShard {
+            shard_id: "shardId-000000000000".to_string(),
+            next_sequence_number: 1,
+            records: Vec::new(),
+        };
+        append_record(&mut shard, "key", b"first".to_vec());
+
+        let index = shard_iterator_start_index(&shard, "TRIM_HORIZON", &json!({})).unwrap();
+        assert_eq!(index, 0);
+    }
+
+    #[test]
+    fn latest_iterator_starts_after_existing_records() {
+        let mut shard = KinesisShard {
+            shard_id: "shardId-000000000000".to_string(),
+            next_sequence_number: 1,
+            records: Vec::new(),
+        };
+        append_record(&mut shard, "key", b"first".to_vec());
+        append_record(&mut shard, "key", b"second".to_vec());
+
+        let index = shard_iterator_start_index(&shard, "LATEST", &json!({})).unwrap();
+        assert_eq!(index, 2);
     }
 }

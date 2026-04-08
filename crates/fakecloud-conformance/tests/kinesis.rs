@@ -2,6 +2,7 @@ mod helpers;
 
 use aws_sdk_kinesis::primitives::Blob;
 use aws_sdk_kinesis::types::PutRecordsRequestEntry;
+use aws_sdk_kinesis::types::ShardIteratorType;
 use fakecloud_conformance_macros::test_action;
 use helpers::TestServer;
 
@@ -221,4 +222,49 @@ async fn kinesis_put_records() {
         response.records()[1].error_code(),
         Some("InvalidArgumentException")
     );
+}
+
+#[test_action("kinesis", "GetShardIterator", checksum = "8d745e01")]
+#[test_action("kinesis", "GetRecords", checksum = "4f940d65")]
+#[tokio::test]
+async fn kinesis_get_records() {
+    let server = TestServer::start().await;
+    let client = server.kinesis_client().await;
+
+    client
+        .create_stream()
+        .stream_name("conf-read")
+        .shard_count(1)
+        .send()
+        .await
+        .unwrap();
+
+    let write = client
+        .put_record()
+        .stream_name("conf-read")
+        .partition_key("read-key")
+        .data(Blob::new(b"payload"))
+        .send()
+        .await
+        .unwrap();
+
+    let iterator = client
+        .get_shard_iterator()
+        .stream_name("conf-read")
+        .shard_id(write.shard_id())
+        .shard_iterator_type(ShardIteratorType::TrimHorizon)
+        .send()
+        .await
+        .unwrap();
+
+    let records = client
+        .get_records()
+        .shard_iterator(iterator.shard_iterator().unwrap())
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(records.records().len(), 1);
+    assert_eq!(records.records()[0].partition_key(), "read-key");
+    assert!(records.next_shard_iterator().is_some());
 }
