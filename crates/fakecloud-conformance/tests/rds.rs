@@ -109,6 +109,38 @@ async fn rds_describe_db_instances() {
     );
 }
 
+#[test_action("rds", "DeleteDBInstance", checksum = "22909663")]
+#[tokio::test]
+async fn rds_delete_db_instance() {
+    let server = TestServer::start().await;
+    let client = server.rds_client().await;
+
+    create_instance(&client).await;
+
+    let response = client
+        .delete_db_instance()
+        .db_instance_identifier("conf-rds-db")
+        .skip_final_snapshot(true)
+        .send()
+        .await
+        .unwrap();
+
+    let instance = response.db_instance().expect("db instance");
+    assert_eq!(instance.db_instance_identifier(), Some("conf-rds-db"));
+    assert_eq!(instance.db_instance_status(), Some("deleting"));
+
+    let error = client
+        .describe_db_instances()
+        .db_instance_identifier("conf-rds-db")
+        .send()
+        .await
+        .expect_err("instance should be deleted");
+    assert_eq!(
+        error.into_service_error().meta().code(),
+        Some("DBInstanceNotFound")
+    );
+}
+
 #[test_action("rds", "AddTagsToResource", checksum = "79e71104")]
 #[tokio::test]
 async fn rds_add_tags_to_resource() {

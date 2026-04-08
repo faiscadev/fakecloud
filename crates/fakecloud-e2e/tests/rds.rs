@@ -154,6 +154,36 @@ async fn rds_tag_roundtrip() {
     assert_eq!(listed.tag_list()[0].key(), Some("team"));
 }
 
+#[tokio::test]
+async fn rds_delete_db_instance() {
+    let server = TestServer::start().await;
+    let client = server.rds_client().await;
+
+    create_instance(&client, "orders-delete-db").await;
+
+    let response = client
+        .delete_db_instance()
+        .db_instance_identifier("orders-delete-db")
+        .skip_final_snapshot(true)
+        .send()
+        .await
+        .unwrap();
+
+    let instance = response.db_instance().expect("db instance");
+    assert_eq!(instance.db_instance_status(), Some("deleting"));
+
+    let error = client
+        .describe_db_instances()
+        .db_instance_identifier("orders-delete-db")
+        .send()
+        .await
+        .expect_err("instance should be gone");
+    assert_eq!(
+        error.into_service_error().meta().code(),
+        Some("DBInstanceNotFound")
+    );
+}
+
 async fn create_instance(
     client: &aws_sdk_rds::Client,
     db_instance_identifier: &str,

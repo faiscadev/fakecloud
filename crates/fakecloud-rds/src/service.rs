@@ -17,6 +17,7 @@ const RDS_NS: &str = "http://rds.amazonaws.com/doc/2014-10-31/";
 const SUPPORTED_ACTIONS: &[&str] = &[
     "AddTagsToResource",
     "CreateDBInstance",
+    "DeleteDBInstance",
     "DescribeDBEngineVersions",
     "DescribeDBInstances",
     "DescribeOrderableDBInstanceOptions",
@@ -53,6 +54,7 @@ impl AwsService for RdsService {
         match request.action.as_str() {
             "AddTagsToResource" => self.add_tags_to_resource(&request),
             "CreateDBInstance" => self.create_db_instance(&request).await,
+            "DeleteDBInstance" => self.delete_db_instance(&request).await,
             "DescribeDBEngineVersions" => self.describe_db_engine_versions(&request),
             "DescribeDBInstances" => self.describe_db_instances(&request),
             "DescribeOrderableDBInstanceOptions" => {
@@ -169,6 +171,72 @@ impl RdsService {
                 &format!(
                     "<DBInstance>{}</DBInstance>",
                     db_instance_xml(&instance, Some("creating"))
+                ),
+                &request.request_id,
+            ),
+        ))
+    }
+
+    async fn delete_db_instance(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let db_instance_identifier = required_param(request, "DBInstanceIdentifier")?;
+        let skip_final_snapshot =
+            parse_optional_bool(optional_param(request, "SkipFinalSnapshot").as_deref())?
+                .unwrap_or(false);
+        let final_db_snapshot_identifier = optional_param(request, "FinalDBSnapshotIdentifier");
+
+        if skip_final_snapshot && final_db_snapshot_identifier.is_some() {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterCombination",
+                "FinalDBSnapshotIdentifier cannot be specified when SkipFinalSnapshot is enabled.",
+            ));
+        }
+        if !skip_final_snapshot {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterCombination",
+                "SkipFinalSnapshot must be enabled until final snapshot support is implemented.",
+            ));
+        }
+
+        let instance = {
+            let mut state = self.state.write();
+            let instance = state
+                .instances
+                .remove(&db_instance_identifier)
+                .ok_or_else(|| db_instance_not_found(&db_instance_identifier))?;
+
+            if instance.deletion_protection {
+                state
+                    .instances
+                    .insert(db_instance_identifier.clone(), instance.clone());
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidDBInstanceState",
+                    format!(
+                        "DBInstance {} cannot be deleted because deletion protection is enabled.",
+                        db_instance_identifier
+                    ),
+                ));
+            }
+
+            instance
+        };
+
+        if let Some(runtime) = &self.runtime {
+            runtime.stop_container(&db_instance_identifier).await;
+        }
+
+        Ok(AwsResponse::xml(
+            StatusCode::OK,
+            xml_wrap(
+                "DeleteDBInstance",
+                &format!(
+                    "<DBInstance>{}</DBInstance>",
+                    db_instance_xml(&instance, Some("deleting"))
                 ),
                 &request.request_id,
             ),
