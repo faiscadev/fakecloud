@@ -51,79 +51,79 @@ const fc = new FakeCloud(baseUrl?: string);
 
 Top-level client. Defaults to `http://localhost:4566`.
 
-| Method | Description |
-|---|---|
-| `health()` | Server health check |
-| `reset()` | Reset all service state |
-| `resetService(service)` | Reset a single service |
+| Method                  | Description             |
+| ----------------------- | ----------------------- |
+| `health()`              | Server health check     |
+| `reset()`               | Reset all service state |
+| `resetService(service)` | Reset a single service  |
 
 ### `fc.lambda`
 
-| Method | Description |
-|---|---|
-| `getInvocations()` | List recorded Lambda invocations |
-| `getWarmContainers()` | List warm (cached) Lambda containers |
-| `evictContainer(functionName)` | Evict a warm container |
+| Method                         | Description                          |
+| ------------------------------ | ------------------------------------ |
+| `getInvocations()`             | List recorded Lambda invocations     |
+| `getWarmContainers()`          | List warm (cached) Lambda containers |
+| `evictContainer(functionName)` | Evict a warm container               |
 
 ### `fc.ses`
 
-| Method | Description |
-|---|---|
-| `getEmails()` | List all sent emails |
+| Method                 | Description                               |
+| ---------------------- | ----------------------------------------- |
+| `getEmails()`          | List all sent emails                      |
 | `simulateInbound(req)` | Simulate an inbound email (receipt rules) |
 
 ### `fc.sns`
 
-| Method | Description |
-|---|---|
-| `getMessages()` | List all published messages |
+| Method                      | Description                             |
+| --------------------------- | --------------------------------------- |
+| `getMessages()`             | List all published messages             |
 | `getPendingConfirmations()` | List subscriptions pending confirmation |
-| `confirmSubscription(req)` | Confirm a pending subscription |
+| `confirmSubscription(req)`  | Confirm a pending subscription          |
 
 ### `fc.sqs`
 
-| Method | Description |
-|---|---|
-| `getMessages()` | List all messages across all queues |
-| `tickExpiration()` | Tick the message expiration processor |
+| Method                | Description                           |
+| --------------------- | ------------------------------------- |
+| `getMessages()`       | List all messages across all queues   |
+| `tickExpiration()`    | Tick the message expiration processor |
 | `forceDlq(queueName)` | Force all messages to the queue's DLQ |
 
 ### `fc.events`
 
-| Method | Description |
-|---|---|
-| `getHistory()` | Get event history and delivery records |
-| `fireRule(req)` | Fire an EventBridge rule manually |
+| Method          | Description                            |
+| --------------- | -------------------------------------- |
+| `getHistory()`  | Get event history and delivery records |
+| `fireRule(req)` | Fire an EventBridge rule manually      |
 
 ### `fc.s3`
 
-| Method | Description |
-|---|---|
-| `getNotifications()` | List S3 notification events |
-| `tickLifecycle()` | Tick the lifecycle processor |
+| Method               | Description                  |
+| -------------------- | ---------------------------- |
+| `getNotifications()` | List S3 notification events  |
+| `tickLifecycle()`    | Tick the lifecycle processor |
 
 ### `fc.dynamodb`
 
-| Method | Description |
-|---|---|
+| Method      | Description            |
+| ----------- | ---------------------- |
 | `tickTtl()` | Tick the TTL processor |
 
 ### `fc.secretsmanager`
 
-| Method | Description |
-|---|---|
+| Method           | Description                 |
+| ---------------- | --------------------------- |
 | `tickRotation()` | Tick the rotation scheduler |
 
 ### `fc.cognito`
 
-| Method | Description |
-|---|---|
-| `getUserCodes(poolId, username)` | Get confirmation codes for a user |
-| `getConfirmationCodes()` | List all confirmation codes |
-| `confirmUser(req)` | Confirm a user (bypass verification) |
-| `getTokens()` | List all active tokens |
-| `expireTokens(req)` | Expire tokens (optionally filtered) |
-| `getAuthEvents()` | List auth events |
+| Method                           | Description                          |
+| -------------------------------- | ------------------------------------ |
+| `getUserCodes(poolId, username)` | Get confirmation codes for a user    |
+| `getConfirmationCodes()`         | List all confirmation codes          |
+| `confirmUser(req)`               | Confirm a user (bypass verification) |
+| `getTokens()`                    | List all active tokens               |
+| `expireTokens(req)`              | Expire tokens (optionally filtered)  |
+| `getAuthEvents()`                | List auth events                     |
 
 ### Error handling
 
@@ -137,7 +137,7 @@ try {
 } catch (err) {
   if (err instanceof FakeCloudError) {
     console.log(err.status); // 404
-    console.log(err.body);   // "user not found"
+    console.log(err.body); // "user not found"
   }
 }
 ```

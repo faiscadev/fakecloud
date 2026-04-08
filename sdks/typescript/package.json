@@ -6,13 +6,18 @@
   "types": "dist/index.d.ts",
   "scripts": {
     "build": "tsc",
-    "test": "vitest run"
+    "test": "vitest run",
+    "lint": "eslint . && prettier --check ."
   },
   "devDependencies": {
+    "@eslint/js": "^9.24.0",
+    "eslint": "^9.24.0",
+    "prettier": "^3.5.0",
     "typescript": "^5.7.0",
+    "typescript-eslint": "^8.30.0",
     "vitest": "^3.1.0"
   },
-  "license": "MIT",
+  "license": "AGPL-3.0-or-later",
   "files": [
     "dist"
   ]
