@@ -50,36 +50,41 @@ Metric storage, alarms, dashboards, and math expressions. Completes the CloudWat
 
 fakecloud is built for testing. Beyond emulating the AWS API, fakecloud exposes its own `/_fakecloud/*` endpoints that give you capabilities AWS doesn't — inspecting internal state, simulating events, and setting up test scenarios.
 
-### Introspection
+### Introspection *(shipped)*
 
 Read internal state that AWS doesn't expose. Useful for test assertions.
 
-- **`GET /_fakecloud/ses/emails`** — Every email sent through SES, with full headers and body. *(shipped)*
-- **`GET /_fakecloud/lambda/invocations`** — Every Lambda invocation with request payload and response.  *(shipped)*
-- **SNS**: Messages published to each topic and what was delivered to each subscription.
-- **SQS**: Message delivery history, dead-letter queue activity, delivery counts.
-- **EventBridge**: Events that matched rules and which targets were invoked.
-- **S3**: Notification events that fired on object operations.
+- **`GET /_fakecloud/ses/emails`** — Every email sent through SES, with full headers and body.
+- **`GET /_fakecloud/lambda/invocations`** — Every Lambda invocation with request payload and response.
+- **`GET /_fakecloud/sns/messages`** — All messages published to SNS topics.
+- **`GET /_fakecloud/sqs/messages`** — All messages across all SQS queues with receive counts.
+- **`GET /_fakecloud/events/history`** — All EventBridge events and target deliveries.
+- **`GET /_fakecloud/s3/notifications`** — All S3 notification events that fired.
+- **`GET /_fakecloud/sns/pending-confirmations`** — SNS subscriptions awaiting confirmation.
+- **`GET /_fakecloud/lambda/warm-containers`** — Lambda containers currently warm.
 
-### Simulation
+### Simulation *(shipped)*
 
 Trigger things that normally come from AWS infrastructure or external systems.
 
-- **`POST /_fakecloud/ses/inbound`** — Simulate receiving an email. Evaluates receipt rules and executes S3/SNS/Lambda actions. *(shipped)*
-- **EventBridge**: Advance time to trigger scheduled rules without waiting.
-- **SQS**: Force dead-letter queue delivery without waiting for visibility timeouts.
+- **`POST /_fakecloud/ses/inbound`** — Simulate receiving an email. Evaluates receipt rules and executes S3/SNS/Lambda actions.
+- **`POST /_fakecloud/events/fire-rule`** — Fire a specific EventBridge rule immediately, regardless of its schedule.
+- **`POST /_fakecloud/dynamodb/ttl-processor/tick`** — Expire DynamoDB items whose TTL attribute is in the past.
+- **`POST /_fakecloud/secretsmanager/rotation-scheduler/tick`** — Rotate secrets whose rotation schedule is due.
+- **`POST /_fakecloud/sqs/expiration-processor/tick`** — Remove expired messages from all SQS queues.
+- **`POST /_fakecloud/sqs/{queue-name}/force-dlq`** — Force messages to dead-letter queue without waiting for more receives.
+- **`POST /_fakecloud/s3/lifecycle-processor/tick`** — Run S3 lifecycle rules (expiration, transitions) immediately.
+- **`POST /_fakecloud/sns/confirm-subscription`** — Force-confirm a pending SNS subscription.
+- **`POST /_fakecloud/lambda/{function-name}/evict-container`** — Force cold start by evicting warm container.
 
-### State setup
+### State setup *(shipped)*
 
-Set up test scenarios faster than calling multiple AWS APIs.
-
-- **`POST /_fakecloud/reset`** — Reset all state across all services. *(shipped)*
-- **Bulk seed**: Load data into DynamoDB tables, S3 buckets, or SQS queues in a single call.
-- **Pre-configure**: Set up IAM roles with policies, verify SES identities, or create full CloudFormation-style resource graphs without running templates.
+- **`POST /_fakecloud/reset`** — Reset all state across all services.
+- **`POST /_fakecloud/reset/{service}`** — Reset only a specific service's state.
 
 ### SDKs
 
-Once the APIs are stable, client libraries for TypeScript, Python, Go, Rust, and Java will wrap the `/_fakecloud/*` endpoints for cleaner test code.
+Client libraries for TypeScript, Python, Go, Rust, and Java will wrap the `/_fakecloud/*` endpoints for cleaner test code. The HTTP APIs are stable and usable directly.
 
 ## Design principles
 

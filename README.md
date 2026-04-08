@@ -187,6 +187,8 @@ fakecloud exposes `/_fakecloud/*` endpoints for testing behaviors that AWS runs 
 | `/_fakecloud/events/history` | GET | List all EventBridge events and deliveries. |
 | `/_fakecloud/s3/notifications` | GET | List all S3 notification events. |
 | `/_fakecloud/ses/emails` | GET | List all sent SES emails. |
+| `/_fakecloud/ses/inbound` | POST | Simulate receiving an inbound email. Evaluates receipt rules and executes actions. |
+| `/_fakecloud/reset` | POST | Reset all state across all services. |
 | `/_fakecloud/reset/{service}` | POST | Reset only the specified service's state. Returns `{"reset": "service_name"}`. |
 
 ## Architecture
