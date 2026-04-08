@@ -1,6 +1,7 @@
 [package]
 name = "fakecloud-sdk"
 description = "Client SDK for fakecloud — local AWS cloud emulator"
+readme = "README.md"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true

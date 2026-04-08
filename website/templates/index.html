@@ -1,16 +1,17 @@
 {% extends "base.html" %}
 
 {% block title %}fakecloud - Local AWS Cloud Emulator{% endblock %}
-{% block description %}fakecloud is a free, open-source local AWS cloud emulator. Single binary, no auth required, no paid tiers.{% endblock %}
+{% block description %}fakecloud is a free, open-source local AWS cloud emulator. Single binary, no auth required, no paid tier, plus first-party SDKs for test assertions.{% endblock %}
 
 {% block content %}
 <section class="hero">
   <div class="container">
     <h1>fake<span>cloud</span></h1>
-    <p class="tagline">Local AWS cloud emulator. Free forever.</p>
+    <p class="tagline">Local AWS cloud emulator for integration tests. Run your app with normal AWS clients, stay fully local, and use fakecloud SDKs when your tests need deeper visibility.</p>
+    <p class="hero-proof">15 services. 922 operations. 100% conformance across implemented APIs.</p>
     <div class="btn-group">
       <a href="#quickstart" class="btn">Get Started</a>
-      <a href="{{ config.extra.github }}" class="btn btn-outline">View on GitHub</a>
+      <a href="#compare" class="btn btn-outline">Why fakecloud</a>
     </div>
   </div>
 </section>
@@ -20,10 +21,10 @@
     <h2 class="section-title">Why fakecloud?</h2>
     <div class="why-box">
       <p>
-        LocalStack replaced their open-source Community Edition with a proprietary image that requires an account and auth token. Their free tier is restricted to non-commercial use only.
+        fakecloud gives you a local AWS environment that behaves like infrastructure, not a mock. Your app uses the regular AWS SDK, CLI, and IaC tools. Unlike today's LocalStack Community setup, you do not need an account, auth token, or paid plan just to keep core development flows local.
       </p>
       <p style="margin-top: 16px;">
-        <strong>fakecloud is the fix.</strong> A fast, lightweight emulator for the AWS services you actually use in local dev. No login, no license key, no cloud account. Just run it and point your SDK at localhost.
+        <strong>The SDKs make that workflow nicer, not narrower.</strong> Start fakecloud, run the code you actually ship, inspect emails/messages/invocations after the fact, and force async AWS-style behavior to happen on demand.
       </p>
     </div>
   </div>
@@ -31,38 +32,71 @@
 
 <section id="features">
   <div class="container">
-    <h2 class="section-title">Built for local dev</h2>
-    <p class="section-sub">Focused scope, zero friction, actually works.</p>
+    <h2 class="section-title">Built for realistic local testing</h2>
+    <p class="section-sub">Real APIs for your app, purpose-built tooling for your tests.</p>
     <div class="features-grid">
       <div class="feature">
-        <div class="label">Simple</div>
-        <h3>Single binary</h3>
-        <p>One binary, one port, one command to run. Starts in under 100ms. Also available as a Docker image.</p>
+        <div class="label">Workflow</div>
+        <h3>Test what your app really does</h3>
+        <p>Use normal AWS clients against localhost, then verify the effects with fakecloud instead of stitching together polling, fixtures, or private test hooks.</p>
       </div>
       <div class="feature">
-        <div class="label">Open</div>
-        <h3>No auth required</h3>
-        <p>SigV4 signatures are parsed for routing but never validated. Use any dummy credentials.</p>
+        <div class="label">SDKs</div>
+        <h3>First-party test clients</h3>
+        <p>TypeScript, Python, Go, and Rust SDKs wrap the <code>/_fakecloud/*</code> endpoints for resets, assertions, and manual control of async processors after your app has already used the normal AWS APIs.</p>
       </div>
       <div class="feature">
         <div class="label">Coverage</div>
         <h3>15 AWS services</h3>
-        <p>S3, SQS, SNS, EventBridge, IAM, STS, SSM, DynamoDB, Lambda, Secrets Manager, CloudWatch Logs, KMS, CloudFormation, SES, Cognito User Pools. The services local dev actually needs.</p>
+        <p>S3, SQS, SNS, EventBridge, IAM, STS, SSM, DynamoDB, Lambda, Secrets Manager, CloudWatch Logs, KMS, CloudFormation, SES, and Cognito User Pools.</p>
       </div>
       <div class="feature">
         <div class="label">Tested</div>
         <h3>Conformance tested</h3>
-        <p>34,856 auto-generated test variants at 100% conformance against official AWS Smithy models across all 983 API operations, plus 500+ handwritten conformance tests and 280+ native E2E tests.</p>
+        <p>100% conformance across all 922 implemented API operations, backed by model-driven conformance coverage plus end-to-end tests against the official AWS SDKs.</p>
       </div>
       <div class="feature">
-        <div class="label">Scheduling</div>
-        <h3>EventBridge rules</h3>
-        <p>Cron and rate-based scheduling that actually fires. Rules deliver to SQS and SNS targets on schedule.</p>
+        <div class="label">Real behavior</div>
+        <h3>Cross-service flows are wired up</h3>
+        <p>SES fanout, inbound email actions, S3 notifications, SQS to Lambda, EventBridge targets, and CloudFormation custom resources all exercise real service interactions.</p>
       </div>
       <div class="feature">
-        <div class="label">Wired up</div>
-        <h3>Cross-service delivery</h3>
-        <p>S3 bucket notifications deliver to SNS/SQS. SNS fans out to SQS. EventBridge rules target SQS/SNS. S3 lifecycle runs in the background. Services talk to each other like they do on real AWS.</p>
+        <div class="label">Simple</div>
+        <h3>No auth, no lock-in, no paid tier</h3>
+        <p>Run a single binary or Docker image, use any dummy credentials, and keep the whole workflow local without signing in to someone else's platform.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="sdks">
+  <div class="container">
+    <h2 class="section-title">SDKs for test assertions</h2>
+    <p class="section-sub">Keep using the AWS SDK in your app. Use fakecloud SDKs when your tests need visibility and control on top of the emulator itself.</p>
+    <div class="sdk-grid">
+      <div class="sdk-card">
+        <div class="label">TypeScript</div>
+        <h3><code>npm install fakecloud</code></h3>
+        <p>Inspect SES emails, SNS messages, SQS queues, Lambda invocations, Cognito confirmation codes, and more.</p>
+        <a href="https://www.npmjs.com/package/fakecloud" target="_blank" rel="noopener noreferrer">View on npm</a>
+      </div>
+      <div class="sdk-card">
+        <div class="label">Python</div>
+        <h3><code>pip install fakecloud</code></h3>
+        <p>Async and sync clients for pytest or app-level integration tests, with the same introspection and simulation coverage.</p>
+        <a href="https://pypi.org/project/fakecloud/" target="_blank" rel="noopener noreferrer">View on PyPI</a>
+      </div>
+      <div class="sdk-card">
+        <div class="label">Go</div>
+        <h3><code>go get github.com/faiscadev/fakecloud/sdks/go</code></h3>
+        <p>Context-friendly helpers for resets, event history, SES inbound simulation, and the rest of the fakecloud test surface.</p>
+        <a href="https://pkg.go.dev/github.com/faiscadev/fakecloud/sdks/go" target="_blank" rel="noopener noreferrer">View on pkg.go.dev</a>
+      </div>
+      <div class="sdk-card">
+        <div class="label">Rust</div>
+        <h3><code>cargo add fakecloud-sdk</code></h3>
+        <p>Native Rust client for tests that need resets, state inspection, and direct access to the fakecloud introspection surface.</p>
+        <a href="https://crates.io/crates/fakecloud-sdk" target="_blank" rel="noopener noreferrer">View on crates.io</a>
       </div>
     </div>
   </div>
@@ -71,18 +105,18 @@
 <section id="quickstart">
   <div class="container">
     <h2 class="section-title">Quick Start</h2>
-    <p class="section-sub">One command. No signup. No config file.</p>
+    <p class="section-sub">Start fakecloud, point your AWS client at localhost, then assert what happened.</p>
     <div class="code-block">
       <span class="comment"># Install (no Cargo or Docker needed)</span><br>
       <span class="prompt">$ </span>curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash<br>
       <span class="prompt">$ </span>fakecloud<br>
       <br>
-      <span class="comment"># Or with Docker</span><br>
-      <span class="prompt">$ </span>docker run -p 4566:4566 ghcr.io/faiscadev/fakecloud<br>
-      <br>
-      <span class="comment"># Point any AWS SDK at localhost</span><br>
+      <span class="comment"># Your app uses the normal AWS SDK against localhost</span><br>
       <span class="prompt">$ </span>aws --endpoint-url http://localhost:4566 sqs create-queue \<br>
       &nbsp;&nbsp;&nbsp;&nbsp;--queue-name my-queue<br>
+      <br>
+      <span class="comment"># Your tests can inspect state through the fakecloud SDK</span><br>
+      <span class="prompt">$ </span>npm install fakecloud
     </div>
   </div>
 </section>
@@ -90,6 +124,7 @@
 <section id="compare">
   <div class="container">
     <h2 class="section-title">How it compares</h2>
+    <p class="section-sub">If you want a fully local workflow with real AWS APIs and no account requirement, fakecloud is built for that path. The SDKs are an extra testing advantage, not a replacement for that positioning.</p>
     <div class="table-wrap">
       <table>
         <thead>
@@ -108,6 +143,7 @@
           <tr><td>Idle memory</td><td class="check">~10 MiB</td><td class="cross">~150 MiB</td></tr>
           <tr><td>Install size</td><td class="check">~19 MB binary</td><td class="cross">~1 GB Docker image</td></tr>
           <tr><td>AWS services</td><td>15</td><td>30+</td></tr>
+          <tr><td>Test assertion SDKs</td><td class="check">TypeScript, Python, Go, Rust</td><td>Python, Java</td></tr>
           <tr><td>Cognito User Pools</td><td class="check">80 operations</td><td class="cross">Paid only</td></tr>
           <tr><td>SES v2</td><td class="check">97 operations</td><td class="cross">Paid only</td></tr>
           <tr><td>SES inbound email</td><td class="check">Real receipt rule actions</td><td class="cross">Stored but never executed</td></tr>
@@ -120,7 +156,7 @@
 <section id="services">
   <div class="container">
     <h2 class="section-title">Supported services</h2>
-    <p class="section-sub">Every emulated API is tested against the official AWS SDK.</p>
+    <p class="section-sub">Every implemented API is covered by conformance and behavioral testing, with the service mix tuned for local development and integration tests.</p>
     <div class="services-grid">
       <div class="service"><div class="name">S3</div><div class="proto">REST protocol &middot; XML</div></div>
       <div class="service"><div class="name">SQS</div><div class="proto">Query protocol &middot; XML</div></div>

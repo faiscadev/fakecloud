@@ -80,7 +80,9 @@ Trigger things that normally come from AWS infrastructure or external systems.
 
 ### SDKs
 
-Client libraries for TypeScript, Python, Go, Rust, and Java will wrap the `/_fakecloud/*` endpoints for cleaner test code. The HTTP APIs are stable and usable directly.
+TypeScript, Python, and Go SDKs now wrap the `/_fakecloud/*` endpoints for
+cleaner test code. Future SDK work, if we need it, will likely focus on Rust and
+Java.
 
 ## Design principles
 
