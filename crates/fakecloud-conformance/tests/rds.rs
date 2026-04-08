@@ -43,3 +43,68 @@ async fn rds_describe_orderable_db_instance_options() {
     assert_eq!(options[0].engine_version(), Some("16.3"));
     assert_eq!(options[0].db_instance_class(), Some("db.t3.micro"));
 }
+
+#[test_action("rds", "CreateDBInstance", checksum = "66cdd119")]
+#[tokio::test]
+async fn rds_create_db_instance() {
+    let server = TestServer::start().await;
+    let client = server.rds_client().await;
+
+    let response = client
+        .create_db_instance()
+        .db_instance_identifier("conf-rds-db")
+        .allocated_storage(20)
+        .db_instance_class("db.t3.micro")
+        .engine("postgres")
+        .engine_version("16.3")
+        .master_username("admin")
+        .master_user_password("secret123")
+        .db_name("appdb")
+        .send()
+        .await
+        .unwrap();
+
+    let instance = response.db_instance().expect("db instance");
+    assert_eq!(instance.db_instance_identifier(), Some("conf-rds-db"));
+    assert_eq!(instance.engine(), Some("postgres"));
+    assert_eq!(instance.db_instance_status(), Some("creating"));
+}
+
+#[test_action("rds", "DescribeDBInstances", checksum = "aa5486d4")]
+#[tokio::test]
+async fn rds_describe_db_instances() {
+    let server = TestServer::start().await;
+    let client = server.rds_client().await;
+
+    client
+        .create_db_instance()
+        .db_instance_identifier("conf-rds-db")
+        .allocated_storage(20)
+        .db_instance_class("db.t3.micro")
+        .engine("postgres")
+        .engine_version("16.3")
+        .master_username("admin")
+        .master_user_password("secret123")
+        .db_name("appdb")
+        .send()
+        .await
+        .unwrap();
+
+    let response = client
+        .describe_db_instances()
+        .db_instance_identifier("conf-rds-db")
+        .send()
+        .await
+        .unwrap();
+
+    let instances = response.db_instances();
+    assert_eq!(instances.len(), 1);
+    assert_eq!(instances[0].db_instance_identifier(), Some("conf-rds-db"));
+    assert_eq!(instances[0].db_instance_status(), Some("available"));
+    assert_eq!(
+        instances[0]
+            .endpoint()
+            .and_then(|endpoint| endpoint.address()),
+        Some("127.0.0.1")
+    );
+}

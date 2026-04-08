@@ -1,27 +1,42 @@
+use std::sync::Arc;
+
 use async_trait::async_trait;
+use chrono::Utc;
 use http::StatusCode;
 
 use fakecloud_aws::xml::xml_escape;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 
+use crate::runtime::{RdsRuntime, RuntimeError};
 use crate::state::{
-    default_engine_versions, default_orderable_options, EngineVersionInfo,
+    default_engine_versions, default_orderable_options, DbInstance, EngineVersionInfo,
     OrderableDbInstanceOption, SharedRdsState,
 };
 
 const RDS_NS: &str = "http://rds.amazonaws.com/doc/2014-10-31/";
 const SUPPORTED_ACTIONS: &[&str] = &[
+    "CreateDBInstance",
     "DescribeDBEngineVersions",
+    "DescribeDBInstances",
     "DescribeOrderableDBInstanceOptions",
 ];
 
 pub struct RdsService {
     state: SharedRdsState,
+    runtime: Option<Arc<RdsRuntime>>,
 }
 
 impl RdsService {
     pub fn new(state: SharedRdsState) -> Self {
-        Self { state }
+        Self {
+            state,
+            runtime: None,
+        }
+    }
+
+    pub fn with_runtime(mut self, runtime: Arc<RdsRuntime>) -> Self {
+        self.runtime = Some(runtime);
+        self
     }
 }
 
@@ -32,9 +47,10 @@ impl AwsService for RdsService {
     }
 
     async fn handle(&self, request: AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        let _ = &self.state;
         match request.action.as_str() {
+            "CreateDBInstance" => self.create_db_instance(&request).await,
             "DescribeDBEngineVersions" => self.describe_db_engine_versions(&request),
+            "DescribeDBInstances" => self.describe_db_instances(&request),
             "DescribeOrderableDBInstanceOptions" => {
                 self.describe_orderable_db_instance_options(&request)
             }
@@ -51,6 +67,107 @@ impl AwsService for RdsService {
 }
 
 impl RdsService {
+    async fn create_db_instance(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let db_instance_identifier = required_param(request, "DBInstanceIdentifier")?;
+        let allocated_storage = required_i32_param(request, "AllocatedStorage")?;
+        let db_instance_class = required_param(request, "DBInstanceClass")?;
+        let engine = required_param(request, "Engine")?;
+        let master_username = required_param(request, "MasterUsername")?;
+        let master_user_password = required_param(request, "MasterUserPassword")?;
+        let db_name = optional_param(request, "DBName");
+        let engine_version =
+            optional_param(request, "EngineVersion").unwrap_or_else(|| "16.3".to_string());
+        let publicly_accessible =
+            parse_optional_bool(optional_param(request, "PubliclyAccessible").as_deref())?
+                .unwrap_or(true);
+        let deletion_protection =
+            parse_optional_bool(optional_param(request, "DeletionProtection").as_deref())?
+                .unwrap_or(false);
+        let port = optional_i32_param(request, "Port")?.unwrap_or(5432);
+
+        validate_create_request(
+            &db_instance_identifier,
+            allocated_storage,
+            &db_instance_class,
+            &engine,
+            &engine_version,
+            port,
+        )?;
+
+        {
+            let mut state = self.state.write();
+            if !state.begin_instance_creation(&db_instance_identifier) {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "DBInstanceAlreadyExists",
+                    format!("DBInstance {} already exists.", db_instance_identifier),
+                ));
+            }
+        }
+
+        let runtime = self.runtime.as_ref().ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "InvalidParameterValue",
+                "Docker/Podman is required for RDS DB instances but is not available",
+            )
+        })?;
+
+        let logical_db_name = db_name.clone().unwrap_or_else(|| "postgres".to_string());
+        let running = runtime
+            .ensure_postgres(
+                &db_instance_identifier,
+                &master_username,
+                &master_user_password,
+                &logical_db_name,
+            )
+            .await
+            .map_err(|error| {
+                self.state
+                    .write()
+                    .cancel_instance_creation(&db_instance_identifier);
+                runtime_error_to_service_error(error)
+            })?;
+
+        let mut state = self.state.write();
+        let instance = DbInstance {
+            db_instance_identifier: db_instance_identifier.clone(),
+            db_instance_arn: state.db_instance_arn(&db_instance_identifier),
+            db_instance_class: db_instance_class.clone(),
+            engine: engine.clone(),
+            engine_version: engine_version.clone(),
+            db_instance_status: "available".to_string(),
+            master_username: master_username.clone(),
+            db_name: db_name.clone(),
+            endpoint_address: "127.0.0.1".to_string(),
+            port: i32::from(running.host_port),
+            allocated_storage,
+            publicly_accessible,
+            deletion_protection,
+            created_at: Utc::now(),
+            dbi_resource_id: state.next_dbi_resource_id(),
+            master_user_password,
+            container_id: running.container_id,
+            host_port: running.host_port,
+        };
+        state.finish_instance_creation(instance.clone());
+
+        Ok(AwsResponse::xml(
+            StatusCode::OK,
+            xml_wrap(
+                "CreateDBInstance",
+                &format!(
+                    "<DBInstance>{}</DBInstance>",
+                    db_instance_xml(&instance, Some("creating"))
+                ),
+                &request.request_id,
+            ),
+        ))
+    }
+
     fn describe_db_engine_versions(
         &self,
         request: &AwsRequest,
@@ -78,6 +195,54 @@ impl RdsService {
                 &format!(
                     "<DBEngineVersions>{}</DBEngineVersions>",
                     versions.iter().map(engine_version_xml).collect::<String>()
+                ),
+                &request.request_id,
+            ),
+        ))
+    }
+
+    fn describe_db_instances(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let db_instance_identifier = optional_param(request, "DBInstanceIdentifier");
+        let marker = optional_param(request, "Marker");
+        let max_records = optional_param(request, "MaxRecords");
+
+        if marker.is_some() || max_records.is_some() {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterValue",
+                "Marker and MaxRecords are not yet supported for DescribeDBInstances.",
+            ));
+        }
+
+        let state = self.state.read();
+        let instances: Vec<DbInstance> = match db_instance_identifier {
+            Some(identifier) => vec![state
+                .instances
+                .get(&identifier)
+                .cloned()
+                .ok_or_else(|| db_instance_not_found(&identifier))?],
+            None => {
+                let mut values: Vec<DbInstance> = state.instances.values().cloned().collect();
+                values.sort_by(|a, b| a.db_instance_identifier.cmp(&b.db_instance_identifier));
+                values
+            }
+        };
+
+        Ok(AwsResponse::xml(
+            StatusCode::OK,
+            xml_wrap(
+                "DescribeDBInstances",
+                &format!(
+                    "<DBInstances>{}</DBInstances>",
+                    instances
+                        .iter()
+                        .map(|instance| {
+                            format!(
+                                "<DBInstance>{}</DBInstance>",
+                                db_instance_xml(instance, None)
+                            )
+                        })
+                        .collect::<String>()
                 ),
                 &request.request_id,
             ),
@@ -124,6 +289,41 @@ fn optional_param(req: &AwsRequest, name: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+fn required_param(req: &AwsRequest, name: &str) -> Result<String, AwsServiceError> {
+    optional_param(req, name).ok_or_else(|| {
+        AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "MissingParameter",
+            format!("The request must contain the parameter {name}."),
+        )
+    })
+}
+
+fn required_i32_param(req: &AwsRequest, name: &str) -> Result<i32, AwsServiceError> {
+    let value = required_param(req, name)?;
+    value.parse::<i32>().map_err(|_| {
+        AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidParameterValue",
+            format!("Parameter {name} must be a valid integer."),
+        )
+    })
+}
+
+fn optional_i32_param(req: &AwsRequest, name: &str) -> Result<Option<i32>, AwsServiceError> {
+    optional_param(req, name)
+        .map(|value| {
+            value.parse::<i32>().map_err(|_| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterValue",
+                    format!("Parameter {name} must be a valid integer."),
+                )
+            })
+        })
+        .transpose()
+}
+
 fn parse_optional_bool(value: Option<&str>) -> Result<Option<bool>, AwsServiceError> {
     value
         .map(|raw| match raw {
@@ -136,6 +336,62 @@ fn parse_optional_bool(value: Option<&str>) -> Result<Option<bool>, AwsServiceEr
             )),
         })
         .transpose()
+}
+
+fn validate_create_request(
+    db_instance_identifier: &str,
+    allocated_storage: i32,
+    db_instance_class: &str,
+    engine: &str,
+    engine_version: &str,
+    port: i32,
+) -> Result<(), AwsServiceError> {
+    if allocated_storage <= 0 {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidParameterValue",
+            "AllocatedStorage must be greater than zero.",
+        ));
+    }
+    if port <= 0 {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidParameterValue",
+            "Port must be greater than zero.",
+        ));
+    }
+    if !db_instance_identifier
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '-')
+    {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidParameterValue",
+            "DBInstanceIdentifier must contain only alphanumeric characters or hyphens.",
+        ));
+    }
+    if engine != "postgres" {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidParameterValue",
+            format!("Engine '{engine}' is not supported yet."),
+        ));
+    }
+    if engine_version != "16.3" {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidParameterValue",
+            format!("EngineVersion '{engine_version}' is not supported yet."),
+        ));
+    }
+    if db_instance_class != "db.t3.micro" {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidParameterValue",
+            format!("DBInstanceClass '{db_instance_class}' is not supported yet."),
+        ));
+    }
+    Ok(())
 }
 
 fn filter_engine_versions(
@@ -257,18 +513,110 @@ fn orderable_option_xml(option: &OrderableDbInstanceOption) -> String {
     )
 }
 
+fn db_instance_xml(instance: &DbInstance, status_override: Option<&str>) -> String {
+    let status = status_override.unwrap_or(&instance.db_instance_status);
+    let db_name_xml = instance
+        .db_name
+        .as_ref()
+        .map(|db_name| format!("<DBName>{}</DBName>", xml_escape(db_name)))
+        .unwrap_or_default();
+    format!(
+        "<DBInstanceIdentifier>{}</DBInstanceIdentifier>\
+         <DBInstanceClass>{}</DBInstanceClass>\
+         <Engine>{}</Engine>\
+         <DBInstanceStatus>{}</DBInstanceStatus>\
+         <MasterUsername>{}</MasterUsername>\
+         {}\
+         <Endpoint><Address>{}</Address><Port>{}</Port></Endpoint>\
+         <AllocatedStorage>{}</AllocatedStorage>\
+         <InstanceCreateTime>{}</InstanceCreateTime>\
+         <PreferredBackupWindow>00:00-00:30</PreferredBackupWindow>\
+         <BackupRetentionPeriod>1</BackupRetentionPeriod>\
+         <DBSecurityGroups/>\
+         <VpcSecurityGroups/>\
+         <DBParameterGroups/>\
+         <AvailabilityZone>us-east-1a</AvailabilityZone>\
+         <PreferredMaintenanceWindow>sun:00:00-sun:00:30</PreferredMaintenanceWindow>\
+         <MultiAZ>false</MultiAZ>\
+         <EngineVersion>{}</EngineVersion>\
+         <AutoMinorVersionUpgrade>true</AutoMinorVersionUpgrade>\
+         <ReadReplicaDBInstanceIdentifiers/>\
+         <LicenseModel>postgresql-license</LicenseModel>\
+         <OptionGroupMemberships/>\
+         <PubliclyAccessible>{}</PubliclyAccessible>\
+         <StorageType>gp2</StorageType>\
+         <DbInstancePort>{}</DbInstancePort>\
+         <StorageEncrypted>false</StorageEncrypted>\
+         <DbiResourceId>{}</DbiResourceId>\
+         <DeletionProtection>{}</DeletionProtection>\
+         <DBInstanceArn>{}</DBInstanceArn>",
+        xml_escape(&instance.db_instance_identifier),
+        xml_escape(&instance.db_instance_class),
+        xml_escape(&instance.engine),
+        xml_escape(status),
+        xml_escape(&instance.master_username),
+        db_name_xml,
+        xml_escape(&instance.endpoint_address),
+        instance.port,
+        instance.allocated_storage,
+        instance.created_at.to_rfc3339(),
+        xml_escape(&instance.engine_version),
+        if instance.publicly_accessible {
+            "true"
+        } else {
+            "false"
+        },
+        instance.port,
+        xml_escape(&instance.dbi_resource_id),
+        if instance.deletion_protection {
+            "true"
+        } else {
+            "false"
+        },
+        xml_escape(&instance.db_instance_arn),
+    )
+}
+
+fn db_instance_not_found(identifier: &str) -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::NOT_FOUND,
+        "DBInstanceNotFound",
+        format!("DBInstance {} not found.", identifier),
+    )
+}
+
+fn runtime_error_to_service_error(error: RuntimeError) -> AwsServiceError {
+    match error {
+        RuntimeError::Unavailable => AwsServiceError::aws_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "InvalidParameterValue",
+            "Docker/Podman is required for RDS DB instances but is not available",
+        ),
+        RuntimeError::ContainerStartFailed(message) => AwsServiceError::aws_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "InternalFailure",
+            message,
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::sync::Arc;
 
     use bytes::Bytes;
+    use chrono::Utc;
     use http::{HeaderMap, Method};
-
-    use super::{filter_engine_versions, filter_orderable_options, RdsService};
-    use crate::state::{default_engine_versions, default_orderable_options, RdsState};
-    use fakecloud_core::service::{AwsRequest, AwsService};
     use parking_lot::RwLock;
-    use std::sync::Arc;
+    use uuid::Uuid;
+
+    use super::{
+        db_instance_xml, filter_engine_versions, filter_orderable_options, optional_i32_param,
+        validate_create_request, RdsService,
+    };
+    use crate::state::{default_engine_versions, default_orderable_options, DbInstance, RdsState};
+    use fakecloud_core::service::{AwsRequest, AwsService};
 
     #[test]
     fn filter_engine_versions_matches_requested_engine() {
@@ -296,6 +644,53 @@ mod tests {
 
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].db_instance_class, "db.t3.micro");
+    }
+
+    #[test]
+    fn validate_create_request_rejects_unsupported_engine() {
+        let error = validate_create_request("test-db", 20, "db.t3.micro", "mysql", "16.3", 5432)
+            .expect_err("unsupported engine");
+
+        assert_eq!(error.code(), "InvalidParameterValue");
+    }
+
+    #[test]
+    fn optional_i32_param_rejects_invalid_integer() {
+        let request = request("CreateDBInstance", &[("Port", "not-a-number")]);
+
+        let error = optional_i32_param(&request, "Port").expect_err("invalid port");
+
+        assert_eq!(error.code(), "InvalidParameterValue");
+    }
+
+    #[test]
+    fn db_instance_xml_renders_endpoint_and_status() {
+        let instance = DbInstance {
+            db_instance_identifier: "test-db".to_string(),
+            db_instance_arn: "arn:aws:rds:us-east-1:123456789012:db:test-db".to_string(),
+            db_instance_class: "db.t3.micro".to_string(),
+            engine: "postgres".to_string(),
+            engine_version: "16.3".to_string(),
+            db_instance_status: "available".to_string(),
+            master_username: "admin".to_string(),
+            db_name: Some("appdb".to_string()),
+            endpoint_address: "127.0.0.1".to_string(),
+            port: 15432,
+            allocated_storage: 20,
+            publicly_accessible: true,
+            deletion_protection: false,
+            created_at: Utc::now(),
+            dbi_resource_id: format!("db-{}", Uuid::new_v4().simple()),
+            master_user_password: "secret123".to_string(),
+            container_id: "container".to_string(),
+            host_port: 15432,
+        };
+
+        let xml = db_instance_xml(&instance, Some("creating"));
+
+        assert!(xml.contains("<DBInstanceIdentifier>test-db</DBInstanceIdentifier>"));
+        assert!(xml.contains("<DBInstanceStatus>creating</DBInstanceStatus>"));
+        assert!(xml.contains("<Address>127.0.0.1</Address><Port>15432</Port>"));
     }
 
     #[tokio::test]

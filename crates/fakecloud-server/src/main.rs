@@ -147,6 +147,15 @@ async fn main() {
     let rds_state = Arc::new(parking_lot::RwLock::new(
         fakecloud_rds::state::RdsState::new(&cli.account_id, &cli.region),
     ));
+    let rds_runtime = fakecloud_rds::runtime::RdsRuntime::new().map(Arc::new);
+    if let Some(ref rt) = rds_runtime {
+        tracing::info!(
+            cli = rt.cli_name(),
+            "RDS execution enabled via container runtime"
+        );
+    } else {
+        tracing::info!("Docker/Podman not available — RDS CreateDBInstance will return errors");
+    }
 
     // Cross-service delivery bus
     // Step 1: SQS delivery (SNS and EventBridge can push messages into SQS queues)
@@ -250,6 +259,7 @@ async fn main() {
         kinesis: kinesis_state.clone(),
         rds: rds_state.clone(),
         container_runtime: container_runtime.clone(),
+        rds_runtime: rds_runtime.clone(),
     };
 
     // Step 5: CloudFormation delivery (custom resources can invoke Lambda)
@@ -357,7 +367,12 @@ async fn main() {
         CognitoService::new(cognito_state.clone()).with_delivery(cognito_delivery_ctx),
     ));
     registry.register(Arc::new(KinesisService::new(kinesis_state.clone())));
-    registry.register(Arc::new(RdsService::new(rds_state)));
+    registry.register(Arc::new(KinesisService::new(kinesis_state.clone())));
+    let mut rds_service = RdsService::new(rds_state);
+    if let Some(ref rt) = rds_runtime {
+        rds_service = rds_service.with_runtime(rt.clone());
+    }
+    registry.register(Arc::new(rds_service));
 
     // Spawn background tasks
     let lifecycle_processor = fakecloud_s3::lifecycle::LifecycleProcessor::new(s3_state);
@@ -1043,6 +1058,9 @@ async fn main() {
     if let Some(rt) = container_runtime {
         rt.stop_all().await;
     }
+    if let Some(rt) = rds_runtime {
+        rt.stop_all().await;
+    }
 }
 
 #[derive(Clone)]
@@ -1064,6 +1082,7 @@ struct ResetState {
     kinesis: fakecloud_kinesis::state::SharedKinesisState,
     rds: fakecloud_rds::state::SharedRdsState,
     container_runtime: Option<Arc<fakecloud_lambda::runtime::ContainerRuntime>>,
+    rds_runtime: Option<Arc<fakecloud_rds::runtime::RdsRuntime>>,
 }
 
 impl ResetState {
@@ -1134,6 +1153,10 @@ impl ResetState {
             }
             "rds" => {
                 self.rds.write().reset();
+                if let Some(ref rt) = self.rds_runtime {
+                    let rt = rt.clone();
+                    tokio::spawn(async move { rt.stop_all().await });
+                }
             }
             _ => {
                 return Err(format!("Unknown service: {service}"));
@@ -1182,6 +1205,10 @@ impl ResetState {
         self.cognito.write().reset();
         self.kinesis.write().reset();
         self.rds.write().reset();
+        if let Some(ref rt) = self.rds_runtime {
+            let rt = rt.clone();
+            tokio::spawn(async move { rt.stop_all().await });
+        }
         tracing::info!("state reset via reset API");
         axum::Json(types::ResetResponse {
             status: "ok".to_string(),
@@ -1200,6 +1227,7 @@ async fn shutdown_signal() {
 mod tests {
     use std::sync::Arc;
 
+    use chrono::Utc;
     use fakecloud_rds::state::{DbInstance, RdsState};
 
     use super::ResetState;
@@ -1211,6 +1239,23 @@ mod tests {
             "db-1".to_string(),
             DbInstance {
                 db_instance_identifier: "db-1".to_string(),
+                db_instance_arn: "arn:aws:rds:us-east-1:123456789012:db:db-1".to_string(),
+                db_instance_class: "db.t3.micro".to_string(),
+                engine: "postgres".to_string(),
+                engine_version: "16.3".to_string(),
+                db_instance_status: "available".to_string(),
+                master_username: "admin".to_string(),
+                db_name: Some("postgres".to_string()),
+                endpoint_address: "127.0.0.1".to_string(),
+                port: 5432,
+                allocated_storage: 20,
+                publicly_accessible: true,
+                deletion_protection: false,
+                created_at: Utc::now(),
+                dbi_resource_id: "db-test".to_string(),
+                master_user_password: "secret123".to_string(),
+                container_id: "container-id".to_string(),
+                host_port: 15432,
             },
         );
 
@@ -1277,6 +1322,7 @@ mod tests {
             )),
             rds: Arc::new(parking_lot::RwLock::new(rds)),
             container_runtime: None,
+            rds_runtime: None,
         };
 
         state.reset_service("rds").expect("reset rds");

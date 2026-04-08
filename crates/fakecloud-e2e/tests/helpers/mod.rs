@@ -30,7 +30,7 @@ impl TestServer {
             .iter()
             .find(|(k, _)| *k == "FAKECLOUD_CONTAINER_CLI")
             .map(|(_, v)| v.to_string())
-            .unwrap_or_else(|| "docker".to_string());
+            .unwrap_or_else(detect_container_cli);
 
         for _ in 0..3 {
             let port = find_available_port();
@@ -272,6 +272,26 @@ fn find_binary() -> String {
         "fakecloud binary not found. Run `cargo build` first.\n\
          Looked in:\n  {debug_path}\n  {release_path}"
     );
+}
+
+fn detect_container_cli() -> String {
+    if cli_available("docker") {
+        "docker".to_string()
+    } else if cli_available("podman") {
+        "podman".to_string()
+    } else {
+        "docker".to_string()
+    }
+}
+
+fn cli_available(cli: &str) -> bool {
+    Command::new(cli)
+        .arg("info")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
 }
 
 async fn wait_for_port(child: &mut Child, port: u16) -> bool {
