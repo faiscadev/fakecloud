@@ -3,9 +3,10 @@ use helpers::TestServer;
 
 use aws_sdk_cognitoidentityprovider::types::{
     AccountRecoverySettingType, AttributeType, ChallengeNameType, DeliveryMediumType,
-    ExplicitAuthFlowsType, IdentityProviderTypeType, PasswordPolicyType, RecoveryOptionNameType,
-    RecoveryOptionType, SmsMfaSettingsType, SoftwareTokenMfaConfigType,
-    SoftwareTokenMfaSettingsType, UserPoolMfaType, UserPoolPolicyType, UserStatusType,
+    DomainStatusType, ExplicitAuthFlowsType, IdentityProviderTypeType,
+    PasswordPolicyType, RecoveryOptionNameType, RecoveryOptionType, ResourceServerScopeType,
+    SmsMfaSettingsType, SoftwareTokenMfaConfigType, SoftwareTokenMfaSettingsType, UserPoolMfaType,
+    UserPoolPolicyType, UserStatusType,
 };
 
 #[tokio::test]
@@ -3482,4 +3483,308 @@ async fn cognito_list_identity_providers() {
         .send()
         .await;
     assert!(err.is_err(), "Should fail for non-existent pool");
+}
+
+#[tokio::test]
+async fn cognito_create_describe_resource_server() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("rs-pool")
+        .send()
+        .await
+        .expect("create pool");
+    let pool_id = pool.user_pool().unwrap().id().unwrap();
+
+    let scope = ResourceServerScopeType::builder()
+        .scope_name("read")
+        .scope_description("Read access")
+        .build()
+        .unwrap();
+
+    let result = client
+        .create_resource_server()
+        .user_pool_id(pool_id)
+        .identifier("https://api.example.com")
+        .name("My API")
+        .scopes(scope)
+        .send()
+        .await
+        .expect("create resource server");
+
+    let rs = result.resource_server().unwrap();
+    assert_eq!(rs.identifier().unwrap(), "https://api.example.com");
+    assert_eq!(rs.name().unwrap(), "My API");
+    assert_eq!(rs.scopes().len(), 1);
+    assert_eq!(rs.scopes()[0].scope_name(), "read");
+    assert_eq!(rs.scopes()[0].scope_description(), "Read access");
+
+    // Describe it
+    let described = client
+        .describe_resource_server()
+        .user_pool_id(pool_id)
+        .identifier("https://api.example.com")
+        .send()
+        .await
+        .expect("describe resource server");
+
+    let rs2 = described.resource_server().unwrap();
+    assert_eq!(rs2.identifier().unwrap(), "https://api.example.com");
+    assert_eq!(rs2.name().unwrap(), "My API");
+
+    // Describe non-existent should fail
+    let err = client
+        .describe_resource_server()
+        .user_pool_id(pool_id)
+        .identifier("https://nope.example.com")
+        .send()
+        .await;
+    assert!(err.is_err(), "Should fail for non-existent resource server");
+}
+
+#[tokio::test]
+async fn cognito_update_delete_resource_server() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("rs-update-pool")
+        .send()
+        .await
+        .expect("create pool");
+    let pool_id = pool.user_pool().unwrap().id().unwrap();
+
+    client
+        .create_resource_server()
+        .user_pool_id(pool_id)
+        .identifier("https://api.example.com")
+        .name("My API")
+        .send()
+        .await
+        .expect("create resource server");
+
+    // Update with new scopes
+    let scope = ResourceServerScopeType::builder()
+        .scope_name("write")
+        .scope_description("Write access")
+        .build()
+        .unwrap();
+
+    let updated = client
+        .update_resource_server()
+        .user_pool_id(pool_id)
+        .identifier("https://api.example.com")
+        .name("My Updated API")
+        .scopes(scope)
+        .send()
+        .await
+        .expect("update resource server");
+
+    let rs = updated.resource_server().unwrap();
+    assert_eq!(rs.name().unwrap(), "My Updated API");
+    assert_eq!(rs.scopes().len(), 1);
+    assert_eq!(rs.scopes()[0].scope_name(), "write");
+
+    // Delete
+    client
+        .delete_resource_server()
+        .user_pool_id(pool_id)
+        .identifier("https://api.example.com")
+        .send()
+        .await
+        .expect("delete resource server");
+
+    // Describe after delete should fail
+    let err = client
+        .describe_resource_server()
+        .user_pool_id(pool_id)
+        .identifier("https://api.example.com")
+        .send()
+        .await;
+    assert!(err.is_err(), "Should fail after delete");
+
+    // Delete non-existent should fail
+    let err = client
+        .delete_resource_server()
+        .user_pool_id(pool_id)
+        .identifier("https://api.example.com")
+        .send()
+        .await;
+    assert!(err.is_err(), "Should fail for non-existent resource server");
+}
+
+#[tokio::test]
+async fn cognito_list_resource_servers() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("rs-list-pool")
+        .send()
+        .await
+        .expect("create pool");
+    let pool_id = pool.user_pool().unwrap().id().unwrap();
+
+    // Create multiple resource servers
+    for i in 0..3 {
+        client
+            .create_resource_server()
+            .user_pool_id(pool_id)
+            .identifier(format!("https://api{i}.example.com"))
+            .name(format!("API {i}"))
+            .send()
+            .await
+            .expect("create resource server");
+    }
+
+    // List all
+    let list = client
+        .list_resource_servers()
+        .user_pool_id(pool_id)
+        .send()
+        .await
+        .expect("list resource servers");
+
+    assert_eq!(list.resource_servers().len(), 3);
+
+    // List with pagination
+    let page1 = client
+        .list_resource_servers()
+        .user_pool_id(pool_id)
+        .max_results(1)
+        .send()
+        .await
+        .expect("list page 1");
+
+    assert_eq!(page1.resource_servers().len(), 1);
+    assert!(
+        page1.next_token().is_some(),
+        "Should have next_token with more results"
+    );
+
+    // List non-existent pool should fail
+    let err = client
+        .list_resource_servers()
+        .user_pool_id("us-east-1_NOTAPOOL")
+        .send()
+        .await;
+    assert!(err.is_err(), "Should fail for non-existent pool");
+}
+
+#[tokio::test]
+async fn cognito_create_describe_domain() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("domain-pool")
+        .send()
+        .await
+        .expect("create pool");
+    let pool_id = pool.user_pool().unwrap().id().unwrap();
+
+    // Create a prefix domain
+    client
+        .create_user_pool_domain()
+        .user_pool_id(pool_id)
+        .domain("my-test-domain")
+        .send()
+        .await
+        .expect("create domain");
+
+    // Describe it
+    let described = client
+        .describe_user_pool_domain()
+        .domain("my-test-domain")
+        .send()
+        .await
+        .expect("describe domain");
+
+    let desc = described.domain_description().unwrap();
+    assert_eq!(desc.domain().unwrap(), "my-test-domain");
+    assert_eq!(desc.user_pool_id().unwrap(), pool_id);
+    assert_eq!(desc.status().unwrap(), &DomainStatusType::Active);
+
+    // Describe non-existent should return empty DomainDescription (not an error)
+    let result = client
+        .describe_user_pool_domain()
+        .domain("nonexistent-domain")
+        .send()
+        .await
+        .expect("describe non-existent should succeed");
+
+    let desc2 = result.domain_description().unwrap();
+    // domain field should be None for non-existent
+    assert!(
+        desc2.domain().is_none(),
+        "Non-existent domain should return empty description"
+    );
+
+    // Duplicate domain should fail
+    let err = client
+        .create_user_pool_domain()
+        .user_pool_id(pool_id)
+        .domain("my-test-domain")
+        .send()
+        .await;
+    assert!(err.is_err(), "Should fail for duplicate domain");
+}
+
+#[tokio::test]
+async fn cognito_delete_domain() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("domain-del-pool")
+        .send()
+        .await
+        .expect("create pool");
+    let pool_id = pool.user_pool().unwrap().id().unwrap();
+
+    client
+        .create_user_pool_domain()
+        .user_pool_id(pool_id)
+        .domain("del-test-domain")
+        .send()
+        .await
+        .expect("create domain");
+
+    // Delete it
+    client
+        .delete_user_pool_domain()
+        .user_pool_id(pool_id)
+        .domain("del-test-domain")
+        .send()
+        .await
+        .expect("delete domain");
+
+    // Describe after delete should return empty
+    let result = client
+        .describe_user_pool_domain()
+        .domain("del-test-domain")
+        .send()
+        .await
+        .expect("describe after delete");
+
+    let desc = result.domain_description().unwrap();
+    assert!(
+        desc.domain().is_none(),
+        "Deleted domain should return empty description"
+    );
+
+    // Delete non-existent should fail
+    let err = client
+        .delete_user_pool_domain()
+        .user_pool_id(pool_id)
+        .domain("del-test-domain")
+        .send()
+        .await;
+    assert!(err.is_err(), "Should fail for non-existent domain");
 }

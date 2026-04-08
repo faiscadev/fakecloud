@@ -26,6 +26,10 @@ pub struct CognitoState {
     pub user_groups: HashMap<String, HashMap<String, Vec<String>>>,
     /// pool_id -> (provider_name -> IdentityProvider)
     pub identity_providers: HashMap<String, HashMap<String, IdentityProvider>>,
+    /// pool_id -> (identifier -> ResourceServer)
+    pub resource_servers: HashMap<String, HashMap<String, ResourceServer>>,
+    /// domain -> UserPoolDomain
+    pub domains: HashMap<String, UserPoolDomain>,
 }
 
 impl CognitoState {
@@ -42,6 +46,8 @@ impl CognitoState {
             groups: HashMap::new(),
             user_groups: HashMap::new(),
             identity_providers: HashMap::new(),
+            resource_servers: HashMap::new(),
+            domains: HashMap::new(),
         }
     }
 
@@ -55,6 +61,8 @@ impl CognitoState {
         self.groups.clear();
         self.user_groups.clear();
         self.identity_providers.clear();
+        self.resource_servers.clear();
+        self.domains.clear();
     }
 }
 
@@ -295,6 +303,34 @@ pub struct IdentityProvider {
     pub idp_identifiers: Vec<String>,
     pub creation_date: DateTime<Utc>,
     pub last_modified_date: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ResourceServer {
+    pub user_pool_id: String,
+    pub identifier: String,
+    pub name: String,
+    pub scopes: Vec<ResourceServerScope>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ResourceServerScope {
+    pub scope_name: String,
+    pub scope_description: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct UserPoolDomain {
+    pub user_pool_id: String,
+    pub domain: String,
+    pub status: String,
+    pub custom_domain_config: Option<CustomDomainConfig>,
+    pub creation_date: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CustomDomainConfig {
+    pub certificate_arn: String,
 }
 
 /// Generate default schema attributes that AWS adds to every user pool.
