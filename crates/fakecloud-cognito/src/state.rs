@@ -118,6 +118,8 @@ pub struct SessionData {
 pub struct ChallengeResult {
     pub challenge_name: String,
     pub challenge_result: bool,
+    /// Optional metadata returned by the CreateAuthChallenge Lambda.
+    pub challenge_metadata: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

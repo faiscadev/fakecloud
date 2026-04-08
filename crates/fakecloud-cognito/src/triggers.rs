@@ -232,10 +232,14 @@ pub fn build_define_auth_challenge_event(
     let session: Vec<Value> = challenge_results
         .iter()
         .map(|cr| {
-            json!({
+            let mut entry = json!({
                 "challengeName": cr.challenge_name,
                 "challengeResult": cr.challenge_result,
-            })
+            });
+            if let Some(ref metadata) = cr.challenge_metadata {
+                entry["challengeMetadata"] = json!(metadata);
+            }
+            entry
         })
         .collect();
 
@@ -286,10 +290,14 @@ pub fn build_create_auth_challenge_event(
     let session: Vec<Value> = challenge_results
         .iter()
         .map(|cr| {
-            json!({
+            let mut entry = json!({
                 "challengeName": cr.challenge_name,
                 "challengeResult": cr.challenge_result,
-            })
+            });
+            if let Some(ref metadata) = cr.challenge_metadata {
+                entry["challengeMetadata"] = json!(metadata);
+            }
+            entry
         })
         .collect();
 
@@ -628,6 +636,7 @@ mod tests {
         let results = vec![ChallengeResult {
             challenge_name: "CUSTOM_CHALLENGE".to_string(),
             challenge_result: true,
+            challenge_metadata: None,
         }];
 
         let event = build_define_auth_challenge_event(

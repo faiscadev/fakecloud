@@ -2147,6 +2147,15 @@ impl CognitoService {
                     .unwrap_or(false);
 
                 if fail_auth {
+                    let mut state = self.state.write();
+                    state.auth_events.push(AuthEvent {
+                        event_type: "SIGN_IN_FAILURE".to_string(),
+                        username: username_owned.clone(),
+                        user_pool_id: pool_id.clone(),
+                        client_id: Some(client_id_owned.clone()),
+                        timestamp: Utc::now(),
+                        success: false,
+                    });
                     return Err(AwsServiceError::aws_error(
                         StatusCode::BAD_REQUEST,
                         "NotAuthorizedException",
@@ -2465,6 +2474,14 @@ impl CognitoService {
                     ));
                 }
 
+                if session_data.challenge_name != "NEW_PASSWORD_REQUIRED" {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "NotAuthorizedException",
+                        "Invalid session.",
+                    ));
+                }
+
                 // Validate password against pool policy (clone to release immutable borrow)
                 let password_policy = state
                     .user_pools
@@ -2582,6 +2599,14 @@ impl CognitoService {
                         ));
                     }
 
+                    if session_data.challenge_name != "CUSTOM_CHALLENGE" {
+                        return Err(AwsServiceError::aws_error(
+                            StatusCode::BAD_REQUEST,
+                            "NotAuthorizedException",
+                            "Invalid session.",
+                        ));
+                    }
+
                     (
                         session_data.user_pool_id,
                         session_data.username,
@@ -2662,6 +2687,7 @@ impl CognitoService {
                 challenge_results.push(ChallengeResult {
                     challenge_name: "CUSTOM_CHALLENGE".to_string(),
                     challenge_result: answer_correct,
+                    challenge_metadata: challenge_metadata.clone(),
                 });
 
                 // Invoke DefineAuthChallenge again with updated session
@@ -8886,6 +8912,7 @@ mod tests {
         let cr = ChallengeResult {
             challenge_name: "CUSTOM_CHALLENGE".to_string(),
             challenge_result: true,
+            challenge_metadata: None,
         };
         let session = SessionData {
             user_pool_id: "pool-1".to_string(),
