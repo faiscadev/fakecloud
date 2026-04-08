@@ -12,12 +12,12 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceErr
 
 use crate::state::{
     default_schema_attributes, AccessTokenData, AccountRecoverySetting, AdminCreateUserConfig,
-    AuthEvent, CustomDomainConfig, Device, EmailConfiguration, Group, IdentityProvider,
-    InviteMessageTemplate, MfaPreferences, PasswordPolicy, PoolPolicies, RecoveryOption,
-    RefreshTokenData, ResourceServer, ResourceServerScope, SchemaAttribute, SessionData,
-    SharedCognitoState, SmsConfiguration, SmsMfaConfiguration, SoftwareTokenMfaConfiguration,
-    StringAttributeConstraints, TokenValidityUnits, User, UserAttribute, UserImportJob, UserPool,
-    UserPoolClient, UserPoolDomain,
+    AuthEvent, ChallengeResult, CustomDomainConfig, Device, EmailConfiguration, Group,
+    IdentityProvider, InviteMessageTemplate, MfaPreferences, PasswordPolicy, PoolPolicies,
+    RecoveryOption, RefreshTokenData, ResourceServer, ResourceServerScope, SchemaAttribute,
+    SessionData, SharedCognitoState, SmsConfiguration, SmsMfaConfiguration,
+    SoftwareTokenMfaConfiguration, StringAttributeConstraints, TokenValidityUnits, User,
+    UserAttribute, UserImportJob, UserPool, UserPoolClient, UserPoolDomain,
 };
 use crate::triggers::{self, CognitoDeliveryContext, TriggerSource};
 
@@ -70,8 +70,8 @@ impl AwsService for CognitoService {
             "AdminSetUserPassword" => self.admin_set_user_password(&req),
             "AdminInitiateAuth" => self.admin_initiate_auth(&req).await,
             "InitiateAuth" => self.initiate_auth(&req).await,
-            "RespondToAuthChallenge" => self.respond_to_auth_challenge(&req),
-            "AdminRespondToAuthChallenge" => self.admin_respond_to_auth_challenge(&req),
+            "RespondToAuthChallenge" => self.respond_to_auth_challenge(&req).await,
+            "AdminRespondToAuthChallenge" => self.admin_respond_to_auth_challenge(&req).await,
             "SignUp" => self.sign_up(&req).await,
             "ConfirmSignUp" => self.confirm_sign_up(&req).await,
             "AdminConfirmSignUp" => self.admin_confirm_sign_up(&req).await,
@@ -1697,6 +1697,8 @@ impl CognitoService {
                         username: username.to_string(),
                         client_id: client_id.to_string(),
                         challenge_name: "NEW_PASSWORD_REQUIRED".to_string(),
+                        challenge_results: vec![],
+                        challenge_metadata: None,
                     },
                 );
                 return Ok(AwsResponse::ok_json(json!({
@@ -1953,6 +1955,8 @@ impl CognitoService {
                                 username: username.to_string(),
                                 client_id: client_id.to_string(),
                                 challenge_name: "NEW_PASSWORD_REQUIRED".to_string(),
+                                challenge_results: vec![],
+                                challenge_metadata: None,
                             },
                         );
                         return Ok(AwsResponse::ok_json(json!({
@@ -2030,6 +2034,251 @@ impl CognitoService {
                         "ExpiresIn": 3600
                     }
                 })))
+            }
+            "CUSTOM_AUTH" => {
+                // Validate client allows this flow
+                if !explicit_auth_flows.contains(&"ALLOW_CUSTOM_AUTH".to_string()) {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "NotAuthorizedException",
+                        "CUSTOM_AUTH flow is not enabled for this client.",
+                    ));
+                }
+
+                let auth_params = body["AuthParameters"].as_object().ok_or_else(|| {
+                    AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "InvalidParameterException",
+                        "AuthParameters is required",
+                    )
+                })?;
+
+                let username = auth_params
+                    .get("USERNAME")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| {
+                        AwsServiceError::aws_error(
+                            StatusCode::BAD_REQUEST,
+                            "InvalidParameterException",
+                            "USERNAME is required in AuthParameters",
+                        )
+                    })?;
+
+                // Look up user and collect attributes
+                let (user_attrs, region, account_id) = {
+                    let state = self.state.read();
+                    let user = state
+                        .users
+                        .get(&pool_id)
+                        .and_then(|users| users.get(username))
+                        .ok_or_else(|| {
+                            AwsServiceError::aws_error(
+                                StatusCode::BAD_REQUEST,
+                                "NotAuthorizedException",
+                                "Incorrect username or password.",
+                            )
+                        })?;
+
+                    if !user.enabled {
+                        return Err(AwsServiceError::aws_error(
+                            StatusCode::BAD_REQUEST,
+                            "NotAuthorizedException",
+                            "User is disabled.",
+                        ));
+                    }
+
+                    let user_attrs = triggers::collect_user_attributes(user);
+                    let region = state.region.clone();
+                    let account_id = state.account_id.clone();
+                    (user_attrs, region, account_id)
+                };
+
+                let username_owned = username.to_string();
+                let client_id_owned = client_id.to_string();
+                let challenge_results: Vec<ChallengeResult> = vec![];
+
+                // DefineAuthChallenge Lambda is required for CUSTOM_AUTH
+                let ctx = self.delivery_ctx.as_ref().ok_or_else(|| {
+                    AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "InvalidLambdaResponseException",
+                        "No Lambda trigger configured for DefineAuthChallenge.",
+                    )
+                })?;
+
+                let define_arn = triggers::get_trigger_arn(
+                    &self.state,
+                    &pool_id,
+                    TriggerSource::DefineAuthChallengeAuthentication,
+                )
+                .ok_or_else(|| {
+                    AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "InvalidLambdaResponseException",
+                        "No Lambda trigger configured for DefineAuthChallenge.",
+                    )
+                })?;
+
+                let define_event = triggers::build_define_auth_challenge_event(
+                    &pool_id,
+                    Some(&client_id_owned),
+                    &username_owned,
+                    &user_attrs,
+                    &challenge_results,
+                    &region,
+                    &account_id,
+                );
+
+                let define_response = triggers::invoke_trigger(ctx, &define_arn, &define_event)
+                    .await
+                    .ok_or_else(|| {
+                        AwsServiceError::aws_error(
+                            StatusCode::BAD_REQUEST,
+                            "InvalidLambdaResponseException",
+                            "DefineAuthChallenge Lambda did not return a response.",
+                        )
+                    })?;
+
+                let issue_tokens = define_response["response"]["issueTokens"]
+                    .as_bool()
+                    .unwrap_or(false);
+                let fail_auth = define_response["response"]["failAuthentication"]
+                    .as_bool()
+                    .unwrap_or(false);
+
+                if fail_auth {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "NotAuthorizedException",
+                        "DefineAuthChallenge Lambda rejected authentication.",
+                    ));
+                }
+
+                if issue_tokens {
+                    // Issue tokens immediately
+                    let mut state = self.state.write();
+                    let user = state
+                        .users
+                        .get(&pool_id)
+                        .and_then(|users| users.get(&username_owned))
+                        .ok_or_else(|| {
+                            AwsServiceError::aws_error(
+                                StatusCode::BAD_REQUEST,
+                                "NotAuthorizedException",
+                                "Incorrect username or password.",
+                            )
+                        })?;
+
+                    let sub = user.sub.clone();
+                    let tokens =
+                        generate_tokens(&pool_id, &client_id_owned, &sub, &username_owned, &region);
+
+                    state.refresh_tokens.insert(
+                        tokens.refresh_token.clone(),
+                        RefreshTokenData {
+                            user_pool_id: pool_id.clone(),
+                            username: username_owned.clone(),
+                            client_id: client_id_owned.clone(),
+                            issued_at: Utc::now(),
+                        },
+                    );
+                    state.access_tokens.insert(
+                        tokens.access_token.clone(),
+                        AccessTokenData {
+                            user_pool_id: pool_id.clone(),
+                            username: username_owned.clone(),
+                            client_id: client_id_owned.clone(),
+                            issued_at: Utc::now(),
+                        },
+                    );
+                    state.auth_events.push(AuthEvent {
+                        event_type: "SIGN_IN".to_string(),
+                        username: username_owned,
+                        user_pool_id: pool_id,
+                        client_id: Some(client_id_owned),
+                        timestamp: Utc::now(),
+                        success: true,
+                    });
+
+                    return Ok(AwsResponse::ok_json(json!({
+                        "AuthenticationResult": {
+                            "AccessToken": tokens.access_token,
+                            "IdToken": tokens.id_token,
+                            "RefreshToken": tokens.refresh_token,
+                            "TokenType": "Bearer",
+                            "ExpiresIn": 3600
+                        }
+                    })));
+                }
+
+                // DefineAuthChallenge wants to issue a challenge
+                let challenge_name = define_response["response"]["challengeName"]
+                    .as_str()
+                    .unwrap_or("CUSTOM_CHALLENGE")
+                    .to_string();
+
+                // Invoke CreateAuthChallenge Lambda
+                let create_arn = triggers::get_trigger_arn(
+                    &self.state,
+                    &pool_id,
+                    TriggerSource::CreateAuthChallengeAuthentication,
+                );
+
+                let mut public_challenge_params = serde_json::Map::new();
+                let mut challenge_metadata: Option<String> = None;
+
+                if let Some(create_arn) = create_arn {
+                    let create_event = triggers::build_create_auth_challenge_event(
+                        &pool_id,
+                        Some(&client_id_owned),
+                        &username_owned,
+                        &user_attrs,
+                        &challenge_name,
+                        &challenge_results,
+                        &region,
+                        &account_id,
+                    );
+                    if let Some(create_response) =
+                        triggers::invoke_trigger(ctx, &create_arn, &create_event).await
+                    {
+                        if let Some(params) =
+                            create_response["response"]["publicChallengeParameters"].as_object()
+                        {
+                            public_challenge_params = params.clone();
+                        }
+                        challenge_metadata = create_response["response"]["challengeMetadata"]
+                            .as_str()
+                            .map(|s| s.to_string());
+                    }
+                }
+
+                // Store session
+                let session = Uuid::new_v4().to_string();
+                {
+                    let mut state = self.state.write();
+                    state.sessions.insert(
+                        session.clone(),
+                        SessionData {
+                            user_pool_id: pool_id,
+                            username: username_owned,
+                            client_id: client_id_owned,
+                            challenge_name: challenge_name.clone(),
+                            challenge_results,
+                            challenge_metadata,
+                        },
+                    );
+                }
+
+                let mut response = json!({
+                    "ChallengeName": challenge_name,
+                    "Session": session,
+                    "ChallengeParameters": public_challenge_params,
+                });
+
+                // Add USERNAME to challenge parameters (AWS always includes it)
+                response["ChallengeParameters"]["USERNAME"] = json!(username);
+
+                Ok(AwsResponse::ok_json(response))
             }
             "REFRESH_TOKEN_AUTH" | "REFRESH_TOKEN" => {
                 // Validate client allows this flow
@@ -2125,7 +2374,10 @@ impl CognitoService {
         }
     }
 
-    fn respond_to_auth_challenge(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+    async fn respond_to_auth_challenge(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
 
         let client_id = require_str(&body, "ClientId")?;
@@ -2133,9 +2385,10 @@ impl CognitoService {
         let session = require_str(&body, "Session")?;
 
         self.handle_auth_challenge_response(client_id, challenge_name, session, &body)
+            .await
     }
 
-    fn admin_respond_to_auth_challenge(
+    async fn admin_respond_to_auth_challenge(
         &self,
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
@@ -2162,9 +2415,10 @@ impl CognitoService {
         }
 
         self.handle_auth_challenge_response(client_id, challenge_name, session, &body)
+            .await
     }
 
-    fn handle_auth_challenge_response(
+    async fn handle_auth_challenge_response(
         &self,
         client_id: &str,
         challenge_name: &str,
@@ -2281,6 +2535,315 @@ impl CognitoService {
                         "ExpiresIn": 3600
                     }
                 })))
+            }
+            "CUSTOM_CHALLENGE" => {
+                let challenge_responses =
+                    body["ChallengeResponses"].as_object().ok_or_else(|| {
+                        AwsServiceError::aws_error(
+                            StatusCode::BAD_REQUEST,
+                            "InvalidParameterException",
+                            "ChallengeResponses is required",
+                        )
+                    })?;
+
+                let answer = challenge_responses
+                    .get("ANSWER")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| {
+                        AwsServiceError::aws_error(
+                            StatusCode::BAD_REQUEST,
+                            "InvalidParameterException",
+                            "ANSWER is required in ChallengeResponses",
+                        )
+                    })?;
+
+                // Extract session data (remove session to consume it)
+                let (
+                    pool_id,
+                    username,
+                    session_client_id,
+                    mut challenge_results,
+                    challenge_metadata,
+                ) = {
+                    let mut state = self.state.write();
+                    let session_data = state.sessions.remove(session).ok_or_else(|| {
+                        AwsServiceError::aws_error(
+                            StatusCode::BAD_REQUEST,
+                            "NotAuthorizedException",
+                            "Invalid session.",
+                        )
+                    })?;
+
+                    if session_data.client_id != client_id {
+                        return Err(AwsServiceError::aws_error(
+                            StatusCode::BAD_REQUEST,
+                            "NotAuthorizedException",
+                            "Invalid session.",
+                        ));
+                    }
+
+                    (
+                        session_data.user_pool_id,
+                        session_data.username,
+                        session_data.client_id,
+                        session_data.challenge_results,
+                        session_data.challenge_metadata,
+                    )
+                };
+
+                // Get user attributes
+                let (user_attrs, region, account_id) = {
+                    let state = self.state.read();
+                    let user = state
+                        .users
+                        .get(&pool_id)
+                        .and_then(|users| users.get(&username))
+                        .ok_or_else(|| {
+                            AwsServiceError::aws_error(
+                                StatusCode::BAD_REQUEST,
+                                "NotAuthorizedException",
+                                "User does not exist.",
+                            )
+                        })?;
+                    let user_attrs = triggers::collect_user_attributes(user);
+                    let region = state.region.clone();
+                    let account_id = state.account_id.clone();
+                    (user_attrs, region, account_id)
+                };
+
+                let ctx = self.delivery_ctx.as_ref().ok_or_else(|| {
+                    AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "InvalidLambdaResponseException",
+                        "No Lambda trigger configured for VerifyAuthChallengeResponse.",
+                    )
+                })?;
+
+                // Invoke VerifyAuthChallengeResponse Lambda
+                let verify_arn = triggers::get_trigger_arn(
+                    &self.state,
+                    &pool_id,
+                    TriggerSource::VerifyAuthChallengeResponseAuthentication,
+                )
+                .ok_or_else(|| {
+                    AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "InvalidLambdaResponseException",
+                        "No Lambda trigger configured for VerifyAuthChallengeResponse.",
+                    )
+                })?;
+
+                let verify_event = triggers::build_verify_auth_challenge_event(
+                    &pool_id,
+                    Some(&session_client_id),
+                    &username,
+                    &user_attrs,
+                    answer,
+                    challenge_metadata.as_deref(),
+                    &region,
+                    &account_id,
+                );
+
+                let verify_response = triggers::invoke_trigger(ctx, &verify_arn, &verify_event)
+                    .await
+                    .ok_or_else(|| {
+                        AwsServiceError::aws_error(
+                            StatusCode::BAD_REQUEST,
+                            "InvalidLambdaResponseException",
+                            "VerifyAuthChallengeResponse Lambda did not return a response.",
+                        )
+                    })?;
+
+                let answer_correct = verify_response["response"]["answerCorrect"]
+                    .as_bool()
+                    .unwrap_or(false);
+
+                // Record this challenge result
+                challenge_results.push(ChallengeResult {
+                    challenge_name: "CUSTOM_CHALLENGE".to_string(),
+                    challenge_result: answer_correct,
+                });
+
+                // Invoke DefineAuthChallenge again with updated session
+                let define_arn = triggers::get_trigger_arn(
+                    &self.state,
+                    &pool_id,
+                    TriggerSource::DefineAuthChallengeAuthentication,
+                )
+                .ok_or_else(|| {
+                    AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "InvalidLambdaResponseException",
+                        "No Lambda trigger configured for DefineAuthChallenge.",
+                    )
+                })?;
+
+                let define_event = triggers::build_define_auth_challenge_event(
+                    &pool_id,
+                    Some(&session_client_id),
+                    &username,
+                    &user_attrs,
+                    &challenge_results,
+                    &region,
+                    &account_id,
+                );
+
+                let define_response = triggers::invoke_trigger(ctx, &define_arn, &define_event)
+                    .await
+                    .ok_or_else(|| {
+                        AwsServiceError::aws_error(
+                            StatusCode::BAD_REQUEST,
+                            "InvalidLambdaResponseException",
+                            "DefineAuthChallenge Lambda did not return a response.",
+                        )
+                    })?;
+
+                let issue_tokens = define_response["response"]["issueTokens"]
+                    .as_bool()
+                    .unwrap_or(false);
+                let fail_auth = define_response["response"]["failAuthentication"]
+                    .as_bool()
+                    .unwrap_or(false);
+
+                if fail_auth {
+                    let mut state = self.state.write();
+                    state.auth_events.push(AuthEvent {
+                        event_type: "SIGN_IN_FAILURE".to_string(),
+                        username: username.clone(),
+                        user_pool_id: pool_id,
+                        client_id: Some(session_client_id),
+                        timestamp: Utc::now(),
+                        success: false,
+                    });
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "NotAuthorizedException",
+                        "DefineAuthChallenge Lambda rejected authentication.",
+                    ));
+                }
+
+                if issue_tokens {
+                    // Issue tokens
+                    let mut state = self.state.write();
+                    let user = state
+                        .users
+                        .get(&pool_id)
+                        .and_then(|users| users.get(&username))
+                        .ok_or_else(|| {
+                            AwsServiceError::aws_error(
+                                StatusCode::BAD_REQUEST,
+                                "NotAuthorizedException",
+                                "User does not exist.",
+                            )
+                        })?;
+
+                    let sub = user.sub.clone();
+                    let tokens =
+                        generate_tokens(&pool_id, &session_client_id, &sub, &username, &region);
+
+                    state.refresh_tokens.insert(
+                        tokens.refresh_token.clone(),
+                        RefreshTokenData {
+                            user_pool_id: pool_id.clone(),
+                            username: username.clone(),
+                            client_id: session_client_id.clone(),
+                            issued_at: Utc::now(),
+                        },
+                    );
+                    state.access_tokens.insert(
+                        tokens.access_token.clone(),
+                        AccessTokenData {
+                            user_pool_id: pool_id.clone(),
+                            username: username.clone(),
+                            client_id: session_client_id.clone(),
+                            issued_at: Utc::now(),
+                        },
+                    );
+                    state.auth_events.push(AuthEvent {
+                        event_type: "SIGN_IN".to_string(),
+                        username,
+                        user_pool_id: pool_id,
+                        client_id: Some(session_client_id),
+                        timestamp: Utc::now(),
+                        success: true,
+                    });
+
+                    return Ok(AwsResponse::ok_json(json!({
+                        "AuthenticationResult": {
+                            "AccessToken": tokens.access_token,
+                            "IdToken": tokens.id_token,
+                            "RefreshToken": tokens.refresh_token,
+                            "TokenType": "Bearer",
+                            "ExpiresIn": 3600
+                        }
+                    })));
+                }
+
+                // Another challenge round — invoke CreateAuthChallenge
+                let next_challenge_name = define_response["response"]["challengeName"]
+                    .as_str()
+                    .unwrap_or("CUSTOM_CHALLENGE")
+                    .to_string();
+
+                let create_arn = triggers::get_trigger_arn(
+                    &self.state,
+                    &pool_id,
+                    TriggerSource::CreateAuthChallengeAuthentication,
+                );
+
+                let mut public_challenge_params = serde_json::Map::new();
+                let mut new_challenge_metadata: Option<String> = None;
+
+                if let Some(create_arn) = create_arn {
+                    let create_event = triggers::build_create_auth_challenge_event(
+                        &pool_id,
+                        Some(&session_client_id),
+                        &username,
+                        &user_attrs,
+                        &next_challenge_name,
+                        &challenge_results,
+                        &region,
+                        &account_id,
+                    );
+                    if let Some(create_response) =
+                        triggers::invoke_trigger(ctx, &create_arn, &create_event).await
+                    {
+                        if let Some(params) =
+                            create_response["response"]["publicChallengeParameters"].as_object()
+                        {
+                            public_challenge_params = params.clone();
+                        }
+                        new_challenge_metadata = create_response["response"]["challengeMetadata"]
+                            .as_str()
+                            .map(|s| s.to_string());
+                    }
+                }
+
+                // Store new session
+                let new_session = Uuid::new_v4().to_string();
+                {
+                    let mut state = self.state.write();
+                    state.sessions.insert(
+                        new_session.clone(),
+                        SessionData {
+                            user_pool_id: pool_id,
+                            username: username.clone(),
+                            client_id: session_client_id,
+                            challenge_name: next_challenge_name.clone(),
+                            challenge_results,
+                            challenge_metadata: new_challenge_metadata,
+                        },
+                    );
+                }
+
+                let mut response = json!({
+                    "ChallengeName": next_challenge_name,
+                    "Session": new_session,
+                    "ChallengeParameters": public_challenge_params,
+                });
+                response["ChallengeParameters"]["USERNAME"] = json!(username);
+
+                Ok(AwsResponse::ok_json(response))
             }
             _ => Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
@@ -7986,5 +8549,354 @@ mod tests {
         assert_eq!(state.read().auth_events.len(), 1);
         state.write().reset();
         assert!(state.read().auth_events.is_empty());
+    }
+
+    #[test]
+    fn custom_auth_rejected_when_not_in_explicit_auth_flows() {
+        let state = std::sync::Arc::new(parking_lot::RwLock::new(crate::state::CognitoState::new(
+            "123456789012",
+            "us-east-1",
+        )));
+        let svc = CognitoService::new(state.clone());
+
+        // Create pool
+        let req = make_req("CreateUserPool", r#"{"PoolName": "capool"}"#);
+        let resp = svc.create_user_pool(&req).unwrap();
+        let resp_body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let pool_id = resp_body["UserPool"]["Id"].as_str().unwrap().to_string();
+
+        // Create client WITHOUT ALLOW_CUSTOM_AUTH
+        let body = serde_json::to_string(&json!({
+            "UserPoolId": pool_id,
+            "ClientName": "caclient",
+            "ExplicitAuthFlows": ["ALLOW_USER_PASSWORD_AUTH"]
+        }))
+        .unwrap();
+        let req = make_req("CreateUserPoolClient", &body);
+        let resp = svc.create_user_pool_client(&req).unwrap();
+        let resp_body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let client_id = resp_body["UserPoolClient"]["ClientId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // Try CUSTOM_AUTH — should fail
+        let body = serde_json::to_string(&json!({
+            "ClientId": client_id,
+            "AuthFlow": "CUSTOM_AUTH",
+            "AuthParameters": {"USERNAME": "someuser"}
+        }))
+        .unwrap();
+        let req = make_req("InitiateAuth", &body);
+        let result = block_on(svc.initiate_auth(&req));
+        let err = result.err().expect("Expected error for CUSTOM_AUTH");
+        let err_str = format!("{err}");
+        assert!(
+            err_str.contains("CUSTOM_AUTH flow is not enabled"),
+            "Expected CUSTOM_AUTH rejection, got: {err_str}"
+        );
+    }
+
+    #[test]
+    fn custom_auth_fails_without_delivery_context() {
+        let state = std::sync::Arc::new(parking_lot::RwLock::new(crate::state::CognitoState::new(
+            "123456789012",
+            "us-east-1",
+        )));
+        // No delivery context — no Lambda support
+        let svc = CognitoService::new(state.clone());
+
+        // Create pool and client
+        let req = make_req("CreateUserPool", r#"{"PoolName": "capool2"}"#);
+        let resp = svc.create_user_pool(&req).unwrap();
+        let resp_body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let pool_id = resp_body["UserPool"]["Id"].as_str().unwrap().to_string();
+
+        let body = serde_json::to_string(&json!({
+            "UserPoolId": pool_id,
+            "ClientName": "caclient2",
+            "ExplicitAuthFlows": ["ALLOW_CUSTOM_AUTH"]
+        }))
+        .unwrap();
+        let req = make_req("CreateUserPoolClient", &body);
+        let resp = svc.create_user_pool_client(&req).unwrap();
+        let resp_body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let client_id = resp_body["UserPoolClient"]["ClientId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // Create user
+        let body = serde_json::to_string(&json!({
+            "UserPoolId": pool_id,
+            "Username": "customuser",
+            "TemporaryPassword": "TempP@ss1!"
+        }))
+        .unwrap();
+        let req = make_req("AdminCreateUser", &body);
+        block_on(svc.admin_create_user(&req)).unwrap();
+
+        let body = serde_json::to_string(&json!({
+            "UserPoolId": pool_id,
+            "Username": "customuser",
+            "Password": "P@ssw0rd!",
+            "Permanent": true
+        }))
+        .unwrap();
+        let req = make_req("AdminSetUserPassword", &body);
+        svc.admin_set_user_password(&req).unwrap();
+
+        // Try CUSTOM_AUTH without delivery context
+        let body = serde_json::to_string(&json!({
+            "ClientId": client_id,
+            "AuthFlow": "CUSTOM_AUTH",
+            "AuthParameters": {"USERNAME": "customuser"}
+        }))
+        .unwrap();
+        let req = make_req("InitiateAuth", &body);
+        let err = block_on(svc.initiate_auth(&req))
+            .err()
+            .expect("Expected error for missing delivery context");
+        let err_str = format!("{err}");
+        assert!(
+            err_str.contains("InvalidLambdaResponseException")
+                || err_str.contains("DefineAuthChallenge"),
+            "Expected Lambda error, got: {err_str}"
+        );
+    }
+
+    #[test]
+    fn custom_auth_fails_without_define_trigger_configured() {
+        let state = std::sync::Arc::new(parking_lot::RwLock::new(crate::state::CognitoState::new(
+            "123456789012",
+            "us-east-1",
+        )));
+        let delivery_bus = std::sync::Arc::new(fakecloud_core::delivery::DeliveryBus::new());
+        let ctx = triggers::CognitoDeliveryContext {
+            delivery_bus: delivery_bus.clone(),
+        };
+        let svc = CognitoService::new(state.clone()).with_delivery(ctx);
+
+        // Create pool WITHOUT DefineAuthChallenge Lambda configured
+        let req = make_req("CreateUserPool", r#"{"PoolName": "capool3"}"#);
+        let resp = svc.create_user_pool(&req).unwrap();
+        let resp_body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let pool_id = resp_body["UserPool"]["Id"].as_str().unwrap().to_string();
+
+        let body = serde_json::to_string(&json!({
+            "UserPoolId": pool_id,
+            "ClientName": "caclient3",
+            "ExplicitAuthFlows": ["ALLOW_CUSTOM_AUTH"]
+        }))
+        .unwrap();
+        let req = make_req("CreateUserPoolClient", &body);
+        let resp = svc.create_user_pool_client(&req).unwrap();
+        let resp_body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let client_id = resp_body["UserPoolClient"]["ClientId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // Create user
+        let body = serde_json::to_string(&json!({
+            "UserPoolId": pool_id,
+            "Username": "customuser2",
+            "TemporaryPassword": "TempP@ss1!"
+        }))
+        .unwrap();
+        let req = make_req("AdminCreateUser", &body);
+        block_on(svc.admin_create_user(&req)).unwrap();
+
+        let body = serde_json::to_string(&json!({
+            "UserPoolId": pool_id,
+            "Username": "customuser2",
+            "Password": "P@ssw0rd!",
+            "Permanent": true
+        }))
+        .unwrap();
+        let req = make_req("AdminSetUserPassword", &body);
+        svc.admin_set_user_password(&req).unwrap();
+
+        // CUSTOM_AUTH — has delivery context but no DefineAuthChallenge Lambda
+        let body = serde_json::to_string(&json!({
+            "ClientId": client_id,
+            "AuthFlow": "CUSTOM_AUTH",
+            "AuthParameters": {"USERNAME": "customuser2"}
+        }))
+        .unwrap();
+        let req = make_req("InitiateAuth", &body);
+        let err = block_on(svc.initiate_auth(&req))
+            .err()
+            .expect("Expected error for missing DefineAuthChallenge trigger");
+        let err_str = format!("{err}");
+        assert!(
+            err_str.contains("DefineAuthChallenge"),
+            "Expected DefineAuthChallenge error, got: {err_str}"
+        );
+    }
+
+    #[test]
+    fn custom_challenge_response_fails_without_delivery_context() {
+        let state = std::sync::Arc::new(parking_lot::RwLock::new(crate::state::CognitoState::new(
+            "123456789012",
+            "us-east-1",
+        )));
+        let svc = CognitoService::new(state.clone());
+
+        // Create pool, client, and user so we get past user lookup
+        let req = make_req("CreateUserPool", r#"{"PoolName": "ccpool"}"#);
+        let resp = svc.create_user_pool(&req).unwrap();
+        let resp_body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let pool_id = resp_body["UserPool"]["Id"].as_str().unwrap().to_string();
+
+        let body = serde_json::to_string(&json!({
+            "UserPoolId": pool_id,
+            "ClientName": "ccclient",
+            "ExplicitAuthFlows": ["ALLOW_CUSTOM_AUTH"]
+        }))
+        .unwrap();
+        let req = make_req("CreateUserPoolClient", &body);
+        let resp = svc.create_user_pool_client(&req).unwrap();
+        let resp_body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let client_id = resp_body["UserPoolClient"]["ClientId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let body = serde_json::to_string(&json!({
+            "UserPoolId": pool_id,
+            "Username": "ccuser",
+            "TemporaryPassword": "TempP@ss1!"
+        }))
+        .unwrap();
+        let req = make_req("AdminCreateUser", &body);
+        block_on(svc.admin_create_user(&req)).unwrap();
+
+        let body = serde_json::to_string(&json!({
+            "UserPoolId": pool_id,
+            "Username": "ccuser",
+            "Password": "P@ssw0rd!",
+            "Permanent": true
+        }))
+        .unwrap();
+        let req = make_req("AdminSetUserPassword", &body);
+        svc.admin_set_user_password(&req).unwrap();
+
+        // Manually insert a CUSTOM_CHALLENGE session
+        let session_token = "test-session-123".to_string();
+        {
+            let mut st = state.write();
+            st.sessions.insert(
+                session_token.clone(),
+                SessionData {
+                    user_pool_id: pool_id,
+                    username: "ccuser".to_string(),
+                    client_id: client_id.clone(),
+                    challenge_name: "CUSTOM_CHALLENGE".to_string(),
+                    challenge_results: vec![],
+                    challenge_metadata: None,
+                },
+            );
+        }
+
+        let body = serde_json::to_string(&json!({
+            "ClientId": client_id,
+            "ChallengeName": "CUSTOM_CHALLENGE",
+            "Session": session_token,
+            "ChallengeResponses": {"ANSWER": "my-answer"}
+        }))
+        .unwrap();
+        let req = make_req("RespondToAuthChallenge", &body);
+        let err = block_on(svc.respond_to_auth_challenge(&req))
+            .err()
+            .expect("Expected error for missing VerifyAuthChallengeResponse trigger");
+        let err_str = format!("{err}");
+        assert!(
+            err_str.contains("InvalidLambdaResponseException")
+                || err_str.contains("VerifyAuthChallengeResponse"),
+            "Expected Lambda error, got: {err_str}"
+        );
+    }
+
+    #[test]
+    fn custom_challenge_response_requires_answer() {
+        let state = std::sync::Arc::new(parking_lot::RwLock::new(crate::state::CognitoState::new(
+            "123456789012",
+            "us-east-1",
+        )));
+        let svc = CognitoService::new(state.clone());
+
+        // Create pool and client so we have valid IDs
+        let req = make_req("CreateUserPool", r#"{"PoolName": "anspool"}"#);
+        let resp = svc.create_user_pool(&req).unwrap();
+        let resp_body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let pool_id = resp_body["UserPool"]["Id"].as_str().unwrap().to_string();
+
+        let body = serde_json::to_string(&json!({
+            "UserPoolId": pool_id,
+            "ClientName": "ansclient",
+            "ExplicitAuthFlows": ["ALLOW_CUSTOM_AUTH"]
+        }))
+        .unwrap();
+        let req = make_req("CreateUserPoolClient", &body);
+        let resp = svc.create_user_pool_client(&req).unwrap();
+        let resp_body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let client_id = resp_body["UserPoolClient"]["ClientId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let session_token = "test-session-456".to_string();
+        {
+            let mut st = state.write();
+            st.sessions.insert(
+                session_token.clone(),
+                SessionData {
+                    user_pool_id: pool_id,
+                    username: "testuser".to_string(),
+                    client_id: client_id.clone(),
+                    challenge_name: "CUSTOM_CHALLENGE".to_string(),
+                    challenge_results: vec![],
+                    challenge_metadata: None,
+                },
+            );
+        }
+
+        // Missing ANSWER
+        let body = serde_json::to_string(&json!({
+            "ClientId": client_id,
+            "ChallengeName": "CUSTOM_CHALLENGE",
+            "Session": session_token,
+            "ChallengeResponses": {}
+        }))
+        .unwrap();
+        let req = make_req("RespondToAuthChallenge", &body);
+        let err = block_on(svc.respond_to_auth_challenge(&req))
+            .err()
+            .expect("Expected error for missing ANSWER");
+        let err_str = format!("{err}");
+        assert!(
+            err_str.contains("ANSWER"),
+            "Expected ANSWER required error, got: {err_str}"
+        );
+    }
+
+    #[test]
+    fn session_data_stores_challenge_results() {
+        let cr = ChallengeResult {
+            challenge_name: "CUSTOM_CHALLENGE".to_string(),
+            challenge_result: true,
+        };
+        let session = SessionData {
+            user_pool_id: "pool-1".to_string(),
+            username: "user1".to_string(),
+            client_id: "client-1".to_string(),
+            challenge_name: "CUSTOM_CHALLENGE".to_string(),
+            challenge_results: vec![cr.clone()],
+            challenge_metadata: Some("meta".to_string()),
+        };
+        assert_eq!(session.challenge_results.len(), 1);
+        assert!(session.challenge_results[0].challenge_result);
+        assert_eq!(session.challenge_metadata.as_deref(), Some("meta"));
     }
 }

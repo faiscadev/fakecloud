@@ -107,6 +107,17 @@ pub struct SessionData {
     pub username: String,
     pub client_id: String,
     pub challenge_name: String,
+    /// History of challenge results for CUSTOM_AUTH multi-round flows.
+    pub challenge_results: Vec<ChallengeResult>,
+    /// Metadata from the CreateAuthChallenge Lambda (passed back to client).
+    pub challenge_metadata: Option<String>,
+}
+
+/// Tracks the result of a single challenge round in a CUSTOM_AUTH flow.
+#[derive(Clone, Debug)]
+pub struct ChallengeResult {
+    pub challenge_name: String,
+    pub challenge_result: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

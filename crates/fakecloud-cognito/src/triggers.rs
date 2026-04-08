@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 
 use fakecloud_core::delivery::DeliveryBus;
 
-use crate::state::{SharedCognitoState, User, UserAttribute};
+use crate::state::{ChallengeResult, SharedCognitoState, User, UserAttribute};
 
 /// Shared references needed for Lambda trigger delivery.
 #[derive(Clone)]
@@ -31,6 +31,9 @@ pub enum TriggerSource {
     CustomMessageForgotPassword,
     TokenGenerationAuthentication,
     UserMigrationAuthentication,
+    DefineAuthChallengeAuthentication,
+    CreateAuthChallengeAuthentication,
+    VerifyAuthChallengeResponseAuthentication,
 }
 
 impl TriggerSource {
@@ -46,6 +49,11 @@ impl TriggerSource {
             Self::CustomMessageForgotPassword => "CustomMessage_ForgotPassword",
             Self::TokenGenerationAuthentication => "TokenGeneration_Authentication",
             Self::UserMigrationAuthentication => "UserMigration_Authentication",
+            Self::DefineAuthChallengeAuthentication => "DefineAuthChallenge_Authentication",
+            Self::CreateAuthChallengeAuthentication => "CreateAuthChallenge_Authentication",
+            Self::VerifyAuthChallengeResponseAuthentication => {
+                "VerifyAuthChallengeResponse_Authentication"
+            }
         }
     }
 
@@ -61,6 +69,9 @@ impl TriggerSource {
             Self::CustomMessageSignUp | Self::CustomMessageForgotPassword => "CustomMessage",
             Self::TokenGenerationAuthentication => "PreTokenGeneration",
             Self::UserMigrationAuthentication => "UserMigration",
+            Self::DefineAuthChallengeAuthentication => "DefineAuthChallenge",
+            Self::CreateAuthChallengeAuthentication => "CreateAuthChallenge",
+            Self::VerifyAuthChallengeResponseAuthentication => "VerifyAuthChallengeResponse",
         }
     }
 }
@@ -197,6 +208,154 @@ pub fn invoke_trigger_fire_and_forget(
             None => {}
         }
     });
+}
+
+/// Build a DefineAuthChallenge trigger event.
+///
+/// The `session` array contains previous challenge results: each entry has
+/// `challengeName`, `challengeResult`, and `challengeMetadata`.
+pub fn build_define_auth_challenge_event(
+    pool_id: &str,
+    client_id: Option<&str>,
+    username: &str,
+    user_attributes: &[UserAttribute],
+    challenge_results: &[ChallengeResult],
+    region: &str,
+    account_id: &str,
+) -> Value {
+    let user_attrs: Value = user_attributes
+        .iter()
+        .map(|a| (a.name.clone(), Value::String(a.value.clone())))
+        .collect::<serde_json::Map<String, Value>>()
+        .into();
+
+    let session: Vec<Value> = challenge_results
+        .iter()
+        .map(|cr| {
+            json!({
+                "challengeName": cr.challenge_name,
+                "challengeResult": cr.challenge_result,
+            })
+        })
+        .collect();
+
+    let mut event = json!({
+        "version": "1",
+        "triggerSource": TriggerSource::DefineAuthChallengeAuthentication.as_str(),
+        "region": region,
+        "userPoolId": pool_id,
+        "userName": username,
+        "callerContext": {
+            "awsSdkVersion": "fakecloud",
+            "clientId": client_id.unwrap_or(""),
+            "accountId": account_id,
+        },
+        "request": {
+            "userAttributes": user_attrs,
+            "session": session,
+        },
+        "response": {
+            "challengeName": null,
+            "issueTokens": false,
+            "failAuthentication": false,
+        },
+    });
+
+    event["callerContext"]["accountId"] = json!(account_id);
+    event
+}
+
+/// Build a CreateAuthChallenge trigger event.
+#[allow(clippy::too_many_arguments)]
+pub fn build_create_auth_challenge_event(
+    pool_id: &str,
+    client_id: Option<&str>,
+    username: &str,
+    user_attributes: &[UserAttribute],
+    challenge_name: &str,
+    challenge_results: &[ChallengeResult],
+    region: &str,
+    account_id: &str,
+) -> Value {
+    let user_attrs: Value = user_attributes
+        .iter()
+        .map(|a| (a.name.clone(), Value::String(a.value.clone())))
+        .collect::<serde_json::Map<String, Value>>()
+        .into();
+
+    let session: Vec<Value> = challenge_results
+        .iter()
+        .map(|cr| {
+            json!({
+                "challengeName": cr.challenge_name,
+                "challengeResult": cr.challenge_result,
+            })
+        })
+        .collect();
+
+    json!({
+        "version": "1",
+        "triggerSource": TriggerSource::CreateAuthChallengeAuthentication.as_str(),
+        "region": region,
+        "userPoolId": pool_id,
+        "userName": username,
+        "callerContext": {
+            "awsSdkVersion": "fakecloud",
+            "clientId": client_id.unwrap_or(""),
+            "accountId": account_id,
+        },
+        "request": {
+            "userAttributes": user_attrs,
+            "challengeName": challenge_name,
+            "session": session,
+        },
+        "response": {
+            "publicChallengeParameters": {},
+            "privateChallengeParameters": {},
+            "challengeMetadata": null,
+        },
+    })
+}
+
+/// Build a VerifyAuthChallengeResponse trigger event.
+#[allow(clippy::too_many_arguments)]
+pub fn build_verify_auth_challenge_event(
+    pool_id: &str,
+    client_id: Option<&str>,
+    username: &str,
+    user_attributes: &[UserAttribute],
+    challenge_answer: &str,
+    challenge_metadata: Option<&str>,
+    region: &str,
+    account_id: &str,
+) -> Value {
+    let user_attrs: Value = user_attributes
+        .iter()
+        .map(|a| (a.name.clone(), Value::String(a.value.clone())))
+        .collect::<serde_json::Map<String, Value>>()
+        .into();
+
+    json!({
+        "version": "1",
+        "triggerSource": TriggerSource::VerifyAuthChallengeResponseAuthentication.as_str(),
+        "region": region,
+        "userPoolId": pool_id,
+        "userName": username,
+        "callerContext": {
+            "awsSdkVersion": "fakecloud",
+            "clientId": client_id.unwrap_or(""),
+            "accountId": account_id,
+        },
+        "request": {
+            "userAttributes": user_attrs,
+            "challengeAnswer": challenge_answer,
+            "privateChallengeParameters": {},
+            "challengeMetadata": challenge_metadata.unwrap_or(""),
+        },
+        "response": {
+            "answerCorrect": false,
+        },
+    })
 }
 
 /// Helper: collect user attributes from state for trigger event construction.
@@ -425,5 +584,142 @@ mod tests {
             TriggerSource::PreAuthenticationAuthentication
         )
         .is_none());
+    }
+
+    #[test]
+    fn custom_auth_trigger_source_strings() {
+        assert_eq!(
+            TriggerSource::DefineAuthChallengeAuthentication.as_str(),
+            "DefineAuthChallenge_Authentication"
+        );
+        assert_eq!(
+            TriggerSource::CreateAuthChallengeAuthentication.as_str(),
+            "CreateAuthChallenge_Authentication"
+        );
+        assert_eq!(
+            TriggerSource::VerifyAuthChallengeResponseAuthentication.as_str(),
+            "VerifyAuthChallengeResponse_Authentication"
+        );
+    }
+
+    #[test]
+    fn custom_auth_trigger_lambda_config_keys() {
+        assert_eq!(
+            TriggerSource::DefineAuthChallengeAuthentication.lambda_config_key(),
+            "DefineAuthChallenge"
+        );
+        assert_eq!(
+            TriggerSource::CreateAuthChallengeAuthentication.lambda_config_key(),
+            "CreateAuthChallenge"
+        );
+        assert_eq!(
+            TriggerSource::VerifyAuthChallengeResponseAuthentication.lambda_config_key(),
+            "VerifyAuthChallengeResponse"
+        );
+    }
+
+    #[test]
+    fn build_define_auth_challenge_event_structure() {
+        let attrs = vec![UserAttribute {
+            name: "sub".to_string(),
+            value: "abc-123".to_string(),
+        }];
+
+        let results = vec![ChallengeResult {
+            challenge_name: "CUSTOM_CHALLENGE".to_string(),
+            challenge_result: true,
+        }];
+
+        let event = build_define_auth_challenge_event(
+            "us-east-1_abc",
+            Some("client-id-1"),
+            "testuser",
+            &attrs,
+            &results,
+            "us-east-1",
+            "123456789012",
+        );
+
+        assert_eq!(event["version"], "1");
+        assert_eq!(event["triggerSource"], "DefineAuthChallenge_Authentication");
+        assert_eq!(event["userName"], "testuser");
+        assert_eq!(event["request"]["userAttributes"]["sub"], "abc-123");
+
+        let session = event["request"]["session"].as_array().unwrap();
+        assert_eq!(session.len(), 1);
+        assert_eq!(session[0]["challengeName"], "CUSTOM_CHALLENGE");
+        assert_eq!(session[0]["challengeResult"], true);
+
+        assert_eq!(event["response"]["issueTokens"], false);
+        assert_eq!(event["response"]["failAuthentication"], false);
+    }
+
+    #[test]
+    fn build_create_auth_challenge_event_structure() {
+        let attrs = vec![UserAttribute {
+            name: "email".to_string(),
+            value: "user@example.com".to_string(),
+        }];
+
+        let event = build_create_auth_challenge_event(
+            "us-east-1_abc",
+            Some("client-id-1"),
+            "testuser",
+            &attrs,
+            "CUSTOM_CHALLENGE",
+            &[],
+            "us-east-1",
+            "123456789012",
+        );
+
+        assert_eq!(event["triggerSource"], "CreateAuthChallenge_Authentication");
+        assert_eq!(event["request"]["challengeName"], "CUSTOM_CHALLENGE");
+        assert!(event["request"]["session"].as_array().unwrap().is_empty());
+        assert!(event["response"]["publicChallengeParameters"]
+            .as_object()
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn build_verify_auth_challenge_event_structure() {
+        let attrs = vec![UserAttribute {
+            name: "sub".to_string(),
+            value: "abc-123".to_string(),
+        }];
+
+        let event = build_verify_auth_challenge_event(
+            "us-east-1_abc",
+            Some("client-id-1"),
+            "testuser",
+            &attrs,
+            "my-answer",
+            Some("challenge-meta"),
+            "us-east-1",
+            "123456789012",
+        );
+
+        assert_eq!(
+            event["triggerSource"],
+            "VerifyAuthChallengeResponse_Authentication"
+        );
+        assert_eq!(event["request"]["challengeAnswer"], "my-answer");
+        assert_eq!(event["request"]["challengeMetadata"], "challenge-meta");
+        assert_eq!(event["response"]["answerCorrect"], false);
+    }
+
+    #[test]
+    fn define_auth_challenge_event_empty_session() {
+        let event = build_define_auth_challenge_event(
+            "us-east-1_abc",
+            Some("client-id-1"),
+            "testuser",
+            &[],
+            &[],
+            "us-east-1",
+            "123456789012",
+        );
+
+        assert!(event["request"]["session"].as_array().unwrap().is_empty());
     }
 }
