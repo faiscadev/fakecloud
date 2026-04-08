@@ -1,4 +1,4 @@
-import { execSync, spawn, type ChildProcess } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import * as net from "node:net";
@@ -45,15 +45,18 @@ export async function setup(): Promise<() => Promise<void>> {
   const releaseBin = resolve(repoRoot, "target/release/fakecloud");
   const debugBin = resolve(repoRoot, "target/debug/fakecloud");
 
+  // CI always builds fresh via `cargo build --release` before running tests.
+  // For local dev, pick up whichever binary exists (release preferred).
   let bin: string;
   if (existsSync(releaseBin)) {
     bin = releaseBin;
   } else if (existsSync(debugBin)) {
     bin = debugBin;
   } else {
-    // Build it
-    execSync("cargo build --release", { cwd: repoRoot, stdio: "inherit" });
-    bin = releaseBin;
+    throw new Error(
+      `fakecloud binary not found. Build it first with: cargo build --release\n` +
+        `  Looked for:\n    ${releaseBin}\n    ${debugBin}`,
+    );
   }
 
   const port = await findAvailablePort();
