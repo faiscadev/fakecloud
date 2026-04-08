@@ -9,10 +9,10 @@ use uuid::Uuid;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 
 use crate::state::{
-    default_schema_attributes, AccountRecoverySetting, AdminCreateUserConfig, EmailConfiguration,
-    InviteMessageTemplate, PasswordPolicy, PoolPolicies, RecoveryOption, RefreshTokenData,
-    SchemaAttribute, SessionData, SharedCognitoState, SmsConfiguration, StringAttributeConstraints,
-    TokenValidityUnits, User, UserAttribute, UserPool, UserPoolClient,
+    default_schema_attributes, AccessTokenData, AccountRecoverySetting, AdminCreateUserConfig,
+    EmailConfiguration, InviteMessageTemplate, PasswordPolicy, PoolPolicies, RecoveryOption,
+    RefreshTokenData, SchemaAttribute, SessionData, SharedCognitoState, SmsConfiguration,
+    StringAttributeConstraints, TokenValidityUnits, User, UserAttribute, UserPool, UserPoolClient,
 };
 
 pub struct CognitoService {
@@ -59,6 +59,12 @@ impl AwsService for CognitoService {
             "SignUp" => self.sign_up(&req),
             "ConfirmSignUp" => self.confirm_sign_up(&req),
             "AdminConfirmSignUp" => self.admin_confirm_sign_up(&req),
+            "ChangePassword" => self.change_password(&req),
+            "ForgotPassword" => self.forgot_password(&req),
+            "ConfirmForgotPassword" => self.confirm_forgot_password(&req),
+            "AdminResetUserPassword" => self.admin_reset_user_password(&req),
+            "GlobalSignOut" => self.global_sign_out(&req),
+            "AdminUserGlobalSignOut" => self.admin_user_global_sign_out(&req),
             _ => Err(AwsServiceError::action_not_implemented(
                 "cognito-idp",
                 &req.action,
@@ -94,6 +100,12 @@ impl AwsService for CognitoService {
             "SignUp",
             "ConfirmSignUp",
             "AdminConfirmSignUp",
+            "ChangePassword",
+            "ForgotPassword",
+            "ConfirmForgotPassword",
+            "AdminResetUserPassword",
+            "GlobalSignOut",
+            "AdminUserGlobalSignOut",
         ]
     }
 }
@@ -835,6 +847,7 @@ impl CognitoService {
             user_last_modified_date: now,
             password: None,
             temporary_password,
+            confirmation_code: None,
         };
 
         let response = user_to_json(&user);
@@ -1450,6 +1463,17 @@ impl CognitoService {
             },
         );
 
+        // Store access token
+        state.access_tokens.insert(
+            tokens.access_token.clone(),
+            AccessTokenData {
+                user_pool_id: pool_id.to_string(),
+                username: username.to_string(),
+                client_id: client_id.to_string(),
+                issued_at: Utc::now(),
+            },
+        );
+
         Ok(AwsResponse::ok_json(json!({
             "AuthenticationResult": {
                 "AccessToken": tokens.access_token,
@@ -1592,6 +1616,16 @@ impl CognitoService {
                     },
                 );
 
+                state.access_tokens.insert(
+                    tokens.access_token.clone(),
+                    AccessTokenData {
+                        user_pool_id: pool_id.to_string(),
+                        username: username.to_string(),
+                        client_id: client_id.to_string(),
+                        issued_at: Utc::now(),
+                    },
+                );
+
                 Ok(AwsResponse::ok_json(json!({
                     "AuthenticationResult": {
                         "AccessToken": tokens.access_token,
@@ -1666,6 +1700,16 @@ impl CognitoService {
                 let sub = user.sub.clone();
                 let tokens =
                     generate_tokens(&token_pool_id, client_id, &sub, &token_username, &region);
+
+                state.access_tokens.insert(
+                    tokens.access_token.clone(),
+                    AccessTokenData {
+                        user_pool_id: token_pool_id,
+                        username: token_username,
+                        client_id: client_id.to_string(),
+                        issued_at: Utc::now(),
+                    },
+                );
 
                 Ok(AwsResponse::ok_json(json!({
                     "AuthenticationResult": {
@@ -1814,6 +1858,16 @@ impl CognitoService {
                 state.refresh_tokens.insert(
                     tokens.refresh_token.clone(),
                     RefreshTokenData {
+                        user_pool_id: pool_id.clone(),
+                        username: username.clone(),
+                        client_id: client_id.to_string(),
+                        issued_at: Utc::now(),
+                    },
+                );
+
+                state.access_tokens.insert(
+                    tokens.access_token.clone(),
+                    AccessTokenData {
                         user_pool_id: pool_id,
                         username,
                         client_id: client_id.to_string(),
@@ -1910,6 +1964,7 @@ impl CognitoService {
             user_last_modified_date: now,
             password: Some(password.to_string()),
             temporary_password: None,
+            confirmation_code: None,
         };
 
         pool_users.insert(username.to_string(), user);
@@ -1998,6 +2053,318 @@ impl CognitoService {
 
         Ok(AwsResponse::ok_json(json!({})))
     }
+
+    fn change_password(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+
+        let access_token = require_str(&body, "AccessToken")?;
+        let previous_password = require_str(&body, "PreviousPassword")?;
+        let proposed_password = require_str(&body, "ProposedPassword")?;
+
+        let mut state = self.state.write();
+
+        // Look up user from access token
+        let token_data = state.access_tokens.get(access_token).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "NotAuthorizedException",
+                "Invalid access token.",
+            )
+        })?;
+        let pool_id = token_data.user_pool_id.clone();
+        let username = token_data.username.clone();
+
+        // Validate password against pool policy
+        let password_policy = state
+            .user_pools
+            .get(&pool_id)
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ResourceNotFoundException",
+                    "User pool does not exist.",
+                )
+            })?
+            .policies
+            .password_policy
+            .clone();
+
+        let user = state
+            .users
+            .get_mut(&pool_id)
+            .and_then(|users| users.get_mut(&username))
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "NotAuthorizedException",
+                    "Invalid access token.",
+                )
+            })?;
+
+        // Verify previous password
+        let password_matches = match (&user.password, &user.temporary_password) {
+            (Some(p), _) if p == previous_password => true,
+            (_, Some(tp)) if tp == previous_password => true,
+            _ => false,
+        };
+        if !password_matches {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "NotAuthorizedException",
+                "Incorrect username or password.",
+            ));
+        }
+
+        validate_password(proposed_password, &password_policy)?;
+
+        user.password = Some(proposed_password.to_string());
+        user.temporary_password = None;
+        user.user_last_modified_date = Utc::now();
+
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    fn forgot_password(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+
+        let client_id = require_str(&body, "ClientId")?;
+        let username = require_str(&body, "Username")?;
+
+        let mut state = self.state.write();
+
+        // Find pool from client
+        let client = state.user_pool_clients.get(client_id).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("User pool client {client_id} does not exist."),
+            )
+        })?;
+        let pool_id = client.user_pool_id.clone();
+
+        let user = state
+            .users
+            .get_mut(&pool_id)
+            .and_then(|users| users.get_mut(username))
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "UserNotFoundException",
+                    "User does not exist.",
+                )
+            })?;
+
+        let code = generate_confirmation_code();
+        user.confirmation_code = Some(code);
+
+        // Find email from user attributes for CodeDeliveryDetails
+        let email = user
+            .attributes
+            .iter()
+            .find(|a| a.name == "email")
+            .map(|a| a.value.clone());
+
+        let destination = email
+            .map(|e| {
+                // Mask email: show first char + *** + @domain
+                if let Some(at_pos) = e.find('@') {
+                    let first = &e[..1];
+                    let domain = &e[at_pos..];
+                    format!("{first}***{domain}")
+                } else {
+                    "***".to_string()
+                }
+            })
+            .unwrap_or_else(|| "***".to_string());
+
+        Ok(AwsResponse::ok_json(json!({
+            "CodeDeliveryDetails": {
+                "Destination": destination,
+                "DeliveryMedium": "EMAIL",
+                "AttributeName": "email"
+            }
+        })))
+    }
+
+    fn confirm_forgot_password(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+
+        let client_id = require_str(&body, "ClientId")?;
+        let username = require_str(&body, "Username")?;
+        let confirmation_code = require_str(&body, "ConfirmationCode")?;
+        let password = require_str(&body, "Password")?;
+
+        let mut state = self.state.write();
+
+        // Find pool from client
+        let client = state.user_pool_clients.get(client_id).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("User pool client {client_id} does not exist."),
+            )
+        })?;
+        let pool_id = client.user_pool_id.clone();
+
+        // Validate password against pool policy
+        let password_policy = state
+            .user_pools
+            .get(&pool_id)
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ResourceNotFoundException",
+                    "User pool does not exist.",
+                )
+            })?
+            .policies
+            .password_policy
+            .clone();
+
+        let user = state
+            .users
+            .get_mut(&pool_id)
+            .and_then(|users| users.get_mut(username))
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "UserNotFoundException",
+                    "User does not exist.",
+                )
+            })?;
+
+        // Validate confirmation code
+        match &user.confirmation_code {
+            Some(code) if code == confirmation_code => {}
+            _ => {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "CodeMismatchException",
+                    "Invalid verification code provided, please try again.",
+                ));
+            }
+        }
+
+        validate_password(password, &password_policy)?;
+
+        user.password = Some(password.to_string());
+        user.temporary_password = None;
+        user.confirmation_code = None;
+        user.user_status = "CONFIRMED".to_string();
+        user.user_last_modified_date = Utc::now();
+
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    fn admin_reset_user_password(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+
+        let pool_id = require_str(&body, "UserPoolId")?;
+        let username = require_str(&body, "Username")?;
+
+        let mut state = self.state.write();
+
+        // Validate pool exists
+        if !state.user_pools.contains_key(pool_id) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("User pool {pool_id} does not exist."),
+            ));
+        }
+
+        let user = state
+            .users
+            .get_mut(pool_id)
+            .and_then(|users| users.get_mut(username))
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "UserNotFoundException",
+                    "User does not exist.",
+                )
+            })?;
+
+        user.user_status = "RESET_REQUIRED".to_string();
+        user.confirmation_code = Some(generate_confirmation_code());
+        user.user_last_modified_date = Utc::now();
+
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    fn global_sign_out(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+
+        let access_token = require_str(&body, "AccessToken")?;
+
+        let mut state = self.state.write();
+
+        // Look up user from access token
+        let token_data = state.access_tokens.get(access_token).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "NotAuthorizedException",
+                "Invalid access token.",
+            )
+        })?;
+        let pool_id = token_data.user_pool_id.clone();
+        let username = token_data.username.clone();
+
+        // Invalidate all refresh tokens for this user
+        state
+            .refresh_tokens
+            .retain(|_, v| !(v.user_pool_id == pool_id && v.username == username));
+
+        // Invalidate all access tokens for this user
+        state
+            .access_tokens
+            .retain(|_, v| !(v.user_pool_id == pool_id && v.username == username));
+
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    fn admin_user_global_sign_out(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+
+        let pool_id = require_str(&body, "UserPoolId")?;
+        let username = require_str(&body, "Username")?;
+
+        let mut state = self.state.write();
+
+        // Validate pool exists
+        if !state.user_pools.contains_key(pool_id) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("User pool {pool_id} does not exist."),
+            ));
+        }
+
+        // Validate user exists
+        if !state
+            .users
+            .get(pool_id)
+            .is_some_and(|users| users.contains_key(username))
+        {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "UserNotFoundException",
+                "User does not exist.",
+            ));
+        }
+
+        // Invalidate all refresh tokens for this user
+        state
+            .refresh_tokens
+            .retain(|_, v| !(v.user_pool_id == pool_id && v.username == username));
+
+        // Invalidate all access tokens for this user
+        state
+            .access_tokens
+            .retain(|_, v| !(v.user_pool_id == pool_id && v.username == username));
+
+        Ok(AwsResponse::ok_json(json!({})))
+    }
 }
 
 /// Generate a pool ID in the format `{region}_{9 random alphanumeric chars}`.
@@ -2027,6 +2394,15 @@ fn generate_client_id() -> String {
 }
 
 /// Generate a client secret: 51 base64 characters (like AWS).
+/// Generate a 6-digit confirmation code for password reset flows.
+fn generate_confirmation_code() -> String {
+    // Use UUID bytes to generate a numeric code
+    let uuid = Uuid::new_v4();
+    let bytes = uuid.as_bytes();
+    let num = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+    format!("{:06}", num % 1_000_000)
+}
+
 fn generate_client_secret() -> String {
     use base64::Engine;
     // Generate enough random bytes via UUIDs to produce 51+ base64 chars
@@ -3026,6 +3402,7 @@ mod tests {
             user_last_modified_date: Utc::now(),
             password: None,
             temporary_password: None,
+            confirmation_code: None,
         };
 
         let filter = parse_filter_expression(r#"username = "testuser""#).unwrap();
@@ -3053,6 +3430,7 @@ mod tests {
             user_last_modified_date: Utc::now(),
             password: None,
             temporary_password: None,
+            confirmation_code: None,
         };
 
         let filter = parse_filter_expression(r#"email = "test@example.com""#).unwrap();
@@ -3077,6 +3455,7 @@ mod tests {
             user_last_modified_date: Utc::now(),
             password: None,
             temporary_password: None,
+            confirmation_code: None,
         };
 
         let filter =
@@ -3323,5 +3702,62 @@ mod tests {
         assert_eq!(session.len(), 36);
         let parts: Vec<&str> = session.split('-').collect();
         assert_eq!(parts.len(), 5);
+    }
+
+    #[test]
+    fn confirmation_code_is_six_digits() {
+        for _ in 0..100 {
+            let code = generate_confirmation_code();
+            assert_eq!(code.len(), 6, "Code should be 6 chars: {code}");
+            assert!(
+                code.chars().all(|c| c.is_ascii_digit()),
+                "Code should be all digits: {code}"
+            );
+        }
+    }
+
+    #[test]
+    fn confirmation_code_uniqueness() {
+        let code1 = generate_confirmation_code();
+        // Generate many codes and check we get at least some different ones
+        let mut found_different = false;
+        for _ in 0..20 {
+            if generate_confirmation_code() != code1 {
+                found_different = true;
+                break;
+            }
+        }
+        assert!(found_different, "Codes should vary across calls");
+    }
+
+    #[test]
+    fn access_token_lookup() {
+        let state = std::sync::Arc::new(parking_lot::RwLock::new(crate::state::CognitoState::new(
+            "123456789012",
+            "us-east-1",
+        )));
+        {
+            let mut s = state.write();
+            s.access_tokens.insert(
+                "test-access-token".to_string(),
+                AccessTokenData {
+                    user_pool_id: "us-east-1_TestPool1".to_string(),
+                    username: "testuser".to_string(),
+                    client_id: "testclient123".to_string(),
+                    issued_at: Utc::now(),
+                },
+            );
+        }
+
+        let s = state.read();
+        let token_data = s.access_tokens.get("test-access-token");
+        assert!(token_data.is_some());
+        let data = token_data.unwrap();
+        assert_eq!(data.user_pool_id, "us-east-1_TestPool1");
+        assert_eq!(data.username, "testuser");
+        assert_eq!(data.client_id, "testclient123");
+
+        // Non-existent token returns None
+        assert!(!s.access_tokens.contains_key("nonexistent"));
     }
 }

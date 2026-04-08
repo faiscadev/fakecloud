@@ -1056,3 +1056,314 @@ async fn cognito_admin_confirm_sign_up() {
         .unwrap();
     assert_eq!(user.user_status().unwrap().as_str(), "CONFIRMED");
 }
+
+// ---------------------------------------------------------------------------
+// Password & Session Management
+// ---------------------------------------------------------------------------
+
+#[test_action("cognito-idp", "ChangePassword", checksum = "037ca3c2")]
+#[tokio::test]
+async fn cognito_change_password() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("chgpwd-pool")
+        .send()
+        .await
+        .unwrap();
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    let upc = client
+        .create_user_pool_client()
+        .user_pool_id(&pool_id)
+        .client_name("chgpwd-client")
+        .explicit_auth_flows(
+            aws_sdk_cognitoidentityprovider::types::ExplicitAuthFlowsType::AllowUserPasswordAuth,
+        )
+        .send()
+        .await
+        .unwrap();
+    let client_id = upc
+        .user_pool_client()
+        .unwrap()
+        .client_id()
+        .unwrap()
+        .to_string();
+
+    client
+        .admin_create_user()
+        .user_pool_id(&pool_id)
+        .username("chguser")
+        .send()
+        .await
+        .unwrap();
+    client
+        .admin_set_user_password()
+        .user_pool_id(&pool_id)
+        .username("chguser")
+        .password("OldPass1!")
+        .permanent(true)
+        .send()
+        .await
+        .unwrap();
+
+    let auth = client
+        .initiate_auth()
+        .client_id(&client_id)
+        .auth_flow(aws_sdk_cognitoidentityprovider::types::AuthFlowType::UserPasswordAuth)
+        .auth_parameters("USERNAME", "chguser")
+        .auth_parameters("PASSWORD", "OldPass1!")
+        .send()
+        .await
+        .unwrap();
+    let access_token = auth
+        .authentication_result()
+        .unwrap()
+        .access_token()
+        .unwrap()
+        .to_string();
+
+    client
+        .change_password()
+        .access_token(&access_token)
+        .previous_password("OldPass1!")
+        .proposed_password("NewPass1!")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("cognito-idp", "ForgotPassword", checksum = "e64c387b")]
+#[test_action("cognito-idp", "ConfirmForgotPassword", checksum = "1246f324")]
+#[tokio::test]
+async fn cognito_forgot_password_flow() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("forgot-pool")
+        .send()
+        .await
+        .unwrap();
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    let upc = client
+        .create_user_pool_client()
+        .user_pool_id(&pool_id)
+        .client_name("forgot-client")
+        .explicit_auth_flows(
+            aws_sdk_cognitoidentityprovider::types::ExplicitAuthFlowsType::AllowUserPasswordAuth,
+        )
+        .send()
+        .await
+        .unwrap();
+    let client_id = upc
+        .user_pool_client()
+        .unwrap()
+        .client_id()
+        .unwrap()
+        .to_string();
+
+    client
+        .admin_create_user()
+        .user_pool_id(&pool_id)
+        .username("forgotuser")
+        .send()
+        .await
+        .unwrap();
+    client
+        .admin_set_user_password()
+        .user_pool_id(&pool_id)
+        .username("forgotuser")
+        .password("OldPass1!")
+        .permanent(true)
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .forgot_password()
+        .client_id(&client_id)
+        .username("forgotuser")
+        .send()
+        .await
+        .unwrap();
+
+    // Get confirmation code via introspection
+    let code_resp: serde_json::Value = reqwest::get(format!(
+        "{}/_fakecloud/cognito/confirmation-codes/{}/forgotuser",
+        server.endpoint(),
+        pool_id
+    ))
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    let code = code_resp["confirmationCode"].as_str().unwrap().to_string();
+
+    client
+        .confirm_forgot_password()
+        .client_id(&client_id)
+        .username("forgotuser")
+        .confirmation_code(&code)
+        .password("ResetPass1!")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("cognito-idp", "AdminResetUserPassword", checksum = "00b62940")]
+#[tokio::test]
+async fn cognito_admin_reset_user_password() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("reset-pool")
+        .send()
+        .await
+        .unwrap();
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    client
+        .admin_create_user()
+        .user_pool_id(&pool_id)
+        .username("resetuser")
+        .send()
+        .await
+        .unwrap();
+    client
+        .admin_set_user_password()
+        .user_pool_id(&pool_id)
+        .username("resetuser")
+        .password("Pass1234!")
+        .permanent(true)
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .admin_reset_user_password()
+        .user_pool_id(&pool_id)
+        .username("resetuser")
+        .send()
+        .await
+        .unwrap();
+
+    let user = client
+        .admin_get_user()
+        .user_pool_id(&pool_id)
+        .username("resetuser")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(user.user_status().unwrap().as_str(), "RESET_REQUIRED");
+}
+
+#[test_action("cognito-idp", "GlobalSignOut", checksum = "1b6afd7d")]
+#[tokio::test]
+async fn cognito_global_sign_out() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("signout-pool")
+        .send()
+        .await
+        .unwrap();
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    let upc = client
+        .create_user_pool_client()
+        .user_pool_id(&pool_id)
+        .client_name("signout-client")
+        .explicit_auth_flows(
+            aws_sdk_cognitoidentityprovider::types::ExplicitAuthFlowsType::AllowUserPasswordAuth,
+        )
+        .send()
+        .await
+        .unwrap();
+    let client_id = upc
+        .user_pool_client()
+        .unwrap()
+        .client_id()
+        .unwrap()
+        .to_string();
+
+    client
+        .admin_create_user()
+        .user_pool_id(&pool_id)
+        .username("signoutuser")
+        .send()
+        .await
+        .unwrap();
+    client
+        .admin_set_user_password()
+        .user_pool_id(&pool_id)
+        .username("signoutuser")
+        .password("Pass1234!")
+        .permanent(true)
+        .send()
+        .await
+        .unwrap();
+
+    let auth = client
+        .initiate_auth()
+        .client_id(&client_id)
+        .auth_flow(aws_sdk_cognitoidentityprovider::types::AuthFlowType::UserPasswordAuth)
+        .auth_parameters("USERNAME", "signoutuser")
+        .auth_parameters("PASSWORD", "Pass1234!")
+        .send()
+        .await
+        .unwrap();
+    let access_token = auth
+        .authentication_result()
+        .unwrap()
+        .access_token()
+        .unwrap()
+        .to_string();
+
+    client
+        .global_sign_out()
+        .access_token(&access_token)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("cognito-idp", "AdminUserGlobalSignOut", checksum = "8461322c")]
+#[tokio::test]
+async fn cognito_admin_user_global_sign_out() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("adminsignout-pool")
+        .send()
+        .await
+        .unwrap();
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    client
+        .admin_create_user()
+        .user_pool_id(&pool_id)
+        .username("adminsignout")
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .admin_user_global_sign_out()
+        .user_pool_id(&pool_id)
+        .username("adminsignout")
+        .send()
+        .await
+        .unwrap();
+}
