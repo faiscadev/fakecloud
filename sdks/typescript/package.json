@@ -1,0 +1,19 @@
+{
+  "name": "fakecloud",
+  "version": "0.1.0",
+  "description": "Client SDK for fakecloud — local AWS cloud emulator",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0",
+    "vitest": "^3.1.0"
+  },
+  "license": "MIT",
+  "files": [
+    "dist"
+  ]
+}
