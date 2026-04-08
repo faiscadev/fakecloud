@@ -1049,6 +1049,7 @@ impl S3Service {
                 obj_size,
                 &obj_etag,
                 &region,
+                Some(&self.state),
             );
         }
 
@@ -1519,6 +1520,7 @@ impl S3Service {
                     0,
                     "",
                     &region,
+                    Some(&self.state),
                 );
             }
 
@@ -1549,6 +1551,7 @@ impl S3Service {
                 0,
                 "",
                 &region,
+                Some(&self.state),
             );
         }
 
@@ -2175,6 +2178,7 @@ impl S3Service {
                 copy_size,
                 &copy_etag,
                 &region,
+                Some(&self.state),
             );
         }
 

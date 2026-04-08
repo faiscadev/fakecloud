@@ -783,3 +783,41 @@ async fn sns_publish_message_structure_json_missing_default_key() {
         "expected InvalidParameter, got: {service_err:?}"
     );
 }
+
+#[tokio::test]
+async fn sns_introspection_messages() {
+    let server = TestServer::start().await;
+    let client = server.sns_client().await;
+
+    let resp = client
+        .create_topic()
+        .name("intro-topic")
+        .send()
+        .await
+        .unwrap();
+    let topic_arn = resp.topic_arn().unwrap().to_string();
+
+    client
+        .publish()
+        .topic_arn(&topic_arn)
+        .message("introspection test message")
+        .subject("Test Subject")
+        .send()
+        .await
+        .unwrap();
+
+    let url = format!("{}/_fakecloud/sns/messages", server.endpoint());
+    let resp: serde_json::Value = reqwest::get(&url).await.unwrap().json().await.unwrap();
+    let messages = resp["messages"].as_array().unwrap();
+    assert!(
+        !messages.is_empty(),
+        "expected at least one published message"
+    );
+
+    let msg = &messages[messages.len() - 1];
+    assert_eq!(msg["topicArn"], topic_arn);
+    assert_eq!(msg["message"], "introspection test message");
+    assert_eq!(msg["subject"], "Test Subject");
+    assert!(!msg["messageId"].as_str().unwrap().is_empty());
+    assert!(!msg["timestamp"].as_str().unwrap().is_empty());
+}

@@ -1165,3 +1165,44 @@ async fn sqs_list_dead_letter_source_queues() {
         urls[0]
     );
 }
+
+#[tokio::test]
+async fn sqs_introspection_messages() {
+    let server = TestServer::start().await;
+    let client = server.sqs_client().await;
+
+    let queue = client
+        .create_queue()
+        .queue_name("intro-queue")
+        .send()
+        .await
+        .unwrap();
+    let queue_url = queue.queue_url().unwrap().to_string();
+
+    client
+        .send_message()
+        .queue_url(&queue_url)
+        .message_body("introspection test body")
+        .send()
+        .await
+        .unwrap();
+
+    let url = format!("{}/_fakecloud/sqs/messages", server.endpoint());
+    let resp: serde_json::Value = reqwest::get(&url).await.unwrap().json().await.unwrap();
+    let queues = resp["queues"].as_array().unwrap();
+    assert!(!queues.is_empty(), "expected at least one queue");
+
+    let q = queues
+        .iter()
+        .find(|q| q["queueName"] == "intro-queue")
+        .expect("expected intro-queue in response");
+    assert_eq!(q["queueUrl"], queue_url);
+
+    let messages = q["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0]["body"], "introspection test body");
+    assert_eq!(messages[0]["receiveCount"], 0);
+    assert_eq!(messages[0]["inFlight"], false);
+    assert!(!messages[0]["messageId"].as_str().unwrap().is_empty());
+    assert!(!messages[0]["createdAt"].as_str().unwrap().is_empty());
+}

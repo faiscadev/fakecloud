@@ -191,6 +191,10 @@ async fn main() {
     let lambda_invocations_state = lambda_state.clone();
     let ses_emails_state = ses_state.clone();
     let ses_inbound_state = ses_state.clone();
+    let sns_introspection_state = sns_state.clone();
+    let sqs_introspection_state = sqs_state.clone();
+    let eb_introspection_state = eb_state.clone();
+    let s3_introspection_state = s3_state.clone();
 
     // Clone state for reset endpoint before moving into services
     let reset_state = ResetState {
@@ -449,6 +453,151 @@ async fn main() {
                         "matchedRules": matched_rules,
                         "actionsExecuted": actions_executed,
                     }))
+                }
+            }),
+        )
+        .route(
+            "/_fakecloud/sns/messages",
+            axum::routing::get({
+                let ss = sns_introspection_state;
+                move || async move {
+                    let state = ss.read();
+                    let messages: Vec<serde_json::Value> = state
+                        .published
+                        .iter()
+                        .map(|msg| {
+                            serde_json::json!({
+                                "messageId": msg.message_id,
+                                "topicArn": msg.topic_arn,
+                                "message": msg.message,
+                                "subject": msg.subject,
+                                "timestamp": msg.timestamp.to_rfc3339(),
+                            })
+                        })
+                        .collect();
+                    axum::Json(serde_json::json!({ "messages": messages }))
+                }
+            }),
+        )
+        .route(
+            "/_fakecloud/sqs/messages",
+            axum::routing::get({
+                let ss = sqs_introspection_state;
+                move || async move {
+                    let state = ss.read();
+                    let queues: Vec<serde_json::Value> = state
+                        .queues
+                        .values()
+                        .map(|queue| {
+                            let mut messages: Vec<serde_json::Value> = queue
+                                .messages
+                                .iter()
+                                .map(|msg| {
+                                    serde_json::json!({
+                                        "messageId": msg.message_id,
+                                        "body": msg.body,
+                                        "receiveCount": msg.receive_count,
+                                        "inFlight": false,
+                                        "createdAt": msg.created_at.to_rfc3339(),
+                                    })
+                                })
+                                .collect();
+                            let inflight: Vec<serde_json::Value> = queue
+                                .inflight
+                                .iter()
+                                .map(|msg| {
+                                    serde_json::json!({
+                                        "messageId": msg.message_id,
+                                        "body": msg.body,
+                                        "receiveCount": msg.receive_count,
+                                        "inFlight": true,
+                                        "createdAt": msg.created_at.to_rfc3339(),
+                                    })
+                                })
+                                .collect();
+                            messages.extend(inflight);
+                            serde_json::json!({
+                                "queueUrl": queue.queue_url,
+                                "queueName": queue.queue_name,
+                                "messages": messages,
+                            })
+                        })
+                        .collect();
+                    axum::Json(serde_json::json!({ "queues": queues }))
+                }
+            }),
+        )
+        .route(
+            "/_fakecloud/events/history",
+            axum::routing::get({
+                let es = eb_introspection_state;
+                move || async move {
+                    let state = es.read();
+                    let events: Vec<serde_json::Value> = state
+                        .events
+                        .iter()
+                        .map(|evt| {
+                            serde_json::json!({
+                                "eventId": evt.event_id,
+                                "source": evt.source,
+                                "detailType": evt.detail_type,
+                                "detail": evt.detail,
+                                "busName": evt.event_bus_name,
+                                "timestamp": evt.time.to_rfc3339(),
+                            })
+                        })
+                        .collect();
+                    let lambda_deliveries: Vec<serde_json::Value> = state
+                        .lambda_invocations
+                        .iter()
+                        .map(|inv| {
+                            serde_json::json!({
+                                "functionArn": inv.function_arn,
+                                "payload": inv.payload,
+                                "timestamp": inv.timestamp.to_rfc3339(),
+                            })
+                        })
+                        .collect();
+                    let log_deliveries: Vec<serde_json::Value> = state
+                        .log_deliveries
+                        .iter()
+                        .map(|ld| {
+                            serde_json::json!({
+                                "logGroupArn": ld.log_group_arn,
+                                "payload": ld.payload,
+                                "timestamp": ld.timestamp.to_rfc3339(),
+                            })
+                        })
+                        .collect();
+                    axum::Json(serde_json::json!({
+                        "events": events,
+                        "deliveries": {
+                            "lambda": lambda_deliveries,
+                            "logs": log_deliveries,
+                        },
+                    }))
+                }
+            }),
+        )
+        .route(
+            "/_fakecloud/s3/notifications",
+            axum::routing::get({
+                let ss = s3_introspection_state;
+                move || async move {
+                    let state = ss.read();
+                    let notifications: Vec<serde_json::Value> = state
+                        .notification_events
+                        .iter()
+                        .map(|evt| {
+                            serde_json::json!({
+                                "bucket": evt.bucket,
+                                "key": evt.key,
+                                "eventType": evt.event_type,
+                                "timestamp": evt.timestamp.to_rfc3339(),
+                            })
+                        })
+                        .collect();
+                    axum::Json(serde_json::json!({ "notifications": notifications }))
                 }
             }),
         )

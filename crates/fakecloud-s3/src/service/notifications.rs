@@ -4,6 +4,8 @@ use chrono::Utc;
 
 use fakecloud_core::delivery::DeliveryBus;
 
+use crate::state::{S3NotificationEvent, SharedS3State};
+
 use super::{extract_xml_value, xml_escape};
 
 pub(crate) fn normalize_notification_ids(xml: &str) -> String {
@@ -507,10 +509,13 @@ pub(crate) fn deliver_notifications(
     size: u64,
     etag: &str,
     region: &str,
+    s3_state: Option<&SharedS3State>,
 ) {
     let targets = parse_notification_config(notification_config);
     let s3_event_name = format!("s3:{event_name}");
     let message = build_s3_event_notification(event_name, bucket_name, key, size, etag, region);
+
+    let mut delivered = false;
 
     for target in &targets {
         let matches = target.events.is_empty()
@@ -524,6 +529,7 @@ pub(crate) fn deliver_notifications(
         if !key_matches_filters(key, &target.prefix_filter, &target.suffix_filter) {
             continue;
         }
+        delivered = true;
         match target.target_type {
             NotificationTargetType::Sqs => {
                 delivery.send_to_sqs(&target.arn, &message, &std::collections::HashMap::new());
@@ -563,6 +569,18 @@ pub(crate) fn deliver_notifications(
                     }
                 });
             }
+        }
+    }
+
+    // Record notification event for introspection only if at least one target matched
+    if delivered {
+        if let Some(state) = s3_state {
+            state.write().notification_events.push(S3NotificationEvent {
+                bucket: bucket_name.to_string(),
+                key: key.to_string(),
+                event_type: s3_event_name,
+                timestamp: Utc::now(),
+            });
         }
     }
 }
