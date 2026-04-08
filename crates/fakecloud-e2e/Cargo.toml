@@ -36,3 +36,4 @@ chrono = { workspace = true }
 base64 = { workspace = true }
 flate2 = { workspace = true }
 zip = { workspace = true }
+fakecloud-sdk = { path = "../fakecloud-sdk" }
