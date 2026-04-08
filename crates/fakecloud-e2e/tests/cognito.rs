@@ -2,8 +2,8 @@ mod helpers;
 use helpers::TestServer;
 
 use aws_sdk_cognitoidentityprovider::types::{
-    AccountRecoverySettingType, PasswordPolicyType, RecoveryOptionNameType, RecoveryOptionType,
-    UserPoolPolicyType,
+    AccountRecoverySettingType, ExplicitAuthFlowsType, PasswordPolicyType, RecoveryOptionNameType,
+    RecoveryOptionType, UserPoolPolicyType,
 };
 
 #[tokio::test]
@@ -282,4 +282,283 @@ async fn cognito_create_user_pool_with_config() {
     assert_eq!(mechanisms.len(), 1);
     assert_eq!(*mechanisms[0].name(), RecoveryOptionNameType::VerifiedEmail);
     assert_eq!(mechanisms[0].priority(), 1);
+}
+
+#[tokio::test]
+async fn cognito_create_describe_user_pool_client() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    // Create a pool first
+    let pool_result = client
+        .create_user_pool()
+        .pool_name("client-test-pool")
+        .send()
+        .await
+        .expect("create user pool");
+    let pool_id = pool_result.user_pool().unwrap().id().unwrap().to_string();
+
+    // Create a client
+    let result = client
+        .create_user_pool_client()
+        .user_pool_id(&pool_id)
+        .client_name("my-app-client")
+        .explicit_auth_flows(ExplicitAuthFlowsType::AllowUserPasswordAuth)
+        .explicit_auth_flows(ExplicitAuthFlowsType::AllowRefreshTokenAuth)
+        .send()
+        .await
+        .expect("create user pool client");
+
+    let app_client = result.user_pool_client().unwrap();
+    let client_id = app_client.client_id().unwrap();
+    let client_name = app_client.client_name().unwrap();
+
+    assert_eq!(client_name, "my-app-client");
+    assert_eq!(
+        client_id.len(),
+        26,
+        "Client ID should be 26 chars: {client_id}"
+    );
+    assert!(
+        client_id.chars().all(|c| c.is_ascii_alphanumeric()),
+        "Client ID should be alphanumeric: {client_id}"
+    );
+    assert_eq!(app_client.user_pool_id().unwrap(), pool_id);
+    assert!(app_client.client_secret().is_none());
+
+    let auth_flows = app_client.explicit_auth_flows();
+    assert!(auth_flows.contains(&ExplicitAuthFlowsType::AllowUserPasswordAuth));
+    assert!(auth_flows.contains(&ExplicitAuthFlowsType::AllowRefreshTokenAuth));
+
+    // Describe the client
+    let describe = client
+        .describe_user_pool_client()
+        .user_pool_id(&pool_id)
+        .client_id(client_id)
+        .send()
+        .await
+        .expect("describe user pool client");
+
+    let described = describe.user_pool_client().unwrap();
+    assert_eq!(described.client_name().unwrap(), "my-app-client");
+    assert_eq!(described.client_id().unwrap(), client_id);
+    assert_eq!(described.user_pool_id().unwrap(), pool_id);
+}
+
+#[tokio::test]
+async fn cognito_create_client_with_secret() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool_result = client
+        .create_user_pool()
+        .pool_name("secret-pool")
+        .send()
+        .await
+        .expect("create user pool");
+    let pool_id = pool_result.user_pool().unwrap().id().unwrap().to_string();
+
+    let result = client
+        .create_user_pool_client()
+        .user_pool_id(&pool_id)
+        .client_name("secret-client")
+        .generate_secret(true)
+        .send()
+        .await
+        .expect("create client with secret");
+
+    let app_client = result.user_pool_client().unwrap();
+    let secret = app_client
+        .client_secret()
+        .expect("Client secret should be present");
+    assert_eq!(
+        secret.len(),
+        51,
+        "Client secret should be 51 chars: {secret}"
+    );
+
+    // Describe should also return the secret
+    let describe = client
+        .describe_user_pool_client()
+        .user_pool_id(&pool_id)
+        .client_id(app_client.client_id().unwrap())
+        .send()
+        .await
+        .expect("describe client");
+    assert_eq!(
+        describe
+            .user_pool_client()
+            .unwrap()
+            .client_secret()
+            .unwrap(),
+        secret
+    );
+}
+
+#[tokio::test]
+async fn cognito_list_user_pool_clients() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool_result = client
+        .create_user_pool()
+        .pool_name("list-clients-pool")
+        .send()
+        .await
+        .expect("create user pool");
+    let pool_id = pool_result.user_pool().unwrap().id().unwrap().to_string();
+
+    // Create 3 clients
+    for i in 0..3 {
+        client
+            .create_user_pool_client()
+            .user_pool_id(&pool_id)
+            .client_name(format!("client-{i}"))
+            .send()
+            .await
+            .expect("create client");
+    }
+
+    // List with MaxResults=2
+    let result = client
+        .list_user_pool_clients()
+        .user_pool_id(&pool_id)
+        .max_results(2)
+        .send()
+        .await
+        .expect("list user pool clients");
+
+    let clients = result.user_pool_clients();
+    assert_eq!(clients.len(), 2, "Should return 2 clients");
+    let next_token = result.next_token().expect("Should have NextToken");
+
+    // Fetch next page
+    let result2 = client
+        .list_user_pool_clients()
+        .user_pool_id(&pool_id)
+        .max_results(2)
+        .next_token(next_token)
+        .send()
+        .await
+        .expect("list clients page 2");
+
+    let clients2 = result2.user_pool_clients();
+    assert_eq!(clients2.len(), 1, "Should return 1 remaining client");
+    assert!(
+        result2.next_token().is_none(),
+        "Should not have NextToken on last page"
+    );
+}
+
+#[tokio::test]
+async fn cognito_update_user_pool_client() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool_result = client
+        .create_user_pool()
+        .pool_name("update-client-pool")
+        .send()
+        .await
+        .expect("create user pool");
+    let pool_id = pool_result.user_pool().unwrap().id().unwrap().to_string();
+
+    let create_result = client
+        .create_user_pool_client()
+        .user_pool_id(&pool_id)
+        .client_name("updatable-client")
+        .send()
+        .await
+        .expect("create client");
+    let client_id = create_result
+        .user_pool_client()
+        .unwrap()
+        .client_id()
+        .unwrap()
+        .to_string();
+
+    // Update callback URLs and name
+    let update_result = client
+        .update_user_pool_client()
+        .user_pool_id(&pool_id)
+        .client_id(&client_id)
+        .client_name("updated-client")
+        .callback_urls("https://example.com/callback")
+        .callback_urls("https://example.com/callback2")
+        .logout_urls("https://example.com/logout")
+        .send()
+        .await
+        .expect("update client");
+
+    let updated = update_result.user_pool_client().unwrap();
+    assert_eq!(updated.client_name().unwrap(), "updated-client");
+    assert_eq!(updated.callback_urls().len(), 2);
+    assert!(updated
+        .callback_urls()
+        .contains(&"https://example.com/callback".to_string()));
+    assert!(updated
+        .callback_urls()
+        .contains(&"https://example.com/callback2".to_string()));
+    assert_eq!(updated.logout_urls().len(), 1);
+    assert!(updated
+        .logout_urls()
+        .contains(&"https://example.com/logout".to_string()));
+
+    // Verify via describe
+    let describe = client
+        .describe_user_pool_client()
+        .user_pool_id(&pool_id)
+        .client_id(&client_id)
+        .send()
+        .await
+        .expect("describe updated client");
+    let described = describe.user_pool_client().unwrap();
+    assert_eq!(described.client_name().unwrap(), "updated-client");
+    assert_eq!(described.callback_urls().len(), 2);
+}
+
+#[tokio::test]
+async fn cognito_delete_user_pool_client() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool_result = client
+        .create_user_pool()
+        .pool_name("delete-client-pool")
+        .send()
+        .await
+        .expect("create user pool");
+    let pool_id = pool_result.user_pool().unwrap().id().unwrap().to_string();
+
+    let create_result = client
+        .create_user_pool_client()
+        .user_pool_id(&pool_id)
+        .client_name("deletable-client")
+        .send()
+        .await
+        .expect("create client");
+    let client_id = create_result
+        .user_pool_client()
+        .unwrap()
+        .client_id()
+        .unwrap()
+        .to_string();
+
+    // Delete it
+    client
+        .delete_user_pool_client()
+        .user_pool_id(&pool_id)
+        .client_id(&client_id)
+        .send()
+        .await
+        .expect("delete client");
+
+    // Verify it's gone
+    let err = client
+        .describe_user_pool_client()
+        .user_pool_id(&pool_id)
+        .client_id(&client_id)
+        .send()
+        .await;
+    assert!(err.is_err(), "Describe should fail after delete");
 }
