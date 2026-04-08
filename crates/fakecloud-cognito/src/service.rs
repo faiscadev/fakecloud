@@ -12,11 +12,12 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceErr
 
 use crate::state::{
     default_schema_attributes, AccessTokenData, AccountRecoverySetting, AdminCreateUserConfig,
-    CustomDomainConfig, EmailConfiguration, Group, IdentityProvider, InviteMessageTemplate,
+    CustomDomainConfig, Device, EmailConfiguration, Group, IdentityProvider, InviteMessageTemplate,
     MfaPreferences, PasswordPolicy, PoolPolicies, RecoveryOption, RefreshTokenData, ResourceServer,
     ResourceServerScope, SchemaAttribute, SessionData, SharedCognitoState, SmsConfiguration,
     SmsMfaConfiguration, SoftwareTokenMfaConfiguration, StringAttributeConstraints,
-    TokenValidityUnits, User, UserAttribute, UserPool, UserPoolClient, UserPoolDomain,
+    TokenValidityUnits, User, UserAttribute, UserImportJob, UserPool, UserPoolClient,
+    UserPoolDomain,
 };
 
 pub struct CognitoService {
@@ -105,6 +106,18 @@ impl AwsService for CognitoService {
             "DescribeUserPoolDomain" => self.describe_user_pool_domain(&req),
             "UpdateUserPoolDomain" => self.update_user_pool_domain(&req),
             "DeleteUserPoolDomain" => self.delete_user_pool_domain(&req),
+            "AdminGetDevice" => self.admin_get_device(&req),
+            "AdminListDevices" => self.admin_list_devices(&req),
+            "AdminForgetDevice" => self.admin_forget_device(&req),
+            "AdminUpdateDeviceStatus" => self.admin_update_device_status(&req),
+            "ConfirmDevice" => self.confirm_device(&req),
+            "TagResource" => self.tag_resource(&req),
+            "UntagResource" => self.untag_resource(&req),
+            "ListTagsForResource" => self.list_tags_for_resource(&req),
+            "GetCSVHeader" => self.get_csv_header(&req),
+            "CreateUserImportJob" => self.create_user_import_job(&req),
+            "DescribeUserImportJob" => self.describe_user_import_job(&req),
+            "ListUserImportJobs" => self.list_user_import_jobs(&req),
             _ => Err(AwsServiceError::action_not_implemented(
                 "cognito-idp",
                 &req.action,
@@ -182,6 +195,18 @@ impl AwsService for CognitoService {
             "DescribeUserPoolDomain",
             "UpdateUserPoolDomain",
             "DeleteUserPoolDomain",
+            "AdminGetDevice",
+            "AdminListDevices",
+            "AdminForgetDevice",
+            "AdminUpdateDeviceStatus",
+            "ConfirmDevice",
+            "TagResource",
+            "UntagResource",
+            "ListTagsForResource",
+            "GetCSVHeader",
+            "CreateUserImportJob",
+            "DescribeUserImportJob",
+            "ListUserImportJobs",
         ]
     }
 }
@@ -436,6 +461,16 @@ impl CognitoService {
 
         // Remove associated domains
         state.domains.retain(|_, d| d.user_pool_id != pool_id);
+
+        // Remove associated tags (match by pool ARN)
+        let arn_prefix = format!(
+            "arn:aws:cognito-idp:{}:{}:userpool/{}",
+            state.region, state.account_id, pool_id
+        );
+        state.tags.remove(&arn_prefix);
+
+        // Remove associated import jobs
+        state.import_jobs.remove(pool_id);
 
         Ok(AwsResponse::ok_json(json!({})))
     }
@@ -943,6 +978,7 @@ impl CognitoService {
             mfa_preferences: None,
             totp_secret: None,
             totp_verified: false,
+            devices: HashMap::new(),
         };
 
         let response = user_to_json(&user);
@@ -2069,6 +2105,7 @@ impl CognitoService {
             mfa_preferences: None,
             totp_secret: None,
             totp_verified: false,
+            devices: HashMap::new(),
         };
 
         pool_users.insert(username.to_string(), user);
@@ -4275,6 +4312,493 @@ impl CognitoService {
 
         Ok(AwsResponse::ok_json(json!({})))
     }
+
+    // ── Device Management ───────────────────────────────────────────────
+
+    fn admin_get_device(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let pool_id = require_str(&body, "UserPoolId")?;
+        let username = require_str(&body, "Username")?;
+        let device_key = require_str(&body, "DeviceKey")?;
+
+        let state = self.state.read();
+
+        let users = state.users.get(pool_id).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("User pool {pool_id} does not exist."),
+            )
+        })?;
+
+        let user = users.get(username).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("User {username} does not exist."),
+            )
+        })?;
+
+        let device = user.devices.get(device_key).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("Device {device_key} does not exist."),
+            )
+        })?;
+
+        Ok(AwsResponse::ok_json(json!({
+            "Device": device_to_json(device)
+        })))
+    }
+
+    fn admin_list_devices(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let pool_id = require_str(&body, "UserPoolId")?;
+        let username = require_str(&body, "Username")?;
+        let limit = body["Limit"].as_i64().unwrap_or(10).clamp(1, 60) as usize;
+        let pagination_token = body["PaginationToken"].as_str();
+
+        let state = self.state.read();
+
+        let users = state.users.get(pool_id).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("User pool {pool_id} does not exist."),
+            )
+        })?;
+
+        let user = users.get(username).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("User {username} does not exist."),
+            )
+        })?;
+
+        let mut devices: Vec<&Device> = user.devices.values().collect();
+        devices.sort_by(|a, b| a.device_create_date.cmp(&b.device_create_date));
+
+        let start = pagination_token
+            .and_then(|t| devices.iter().position(|d| d.device_key == t))
+            .unwrap_or(0);
+
+        let page = &devices[start..devices.len().min(start + limit)];
+        let next_token = if start + limit < devices.len() {
+            devices.get(start + limit).map(|d| d.device_key.clone())
+        } else {
+            None
+        };
+
+        let mut result = json!({
+            "Devices": page.iter().map(|d| device_to_json(d)).collect::<Vec<_>>()
+        });
+        if let Some(token) = next_token {
+            result["PaginationToken"] = json!(token);
+        }
+
+        Ok(AwsResponse::ok_json(result))
+    }
+
+    fn admin_forget_device(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let pool_id = require_str(&body, "UserPoolId")?;
+        let username = require_str(&body, "Username")?;
+        let device_key = require_str(&body, "DeviceKey")?;
+
+        let mut state = self.state.write();
+
+        let users = state.users.get_mut(pool_id).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("User pool {pool_id} does not exist."),
+            )
+        })?;
+
+        let user = users.get_mut(username).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("User {username} does not exist."),
+            )
+        })?;
+
+        if user.devices.remove(device_key).is_none() {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("Device {device_key} does not exist."),
+            ));
+        }
+
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    fn admin_update_device_status(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let pool_id = require_str(&body, "UserPoolId")?;
+        let username = require_str(&body, "Username")?;
+        let device_key = require_str(&body, "DeviceKey")?;
+        let status = body["DeviceRememberedStatus"]
+            .as_str()
+            .map(|s| s.to_string());
+
+        let mut state = self.state.write();
+
+        let users = state.users.get_mut(pool_id).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("User pool {pool_id} does not exist."),
+            )
+        })?;
+
+        let user = users.get_mut(username).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("User {username} does not exist."),
+            )
+        })?;
+
+        let device = user.devices.get_mut(device_key).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("Device {device_key} does not exist."),
+            )
+        })?;
+
+        device.device_remembered_status = status;
+        device.device_last_modified_date = Utc::now();
+
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    fn confirm_device(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let access_token = require_str(&body, "AccessToken")?;
+        let device_key = require_str(&body, "DeviceKey")?;
+        let device_name = body["DeviceName"].as_str();
+
+        let mut state = self.state.write();
+
+        let token_data = state.access_tokens.get(access_token).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "NotAuthorizedException",
+                "Invalid access token.",
+            )
+        })?;
+        let pool_id = token_data.user_pool_id.clone();
+        let username = token_data.username.clone();
+
+        let user = state
+            .users
+            .get_mut(&pool_id)
+            .and_then(|users| users.get_mut(&username))
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "NotAuthorizedException",
+                    "Invalid access token.",
+                )
+            })?;
+
+        let now = Utc::now();
+        let mut device_attributes = HashMap::new();
+        if let Some(name) = device_name {
+            device_attributes.insert("device_name".to_string(), name.to_string());
+        }
+
+        user.devices.insert(
+            device_key.to_string(),
+            Device {
+                device_key: device_key.to_string(),
+                device_attributes,
+                device_create_date: now,
+                device_last_modified_date: now,
+                device_last_authenticated_date: Some(now),
+                device_remembered_status: None,
+            },
+        );
+
+        Ok(AwsResponse::ok_json(json!({
+            "UserConfirmationNecessary": false
+        })))
+    }
+
+    // ── Tags ────────────────────────────────────────────────────────────
+
+    fn tag_resource(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let resource_arn = require_str(&body, "ResourceArn")?;
+
+        let tags: HashMap<String, String> = body["Tags"]
+            .as_object()
+            .map(|m| {
+                m.iter()
+                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let mut state = self.state.write();
+
+        // Validate that the ARN matches a known user pool
+        let pool_exists = state.user_pools.values().any(|p| p.arn == resource_arn);
+        if !pool_exists {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("Resource {resource_arn} not found."),
+            ));
+        }
+
+        let existing = state.tags.entry(resource_arn.to_string()).or_default();
+        for (k, v) in tags {
+            existing.insert(k, v);
+        }
+
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    fn untag_resource(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let resource_arn = require_str(&body, "ResourceArn")?;
+
+        let tag_keys: Vec<String> = body["TagKeys"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let mut state = self.state.write();
+
+        let pool_exists = state.user_pools.values().any(|p| p.arn == resource_arn);
+        if !pool_exists {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("Resource {resource_arn} not found."),
+            ));
+        }
+
+        if let Some(tags) = state.tags.get_mut(resource_arn) {
+            for key in &tag_keys {
+                tags.remove(key);
+            }
+        }
+
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    fn list_tags_for_resource(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let resource_arn = require_str(&body, "ResourceArn")?;
+
+        let state = self.state.read();
+
+        let pool_exists = state.user_pools.values().any(|p| p.arn == resource_arn);
+        if !pool_exists {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("Resource {resource_arn} not found."),
+            ));
+        }
+
+        let tags = state.tags.get(resource_arn).cloned().unwrap_or_default();
+
+        Ok(AwsResponse::ok_json(json!({ "Tags": tags })))
+    }
+
+    // ── Import Jobs ─────────────────────────────────────────────────────
+
+    fn get_csv_header(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let pool_id = require_str(&body, "UserPoolId")?;
+
+        let state = self.state.read();
+
+        let pool = state.user_pools.get(pool_id).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("User pool {pool_id} does not exist."),
+            )
+        })?;
+
+        let csv_header: Vec<String> = pool
+            .schema_attributes
+            .iter()
+            .map(|a| a.name.clone())
+            .collect();
+
+        Ok(AwsResponse::ok_json(json!({
+            "UserPoolId": pool_id,
+            "CSVHeader": csv_header
+        })))
+    }
+
+    fn create_user_import_job(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let pool_id = require_str(&body, "UserPoolId")?;
+        let job_name = require_str(&body, "JobName")?;
+        let cw_role_arn = require_str(&body, "CloudWatchLogsRoleArn")?;
+
+        let mut state = self.state.write();
+
+        if !state.user_pools.contains_key(pool_id) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("User pool {pool_id} does not exist."),
+            ));
+        }
+
+        let job_id = format!("import-{}", Uuid::new_v4());
+        let now = Utc::now();
+
+        let job = UserImportJob {
+            job_id: job_id.clone(),
+            job_name: job_name.to_string(),
+            user_pool_id: pool_id.to_string(),
+            cloud_watch_logs_role_arn: cw_role_arn.to_string(),
+            status: "Created".to_string(),
+            creation_date: now,
+            start_date: None,
+            completion_date: None,
+            pre_signed_url: Some(format!(
+                "https://fakecloud-import.s3.amazonaws.com/{pool_id}/{job_id}/upload.csv"
+            )),
+        };
+
+        let resp = import_job_to_json(&job);
+
+        state
+            .import_jobs
+            .entry(pool_id.to_string())
+            .or_default()
+            .insert(job_id, job);
+
+        Ok(AwsResponse::ok_json(json!({
+            "UserImportJob": resp
+        })))
+    }
+
+    fn describe_user_import_job(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let pool_id = require_str(&body, "UserPoolId")?;
+        let job_id = require_str(&body, "JobId")?;
+
+        let state = self.state.read();
+
+        let job = state
+            .import_jobs
+            .get(pool_id)
+            .and_then(|jobs| jobs.get(job_id))
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ResourceNotFoundException",
+                    format!("Import job {job_id} does not exist."),
+                )
+            })?;
+
+        Ok(AwsResponse::ok_json(json!({
+            "UserImportJob": import_job_to_json(job)
+        })))
+    }
+
+    fn list_user_import_jobs(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let pool_id = require_str(&body, "UserPoolId")?;
+        let max_results = body["MaxResults"].as_i64().unwrap_or(10).clamp(1, 60) as usize;
+        let pagination_token = body["PaginationToken"].as_str();
+
+        let state = self.state.read();
+
+        if !state.user_pools.contains_key(pool_id) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("User pool {pool_id} does not exist."),
+            ));
+        }
+
+        let mut jobs: Vec<&UserImportJob> = state
+            .import_jobs
+            .get(pool_id)
+            .map(|m| m.values().collect())
+            .unwrap_or_default();
+        jobs.sort_by(|a, b| a.creation_date.cmp(&b.creation_date));
+
+        let start = pagination_token
+            .and_then(|t| jobs.iter().position(|j| j.job_id == t))
+            .unwrap_or(0);
+
+        let page = &jobs[start..jobs.len().min(start + max_results)];
+        let next_token = if start + max_results < jobs.len() {
+            jobs.get(start + max_results).map(|j| j.job_id.clone())
+        } else {
+            None
+        };
+
+        let mut result = json!({
+            "UserImportJobs": page.iter().map(|j| import_job_to_json(j)).collect::<Vec<_>>()
+        });
+        if let Some(token) = next_token {
+            result["PaginationToken"] = json!(token);
+        }
+
+        Ok(AwsResponse::ok_json(result))
+    }
+}
+
+fn device_to_json(device: &Device) -> Value {
+    let attrs: Vec<Value> = device
+        .device_attributes
+        .iter()
+        .map(|(k, v)| json!({"Name": k, "Value": v}))
+        .collect();
+
+    let mut obj = json!({
+        "DeviceKey": device.device_key,
+        "DeviceAttributes": attrs,
+        "DeviceCreateDate": device.device_create_date.timestamp() as f64,
+        "DeviceLastModifiedDate": device.device_last_modified_date.timestamp() as f64,
+    });
+    if let Some(auth_date) = device.device_last_authenticated_date {
+        obj["DeviceLastAuthenticatedDate"] = json!(auth_date.timestamp() as f64);
+    }
+    obj
+}
+
+fn import_job_to_json(job: &UserImportJob) -> Value {
+    let mut obj = json!({
+        "JobId": job.job_id,
+        "JobName": job.job_name,
+        "UserPoolId": job.user_pool_id,
+        "CloudWatchLogsRoleArn": job.cloud_watch_logs_role_arn,
+        "Status": job.status,
+        "CreationDate": job.creation_date.timestamp() as f64,
+    });
+    if let Some(url) = &job.pre_signed_url {
+        obj["PreSignedUrl"] = json!(url);
+    }
+    if let Some(d) = job.start_date {
+        obj["StartDate"] = json!(d.timestamp() as f64);
+    }
+    if let Some(d) = job.completion_date {
+        obj["CompletionDate"] = json!(d.timestamp() as f64);
+    }
+    obj
 }
 
 /// Generate a pool ID in the format `{region}_{9 random alphanumeric chars}`.
@@ -5460,6 +5984,7 @@ mod tests {
             mfa_preferences: None,
             totp_secret: None,
             totp_verified: false,
+            devices: HashMap::new(),
         };
 
         let filter = parse_filter_expression(r#"username = "testuser""#).unwrap();
@@ -5492,6 +6017,7 @@ mod tests {
             mfa_preferences: None,
             totp_secret: None,
             totp_verified: false,
+            devices: HashMap::new(),
         };
 
         let filter = parse_filter_expression(r#"email = "test@example.com""#).unwrap();
@@ -5521,6 +6047,7 @@ mod tests {
             mfa_preferences: None,
             totp_secret: None,
             totp_verified: false,
+            devices: HashMap::new(),
         };
 
         let filter =
@@ -6748,5 +7275,153 @@ mod tests {
             Err(e) => assert_eq!(e.code(), "InvalidParameterException"),
             Ok(_) => panic!("Expected InvalidParameterException for duplicate domain"),
         }
+    }
+
+    fn setup_svc_with_pool_and_user() -> (CognitoService, String, String) {
+        let (svc, pool_id) = setup_svc_with_pool();
+        let body = serde_json::to_string(&json!({
+            "UserPoolId": pool_id,
+            "Username": "deviceuser",
+            "TemporaryPassword": "Temp1234!"
+        }))
+        .unwrap();
+        let req = make_req("AdminCreateUser", &body);
+        svc.admin_create_user(&req).unwrap();
+        (svc, pool_id, "deviceuser".to_string())
+    }
+
+    #[test]
+    fn device_key_storage() {
+        let (svc, pool_id, username) = setup_svc_with_pool_and_user();
+
+        // Directly insert a device into the user's devices map
+        {
+            let mut state = svc.state.write();
+            let user = state
+                .users
+                .get_mut(&pool_id)
+                .unwrap()
+                .get_mut(&username)
+                .unwrap();
+            user.devices.insert(
+                "dev-key-1".to_string(),
+                Device {
+                    device_key: "dev-key-1".to_string(),
+                    device_attributes: HashMap::new(),
+                    device_create_date: Utc::now(),
+                    device_last_modified_date: Utc::now(),
+                    device_last_authenticated_date: None,
+                    device_remembered_status: None,
+                },
+            );
+        }
+
+        // AdminGetDevice
+        let body = serde_json::to_string(&json!({
+            "UserPoolId": pool_id,
+            "Username": username,
+            "DeviceKey": "dev-key-1"
+        }))
+        .unwrap();
+        let req = make_req("AdminGetDevice", &body);
+        let resp = svc.admin_get_device(&req).unwrap();
+        let resp_body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(resp_body["Device"]["DeviceKey"], "dev-key-1");
+
+        // AdminForgetDevice
+        let req = make_req("AdminForgetDevice", &body);
+        svc.admin_forget_device(&req).unwrap();
+
+        // Device should be gone
+        let req = make_req("AdminGetDevice", &body);
+        match svc.admin_get_device(&req) {
+            Err(e) => assert_eq!(e.code(), "ResourceNotFoundException"),
+            Ok(_) => panic!("Expected ResourceNotFoundException"),
+        }
+    }
+
+    #[test]
+    fn tag_management() {
+        let (svc, pool_id) = setup_svc_with_pool();
+        let state = svc.state.read();
+        let arn = state.user_pools.get(&pool_id).unwrap().arn.clone();
+        drop(state);
+
+        // Tag
+        let body = serde_json::to_string(&json!({
+            "ResourceArn": arn,
+            "Tags": {"env": "test", "team": "core"}
+        }))
+        .unwrap();
+        let req = make_req("TagResource", &body);
+        svc.tag_resource(&req).unwrap();
+
+        // List
+        let body = serde_json::to_string(&json!({"ResourceArn": arn})).unwrap();
+        let req = make_req("ListTagsForResource", &body);
+        let resp = svc.list_tags_for_resource(&req).unwrap();
+        let resp_body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(resp_body["Tags"]["env"], "test");
+        assert_eq!(resp_body["Tags"]["team"], "core");
+
+        // Untag
+        let body = serde_json::to_string(&json!({
+            "ResourceArn": arn,
+            "TagKeys": ["team"]
+        }))
+        .unwrap();
+        let req = make_req("UntagResource", &body);
+        svc.untag_resource(&req).unwrap();
+
+        // Verify
+        let body = serde_json::to_string(&json!({"ResourceArn": arn})).unwrap();
+        let req = make_req("ListTagsForResource", &body);
+        let resp = svc.list_tags_for_resource(&req).unwrap();
+        let resp_body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(resp_body["Tags"]["env"], "test");
+        assert!(resp_body["Tags"]["team"].is_null());
+    }
+
+    #[test]
+    fn import_job_creation() {
+        let (svc, pool_id) = setup_svc_with_pool();
+
+        let body = serde_json::to_string(&json!({
+            "UserPoolId": pool_id,
+            "JobName": "my-import",
+            "CloudWatchLogsRoleArn": "arn:aws:iam::123456789012:role/CognitoImport"
+        }))
+        .unwrap();
+        let req = make_req("CreateUserImportJob", &body);
+        let resp = svc.create_user_import_job(&req).unwrap();
+        let resp_body: Value = serde_json::from_slice(&resp.body).unwrap();
+        let job = &resp_body["UserImportJob"];
+        assert_eq!(job["JobName"], "my-import");
+        assert_eq!(job["Status"], "Created");
+        assert!(job["JobId"].as_str().unwrap().starts_with("import-"));
+        assert!(job["PreSignedUrl"].as_str().is_some());
+
+        // Describe
+        let job_id = job["JobId"].as_str().unwrap();
+        let body = serde_json::to_string(&json!({
+            "UserPoolId": pool_id,
+            "JobId": job_id
+        }))
+        .unwrap();
+        let req = make_req("DescribeUserImportJob", &body);
+        let resp = svc.describe_user_import_job(&req).unwrap();
+        let resp_body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(resp_body["UserImportJob"]["JobName"], "my-import");
+
+        // List
+        let body = serde_json::to_string(&json!({
+            "UserPoolId": pool_id,
+            "MaxResults": 10
+        }))
+        .unwrap();
+        let req = make_req("ListUserImportJobs", &body);
+        let resp = svc.list_user_import_jobs(&req).unwrap();
+        let resp_body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(resp_body["UserImportJobs"].as_array().unwrap().len(), 1);
     }
 }

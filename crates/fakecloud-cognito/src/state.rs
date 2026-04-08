@@ -30,6 +30,10 @@ pub struct CognitoState {
     pub resource_servers: HashMap<String, HashMap<String, ResourceServer>>,
     /// domain -> UserPoolDomain
     pub domains: HashMap<String, UserPoolDomain>,
+    /// resource_arn -> tags
+    pub tags: HashMap<String, HashMap<String, String>>,
+    /// pool_id -> (job_id -> UserImportJob)
+    pub import_jobs: HashMap<String, HashMap<String, UserImportJob>>,
 }
 
 impl CognitoState {
@@ -48,6 +52,8 @@ impl CognitoState {
             identity_providers: HashMap::new(),
             resource_servers: HashMap::new(),
             domains: HashMap::new(),
+            tags: HashMap::new(),
+            import_jobs: HashMap::new(),
         }
     }
 
@@ -63,6 +69,8 @@ impl CognitoState {
         self.identity_providers.clear();
         self.resource_servers.clear();
         self.domains.clear();
+        self.tags.clear();
+        self.import_jobs.clear();
     }
 }
 
@@ -266,6 +274,7 @@ pub struct User {
     pub mfa_preferences: Option<MfaPreferences>,
     pub totp_secret: Option<String>,
     pub totp_verified: bool,
+    pub devices: HashMap<String, Device>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -331,6 +340,29 @@ pub struct UserPoolDomain {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CustomDomainConfig {
     pub certificate_arn: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Device {
+    pub device_key: String,
+    pub device_attributes: HashMap<String, String>,
+    pub device_create_date: DateTime<Utc>,
+    pub device_last_modified_date: DateTime<Utc>,
+    pub device_last_authenticated_date: Option<DateTime<Utc>>,
+    pub device_remembered_status: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct UserImportJob {
+    pub job_id: String,
+    pub job_name: String,
+    pub user_pool_id: String,
+    pub cloud_watch_logs_role_arn: String,
+    pub status: String,
+    pub creation_date: DateTime<Utc>,
+    pub start_date: Option<DateTime<Utc>>,
+    pub completion_date: Option<DateTime<Utc>>,
+    pub pre_signed_url: Option<String>,
 }
 
 /// Generate default schema attributes that AWS adds to every user pool.

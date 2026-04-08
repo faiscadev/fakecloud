@@ -3,10 +3,10 @@ use helpers::TestServer;
 
 use aws_sdk_cognitoidentityprovider::types::{
     AccountRecoverySettingType, AttributeType, ChallengeNameType, DeliveryMediumType,
-    DomainStatusType, ExplicitAuthFlowsType, IdentityProviderTypeType, PasswordPolicyType,
-    RecoveryOptionNameType, RecoveryOptionType, ResourceServerScopeType, SmsMfaSettingsType,
-    SoftwareTokenMfaConfigType, SoftwareTokenMfaSettingsType, UserPoolMfaType, UserPoolPolicyType,
-    UserStatusType,
+    DeviceRememberedStatusType, DomainStatusType, ExplicitAuthFlowsType, IdentityProviderTypeType,
+    PasswordPolicyType, RecoveryOptionNameType, RecoveryOptionType, ResourceServerScopeType,
+    SmsMfaSettingsType, SoftwareTokenMfaConfigType, SoftwareTokenMfaSettingsType, UserPoolMfaType,
+    UserPoolPolicyType, UserStatusType,
 };
 
 #[tokio::test]
@@ -3787,4 +3787,442 @@ async fn cognito_delete_domain() {
         .send()
         .await;
     assert!(err.is_err(), "Should fail for non-existent domain");
+}
+
+// ── Device Management E2E Tests ─────────────────────────────────────
+
+/// Helper: create pool + client + user + auth, return (client, pool_id, username, access_token)
+async fn setup_pool_with_auth(
+    server: &TestServer,
+) -> (
+    aws_sdk_cognitoidentityprovider::Client,
+    String,
+    String,
+    String,
+) {
+    let client = server.cognito_client().await;
+
+    let pool_result = client
+        .create_user_pool()
+        .pool_name("device-pool")
+        .policies(
+            UserPoolPolicyType::builder()
+                .password_policy(
+                    PasswordPolicyType::builder()
+                        .minimum_length(6)
+                        .require_uppercase(false)
+                        .require_lowercase(false)
+                        .require_numbers(false)
+                        .require_symbols(false)
+                        .build(),
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .expect("create pool");
+    let pool_id = pool_result.user_pool().unwrap().id().unwrap().to_string();
+
+    let client_result = client
+        .create_user_pool_client()
+        .user_pool_id(&pool_id)
+        .client_name("dev-client")
+        .explicit_auth_flows(ExplicitAuthFlowsType::AllowAdminUserPasswordAuth)
+        .explicit_auth_flows(ExplicitAuthFlowsType::AllowRefreshTokenAuth)
+        .send()
+        .await
+        .expect("create client");
+    let client_id = client_result
+        .user_pool_client()
+        .unwrap()
+        .client_id()
+        .unwrap()
+        .to_string();
+
+    client
+        .admin_create_user()
+        .user_pool_id(&pool_id)
+        .username("devuser")
+        .send()
+        .await
+        .expect("create user");
+
+    client
+        .admin_set_user_password()
+        .user_pool_id(&pool_id)
+        .username("devuser")
+        .password("secret")
+        .permanent(true)
+        .send()
+        .await
+        .expect("set password");
+
+    let auth_result = client
+        .admin_initiate_auth()
+        .user_pool_id(&pool_id)
+        .client_id(&client_id)
+        .auth_flow(aws_sdk_cognitoidentityprovider::types::AuthFlowType::AdminUserPasswordAuth)
+        .auth_parameters("USERNAME", "devuser")
+        .auth_parameters("PASSWORD", "secret")
+        .send()
+        .await
+        .expect("auth");
+
+    let access_token = auth_result
+        .authentication_result()
+        .unwrap()
+        .access_token()
+        .unwrap()
+        .to_string();
+
+    (client, pool_id, "devuser".to_string(), access_token)
+}
+
+#[tokio::test]
+async fn cognito_confirm_admin_get_device() {
+    let server = TestServer::start().await;
+    let (client, pool_id, username, access_token) = setup_pool_with_auth(&server).await;
+
+    // Confirm a device
+    let confirm = client
+        .confirm_device()
+        .access_token(&access_token)
+        .device_key("test-device-key-1")
+        .device_name("My Phone")
+        .send()
+        .await
+        .expect("confirm device");
+    assert!(!confirm.user_confirmation_necessary());
+
+    // AdminGetDevice
+    let device = client
+        .admin_get_device()
+        .user_pool_id(&pool_id)
+        .username(&username)
+        .device_key("test-device-key-1")
+        .send()
+        .await
+        .expect("admin get device");
+
+    let dev = device.device().unwrap();
+    assert_eq!(dev.device_key().unwrap(), "test-device-key-1");
+    assert!(dev.device_create_date().is_some());
+
+    // Non-existent device should fail
+    let err = client
+        .admin_get_device()
+        .user_pool_id(&pool_id)
+        .username(&username)
+        .device_key("nonexistent")
+        .send()
+        .await;
+    assert!(err.is_err(), "Should fail for non-existent device");
+}
+
+#[tokio::test]
+async fn cognito_admin_list_devices() {
+    let server = TestServer::start().await;
+    let (client, pool_id, username, access_token) = setup_pool_with_auth(&server).await;
+
+    // Confirm two devices
+    for key in &["dev-a", "dev-b"] {
+        client
+            .confirm_device()
+            .access_token(&access_token)
+            .device_key(*key)
+            .send()
+            .await
+            .expect("confirm device");
+    }
+
+    // List devices
+    let list = client
+        .admin_list_devices()
+        .user_pool_id(&pool_id)
+        .username(&username)
+        .limit(10)
+        .send()
+        .await
+        .expect("admin list devices");
+
+    let devices = list.devices();
+    assert_eq!(devices.len(), 2, "Should have 2 devices");
+}
+
+#[tokio::test]
+async fn cognito_admin_forget_device() {
+    let server = TestServer::start().await;
+    let (client, pool_id, username, access_token) = setup_pool_with_auth(&server).await;
+
+    // Confirm a device
+    client
+        .confirm_device()
+        .access_token(&access_token)
+        .device_key("forget-me")
+        .send()
+        .await
+        .expect("confirm device");
+
+    // Forget it
+    client
+        .admin_forget_device()
+        .user_pool_id(&pool_id)
+        .username(&username)
+        .device_key("forget-me")
+        .send()
+        .await
+        .expect("admin forget device");
+
+    // Get should fail
+    let err = client
+        .admin_get_device()
+        .user_pool_id(&pool_id)
+        .username(&username)
+        .device_key("forget-me")
+        .send()
+        .await;
+    assert!(err.is_err(), "Device should be forgotten");
+
+    // Forgetting again should fail
+    let err = client
+        .admin_forget_device()
+        .user_pool_id(&pool_id)
+        .username(&username)
+        .device_key("forget-me")
+        .send()
+        .await;
+    assert!(err.is_err(), "Should fail for already-forgotten device");
+}
+
+#[tokio::test]
+async fn cognito_admin_update_device_status() {
+    let server = TestServer::start().await;
+    let (client, pool_id, username, access_token) = setup_pool_with_auth(&server).await;
+
+    // Confirm a device
+    client
+        .confirm_device()
+        .access_token(&access_token)
+        .device_key("status-dev")
+        .send()
+        .await
+        .expect("confirm device");
+
+    // Update status to remembered
+    client
+        .admin_update_device_status()
+        .user_pool_id(&pool_id)
+        .username(&username)
+        .device_key("status-dev")
+        .device_remembered_status(DeviceRememberedStatusType::Remembered)
+        .send()
+        .await
+        .expect("update device status");
+
+    // Update to not_remembered should also work
+    client
+        .admin_update_device_status()
+        .user_pool_id(&pool_id)
+        .username(&username)
+        .device_key("status-dev")
+        .device_remembered_status(DeviceRememberedStatusType::NotRemembered)
+        .send()
+        .await
+        .expect("update device status to not_remembered");
+
+    // Non-existent device should fail
+    let err = client
+        .admin_update_device_status()
+        .user_pool_id(&pool_id)
+        .username(&username)
+        .device_key("nonexistent")
+        .device_remembered_status(DeviceRememberedStatusType::Remembered)
+        .send()
+        .await;
+    assert!(err.is_err(), "Should fail for non-existent device");
+}
+
+// ── Tags E2E Tests ──────────────────────────────────────────────────
+
+#[tokio::test]
+async fn cognito_tag_untag_list_tags() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool_result = client
+        .create_user_pool()
+        .pool_name("tag-pool")
+        .send()
+        .await
+        .expect("create pool");
+    let pool = pool_result.user_pool().unwrap();
+    let pool_arn = pool.arn().unwrap().to_string();
+
+    // Tag
+    client
+        .tag_resource()
+        .resource_arn(&pool_arn)
+        .tags("env", "staging")
+        .tags("team", "platform")
+        .send()
+        .await
+        .expect("tag resource");
+
+    // List
+    let list = client
+        .list_tags_for_resource()
+        .resource_arn(&pool_arn)
+        .send()
+        .await
+        .expect("list tags");
+    let tags = list.tags().unwrap();
+    assert_eq!(tags.get("env").unwrap(), "staging");
+    assert_eq!(tags.get("team").unwrap(), "platform");
+
+    // Untag
+    client
+        .untag_resource()
+        .resource_arn(&pool_arn)
+        .tag_keys("team")
+        .send()
+        .await
+        .expect("untag resource");
+
+    // Verify
+    let list2 = client
+        .list_tags_for_resource()
+        .resource_arn(&pool_arn)
+        .send()
+        .await
+        .expect("list tags after untag");
+    let tags2 = list2.tags().unwrap();
+    assert_eq!(tags2.get("env").unwrap(), "staging");
+    assert!(tags2.get("team").is_none(), "team tag should be removed");
+
+    // Non-existent ARN should fail
+    let err = client
+        .list_tags_for_resource()
+        .resource_arn("arn:aws:cognito-idp:us-east-1:000000000000:userpool/nonexistent")
+        .send()
+        .await;
+    assert!(err.is_err(), "Should fail for non-existent resource");
+}
+
+// ── Import Jobs E2E Tests ───────────────────────────────────────────
+
+#[tokio::test]
+async fn cognito_create_describe_list_import_jobs() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool_result = client
+        .create_user_pool()
+        .pool_name("import-pool")
+        .send()
+        .await
+        .expect("create pool");
+    let pool_id = pool_result.user_pool().unwrap().id().unwrap().to_string();
+
+    // Create import job
+    let create = client
+        .create_user_import_job()
+        .user_pool_id(&pool_id)
+        .job_name("test-import")
+        .cloud_watch_logs_role_arn("arn:aws:iam::123456789012:role/CognitoImportRole")
+        .send()
+        .await
+        .expect("create import job");
+
+    let job = create.user_import_job().unwrap();
+    assert_eq!(job.job_name().unwrap(), "test-import");
+    assert_eq!(job.status().unwrap().as_str(), "Created");
+    let job_id = job.job_id().unwrap().to_string();
+    assert!(job.pre_signed_url().is_some());
+
+    // Describe
+    let describe = client
+        .describe_user_import_job()
+        .user_pool_id(&pool_id)
+        .job_id(&job_id)
+        .send()
+        .await
+        .expect("describe import job");
+    let described = describe.user_import_job().unwrap();
+    assert_eq!(described.job_name().unwrap(), "test-import");
+    assert_eq!(described.user_pool_id().unwrap(), pool_id);
+
+    // Create another job
+    client
+        .create_user_import_job()
+        .user_pool_id(&pool_id)
+        .job_name("test-import-2")
+        .cloud_watch_logs_role_arn("arn:aws:iam::123456789012:role/CognitoImportRole")
+        .send()
+        .await
+        .expect("create second import job");
+
+    // List
+    let list = client
+        .list_user_import_jobs()
+        .user_pool_id(&pool_id)
+        .max_results(10)
+        .send()
+        .await
+        .expect("list import jobs");
+    assert_eq!(
+        list.user_import_jobs().len(),
+        2,
+        "Should have 2 import jobs"
+    );
+
+    // Describe non-existent should fail
+    let err = client
+        .describe_user_import_job()
+        .user_pool_id(&pool_id)
+        .job_id("nonexistent")
+        .send()
+        .await;
+    assert!(err.is_err(), "Should fail for non-existent job");
+}
+
+#[tokio::test]
+async fn cognito_get_csv_header() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool_result = client
+        .create_user_pool()
+        .pool_name("csv-pool")
+        .send()
+        .await
+        .expect("create pool");
+    let pool_id = pool_result.user_pool().unwrap().id().unwrap().to_string();
+
+    let csv = client
+        .get_csv_header()
+        .user_pool_id(&pool_id)
+        .send()
+        .await
+        .expect("get csv header");
+
+    assert_eq!(csv.user_pool_id().unwrap(), pool_id);
+    let headers = csv.csv_header();
+    assert!(!headers.is_empty(), "CSV headers should not be empty");
+    // Default schema includes 'sub', 'email', 'name', etc.
+    assert!(
+        headers.contains(&"sub".to_string()),
+        "Headers should contain 'sub'"
+    );
+    assert!(
+        headers.contains(&"email".to_string()),
+        "Headers should contain 'email'"
+    );
+
+    // Non-existent pool should fail
+    let err = client
+        .get_csv_header()
+        .user_pool_id("us-east-1_nonexistent")
+        .send()
+        .await;
+    assert!(err.is_err(), "Should fail for non-existent pool");
 }
