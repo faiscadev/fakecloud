@@ -1,11 +1,13 @@
 use async_trait::async_trait;
+use base64::Engine;
 use chrono::Utc;
 use http::StatusCode;
+use md5::{Digest, Md5};
 use serde_json::{json, Value};
 
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 
-use crate::state::{KinesisStream, SharedKinesisState};
+use crate::state::{KinesisRecord, KinesisShard, KinesisStream, SharedKinesisState};
 
 const SUPPORTED_ACTIONS: &[&str] = &[
     "CreateStream",
@@ -13,6 +15,8 @@ const SUPPORTED_ACTIONS: &[&str] = &[
     "DescribeStreamSummary",
     "ListStreams",
     "DeleteStream",
+    "PutRecord",
+    "PutRecords",
     "AddTagsToStream",
     "ListTagsForStream",
     "RemoveTagsFromStream",
@@ -43,6 +47,8 @@ impl AwsService for KinesisService {
             "DescribeStreamSummary" => self.describe_stream_summary(&request),
             "ListStreams" => self.list_streams(&request),
             "DeleteStream" => self.delete_stream(&request),
+            "PutRecord" => self.put_record(&request),
+            "PutRecords" => self.put_records(&request),
             "AddTagsToStream" => self.add_tags_to_stream(&request),
             "ListTagsForStream" => self.list_tags_for_stream(&request),
             "RemoveTagsFromStream" => self.remove_tags_from_stream(&request),
@@ -94,6 +100,7 @@ impl KinesisService {
             shard_count,
             open_shard_count: shard_count,
             tags: std::collections::HashMap::new(),
+            shards: build_stream_shards(shard_count),
         };
         state.streams.insert(stream_name.to_string(), stream);
 
@@ -209,6 +216,72 @@ impl KinesisService {
         }
 
         Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    fn put_record(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        let mut state = self.state.write();
+        let stream_name = resolve_stream_name(&state, &body)?;
+        let account_id = state.account_id.clone();
+        let stream = state
+            .streams
+            .get_mut(&stream_name)
+            .ok_or_else(|| stream_not_found(&account_id, &stream_name))?;
+
+        let partition_key = require_partition_key(&body)?;
+        let data = decode_record_data(&body["Data"])?;
+        let encryption_type = stream.encryption_type.clone();
+        let shard = select_shard_mut(stream, partition_key);
+        let sequence_number = append_record(shard, partition_key, data);
+        let shard_id = shard.shard_id.clone();
+
+        Ok(AwsResponse::ok_json(json!({
+            "EncryptionType": encryption_type,
+            "SequenceNumber": sequence_number,
+            "ShardId": shard_id,
+        })))
+    }
+
+    fn put_records(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        let mut state = self.state.write();
+        let stream_name = resolve_stream_name(&state, &body)?;
+        let account_id = state.account_id.clone();
+        let stream = state
+            .streams
+            .get_mut(&stream_name)
+            .ok_or_else(|| stream_not_found(&account_id, &stream_name))?;
+
+        let entries = body["Records"]
+            .as_array()
+            .ok_or_else(|| invalid_argument("Records must be an array"))?;
+        if entries.is_empty() {
+            return Err(invalid_argument("Records must not be empty"));
+        }
+
+        let mut failed_record_count = 0;
+        let mut records = Vec::with_capacity(entries.len());
+        for entry in entries {
+            match put_records_entry(stream, entry) {
+                Ok((shard_id, sequence_number)) => records.push(json!({
+                    "SequenceNumber": sequence_number,
+                    "ShardId": shard_id,
+                })),
+                Err(error_message) => {
+                    failed_record_count += 1;
+                    records.push(json!({
+                        "ErrorCode": "InvalidArgumentException",
+                        "ErrorMessage": error_message,
+                    }));
+                }
+            }
+        }
+
+        Ok(AwsResponse::ok_json(json!({
+            "EncryptionType": stream.encryption_type,
+            "FailedRecordCount": failed_record_count,
+            "Records": records,
+        })))
     }
 
     fn list_tags_for_stream(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
@@ -344,20 +417,88 @@ fn resolve_stream_name(
 }
 
 fn build_shards(shard_count: i32) -> Vec<Value> {
-    (0..shard_count)
-        .map(|index| {
+    build_stream_shards(shard_count)
+        .into_iter()
+        .map(|shard| {
             json!({
                 "HashKeyRange": {
                     "EndingHashKey": "340282366920938463463374607431768211455",
                     "StartingHashKey": "0"
                 },
                 "SequenceNumberRange": {
-                    "StartingSequenceNumber": format!("{}0000000000000000000", index + 1)
+                    "StartingSequenceNumber": format!("{}0000000000000000000", 1)
                 },
-                "ShardId": format!("shardId-{:012}", index)
+                "ShardId": shard.shard_id
             })
         })
         .collect()
+}
+
+fn build_stream_shards(shard_count: i32) -> Vec<KinesisShard> {
+    (0..shard_count)
+        .map(|index| KinesisShard {
+            shard_id: format!("shardId-{:012}", index),
+            next_sequence_number: 1,
+            records: Vec::new(),
+        })
+        .collect()
+}
+
+fn require_partition_key(body: &Value) -> Result<&str, AwsServiceError> {
+    body["PartitionKey"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| invalid_argument("PartitionKey is required"))
+}
+
+fn decode_record_data(value: &Value) -> Result<Vec<u8>, AwsServiceError> {
+    let encoded = value
+        .as_str()
+        .ok_or_else(|| invalid_argument("Data must be a base64 string"))?;
+    base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .map_err(|_| invalid_argument("Data must be valid base64"))
+}
+
+fn select_shard_mut<'a>(
+    stream: &'a mut KinesisStream,
+    partition_key: &str,
+) -> &'a mut KinesisShard {
+    let shard_index = partition_key_to_shard_index(partition_key, stream.shards.len());
+    &mut stream.shards[shard_index]
+}
+
+fn partition_key_to_shard_index(partition_key: &str, shard_count: usize) -> usize {
+    let digest = Md5::digest(partition_key.as_bytes());
+    let mut bytes = [0u8; 8];
+    bytes.copy_from_slice(&digest[..8]);
+    (u64::from_be_bytes(bytes) as usize) % shard_count
+}
+
+fn append_record(shard: &mut KinesisShard, partition_key: &str, data: Vec<u8>) -> String {
+    let sequence_number = format!("{:020}", shard.next_sequence_number);
+    shard.next_sequence_number += 1;
+    shard.records.push(KinesisRecord {
+        sequence_number: sequence_number.clone(),
+        partition_key: partition_key.to_string(),
+        data,
+        approximate_arrival_timestamp: Utc::now(),
+    });
+    sequence_number
+}
+
+fn put_records_entry(
+    stream: &mut KinesisStream,
+    entry: &Value,
+) -> Result<(String, String), String> {
+    let partition_key = entry["PartitionKey"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "PartitionKey is required".to_string())?;
+    let data = decode_record_data(&entry["Data"]).map_err(|error| error.message())?;
+    let shard = select_shard_mut(stream, partition_key);
+    let sequence_number = append_record(shard, partition_key, data);
+    Ok((shard.shard_id.clone(), sequence_number))
 }
 
 fn invalid_argument(message: impl Into<String>) -> AwsServiceError {
@@ -465,5 +606,31 @@ mod tests {
             .err()
             .expect("invalid retention decrease should fail");
         assert_eq!(error.code(), "InvalidArgumentException");
+    }
+
+    #[test]
+    fn partition_keys_route_deterministically() {
+        let shard_a = partition_key_to_shard_index("customer-1", 4);
+        let shard_b = partition_key_to_shard_index("customer-1", 4);
+        let shard_c = partition_key_to_shard_index("customer-2", 4);
+
+        assert_eq!(shard_a, shard_b);
+        assert!(shard_c < 4);
+    }
+
+    #[test]
+    fn append_record_advances_sequence_numbers() {
+        let mut shard = KinesisShard {
+            shard_id: "shardId-000000000000".to_string(),
+            next_sequence_number: 1,
+            records: Vec::new(),
+        };
+
+        let first = append_record(&mut shard, "key", b"first".to_vec());
+        let second = append_record(&mut shard, "key", b"second".to_vec());
+
+        assert_eq!(first, "00000000000000000001");
+        assert_eq!(second, "00000000000000000002");
+        assert_eq!(shard.records.len(), 2);
     }
 }

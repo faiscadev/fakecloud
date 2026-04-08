@@ -1,5 +1,7 @@
 mod helpers;
 
+use aws_sdk_kinesis::primitives::Blob;
+use aws_sdk_kinesis::types::PutRecordsRequestEntry;
 use fakecloud_conformance_macros::test_action;
 use helpers::TestServer;
 
@@ -142,4 +144,81 @@ async fn kinesis_tags_and_retention() {
         .await
         .unwrap();
     assert!(tags.tags().is_empty());
+}
+
+#[test_action("kinesis", "PutRecord", checksum = "ebd87879")]
+#[tokio::test]
+async fn kinesis_put_record() {
+    let server = TestServer::start().await;
+    let client = server.kinesis_client().await;
+
+    client
+        .create_stream()
+        .stream_name("conf-put")
+        .shard_count(2)
+        .send()
+        .await
+        .unwrap();
+
+    let first = client
+        .put_record()
+        .stream_name("conf-put")
+        .partition_key("conf-key")
+        .data(Blob::new(b"first"))
+        .send()
+        .await
+        .unwrap();
+    let second = client
+        .put_record()
+        .stream_name("conf-put")
+        .partition_key("conf-key")
+        .data(Blob::new(b"second"))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(first.shard_id(), second.shard_id());
+    assert!(first.sequence_number() < second.sequence_number());
+}
+
+#[test_action("kinesis", "PutRecords", checksum = "27e5bb6b")]
+#[tokio::test]
+async fn kinesis_put_records() {
+    let server = TestServer::start().await;
+    let client = server.kinesis_client().await;
+
+    client
+        .create_stream()
+        .stream_name("conf-batch")
+        .shard_count(1)
+        .send()
+        .await
+        .unwrap();
+
+    let ok_entry = PutRecordsRequestEntry::builder()
+        .data(Blob::new(b"ok"))
+        .partition_key("good-key")
+        .build()
+        .unwrap();
+    let bad_entry = PutRecordsRequestEntry::builder()
+        .data(Blob::new(b"bad"))
+        .partition_key("")
+        .build()
+        .unwrap();
+
+    let response = client
+        .put_records()
+        .stream_name("conf-batch")
+        .records(ok_entry)
+        .records(bad_entry)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.failed_record_count(), Some(1));
+    assert!(response.records()[0].sequence_number().is_some());
+    assert_eq!(
+        response.records()[1].error_code(),
+        Some("InvalidArgumentException")
+    );
 }

@@ -25,6 +25,22 @@ pub struct KinesisStream {
     pub shard_count: i32,
     pub open_shard_count: i32,
     pub tags: HashMap<String, String>,
+    pub shards: Vec<KinesisShard>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KinesisShard {
+    pub shard_id: String,
+    pub next_sequence_number: u128,
+    pub records: Vec<KinesisRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KinesisRecord {
+    pub sequence_number: String,
+    pub partition_key: String,
+    pub data: Vec<u8>,
+    pub approximate_arrival_timestamp: DateTime<Utc>,
 }
 
 impl KinesisState {

@@ -1746,10 +1746,12 @@ name = "fakecloud-kinesis"
 version = "0.5.1"
 dependencies = [
  "async-trait",
+ "base64",
  "bytes",
  "chrono",
  "fakecloud-core",
  "http 1.4.0",
+ "md-5",
  "parking_lot",
  "serde",
  "serde_json",
