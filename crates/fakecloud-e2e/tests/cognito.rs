@@ -4,6 +4,7 @@ use helpers::TestServer;
 use aws_sdk_cognitoidentityprovider::types::{
     AccountRecoverySettingType, AttributeType, ChallengeNameType, ExplicitAuthFlowsType,
     PasswordPolicyType, RecoveryOptionNameType, RecoveryOptionType, UserPoolPolicyType,
+    UserStatusType,
 };
 
 #[tokio::test]
@@ -1505,5 +1506,553 @@ async fn cognito_auth_wrong_password() {
         err_str.contains("NotAuthorizedException")
             || err_str.contains("Incorrect username or password"),
         "Error should be NotAuthorizedException: {err_str}"
+    );
+}
+
+#[tokio::test]
+async fn cognito_change_password() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    // Create pool with relaxed policy
+    let pool_result = client
+        .create_user_pool()
+        .pool_name("chpw-pool")
+        .policies(
+            UserPoolPolicyType::builder()
+                .password_policy(
+                    PasswordPolicyType::builder()
+                        .minimum_length(6)
+                        .require_uppercase(false)
+                        .require_lowercase(false)
+                        .require_numbers(false)
+                        .require_symbols(false)
+                        .build(),
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .expect("create pool");
+    let pool_id = pool_result.user_pool().unwrap().id().unwrap().to_string();
+
+    // Create client
+    let client_result = client
+        .create_user_pool_client()
+        .user_pool_id(&pool_id)
+        .client_name("chpw-client")
+        .explicit_auth_flows(ExplicitAuthFlowsType::AllowAdminUserPasswordAuth)
+        .explicit_auth_flows(ExplicitAuthFlowsType::AllowRefreshTokenAuth)
+        .send()
+        .await
+        .expect("create client");
+    let client_id = client_result
+        .user_pool_client()
+        .unwrap()
+        .client_id()
+        .unwrap()
+        .to_string();
+
+    // Create user and set password
+    client
+        .admin_create_user()
+        .user_pool_id(&pool_id)
+        .username("chpwuser")
+        .send()
+        .await
+        .expect("create user");
+
+    client
+        .admin_set_user_password()
+        .user_pool_id(&pool_id)
+        .username("chpwuser")
+        .password("oldpass")
+        .permanent(true)
+        .send()
+        .await
+        .expect("set password");
+
+    // Auth to get access token
+    let auth_result = client
+        .admin_initiate_auth()
+        .user_pool_id(&pool_id)
+        .client_id(&client_id)
+        .auth_flow(aws_sdk_cognitoidentityprovider::types::AuthFlowType::AdminUserPasswordAuth)
+        .auth_parameters("USERNAME", "chpwuser")
+        .auth_parameters("PASSWORD", "oldpass")
+        .send()
+        .await
+        .expect("auth");
+
+    let access_token = auth_result
+        .authentication_result()
+        .unwrap()
+        .access_token()
+        .unwrap()
+        .to_string();
+
+    // Change password
+    client
+        .change_password()
+        .access_token(&access_token)
+        .previous_password("oldpass")
+        .proposed_password("newpass")
+        .send()
+        .await
+        .expect("change password");
+
+    // Auth with new password should work
+    let auth2 = client
+        .admin_initiate_auth()
+        .user_pool_id(&pool_id)
+        .client_id(&client_id)
+        .auth_flow(aws_sdk_cognitoidentityprovider::types::AuthFlowType::AdminUserPasswordAuth)
+        .auth_parameters("USERNAME", "chpwuser")
+        .auth_parameters("PASSWORD", "newpass")
+        .send()
+        .await;
+    assert!(auth2.is_ok(), "Auth with new password should work");
+
+    // Auth with old password should fail
+    let auth3 = client
+        .admin_initiate_auth()
+        .user_pool_id(&pool_id)
+        .client_id(&client_id)
+        .auth_flow(aws_sdk_cognitoidentityprovider::types::AuthFlowType::AdminUserPasswordAuth)
+        .auth_parameters("USERNAME", "chpwuser")
+        .auth_parameters("PASSWORD", "oldpass")
+        .send()
+        .await;
+    assert!(auth3.is_err(), "Auth with old password should fail");
+}
+
+#[tokio::test]
+async fn cognito_forgot_password_flow() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    // Create pool with relaxed policy
+    let pool_result = client
+        .create_user_pool()
+        .pool_name("forgot-pool")
+        .policies(
+            UserPoolPolicyType::builder()
+                .password_policy(
+                    PasswordPolicyType::builder()
+                        .minimum_length(6)
+                        .require_uppercase(false)
+                        .require_lowercase(false)
+                        .require_numbers(false)
+                        .require_symbols(false)
+                        .build(),
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .expect("create pool");
+    let pool_id = pool_result.user_pool().unwrap().id().unwrap().to_string();
+
+    // Create client
+    let client_result = client
+        .create_user_pool_client()
+        .user_pool_id(&pool_id)
+        .client_name("forgot-client")
+        .explicit_auth_flows(ExplicitAuthFlowsType::AllowAdminUserPasswordAuth)
+        .explicit_auth_flows(ExplicitAuthFlowsType::AllowUserPasswordAuth)
+        .send()
+        .await
+        .expect("create client");
+    let client_id = client_result
+        .user_pool_client()
+        .unwrap()
+        .client_id()
+        .unwrap()
+        .to_string();
+
+    // Create user with email
+    client
+        .admin_create_user()
+        .user_pool_id(&pool_id)
+        .username("forgotuser")
+        .user_attributes(
+            AttributeType::builder()
+                .name("email")
+                .value("user@example.com")
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .expect("create user");
+
+    client
+        .admin_set_user_password()
+        .user_pool_id(&pool_id)
+        .username("forgotuser")
+        .password("oldpass")
+        .permanent(true)
+        .send()
+        .await
+        .expect("set password");
+
+    // Call ForgotPassword
+    let forgot_result = client
+        .forgot_password()
+        .client_id(&client_id)
+        .username("forgotuser")
+        .send()
+        .await
+        .expect("forgot password");
+
+    // Check CodeDeliveryDetails
+    let delivery = forgot_result.code_delivery_details().unwrap();
+    assert_eq!(delivery.delivery_medium().unwrap().as_str(), "EMAIL");
+    assert_eq!(delivery.attribute_name().unwrap(), "email");
+    let destination = delivery.destination().unwrap();
+    assert!(
+        destination.contains("***"),
+        "Destination should be masked: {destination}"
+    );
+
+    // Get confirmation code from introspection endpoint
+    let http_client = reqwest::Client::new();
+    let code_resp = http_client
+        .get(format!(
+            "{}/_fakecloud/cognito/confirmation-codes/{}/forgotuser",
+            server.endpoint(),
+            pool_id
+        ))
+        .send()
+        .await
+        .expect("get confirmation code");
+    let code_json: serde_json::Value = code_resp.json().await.unwrap();
+    let code = code_json["confirmationCode"].as_str().unwrap().to_string();
+    assert_eq!(code.len(), 6, "Code should be 6 digits");
+
+    // Confirm forgot password with wrong code should fail
+    let bad_confirm = client
+        .confirm_forgot_password()
+        .client_id(&client_id)
+        .username("forgotuser")
+        .confirmation_code("000000")
+        .password("newpass")
+        .send()
+        .await;
+    if code != "000000" {
+        assert!(bad_confirm.is_err(), "Wrong code should fail");
+    }
+
+    // Confirm forgot password with correct code
+    client
+        .confirm_forgot_password()
+        .client_id(&client_id)
+        .username("forgotuser")
+        .confirmation_code(&code)
+        .password("newpass")
+        .send()
+        .await
+        .expect("confirm forgot password");
+
+    // Auth with new password should work
+    let auth = client
+        .admin_initiate_auth()
+        .user_pool_id(&pool_id)
+        .client_id(&client_id)
+        .auth_flow(aws_sdk_cognitoidentityprovider::types::AuthFlowType::AdminUserPasswordAuth)
+        .auth_parameters("USERNAME", "forgotuser")
+        .auth_parameters("PASSWORD", "newpass")
+        .send()
+        .await;
+    assert!(auth.is_ok(), "Auth with new password should work");
+
+    // Auth with old password should fail
+    let auth_old = client
+        .admin_initiate_auth()
+        .user_pool_id(&pool_id)
+        .client_id(&client_id)
+        .auth_flow(aws_sdk_cognitoidentityprovider::types::AuthFlowType::AdminUserPasswordAuth)
+        .auth_parameters("USERNAME", "forgotuser")
+        .auth_parameters("PASSWORD", "oldpass")
+        .send()
+        .await;
+    assert!(auth_old.is_err(), "Auth with old password should fail");
+}
+
+#[tokio::test]
+async fn cognito_admin_reset_user_password() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    // Create pool
+    let pool_result = client
+        .create_user_pool()
+        .pool_name("reset-pool")
+        .policies(
+            UserPoolPolicyType::builder()
+                .password_policy(
+                    PasswordPolicyType::builder()
+                        .minimum_length(6)
+                        .require_uppercase(false)
+                        .require_lowercase(false)
+                        .require_numbers(false)
+                        .require_symbols(false)
+                        .build(),
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .expect("create pool");
+    let pool_id = pool_result.user_pool().unwrap().id().unwrap().to_string();
+
+    // Create user and set password
+    client
+        .admin_create_user()
+        .user_pool_id(&pool_id)
+        .username("resetuser")
+        .send()
+        .await
+        .expect("create user");
+
+    client
+        .admin_set_user_password()
+        .user_pool_id(&pool_id)
+        .username("resetuser")
+        .password("mypass")
+        .permanent(true)
+        .send()
+        .await
+        .expect("set password");
+
+    // Verify status is CONFIRMED
+    let get1 = client
+        .admin_get_user()
+        .user_pool_id(&pool_id)
+        .username("resetuser")
+        .send()
+        .await
+        .expect("get user");
+    assert_eq!(get1.user_status(), Some(&UserStatusType::Confirmed));
+
+    // Admin reset user password
+    client
+        .admin_reset_user_password()
+        .user_pool_id(&pool_id)
+        .username("resetuser")
+        .send()
+        .await
+        .expect("admin reset user password");
+
+    // Verify status is RESET_REQUIRED
+    let get2 = client
+        .admin_get_user()
+        .user_pool_id(&pool_id)
+        .username("resetuser")
+        .send()
+        .await
+        .expect("get user after reset");
+    assert_eq!(get2.user_status(), Some(&UserStatusType::ResetRequired));
+}
+
+#[tokio::test]
+async fn cognito_global_sign_out() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    // Create pool with relaxed policy
+    let pool_result = client
+        .create_user_pool()
+        .pool_name("signout-pool")
+        .policies(
+            UserPoolPolicyType::builder()
+                .password_policy(
+                    PasswordPolicyType::builder()
+                        .minimum_length(6)
+                        .require_uppercase(false)
+                        .require_lowercase(false)
+                        .require_numbers(false)
+                        .require_symbols(false)
+                        .build(),
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .expect("create pool");
+    let pool_id = pool_result.user_pool().unwrap().id().unwrap().to_string();
+
+    // Create client with user password auth + refresh token flows
+    let client_result = client
+        .create_user_pool_client()
+        .user_pool_id(&pool_id)
+        .client_name("signout-client")
+        .explicit_auth_flows(ExplicitAuthFlowsType::AllowAdminUserPasswordAuth)
+        .explicit_auth_flows(ExplicitAuthFlowsType::AllowRefreshTokenAuth)
+        .send()
+        .await
+        .expect("create client");
+    let client_id = client_result
+        .user_pool_client()
+        .unwrap()
+        .client_id()
+        .unwrap()
+        .to_string();
+
+    // Create user and set password
+    client
+        .admin_create_user()
+        .user_pool_id(&pool_id)
+        .username("signoutuser")
+        .send()
+        .await
+        .expect("create user");
+
+    client
+        .admin_set_user_password()
+        .user_pool_id(&pool_id)
+        .username("signoutuser")
+        .password("mypass")
+        .permanent(true)
+        .send()
+        .await
+        .expect("set password");
+
+    // Auth to get tokens
+    let auth_result = client
+        .admin_initiate_auth()
+        .user_pool_id(&pool_id)
+        .client_id(&client_id)
+        .auth_flow(aws_sdk_cognitoidentityprovider::types::AuthFlowType::AdminUserPasswordAuth)
+        .auth_parameters("USERNAME", "signoutuser")
+        .auth_parameters("PASSWORD", "mypass")
+        .send()
+        .await
+        .expect("auth");
+
+    let auth = auth_result.authentication_result().unwrap();
+    let access_token = auth.access_token().unwrap().to_string();
+    let refresh_token = auth.refresh_token().unwrap().to_string();
+
+    // Global sign out
+    client
+        .global_sign_out()
+        .access_token(&access_token)
+        .send()
+        .await
+        .expect("global sign out");
+
+    // Refresh token should no longer work
+    let refresh_err = client
+        .initiate_auth()
+        .client_id(&client_id)
+        .auth_flow(aws_sdk_cognitoidentityprovider::types::AuthFlowType::RefreshTokenAuth)
+        .auth_parameters("REFRESH_TOKEN", &refresh_token)
+        .send()
+        .await;
+    assert!(
+        refresh_err.is_err(),
+        "Refresh token should be invalidated after sign out"
+    );
+}
+
+#[tokio::test]
+async fn cognito_admin_user_global_sign_out() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    // Create pool with relaxed policy
+    let pool_result = client
+        .create_user_pool()
+        .pool_name("admin-signout-pool")
+        .policies(
+            UserPoolPolicyType::builder()
+                .password_policy(
+                    PasswordPolicyType::builder()
+                        .minimum_length(6)
+                        .require_uppercase(false)
+                        .require_lowercase(false)
+                        .require_numbers(false)
+                        .require_symbols(false)
+                        .build(),
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .expect("create pool");
+    let pool_id = pool_result.user_pool().unwrap().id().unwrap().to_string();
+
+    // Create client
+    let client_result = client
+        .create_user_pool_client()
+        .user_pool_id(&pool_id)
+        .client_name("admin-signout-client")
+        .explicit_auth_flows(ExplicitAuthFlowsType::AllowAdminUserPasswordAuth)
+        .explicit_auth_flows(ExplicitAuthFlowsType::AllowRefreshTokenAuth)
+        .send()
+        .await
+        .expect("create client");
+    let client_id = client_result
+        .user_pool_client()
+        .unwrap()
+        .client_id()
+        .unwrap()
+        .to_string();
+
+    // Create user and set password
+    client
+        .admin_create_user()
+        .user_pool_id(&pool_id)
+        .username("adminsignoutuser")
+        .send()
+        .await
+        .expect("create user");
+
+    client
+        .admin_set_user_password()
+        .user_pool_id(&pool_id)
+        .username("adminsignoutuser")
+        .password("mypass")
+        .permanent(true)
+        .send()
+        .await
+        .expect("set password");
+
+    // Auth to get tokens
+    let auth_result = client
+        .admin_initiate_auth()
+        .user_pool_id(&pool_id)
+        .client_id(&client_id)
+        .auth_flow(aws_sdk_cognitoidentityprovider::types::AuthFlowType::AdminUserPasswordAuth)
+        .auth_parameters("USERNAME", "adminsignoutuser")
+        .auth_parameters("PASSWORD", "mypass")
+        .send()
+        .await
+        .expect("auth");
+
+    let auth = auth_result.authentication_result().unwrap();
+    let refresh_token = auth.refresh_token().unwrap().to_string();
+
+    // Admin user global sign out
+    client
+        .admin_user_global_sign_out()
+        .user_pool_id(&pool_id)
+        .username("adminsignoutuser")
+        .send()
+        .await
+        .expect("admin user global sign out");
+
+    // Refresh token should no longer work
+    let refresh_err = client
+        .initiate_auth()
+        .client_id(&client_id)
+        .auth_flow(aws_sdk_cognitoidentityprovider::types::AuthFlowType::RefreshTokenAuth)
+        .auth_parameters("REFRESH_TOKEN", &refresh_token)
+        .send()
+        .await;
+    assert!(
+        refresh_err.is_err(),
+        "Refresh token should be invalidated after admin sign out"
     );
 }

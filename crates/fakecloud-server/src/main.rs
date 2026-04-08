@@ -627,6 +627,27 @@ async fn main() {
                 }
             }),
         )
+        .route(
+            "/_fakecloud/cognito/confirmation-codes/{pool_id}/{username}",
+            axum::routing::get({
+                let cs = cognito_state.clone();
+                move |axum::extract::Path((pool_id, username)): axum::extract::Path<(
+                    String,
+                    String,
+                )>| {
+                    let cs = cs.clone();
+                    async move {
+                        let state = cs.read();
+                        let code = state
+                            .users
+                            .get(&pool_id)
+                            .and_then(|users| users.get(&username))
+                            .and_then(|user| user.confirmation_code.clone());
+                        axum::Json(serde_json::json!({ "confirmationCode": code }))
+                    }
+                }
+            }),
+        )
         .fallback(dispatch::dispatch)
         .layer(Extension(Arc::new(registry)))
         .layer(Extension(Arc::new(config)))
