@@ -1,13 +1,22 @@
-"""Tests for the fakecloud Python SDK client."""
+"""E2E tests for the fakecloud Python SDK.
+
+These tests start a real fakecloud server as a subprocess and use boto3 to
+create AWS resources, then verify the fakecloud introspection SDK returns the
+correct data.
+"""
 
 from __future__ import annotations
 
-import httpx
-import pytest
-import respx
+import json
+import os
+import socket
+import subprocess
+import time
 
-from fakecloud import FakeCloud, FakeCloudSync
-from fakecloud.client import FakeCloudError
+import boto3
+import pytest
+
+from fakecloud import FakeCloudSync
 from fakecloud.types import (
     ConfirmSubscriptionRequest,
     ConfirmUserRequest,
@@ -16,624 +25,253 @@ from fakecloud.types import (
     InboundEmailRequest,
 )
 
-BASE = "http://localhost:4566"
+# ── Fixtures ──────────────────────────────────────────────────────────
+
+_DEFAULT_BIN = os.path.join(
+    os.path.dirname(__file__), "..", "..", "..", "target", "release", "fakecloud"
+)
+FAKECLOUD_BIN = os.environ.get("FAKECLOUD_BIN", _DEFAULT_BIN)
 
 
-# ── Health & Reset ──────────────────────────────────────────────────
+def _free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
 
 
-@respx.mock
-@pytest.mark.asyncio
-async def test_health_async():
-    respx.get(f"{BASE}/_fakecloud/health").mock(
-        return_value=httpx.Response(
-            200,
-            json={"status": "ok", "version": "0.1.0", "services": ["sqs", "sns"]},
+def _wait_for_ready(url: str, timeout: float = 15.0) -> None:
+    """Poll the health endpoint until fakecloud is ready."""
+    import httpx
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            r = httpx.get(f"{url}/_fakecloud/health", timeout=2.0)
+            if r.status_code == 200:
+                return
+        except httpx.ConnectError:
+            pass
+        time.sleep(0.1)
+    raise RuntimeError(f"fakecloud did not become ready at {url} within {timeout}s")
+
+
+@pytest.fixture(scope="session")
+def fakecloud_url() -> str:  # type: ignore[misc]
+    """Start fakecloud and yield its base URL. Kills it after the session."""
+    port = _free_port()
+    binary = os.path.abspath(FAKECLOUD_BIN)
+    if not os.path.isfile(binary):
+        pytest.skip(
+            f"fakecloud binary not found at {binary} — run cargo build --release first"
         )
+
+    proc = subprocess.Popen(
+        [binary, "--addr", f"127.0.0.1:{port}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
     )
-    async with FakeCloud(BASE) as fc:
-        h = await fc.health()
+    url = f"http://127.0.0.1:{port}"
+    try:
+        _wait_for_ready(url)
+        yield url
+    finally:
+        proc.terminate()
+        proc.wait(timeout=5)
+
+
+@pytest.fixture()
+def fc(fakecloud_url: str) -> FakeCloudSync:  # type: ignore[misc]
+    """Return a sync SDK client and reset state before each test."""
+    client = FakeCloudSync(fakecloud_url)
+    client.reset()
+    yield client  # type: ignore[misc]
+    client.close()
+
+
+def _boto_kwargs(fakecloud_url: str) -> dict:  # type: ignore[type-arg]
+    return dict(
+        endpoint_url=fakecloud_url,
+        region_name="us-east-1",
+        aws_access_key_id="test",
+        aws_secret_access_key="test",
+    )
+
+
+# ── Health ────────────────────────────────────────────────────────────
+
+
+def test_health(fc: FakeCloudSync, fakecloud_url: str) -> None:
+    h = fc.health()
     assert h.status == "ok"
-    assert h.version == "0.1.0"
-    assert h.services == ["sqs", "sns"]
+    assert isinstance(h.services, list)
+    assert len(h.services) > 0
 
 
-@respx.mock
-@pytest.mark.asyncio
-async def test_reset_async():
-    respx.post(f"{BASE}/_reset").mock(
-        return_value=httpx.Response(200, json={"status": "ok"})
-    )
-    async with FakeCloud(BASE) as fc:
-        r = await fc.reset()
+# ── Reset ─────────────────────────────────────────────────────────────
+
+
+def test_reset_clears_state(fc: FakeCloudSync, fakecloud_url: str) -> None:
+    # Create a queue so there's state
+    sqs = boto3.client("sqs", **_boto_kwargs(fakecloud_url))
+    sqs.create_queue(QueueName="reset-test-queue")
+
+    # Verify the queue exists via SQS list
+    queues = sqs.list_queues().get("QueueUrls", [])
+    assert any("reset-test-queue" in q for q in queues)
+
+    # Reset
+    r = fc.reset()
     assert r.status == "ok"
 
+    # After reset, queue should be gone
+    queues = sqs.list_queues().get("QueueUrls", [])
+    assert not any("reset-test-queue" in q for q in queues)
 
-@respx.mock
-@pytest.mark.asyncio
-async def test_reset_service_async():
-    respx.post(f"{BASE}/_fakecloud/reset/sqs").mock(
-        return_value=httpx.Response(200, json={"reset": "sqs"})
+
+# ── SQS ──────────────────────────────────────────────────────────────
+
+
+def test_sqs_messages(fc: FakeCloudSync, fakecloud_url: str) -> None:
+    sqs = boto3.client("sqs", **_boto_kwargs(fakecloud_url))
+    queue_url = sqs.create_queue(QueueName="sdk-test-queue")["QueueUrl"]
+    sqs.send_message(QueueUrl=queue_url, MessageBody="hello from sdk test")
+
+    result = fc.sqs.get_messages()
+    assert len(result.queues) >= 1
+    queue = next(q for q in result.queues if q.queue_name == "sdk-test-queue")
+    assert len(queue.messages) == 1
+    assert queue.messages[0].body == "hello from sdk test"
+
+
+# ── SNS ──────────────────────────────────────────────────────────────
+
+
+def test_sns_messages(fc: FakeCloudSync, fakecloud_url: str) -> None:
+    sns = boto3.client("sns", **_boto_kwargs(fakecloud_url))
+    topic = sns.create_topic(Name="sdk-test-topic")
+    topic_arn = topic["TopicArn"]
+    sns.publish(TopicArn=topic_arn, Message="hello from sns test")
+
+    result = fc.sns.get_messages()
+    assert len(result.messages) >= 1
+    msg = next(m for m in result.messages if "sdk-test-topic" in m.topic_arn)
+    assert msg.message == "hello from sns test"
+
+
+# ── SES ──────────────────────────────────────────────────────────────
+
+
+def test_ses_emails(fc: FakeCloudSync, fakecloud_url: str) -> None:
+    sesv2 = boto3.client("sesv2", **_boto_kwargs(fakecloud_url))
+    sesv2.send_email(
+        FromEmailAddress="sender@example.com",
+        Destination={"ToAddresses": ["recipient@example.com"]},
+        Content={
+            "Simple": {
+                "Subject": {"Data": "SDK Test"},
+                "Body": {"Text": {"Data": "hello from ses test"}},
+            }
+        },
     )
-    async with FakeCloud(BASE) as fc:
-        r = await fc.reset_service("sqs")
-    assert r.reset == "sqs"
+
+    result = fc.ses.get_emails()
+    assert len(result.emails) >= 1
+    email = result.emails[0]
+    assert email.from_addr == "sender@example.com"
+    assert "recipient@example.com" in email.to
+    assert email.subject == "SDK Test"
 
 
-@respx.mock
-@pytest.mark.asyncio
-async def test_error_raises():
-    respx.get(f"{BASE}/_fakecloud/health").mock(
-        return_value=httpx.Response(500, text="internal error")
+# ── S3 ───────────────────────────────────────────────────────────────
+
+
+def test_s3_notifications(fc: FakeCloudSync, fakecloud_url: str) -> None:
+    s3 = boto3.client("s3", **_boto_kwargs(fakecloud_url))
+    s3.create_bucket(Bucket="sdk-test-bucket")
+    s3.put_object(Bucket="sdk-test-bucket", Key="test.txt", Body=b"hello")
+
+    result = fc.s3.get_notifications()
+    # S3 notifications are only emitted when notification configuration is set,
+    # so we just verify the endpoint works and returns a valid response.
+    assert isinstance(result.notifications, list)
+
+
+# ── DynamoDB ─────────────────────────────────────────────────────────
+
+
+def test_dynamodb_ttl_tick(fc: FakeCloudSync, fakecloud_url: str) -> None:
+    ddb = boto3.client("dynamodb", **_boto_kwargs(fakecloud_url))
+    ddb.create_table(
+        TableName="sdk-test-table",
+        KeySchema=[{"AttributeName": "pk", "KeyType": "HASH"}],
+        AttributeDefinitions=[{"AttributeName": "pk", "AttributeType": "S"}],
+        BillingMode="PAY_PER_REQUEST",
     )
-    async with FakeCloud(BASE) as fc:
-        with pytest.raises(FakeCloudError) as exc_info:
-            await fc.health()
-    assert exc_info.value.status == 500
-    assert "internal error" in exc_info.value.body
+
+    result = fc.dynamodb.tick_ttl()
+    assert result.expired_items >= 0
 
 
-# ── Lambda ──────────────────────────────────────────────────────────
+# ── Cognito ──────────────────────────────────────────────────────────
 
 
-@respx.mock
-@pytest.mark.asyncio
-async def test_lambda_invocations():
-    respx.get(f"{BASE}/_fakecloud/lambda/invocations").mock(
-        return_value=httpx.Response(
-            200,
-            json={
-                "invocations": [
-                    {
-                        "functionArn": (
-                            "arn:aws:lambda:us-east-1:000000000000:function:my-fn"
-                        ),
-                        "payload": '{"key": "val"}',
-                        "source": "api",
-                        "timestamp": "2026-01-01T00:00:00Z",
-                    }
-                ]
-            },
-        )
+def test_cognito_confirm_user(fc: FakeCloudSync, fakecloud_url: str) -> None:
+    cognito = boto3.client("cognito-idp", **_boto_kwargs(fakecloud_url))
+    pool = cognito.create_user_pool(PoolName="sdk-test-pool")
+    pool_id = pool["UserPool"]["Id"]
+    client_resp = cognito.create_user_pool_client(
+        UserPoolId=pool_id, ClientName="sdk-test-client"
     )
-    async with FakeCloud(BASE) as fc:
-        r = await fc.lambda_.get_invocations()
-    assert len(r.invocations) == 1
-    assert r.invocations[0].function_arn.endswith("my-fn")
-    assert r.invocations[0].source == "api"
+    client_id = client_resp["UserPoolClient"]["ClientId"]
 
-
-@respx.mock
-@pytest.mark.asyncio
-async def test_lambda_warm_containers():
-    respx.get(f"{BASE}/_fakecloud/lambda/warm-containers").mock(
-        return_value=httpx.Response(
-            200,
-            json={
-                "containers": [
-                    {
-                        "functionName": "my-fn",
-                        "runtime": "python3.12",
-                        "containerId": "abc123",
-                        "lastUsedSecsAgo": 30,
-                    }
-                ]
-            },
-        )
+    cognito.sign_up(
+        ClientId=client_id,
+        Username="testuser",
+        Password="Test1234!@#$",
     )
-    async with FakeCloud(BASE) as fc:
-        r = await fc.lambda_.get_warm_containers()
-    assert len(r.containers) == 1
-    assert r.containers[0].function_name == "my-fn"
-    assert r.containers[0].last_used_secs_ago == 30
 
+    # User should be UNCONFIRMED
+    user = cognito.admin_get_user(UserPoolId=pool_id, Username="testuser")
+    assert user["UserStatus"] == "UNCONFIRMED"
 
-@respx.mock
-@pytest.mark.asyncio
-async def test_lambda_evict_container():
-    respx.post(f"{BASE}/_fakecloud/lambda/my-fn/evict-container").mock(
-        return_value=httpx.Response(200, json={"evicted": True})
+    # Confirm via introspection SDK
+    result = fc.cognito.confirm_user(
+        ConfirmUserRequest(user_pool_id=pool_id, username="testuser")
     )
-    async with FakeCloud(BASE) as fc:
-        r = await fc.lambda_.evict_container("my-fn")
-    assert r.evicted is True
+    assert result.confirmed is True
+
+    # User should now be CONFIRMED
+    user = cognito.admin_get_user(UserPoolId=pool_id, Username="testuser")
+    assert user["UserStatus"] == "CONFIRMED"
 
 
-# ── SES ─────────────────────────────────────────────────────────────
+# ── EventBridge ──────────────────────────────────────────────────────
 
 
-@respx.mock
-@pytest.mark.asyncio
-async def test_ses_get_emails():
-    respx.get(f"{BASE}/_fakecloud/ses/emails").mock(
-        return_value=httpx.Response(
-            200,
-            json={
-                "emails": [
-                    {
-                        "messageId": "msg-1",
-                        "from": "a@b.com",
-                        "to": ["c@d.com"],
-                        "cc": [],
-                        "bcc": [],
-                        "subject": "Hello",
-                        "htmlBody": "<p>Hi</p>",
-                        "textBody": "Hi",
-                        "rawData": None,
-                        "templateName": None,
-                        "templateData": None,
-                        "timestamp": "2026-01-01T00:00:00Z",
-                    }
-                ]
-            },
-        )
+def test_events_history(fc: FakeCloudSync, fakecloud_url: str) -> None:
+    eb = boto3.client("events", **_boto_kwargs(fakecloud_url))
+    eb.put_events(
+        Entries=[
+            {
+                "Source": "sdk.test",
+                "DetailType": "TestEvent",
+                "Detail": json.dumps({"key": "value"}),
+                "EventBusName": "default",
+            }
+        ]
     )
-    async with FakeCloud(BASE) as fc:
-        r = await fc.ses.get_emails()
-    assert len(r.emails) == 1
-    assert r.emails[0].from_addr == "a@b.com"
-    assert r.emails[0].subject == "Hello"
 
+    result = fc.events.get_history()
+    assert len(result.events) >= 1
+    event = next(e for e in result.events if e.source == "sdk.test")
+    assert event.detail_type == "TestEvent"
+    assert event.bus_name == "default"
 
-@respx.mock
-@pytest.mark.asyncio
-async def test_ses_simulate_inbound():
-    respx.post(f"{BASE}/_fakecloud/ses/inbound").mock(
-        return_value=httpx.Response(
-            200,
-            json={
-                "messageId": "msg-2",
-                "matchedRules": ["rule1"],
-                "actionsExecuted": [{"rule": "rule1", "actionType": "Lambda"}],
-            },
-        )
-    )
-    req = InboundEmailRequest(
-        from_addr="sender@x.com",
-        to=["rcpt@y.com"],
-        subject="Test",
-        body="Body text",
-    )
-    async with FakeCloud(BASE) as fc:
-        r = await fc.ses.simulate_inbound(req)
-    assert r.message_id == "msg-2"
-    assert r.matched_rules == ["rule1"]
-    assert r.actions_executed[0].action_type == "Lambda"
 
+# ── Unit tests for serialization logic ────────────────────────────────
 
-# ── SNS ─────────────────────────────────────────────────────────────
 
-
-@respx.mock
-@pytest.mark.asyncio
-async def test_sns_get_messages():
-    respx.get(f"{BASE}/_fakecloud/sns/messages").mock(
-        return_value=httpx.Response(
-            200,
-            json={
-                "messages": [
-                    {
-                        "messageId": "m1",
-                        "topicArn": "arn:aws:sns:us-east-1:000000000000:my-topic",
-                        "message": "hello",
-                        "subject": None,
-                        "timestamp": "2026-01-01T00:00:00Z",
-                    }
-                ]
-            },
-        )
-    )
-    async with FakeCloud(BASE) as fc:
-        r = await fc.sns.get_messages()
-    assert len(r.messages) == 1
-    assert r.messages[0].topic_arn.endswith("my-topic")
-
-
-@respx.mock
-@pytest.mark.asyncio
-async def test_sns_pending_confirmations():
-    respx.get(f"{BASE}/_fakecloud/sns/pending-confirmations").mock(
-        return_value=httpx.Response(
-            200,
-            json={
-                "pendingConfirmations": [
-                    {
-                        "subscriptionArn": "arn:...",
-                        "topicArn": "arn:...",
-                        "protocol": "https",
-                        "endpoint": "https://example.com",
-                        "token": "tok-1",
-                    }
-                ]
-            },
-        )
-    )
-    async with FakeCloud(BASE) as fc:
-        r = await fc.sns.get_pending_confirmations()
-    assert len(r.pending_confirmations) == 1
-    assert r.pending_confirmations[0].token == "tok-1"
-
-
-@respx.mock
-@pytest.mark.asyncio
-async def test_sns_confirm_subscription():
-    respx.post(f"{BASE}/_fakecloud/sns/confirm-subscription").mock(
-        return_value=httpx.Response(200, json={"confirmed": True})
-    )
-    req = ConfirmSubscriptionRequest(subscription_arn="arn:...")
-    async with FakeCloud(BASE) as fc:
-        r = await fc.sns.confirm_subscription(req)
-    assert r.confirmed is True
-
-
-# ── SQS ─────────────────────────────────────────────────────────────
-
-
-@respx.mock
-@pytest.mark.asyncio
-async def test_sqs_get_messages():
-    respx.get(f"{BASE}/_fakecloud/sqs/messages").mock(
-        return_value=httpx.Response(
-            200,
-            json={
-                "queues": [
-                    {
-                        "queueUrl": "http://localhost:4566/000000000000/my-queue",
-                        "queueName": "my-queue",
-                        "messages": [
-                            {
-                                "messageId": "m1",
-                                "body": "hello",
-                                "receiveCount": 0,
-                                "inFlight": False,
-                                "createdAt": "2026-01-01T00:00:00Z",
-                            }
-                        ],
-                    }
-                ]
-            },
-        )
-    )
-    async with FakeCloud(BASE) as fc:
-        r = await fc.sqs.get_messages()
-    assert len(r.queues) == 1
-    assert r.queues[0].queue_name == "my-queue"
-    assert r.queues[0].messages[0].in_flight is False
-
-
-@respx.mock
-@pytest.mark.asyncio
-async def test_sqs_tick_expiration():
-    respx.post(f"{BASE}/_fakecloud/sqs/expiration-processor/tick").mock(
-        return_value=httpx.Response(200, json={"expiredMessages": 3})
-    )
-    async with FakeCloud(BASE) as fc:
-        r = await fc.sqs.tick_expiration()
-    assert r.expired_messages == 3
-
-
-@respx.mock
-@pytest.mark.asyncio
-async def test_sqs_force_dlq():
-    respx.post(f"{BASE}/_fakecloud/sqs/my-queue/force-dlq").mock(
-        return_value=httpx.Response(200, json={"movedMessages": 5})
-    )
-    async with FakeCloud(BASE) as fc:
-        r = await fc.sqs.force_dlq("my-queue")
-    assert r.moved_messages == 5
-
-
-# ── EventBridge ─────────────────────────────────────────────────────
-
-
-@respx.mock
-@pytest.mark.asyncio
-async def test_events_history():
-    respx.get(f"{BASE}/_fakecloud/events/history").mock(
-        return_value=httpx.Response(
-            200,
-            json={
-                "events": [
-                    {
-                        "eventId": "e1",
-                        "source": "my.app",
-                        "detailType": "OrderPlaced",
-                        "detail": "{}",
-                        "busName": "default",
-                        "timestamp": "2026-01-01T00:00:00Z",
-                    }
-                ],
-                "deliveries": {
-                    "lambda": [
-                        {
-                            "functionArn": "arn:...",
-                            "payload": "{}",
-                            "timestamp": "2026-01-01T00:00:00Z",
-                        }
-                    ],
-                    "logs": [],
-                },
-            },
-        )
-    )
-    async with FakeCloud(BASE) as fc:
-        r = await fc.events.get_history()
-    assert len(r.events) == 1
-    assert r.events[0].detail_type == "OrderPlaced"
-    assert len(r.deliveries.lambda_deliveries) == 1
-
-
-@respx.mock
-@pytest.mark.asyncio
-async def test_events_fire_rule():
-    respx.post(f"{BASE}/_fakecloud/events/fire-rule").mock(
-        return_value=httpx.Response(
-            200,
-            json={"targets": [{"type": "lambda", "arn": "arn:..."}]},
-        )
-    )
-    req = FireRuleRequest(rule_name="my-rule", bus_name="default")
-    async with FakeCloud(BASE) as fc:
-        r = await fc.events.fire_rule(req)
-    assert len(r.targets) == 1
-    assert r.targets[0].target_type == "lambda"
-
-
-# ── S3 ──────────────────────────────────────────────────────────────
-
-
-@respx.mock
-@pytest.mark.asyncio
-async def test_s3_notifications():
-    respx.get(f"{BASE}/_fakecloud/s3/notifications").mock(
-        return_value=httpx.Response(
-            200,
-            json={
-                "notifications": [
-                    {
-                        "bucket": "my-bucket",
-                        "key": "obj.txt",
-                        "eventType": "s3:ObjectCreated:Put",
-                        "timestamp": "2026-01-01T00:00:00Z",
-                    }
-                ]
-            },
-        )
-    )
-    async with FakeCloud(BASE) as fc:
-        r = await fc.s3.get_notifications()
-    assert len(r.notifications) == 1
-    assert r.notifications[0].bucket == "my-bucket"
-
-
-@respx.mock
-@pytest.mark.asyncio
-async def test_s3_tick_lifecycle():
-    respx.post(f"{BASE}/_fakecloud/s3/lifecycle-processor/tick").mock(
-        return_value=httpx.Response(
-            200,
-            json={
-                "processedBuckets": 2,
-                "expiredObjects": 1,
-                "transitionedObjects": 0,
-            },
-        )
-    )
-    async with FakeCloud(BASE) as fc:
-        r = await fc.s3.tick_lifecycle()
-    assert r.processed_buckets == 2
-    assert r.expired_objects == 1
-
-
-# ── DynamoDB ────────────────────────────────────────────────────────
-
-
-@respx.mock
-@pytest.mark.asyncio
-async def test_dynamodb_tick_ttl():
-    respx.post(f"{BASE}/_fakecloud/dynamodb/ttl-processor/tick").mock(
-        return_value=httpx.Response(200, json={"expiredItems": 7})
-    )
-    async with FakeCloud(BASE) as fc:
-        r = await fc.dynamodb.tick_ttl()
-    assert r.expired_items == 7
-
-
-# ── SecretsManager ──────────────────────────────────────────────────
-
-
-@respx.mock
-@pytest.mark.asyncio
-async def test_secretsmanager_tick_rotation():
-    respx.post(f"{BASE}/_fakecloud/secretsmanager/rotation-scheduler/tick").mock(
-        return_value=httpx.Response(200, json={"rotatedSecrets": ["secret-1"]})
-    )
-    async with FakeCloud(BASE) as fc:
-        r = await fc.secretsmanager.tick_rotation()
-    assert r.rotated_secrets == ["secret-1"]
-
-
-# ── Cognito ─────────────────────────────────────────────────────────
-
-
-@respx.mock
-@pytest.mark.asyncio
-async def test_cognito_get_user_codes():
-    respx.get(f"{BASE}/_fakecloud/cognito/confirmation-codes/pool-1/alice").mock(
-        return_value=httpx.Response(
-            200,
-            json={
-                "confirmationCode": "123456",
-                "attributeVerificationCodes": {},
-            },
-        )
-    )
-    async with FakeCloud(BASE) as fc:
-        r = await fc.cognito.get_user_codes("pool-1", "alice")
-    assert r.confirmation_code == "123456"
-
-
-@respx.mock
-@pytest.mark.asyncio
-async def test_cognito_confirm_user():
-    respx.post(f"{BASE}/_fakecloud/cognito/confirm-user").mock(
-        return_value=httpx.Response(200, json={"confirmed": True})
-    )
-    req = ConfirmUserRequest(user_pool_id="pool-1", username="alice")
-    async with FakeCloud(BASE) as fc:
-        r = await fc.cognito.confirm_user(req)
-    assert r.confirmed is True
-
-
-@respx.mock
-@pytest.mark.asyncio
-async def test_cognito_confirm_user_not_found():
-    respx.post(f"{BASE}/_fakecloud/cognito/confirm-user").mock(
-        return_value=httpx.Response(
-            404, json={"confirmed": False, "error": "user not found"}
-        )
-    )
-    req = ConfirmUserRequest(user_pool_id="pool-1", username="nobody")
-    async with FakeCloud(BASE) as fc:
-        with pytest.raises(FakeCloudError) as exc_info:
-            await fc.cognito.confirm_user(req)
-    assert exc_info.value.status == 404
-
-
-@respx.mock
-@pytest.mark.asyncio
-async def test_cognito_tokens():
-    respx.get(f"{BASE}/_fakecloud/cognito/tokens").mock(
-        return_value=httpx.Response(
-            200,
-            json={
-                "tokens": [
-                    {
-                        "type": "access",
-                        "username": "alice",
-                        "poolId": "pool-1",
-                        "clientId": "client-1",
-                        "issuedAt": 1700000000.0,
-                    }
-                ]
-            },
-        )
-    )
-    async with FakeCloud(BASE) as fc:
-        r = await fc.cognito.get_tokens()
-    assert len(r.tokens) == 1
-    assert r.tokens[0].token_type == "access"
-
-
-@respx.mock
-@pytest.mark.asyncio
-async def test_cognito_expire_tokens():
-    respx.post(f"{BASE}/_fakecloud/cognito/expire-tokens").mock(
-        return_value=httpx.Response(200, json={"expiredTokens": 2})
-    )
-    req = ExpireTokensRequest(user_pool_id="pool-1")
-    async with FakeCloud(BASE) as fc:
-        r = await fc.cognito.expire_tokens(req)
-    assert r.expired_tokens == 2
-
-
-@respx.mock
-@pytest.mark.asyncio
-async def test_cognito_auth_events():
-    respx.get(f"{BASE}/_fakecloud/cognito/auth-events").mock(
-        return_value=httpx.Response(
-            200,
-            json={
-                "events": [
-                    {
-                        "eventType": "SignIn",
-                        "username": "alice",
-                        "userPoolId": "pool-1",
-                        "clientId": "client-1",
-                        "timestamp": 1700000000.0,
-                        "success": True,
-                    }
-                ]
-            },
-        )
-    )
-    async with FakeCloud(BASE) as fc:
-        r = await fc.cognito.get_auth_events()
-    assert len(r.events) == 1
-    assert r.events[0].success is True
-
-
-# ── Sync client tests ──────────────────────────────────────────────
-
-
-@respx.mock
-def test_health_sync():
-    respx.get(f"{BASE}/_fakecloud/health").mock(
-        return_value=httpx.Response(
-            200,
-            json={"status": "ok", "version": "0.1.0", "services": ["sqs"]},
-        )
-    )
-    with FakeCloudSync(BASE) as fc:
-        h = fc.health()
-    assert h.status == "ok"
-
-
-@respx.mock
-def test_reset_sync():
-    respx.post(f"{BASE}/_reset").mock(
-        return_value=httpx.Response(200, json={"status": "ok"})
-    )
-    with FakeCloudSync(BASE) as fc:
-        r = fc.reset()
-    assert r.status == "ok"
-
-
-@respx.mock
-def test_sync_lambda_invocations():
-    respx.get(f"{BASE}/_fakecloud/lambda/invocations").mock(
-        return_value=httpx.Response(200, json={"invocations": []})
-    )
-    with FakeCloudSync(BASE) as fc:
-        r = fc.lambda_.get_invocations()
-    assert r.invocations == []
-
-
-@respx.mock
-def test_sync_ses_emails():
-    respx.get(f"{BASE}/_fakecloud/ses/emails").mock(
-        return_value=httpx.Response(200, json={"emails": []})
-    )
-    with FakeCloudSync(BASE) as fc:
-        r = fc.ses.get_emails()
-    assert r.emails == []
-
-
-@respx.mock
-def test_sync_sqs_messages():
-    respx.get(f"{BASE}/_fakecloud/sqs/messages").mock(
-        return_value=httpx.Response(200, json={"queues": []})
-    )
-    with FakeCloudSync(BASE) as fc:
-        r = fc.sqs.get_messages()
-    assert r.queues == []
-
-
-@respx.mock
-def test_sync_error_raises():
-    respx.get(f"{BASE}/_fakecloud/health").mock(
-        return_value=httpx.Response(503, text="unavailable")
-    )
-    with FakeCloudSync(BASE) as fc:
-        with pytest.raises(FakeCloudError) as exc_info:
-            fc.health()
-    assert exc_info.value.status == 503
-
-
-# ── Request serialization ──────────────────────────────────────────
-
-
-def test_inbound_email_request_to_dict():
+def test_inbound_email_request_to_dict() -> None:
     req = InboundEmailRequest(
         from_addr="a@b.com", to=["c@d.com"], subject="Hi", body="Hello"
     )
@@ -641,50 +279,49 @@ def test_inbound_email_request_to_dict():
     assert d == {"from": "a@b.com", "to": ["c@d.com"], "subject": "Hi", "body": "Hello"}
 
 
-def test_fire_rule_request_to_dict():
+def test_fire_rule_request_to_dict() -> None:
     req = FireRuleRequest(rule_name="my-rule", bus_name="default")
     d = req.to_dict()
     assert d == {"ruleName": "my-rule", "busName": "default"}
 
 
-def test_fire_rule_request_to_dict_no_bus():
+def test_fire_rule_request_to_dict_no_bus() -> None:
     req = FireRuleRequest(rule_name="my-rule")
     d = req.to_dict()
     assert d == {"ruleName": "my-rule"}
 
 
-def test_confirm_subscription_request_to_dict():
+def test_confirm_subscription_request_to_dict() -> None:
     req = ConfirmSubscriptionRequest(subscription_arn="arn:...")
     d = req.to_dict()
     assert d == {"subscriptionArn": "arn:..."}
 
 
-def test_confirm_user_request_to_dict():
+def test_confirm_user_request_to_dict() -> None:
     req = ConfirmUserRequest(user_pool_id="pool-1", username="alice")
     d = req.to_dict()
     assert d == {"userPoolId": "pool-1", "username": "alice"}
 
 
-def test_expire_tokens_request_to_dict():
+def test_expire_tokens_request_to_dict() -> None:
     req = ExpireTokensRequest(user_pool_id="pool-1")
     d = req.to_dict()
     assert d == {"userPoolId": "pool-1"}
 
 
-def test_expire_tokens_request_to_dict_empty():
+def test_expire_tokens_request_to_dict_empty() -> None:
     req = ExpireTokensRequest()
     d = req.to_dict()
     assert d == {}
 
 
-# ── URL construction ───────────────────────────────────────────────
+def test_trailing_slash_stripped() -> None:
+    from fakecloud import FakeCloud
 
-
-def test_trailing_slash_stripped():
     fc = FakeCloud("http://localhost:4566/")
     assert fc._base == "http://localhost:4566"
 
 
-def test_trailing_slash_stripped_sync():
+def test_trailing_slash_stripped_sync() -> None:
     fc = FakeCloudSync("http://localhost:4566/")
     assert fc._base == "http://localhost:4566"

@@ -40,8 +40,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build fakecloud
+        run: cargo build --release
+        working-directory: .
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - run: pip install '.[dev]'
-      - run: pytest
+      - run: pytest -v
