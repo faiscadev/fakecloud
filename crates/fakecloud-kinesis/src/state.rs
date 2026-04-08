@@ -81,6 +81,8 @@ impl KinesisState {
         shard_id: &str,
         next_record_index: usize,
     ) -> String {
+        self.iterators
+            .retain(|_, lease| lease.expires_at >= Utc::now());
         let token = format!(
             "{}:{}:{}:{}:{}",
             stream_name,
