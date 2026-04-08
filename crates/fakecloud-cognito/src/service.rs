@@ -455,9 +455,9 @@ impl CognitoService {
                 AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
                     "InvalidParameterException",
-                "ClientId is required",
-            )
-        })?;
+                    "ClientId is required",
+                )
+            })?;
 
         let state = self.state.read();
 
