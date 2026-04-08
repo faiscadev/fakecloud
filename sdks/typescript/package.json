@@ -10,6 +10,13 @@
     "lint": "eslint . && prettier --check ."
   },
   "devDependencies": {
+    "@aws-sdk/client-cognito-identity-provider": "^3.750.0",
+    "@aws-sdk/client-dynamodb": "^3.750.0",
+    "@aws-sdk/client-eventbridge": "^3.750.0",
+    "@aws-sdk/client-s3": "^3.750.0",
+    "@aws-sdk/client-sesv2": "^3.750.0",
+    "@aws-sdk/client-sns": "^3.750.0",
+    "@aws-sdk/client-sqs": "^3.750.0",
     "@eslint/js": "^9.24.0",
     "eslint": "^9.24.0",
     "prettier": "^3.5.0",
