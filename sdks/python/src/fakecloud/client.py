@@ -253,11 +253,8 @@ class CognitoClient:
             f"{self._base}/_fakecloud/cognito/confirm-user",
             json=req.to_dict(),
         )
-        data = resp.json()
-        if resp.status_code == 404:
-            raise FakeCloudError(404, data.get("error", ""))
         _check(resp)
-        return ConfirmUserResponse.from_dict(data)
+        return ConfirmUserResponse.from_dict(resp.json())
 
     async def get_tokens(self) -> TokensResponse:
         resp = await self._client.get(f"{self._base}/_fakecloud/cognito/tokens")
@@ -461,11 +458,8 @@ class _SyncCognitoClient:
             f"{self._base}/_fakecloud/cognito/confirm-user",
             json=req.to_dict(),
         )
-        data = resp.json()
-        if resp.status_code == 404:
-            raise FakeCloudError(404, data.get("error", ""))
         _check(resp)
-        return ConfirmUserResponse.from_dict(data)
+        return ConfirmUserResponse.from_dict(resp.json())
 
     def get_tokens(self) -> TokensResponse:
         resp = self._client.get(f"{self._base}/_fakecloud/cognito/tokens")
