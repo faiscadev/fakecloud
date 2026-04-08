@@ -2258,3 +2258,199 @@ async fn cognito_associate_verify_software_token() {
         Some(&aws_sdk_cognitoidentityprovider::types::VerifySoftwareTokenResponseType::Success),
     );
 }
+
+// ---------------------------------------------------------------------------
+// Identity Providers
+// ---------------------------------------------------------------------------
+
+#[test_action("cognito-idp", "CreateIdentityProvider", checksum = "59c9c181")]
+#[tokio::test]
+async fn cognito_create_identity_provider() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("idp-pool")
+        .send()
+        .await
+        .unwrap();
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    let resp = client
+        .create_identity_provider()
+        .user_pool_id(&pool_id)
+        .provider_name("TestOIDC")
+        .provider_type(aws_sdk_cognitoidentityprovider::types::IdentityProviderTypeType::Oidc)
+        .provider_details("client_id", "test-client")
+        .provider_details("authorize_scopes", "openid")
+        .send()
+        .await
+        .unwrap();
+    let idp = resp.identity_provider().unwrap();
+    assert_eq!(idp.provider_name().unwrap(), "TestOIDC");
+}
+
+#[test_action("cognito-idp", "DescribeIdentityProvider", checksum = "94a4d7f7")]
+#[tokio::test]
+async fn cognito_describe_identity_provider() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("descidp-pool")
+        .send()
+        .await
+        .unwrap();
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    client
+        .create_identity_provider()
+        .user_pool_id(&pool_id)
+        .provider_name("DescOIDC")
+        .provider_type(aws_sdk_cognitoidentityprovider::types::IdentityProviderTypeType::Oidc)
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .describe_identity_provider()
+        .user_pool_id(&pool_id)
+        .provider_name("DescOIDC")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.identity_provider().unwrap().provider_name().unwrap(),
+        "DescOIDC"
+    );
+}
+
+#[test_action("cognito-idp", "UpdateIdentityProvider", checksum = "7addfa0c")]
+#[tokio::test]
+async fn cognito_update_identity_provider() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("updidp-pool")
+        .send()
+        .await
+        .unwrap();
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    client
+        .create_identity_provider()
+        .user_pool_id(&pool_id)
+        .provider_name("UpdOIDC")
+        .provider_type(aws_sdk_cognitoidentityprovider::types::IdentityProviderTypeType::Oidc)
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .update_identity_provider()
+        .user_pool_id(&pool_id)
+        .provider_name("UpdOIDC")
+        .provider_details("client_id", "updated-client")
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .describe_identity_provider()
+        .user_pool_id(&pool_id)
+        .provider_name("UpdOIDC")
+        .send()
+        .await
+        .unwrap();
+    let idp = resp.identity_provider().unwrap();
+    assert_eq!(
+        idp.provider_details().unwrap().get("client_id").map(|v| v.as_str()),
+        Some("updated-client")
+    );
+}
+
+#[test_action("cognito-idp", "DeleteIdentityProvider", checksum = "9d54dc37")]
+#[tokio::test]
+async fn cognito_delete_identity_provider() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("delidp-pool")
+        .send()
+        .await
+        .unwrap();
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    client
+        .create_identity_provider()
+        .user_pool_id(&pool_id)
+        .provider_name("DelOIDC")
+        .provider_type(aws_sdk_cognitoidentityprovider::types::IdentityProviderTypeType::Oidc)
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .delete_identity_provider()
+        .user_pool_id(&pool_id)
+        .provider_name("DelOIDC")
+        .send()
+        .await
+        .unwrap();
+
+    let err = client
+        .describe_identity_provider()
+        .user_pool_id(&pool_id)
+        .provider_name("DelOIDC")
+        .send()
+        .await
+        .unwrap_err();
+    assert!(err.into_service_error().is_resource_not_found_exception());
+}
+
+#[test_action("cognito-idp", "ListIdentityProviders", checksum = "b9551ba1")]
+#[tokio::test]
+async fn cognito_list_identity_providers() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("listidp-pool")
+        .send()
+        .await
+        .unwrap();
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    client
+        .create_identity_provider()
+        .user_pool_id(&pool_id)
+        .provider_name("IDP1")
+        .provider_type(aws_sdk_cognitoidentityprovider::types::IdentityProviderTypeType::Oidc)
+        .send()
+        .await
+        .unwrap();
+    client
+        .create_identity_provider()
+        .user_pool_id(&pool_id)
+        .provider_name("IDP2")
+        .provider_type(aws_sdk_cognitoidentityprovider::types::IdentityProviderTypeType::Saml)
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .list_identity_providers()
+        .user_pool_id(&pool_id)
+        .max_results(10)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.providers().len(), 2);
+}
