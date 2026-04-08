@@ -1,0 +1,30 @@
+name: SDK TypeScript
+
+on:
+  push:
+    paths:
+      - "sdks/typescript/**"
+  pull_request:
+    paths:
+      - "sdks/typescript/**"
+
+defaults:
+  run:
+    working-directory: sdks/typescript
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: sdks/typescript/package-lock.json
+
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run build
+      - run: npm test

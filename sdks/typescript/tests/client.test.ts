@@ -39,9 +39,7 @@ describe("FakeCloud", () => {
     const fc = new FakeCloud();
     mockFetch({ status: "ok", version: "0.1.0", services: [] });
     fc.health();
-    expect(lastFetchCall().url).toBe(
-      "http://localhost:4566/_fakecloud/health",
-    );
+    expect(lastFetchCall().url).toBe("http://localhost:4566/_fakecloud/health");
   });
 
   it("health() returns parsed response", async () => {
@@ -84,9 +82,7 @@ describe("LambdaClient", () => {
     const fc = new FakeCloud(BASE);
     mockFetch({ invocations: [] });
     const result = await fc.lambda.getInvocations();
-    expect(lastFetchCall().url).toBe(
-      `${BASE}/_fakecloud/lambda/invocations`,
-    );
+    expect(lastFetchCall().url).toBe(`${BASE}/_fakecloud/lambda/invocations`);
     expect(result.invocations).toEqual([]);
   });
 
@@ -236,9 +232,7 @@ describe("S3Client", () => {
     const fc = new FakeCloud(BASE);
     mockFetch({ notifications: [] });
     await fc.s3.getNotifications();
-    expect(lastFetchCall().url).toBe(
-      `${BASE}/_fakecloud/s3/notifications`,
-    );
+    expect(lastFetchCall().url).toBe(`${BASE}/_fakecloud/s3/notifications`);
   });
 
   it("tickLifecycle() sends POST", async () => {
@@ -345,8 +339,6 @@ describe("CognitoClient", () => {
     const fc = new FakeCloud(BASE);
     mockFetch({ events: [] });
     await fc.cognito.getAuthEvents();
-    expect(lastFetchCall().url).toBe(
-      `${BASE}/_fakecloud/cognito/auth-events`,
-    );
+    expect(lastFetchCall().url).toBe(`${BASE}/_fakecloud/cognito/auth-events`);
   });
 });

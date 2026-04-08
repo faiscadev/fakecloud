@@ -265,9 +265,7 @@ export class CognitoClient {
   }
 
   async getAuthEvents(): Promise<AuthEventsResponse> {
-    const resp = await fetch(
-      `${this.baseUrl}/_fakecloud/cognito/auth-events`,
-    );
+    const resp = await fetch(`${this.baseUrl}/_fakecloud/cognito/auth-events`);
     return parse(resp);
   }
 }
