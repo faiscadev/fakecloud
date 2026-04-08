@@ -2688,3 +2688,229 @@ async fn cognito_update_delete_domain() {
     // AWS returns empty description for non-existent domains
     assert!(resp.domain_description().unwrap().user_pool_id().is_none());
 }
+
+// ---------------------------------------------------------------------------
+// Device Management
+// ---------------------------------------------------------------------------
+
+#[test_action("cognito-idp", "ConfirmDevice", checksum = "d2285f4d")]
+#[test_action("cognito-idp", "AdminGetDevice", checksum = "b7ff3b4f")]
+#[test_action("cognito-idp", "AdminListDevices", checksum = "52c1799f")]
+#[tokio::test]
+async fn cognito_device_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+    let (pool_id, _client_id, access_token) =
+        setup_authenticated_user(&client, "device-pool").await;
+
+    client
+        .confirm_device()
+        .access_token(&access_token)
+        .device_key("device-key-1")
+        .send()
+        .await
+        .unwrap();
+
+    let dev = client
+        .admin_get_device()
+        .user_pool_id(&pool_id)
+        .username("selfuser")
+        .device_key("device-key-1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(dev.device().unwrap().device_key().unwrap(), "device-key-1");
+
+    let list = client
+        .admin_list_devices()
+        .user_pool_id(&pool_id)
+        .username("selfuser")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(list.devices().len(), 1);
+}
+
+#[test_action("cognito-idp", "AdminUpdateDeviceStatus", checksum = "4c7d9838")]
+#[test_action("cognito-idp", "AdminForgetDevice", checksum = "3383fe72")]
+#[tokio::test]
+async fn cognito_admin_update_forget_device() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+    let (pool_id, _client_id, access_token) =
+        setup_authenticated_user(&client, "devupd-pool").await;
+
+    client
+        .confirm_device()
+        .access_token(&access_token)
+        .device_key("dev-2")
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .admin_update_device_status()
+        .user_pool_id(&pool_id)
+        .username("selfuser")
+        .device_key("dev-2")
+        .device_remembered_status(
+            aws_sdk_cognitoidentityprovider::types::DeviceRememberedStatusType::Remembered,
+        )
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .admin_forget_device()
+        .user_pool_id(&pool_id)
+        .username("selfuser")
+        .device_key("dev-2")
+        .send()
+        .await
+        .unwrap();
+
+    let list = client
+        .admin_list_devices()
+        .user_pool_id(&pool_id)
+        .username("selfuser")
+        .send()
+        .await
+        .unwrap();
+    assert!(list.devices().is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// Tags
+// ---------------------------------------------------------------------------
+
+#[test_action("cognito-idp", "TagResource", checksum = "b19b19ae")]
+#[test_action("cognito-idp", "UntagResource", checksum = "3bd5fe69")]
+#[test_action("cognito-idp", "ListTagsForResource", checksum = "a72e0056")]
+#[tokio::test]
+async fn cognito_tag_untag_list() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("tag-pool")
+        .send()
+        .await
+        .unwrap();
+    let pool_arn = pool.user_pool().unwrap().arn().unwrap().to_string();
+
+    client
+        .tag_resource()
+        .resource_arn(&pool_arn)
+        .tags("env", "test")
+        .tags("team", "platform")
+        .send()
+        .await
+        .unwrap();
+
+    let tags = client
+        .list_tags_for_resource()
+        .resource_arn(&pool_arn)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(tags.tags().unwrap().get("env"), Some(&"test".to_string()));
+
+    client
+        .untag_resource()
+        .resource_arn(&pool_arn)
+        .tag_keys("env")
+        .send()
+        .await
+        .unwrap();
+
+    let tags2 = client
+        .list_tags_for_resource()
+        .resource_arn(&pool_arn)
+        .send()
+        .await
+        .unwrap();
+    assert!(tags2.tags().unwrap().get("env").is_none());
+    assert_eq!(
+        tags2.tags().unwrap().get("team"),
+        Some(&"platform".to_string())
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Import Jobs
+// ---------------------------------------------------------------------------
+
+#[test_action("cognito-idp", "CreateUserImportJob", checksum = "6cf3fba2")]
+#[test_action("cognito-idp", "DescribeUserImportJob", checksum = "1c8e4fe5")]
+#[test_action("cognito-idp", "ListUserImportJobs", checksum = "f4ef28a5")]
+#[tokio::test]
+async fn cognito_import_jobs() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("import-pool")
+        .send()
+        .await
+        .unwrap();
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    let resp = client
+        .create_user_import_job()
+        .user_pool_id(&pool_id)
+        .job_name("test-import")
+        .cloud_watch_logs_role_arn("arn:aws:iam::123456789012:role/CognitoCloudWatchRole")
+        .send()
+        .await
+        .unwrap();
+    let job = resp.user_import_job().unwrap();
+    assert_eq!(job.job_name().unwrap(), "test-import");
+    let job_id = job.job_id().unwrap().to_string();
+
+    let desc = client
+        .describe_user_import_job()
+        .user_pool_id(&pool_id)
+        .job_id(&job_id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        desc.user_import_job().unwrap().job_name().unwrap(),
+        "test-import"
+    );
+
+    let list = client
+        .list_user_import_jobs()
+        .user_pool_id(&pool_id)
+        .max_results(10)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(list.user_import_jobs().len(), 1);
+}
+
+#[test_action("cognito-idp", "GetCSVHeader", checksum = "c4b2b3d1")]
+#[tokio::test]
+async fn cognito_get_csv_header() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("csv-pool")
+        .send()
+        .await
+        .unwrap();
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    let resp = client
+        .get_csv_header()
+        .user_pool_id(&pool_id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.user_pool_id().unwrap(), pool_id);
+    assert!(!resp.csv_header().is_empty());
+}
