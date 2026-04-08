@@ -4777,6 +4777,9 @@ fn device_to_json(device: &Device) -> Value {
     if let Some(auth_date) = device.device_last_authenticated_date {
         obj["DeviceLastAuthenticatedDate"] = json!(auth_date.timestamp() as f64);
     }
+    if let Some(ref status) = device.device_remembered_status {
+        obj["DeviceRememberedStatus"] = json!(status);
+    }
     obj
 }
 
