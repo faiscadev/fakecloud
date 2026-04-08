@@ -3,10 +3,10 @@ use helpers::TestServer;
 
 use aws_sdk_cognitoidentityprovider::types::{
     AccountRecoverySettingType, AttributeType, ChallengeNameType, DeliveryMediumType,
-    DomainStatusType, ExplicitAuthFlowsType, IdentityProviderTypeType,
-    PasswordPolicyType, RecoveryOptionNameType, RecoveryOptionType, ResourceServerScopeType,
-    SmsMfaSettingsType, SoftwareTokenMfaConfigType, SoftwareTokenMfaSettingsType, UserPoolMfaType,
-    UserPoolPolicyType, UserStatusType,
+    DomainStatusType, ExplicitAuthFlowsType, IdentityProviderTypeType, PasswordPolicyType,
+    RecoveryOptionNameType, RecoveryOptionType, ResourceServerScopeType, SmsMfaSettingsType,
+    SoftwareTokenMfaConfigType, SoftwareTokenMfaSettingsType, UserPoolMfaType, UserPoolPolicyType,
+    UserStatusType,
 };
 
 #[tokio::test]
