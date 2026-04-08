@@ -1707,7 +1707,7 @@ impl CognitoService {
             )
         };
 
-        // PreAuthentication_Authentication trigger (synchronous)
+        // PreAuthentication_Authentication trigger (synchronous — can reject auth)
         if let Some(ref ctx) = self.delivery_ctx {
             if let Some(function_arn) = triggers::get_trigger_arn(
                 &self.state,
@@ -1723,7 +1723,16 @@ impl CognitoService {
                     &region,
                     &account_id,
                 );
-                let _ = triggers::invoke_trigger(ctx, &function_arn, &event).await;
+                if triggers::invoke_trigger(ctx, &function_arn, &event)
+                    .await
+                    .is_none()
+                {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "NotAuthorizedException",
+                        "PreAuthentication Lambda trigger rejected the request.",
+                    ));
+                }
             }
         }
 
@@ -1931,7 +1940,7 @@ impl CognitoService {
                 let username_owned = username.to_string();
                 let client_id_owned = client_id.to_string();
 
-                // PreAuthentication_Authentication trigger (synchronous)
+                // PreAuthentication_Authentication trigger (synchronous — can reject auth)
                 if let Some(ref ctx) = self.delivery_ctx {
                     if let Some(function_arn) = triggers::get_trigger_arn(
                         &self.state,
@@ -1947,7 +1956,16 @@ impl CognitoService {
                             &region,
                             &account_id,
                         );
-                        let _ = triggers::invoke_trigger(ctx, &function_arn, &event).await;
+                        if triggers::invoke_trigger(ctx, &function_arn, &event)
+                            .await
+                            .is_none()
+                        {
+                            return Err(AwsServiceError::aws_error(
+                                StatusCode::BAD_REQUEST,
+                                "NotAuthorizedException",
+                                "PreAuthentication Lambda trigger rejected the request.",
+                            ));
+                        }
                     }
                 }
 
