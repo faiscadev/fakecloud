@@ -5,3 +5,7 @@ examples/terraform/.terraform.lock.hcl
 examples/terraform/terraform.tfstate*
 .claude/worktrees/
 website/public/
+sdks/python/.venv/
+sdks/python/.pytest_cache/
+__pycache__/
+*.egg-info/
