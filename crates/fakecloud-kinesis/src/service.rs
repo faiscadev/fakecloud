@@ -68,6 +68,8 @@ impl KinesisService {
         if shard_count <= 0 {
             return Err(invalid_argument("ShardCount must be greater than zero"));
         }
+        let shard_count = i32::try_from(shard_count)
+            .map_err(|_| invalid_argument("ShardCount must be less than or equal to 2147483647"))?;
 
         let mut state = self.state.write();
         if state.streams.contains_key(stream_name) {
@@ -89,8 +91,8 @@ impl KinesisService {
             retention_period_hours: 24,
             stream_mode: "PROVISIONED".to_string(),
             encryption_type: "NONE".to_string(),
-            shard_count: shard_count as i32,
-            open_shard_count: shard_count as i32,
+            shard_count,
+            open_shard_count: shard_count,
             tags: std::collections::HashMap::new(),
         };
         state.streams.insert(stream_name.to_string(), stream);
@@ -163,10 +165,13 @@ impl KinesisService {
                     .map(|idx| idx + 1)
             })
             .unwrap_or(0);
-        let selected: Vec<String> = names.into_iter().skip(start).take(limit as usize).collect();
+        let remaining = names.len().saturating_sub(start);
+        let page_len = remaining.min(limit as usize);
+        let has_more_streams = remaining > page_len;
+        let selected: Vec<String> = names.into_iter().skip(start).take(page_len).collect();
 
         Ok(AwsResponse::ok_json(json!({
-            "HasMoreStreams": false,
+            "HasMoreStreams": has_more_streams,
             "StreamNames": selected,
             "StreamSummaries": []
         })))
@@ -178,7 +183,7 @@ impl KinesisService {
 
         let mut state = self.state.write();
         if state.streams.remove(&stream_name).is_none() {
-            return Err(stream_not_found(&stream_name));
+            return Err(stream_not_found(&state.account_id, &stream_name));
         }
 
         Ok(AwsResponse::ok_json(json!({})))
@@ -188,10 +193,11 @@ impl KinesisService {
         let body = request.json_body();
         let mut state = self.state.write();
         let stream_name = resolve_stream_name(&state, &body)?;
+        let account_id = state.account_id.clone();
         let stream = state
             .streams
             .get_mut(&stream_name)
-            .ok_or_else(|| stream_not_found(&stream_name))?;
+            .ok_or_else(|| stream_not_found(&account_id, &stream_name))?;
 
         let tags = body["Tags"]
             .as_object()
@@ -229,10 +235,11 @@ impl KinesisService {
         let body = request.json_body();
         let mut state = self.state.write();
         let stream_name = resolve_stream_name(&state, &body)?;
+        let account_id = state.account_id.clone();
         let stream = state
             .streams
             .get_mut(&stream_name)
-            .ok_or_else(|| stream_not_found(&stream_name))?;
+            .ok_or_else(|| stream_not_found(&account_id, &stream_name))?;
 
         let tag_keys = body["TagKeys"]
             .as_array()
@@ -275,10 +282,11 @@ impl KinesisService {
 
         let mut state = self.state.write();
         let stream_name = resolve_stream_name(&state, &body)?;
+        let account_id = state.account_id.clone();
         let stream = state
             .streams
             .get_mut(&stream_name)
-            .ok_or_else(|| stream_not_found(&stream_name))?;
+            .ok_or_else(|| stream_not_found(&account_id, &stream_name))?;
 
         if increasing && hours <= stream.retention_period_hours as i64 {
             return Err(invalid_argument(
@@ -301,7 +309,7 @@ impl crate::state::KinesisState {
         let stream_name = resolve_stream_name(self, body)?;
         self.streams
             .get(&stream_name)
-            .ok_or_else(|| stream_not_found(&stream_name))
+            .ok_or_else(|| stream_not_found(&self.account_id, &stream_name))
     }
 }
 
@@ -328,7 +336,7 @@ fn resolve_stream_name(
             if state.streams.contains_key(stream_name) {
                 return Ok(stream_name.to_string());
             }
-            return Err(stream_not_found(stream_name));
+            return Err(stream_not_found(&state.account_id, stream_name));
         }
     }
 
@@ -356,11 +364,11 @@ fn invalid_argument(message: impl Into<String>) -> AwsServiceError {
     AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "InvalidArgumentException", message)
 }
 
-fn stream_not_found(stream_name: &str) -> AwsServiceError {
+fn stream_not_found(account_id: &str, stream_name: &str) -> AwsServiceError {
     AwsServiceError::aws_error(
         StatusCode::BAD_REQUEST,
         "ResourceNotFoundException",
-        format!("Stream {stream_name} under account 123456789012 not found."),
+        format!("Stream {stream_name} under account {account_id} not found."),
     )
 }
 

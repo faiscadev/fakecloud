@@ -56,6 +56,13 @@ async fn kinesis_stream_lifecycle() {
         .send()
         .await
         .unwrap();
+
+    let deleted = client
+        .describe_stream()
+        .stream_name("conf-stream")
+        .send()
+        .await;
+    assert!(deleted.is_err());
 }
 
 #[test_action("kinesis", "AddTagsToStream", checksum = "1864db43")]
@@ -106,6 +113,20 @@ async fn kinesis_tags_and_retention() {
         .await
         .unwrap();
 
+    let summary = client
+        .describe_stream_summary()
+        .stream_name("conf-tags")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        summary
+            .stream_description_summary()
+            .unwrap()
+            .retention_period_hours(),
+        24
+    );
+
     client
         .remove_tags_from_stream()
         .stream_name("conf-tags")
@@ -113,4 +134,12 @@ async fn kinesis_tags_and_retention() {
         .send()
         .await
         .unwrap();
+
+    let tags = client
+        .list_tags_for_stream()
+        .stream_name("conf-tags")
+        .send()
+        .await
+        .unwrap();
+    assert!(tags.tags().is_empty());
 }
