@@ -143,6 +143,7 @@ jobs:
 
           # Layer 1: no internal deps
           publish fakecloud-aws
+          publish fakecloud-sdk
 
           # Layer 2: depends on fakecloud-aws
           publish fakecloud-core
@@ -167,3 +168,92 @@ jobs:
           publish fakecloud
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  publish-npm:
+    name: Publish npm
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: https://registry.npmjs.org
+
+      - name: Verify tag matches package.json version
+        working-directory: sdks/typescript
+        run: |
+          TAG="${GITHUB_REF#refs/tags/v}"
+          VERSION=$(node -p "require('./package.json').version")
+          if [ "$TAG" != "$VERSION" ]; then
+            echo "::error::Tag v${TAG} does not match package.json version ${VERSION}"
+            exit 1
+          fi
+          echo "Tag v${TAG} matches package.json version ${VERSION}"
+
+      - name: Build
+        working-directory: sdks/typescript
+        run: |
+          npm ci
+          npm run build
+
+      - name: Publish
+        working-directory: sdks/typescript
+        run: npm publish --access public || { echo "Package may already be published"; npm view fakecloud@"$(node -p "require('./package.json').version")" version && echo "Already published, skipping" || exit 1; }
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  publish-pypi:
+    name: Publish PyPI
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Verify tag matches pyproject.toml version
+        working-directory: sdks/python
+        run: |
+          TAG="${GITHUB_REF#refs/tags/v}"
+          VERSION=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          if [ "$TAG" != "$VERSION" ]; then
+            echo "::error::Tag v${TAG} does not match pyproject.toml version ${VERSION}"
+            exit 1
+          fi
+          echo "Tag v${TAG} matches pyproject.toml version ${VERSION}"
+
+      - name: Build
+        working-directory: sdks/python
+        run: |
+          pip install build twine
+          python -m build
+
+      - name: Publish
+        working-directory: sdks/python
+        run: twine upload dist/* || { echo "Package may already be published"; pip install fakecloud=="${GITHUB_REF#refs/tags/v}" --dry-run 2>/dev/null && echo "Already published, skipping" || exit 1; }
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
+
+  publish-go:
+    name: Publish Go module
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create and push Go module tag
+        run: |
+          TAG="${GITHUB_REF#refs/tags/v}"
+          GO_TAG="sdks/go/v${TAG}"
+          # Check if tag already exists on remote
+          if git ls-remote --tags origin "refs/tags/${GO_TAG}" | grep -q "${GO_TAG}"; then
+            echo "Tag ${GO_TAG} already exists, skipping"
+            exit 0
+          fi
+          git tag "${GO_TAG}" "${GITHUB_SHA}"
+          git push origin "${GO_TAG}"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
