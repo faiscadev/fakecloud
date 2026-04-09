@@ -21,27 +21,27 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Build server
-        run: cargo build --bin fakecloud
+        run: cargo build --release --bin fakecloud
 
       - name: Run conformance integration tests
         run: cargo test -p fakecloud-conformance --tests
 
       - name: Build conformance tool
-        run: cargo build -p fakecloud-conformance
+        run: cargo build --release -p fakecloud-conformance
 
       - name: Check conformance (fails if coverage drops)
         id: check
         run: |
           set -o pipefail
-          cargo run -p fakecloud-conformance -- check 2>&1 | tee conformance-report.txt
+          ./target/release/fakecloud-conformance check 2>&1 | tee conformance-report.txt
 
       - name: Audit handwritten tests (fails if implemented action lacks a test)
         if: always() && steps.check.outcome != 'skipped'
-        run: cargo run -p fakecloud-conformance -- audit
+        run: ./target/release/fakecloud-conformance audit
 
       - name: Generate JSON report
         if: always()
-        run: cargo run -p fakecloud-conformance -- run --format json > conformance-report.json 2>/dev/null || true
+        run: ./target/release/fakecloud-conformance run --format json > conformance-report.json 2>/dev/null || true
 
       - name: Post summary
         if: always()

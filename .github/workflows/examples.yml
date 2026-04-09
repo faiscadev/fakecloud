@@ -18,11 +18,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Build server
-        run: cargo build --bin fakecloud
+        run: cargo build --release --bin fakecloud
 
       - name: Start FakeCloud
         run: |
-          cargo run --bin fakecloud &
+          ./target/release/fakecloud &
           for i in $(seq 1 30); do
             curl -sf http://localhost:4566/_fakecloud/health && exit 0
             sleep 1

@@ -75,7 +75,7 @@ jobs:
           fi
 
       - name: Build server
-        run: cargo build --bin fakecloud
+        run: cargo build --release --bin fakecloud
 
       - name: Run nextest partition
         run: |
