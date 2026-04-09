@@ -111,6 +111,10 @@ impl TestServer {
         aws_sdk_rds::Client::new(&self.aws_config().await)
     }
 
+    pub async fn elasticache_client(&self) -> aws_sdk_elasticache::Client {
+        aws_sdk_elasticache::Client::new(&self.aws_config().await)
+    }
+
     pub async fn cloudformation_client(&self) -> aws_sdk_cloudformation::Client {
         aws_sdk_cloudformation::Client::new(&self.aws_config().await)
     }
