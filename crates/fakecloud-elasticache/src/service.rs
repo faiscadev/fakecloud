@@ -390,8 +390,9 @@ impl ElastiCacheService {
                 format!("Invalid value for Engine: {engine}. Supported engines: redis, valkey"),
             ));
         }
+        let default_version = if engine == "valkey" { "8.0" } else { "7.1" };
         let engine_version =
-            optional_param(request, "EngineVersion").unwrap_or_else(|| "7.1".to_string());
+            optional_param(request, "EngineVersion").unwrap_or_else(|| default_version.to_string());
         let cache_node_type = optional_param(request, "CacheNodeType")
             .unwrap_or_else(|| "cache.t3.micro".to_string());
         let num_cache_clusters = match optional_param(request, "NumCacheClusters") {
