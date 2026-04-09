@@ -15,6 +15,7 @@ use crate::state::{
 
 const ELASTICACHE_NS: &str = "http://elasticache.amazonaws.com/doc/2015-02-02/";
 const SUPPORTED_ACTIONS: &[&str] = &[
+    "AddTagsToResource",
     "CreateCacheSubnetGroup",
     "CreateReplicationGroup",
     "DeleteCacheSubnetGroup",
@@ -24,7 +25,9 @@ const SUPPORTED_ACTIONS: &[&str] = &[
     "DescribeCacheSubnetGroups",
     "DescribeEngineDefaultParameters",
     "DescribeReplicationGroups",
+    "ListTagsForResource",
     "ModifyCacheSubnetGroup",
+    "RemoveTagsFromResource",
 ];
 
 pub struct ElastiCacheService {
@@ -54,6 +57,7 @@ impl AwsService for ElastiCacheService {
 
     async fn handle(&self, request: AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         match request.action.as_str() {
+            "AddTagsToResource" => self.add_tags_to_resource(&request),
             "CreateCacheSubnetGroup" => self.create_cache_subnet_group(&request),
             "CreateReplicationGroup" => self.create_replication_group(&request).await,
             "DeleteCacheSubnetGroup" => self.delete_cache_subnet_group(&request),
@@ -63,7 +67,9 @@ impl AwsService for ElastiCacheService {
             "DescribeCacheSubnetGroups" => self.describe_cache_subnet_groups(&request),
             "DescribeEngineDefaultParameters" => self.describe_engine_default_parameters(&request),
             "DescribeReplicationGroups" => self.describe_replication_groups(&request),
+            "ListTagsForResource" => self.list_tags_for_resource(&request),
             "ModifyCacheSubnetGroup" => self.modify_cache_subnet_group(&request),
+            "RemoveTagsFromResource" => self.remove_tags_from_resource(&request),
             _ => Err(AwsServiceError::action_not_implemented(
                 self.service_name(),
                 &request.action,
@@ -244,6 +250,7 @@ impl ElastiCacheService {
         };
 
         let xml = cache_subnet_group_xml(&group, &state.region);
+        state.register_arn(&group.arn);
         state.subnet_groups.insert(name, group);
 
         Ok(AwsResponse::xml(
@@ -587,6 +594,81 @@ impl ElastiCacheService {
             ),
         ))
     }
+
+    fn add_tags_to_resource(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let resource_name = required_param(request, "ResourceName")?;
+        let tags = parse_tags(request)?;
+
+        let mut state = self.state.write();
+        let tag_list = state.tags.get_mut(&resource_name).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "CacheClusterNotFound",
+                format!("The resource {resource_name} could not be found."),
+            )
+        })?;
+
+        merge_tags(tag_list, &tags);
+
+        let tag_xml: String = tag_list.iter().map(tag_xml).collect();
+
+        Ok(AwsResponse::xml(
+            StatusCode::OK,
+            xml_wrap(
+                "AddTagsToResource",
+                &format!("<TagList>{tag_xml}</TagList>"),
+                &request.request_id,
+            ),
+        ))
+    }
+
+    fn list_tags_for_resource(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let resource_name = required_param(request, "ResourceName")?;
+
+        let state = self.state.read();
+        let tag_list = state.tags.get(&resource_name).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "CacheClusterNotFound",
+                format!("The resource {resource_name} could not be found."),
+            )
+        })?;
+
+        let tag_xml: String = tag_list.iter().map(tag_xml).collect();
+
+        Ok(AwsResponse::xml(
+            StatusCode::OK,
+            xml_wrap(
+                "ListTagsForResource",
+                &format!("<TagList>{tag_xml}</TagList>"),
+                &request.request_id,
+            ),
+        ))
+    }
+
+    fn remove_tags_from_resource(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let resource_name = required_param(request, "ResourceName")?;
+        let tag_keys = parse_tag_keys(request)?;
+
+        let mut state = self.state.write();
+        let tag_list = state.tags.get_mut(&resource_name).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "CacheClusterNotFound",
+                format!("The resource {resource_name} could not be found."),
+            )
+        })?;
+
+        tag_list.retain(|(key, _)| !tag_keys.contains(key));
+
+        Ok(AwsResponse::xml(
+            StatusCode::OK,
+            xml_wrap("RemoveTagsFromResource", "", &request.request_id),
+        ))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -683,6 +765,62 @@ fn paginate<T: Clone>(
         None
     };
     (page, next_marker)
+}
+
+// ---------------------------------------------------------------------------
+// Tag helpers
+// ---------------------------------------------------------------------------
+
+fn parse_tags(req: &AwsRequest) -> Result<Vec<(String, String)>, AwsServiceError> {
+    let mut tags = Vec::new();
+    for index in 1.. {
+        let key_name = format!("Tags.Tag.{index}.Key");
+        let value_name = format!("Tags.Tag.{index}.Value");
+        let key = optional_param(req, &key_name);
+        let value = optional_param(req, &value_name);
+        match (key, value) {
+            (Some(k), Some(v)) => tags.push((k, v)),
+            (None, None) => break,
+            _ => {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterValue",
+                    "Each tag must include both Key and Value.",
+                ));
+            }
+        }
+    }
+    Ok(tags)
+}
+
+fn parse_tag_keys(req: &AwsRequest) -> Result<Vec<String>, AwsServiceError> {
+    let mut keys = Vec::new();
+    for index in 1.. {
+        let key_name = format!("TagKeys.member.{index}");
+        match optional_param(req, &key_name) {
+            Some(key) => keys.push(key),
+            None => break,
+        }
+    }
+    Ok(keys)
+}
+
+fn merge_tags(existing: &mut Vec<(String, String)>, incoming: &[(String, String)]) {
+    for (key, value) in incoming {
+        if let Some(existing_tag) = existing.iter_mut().find(|(k, _)| k == key) {
+            existing_tag.1 = value.clone();
+        } else {
+            existing.push((key.clone(), value.clone()));
+        }
+    }
+}
+
+fn tag_xml(tag: &(String, String)) -> String {
+    format!(
+        "<Tag><Key>{}</Key><Value>{}</Value></Tag>",
+        xml_escape(&tag.0),
+        xml_escape(&tag.1),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -896,7 +1034,33 @@ fn parameter_xml(p: &EngineDefaultParameter) -> String {
 mod tests {
     use super::*;
     use crate::state::default_engine_versions;
+    use bytes::Bytes;
+    use http::HeaderMap;
     use std::collections::HashMap;
+
+    fn request(action: &str, params: &[(&str, &str)]) -> AwsRequest {
+        let mut query_params = HashMap::from([("Action".to_string(), action.to_string())]);
+        for (key, value) in params {
+            query_params.insert((*key).to_string(), (*value).to_string());
+        }
+
+        AwsRequest {
+            service: "elasticache".to_string(),
+            action: action.to_string(),
+            region: "us-east-1".to_string(),
+            account_id: "123456789012".to_string(),
+            request_id: "test-request-id".to_string(),
+            headers: HeaderMap::new(),
+            query_params,
+            body: Bytes::new(),
+            path_segments: vec![],
+            raw_path: "/".to_string(),
+            raw_query: String::new(),
+            method: http::Method::POST,
+            is_query_protocol: true,
+            access_key_id: None,
+        }
+    }
 
     #[test]
     fn parse_member_list_extracts_indexed_values() {
@@ -1019,5 +1183,72 @@ mod tests {
         assert!(xml.contains("<TestActionResult>"));
         assert!(xml.contains("<RequestId>req-123</RequestId>"));
         assert!(xml.contains(ELASTICACHE_NS));
+    }
+
+    #[test]
+    fn parse_tags_reads_query_shape() {
+        let req = request(
+            "AddTagsToResource",
+            &[
+                ("Tags.Tag.1.Key", "env"),
+                ("Tags.Tag.1.Value", "prod"),
+                ("Tags.Tag.2.Key", "team"),
+                ("Tags.Tag.2.Value", "backend"),
+            ],
+        );
+
+        let tags = parse_tags(&req).expect("tags");
+        assert_eq!(
+            tags,
+            vec![
+                ("env".to_string(), "prod".to_string()),
+                ("team".to_string(), "backend".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_tags_returns_empty_for_no_tags() {
+        let req = request("AddTagsToResource", &[]);
+        let tags = parse_tags(&req).expect("tags");
+        assert!(tags.is_empty());
+    }
+
+    #[test]
+    fn parse_tag_keys_reads_member_shape() {
+        let req = request(
+            "RemoveTagsFromResource",
+            &[("TagKeys.member.1", "env"), ("TagKeys.member.2", "team")],
+        );
+
+        let keys = parse_tag_keys(&req).expect("tag keys");
+        assert_eq!(keys, vec!["env".to_string(), "team".to_string()]);
+    }
+
+    #[test]
+    fn merge_tags_adds_new_and_updates_existing() {
+        let mut tags = vec![("env".to_string(), "dev".to_string())];
+
+        merge_tags(
+            &mut tags,
+            &[
+                ("env".to_string(), "prod".to_string()),
+                ("team".to_string(), "core".to_string()),
+            ],
+        );
+
+        assert_eq!(
+            tags,
+            vec![
+                ("env".to_string(), "prod".to_string()),
+                ("team".to_string(), "core".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn tag_xml_produces_valid_element() {
+        let xml = tag_xml(&("env".to_string(), "prod".to_string()));
+        assert_eq!(xml, "<Tag><Key>env</Key><Value>prod</Value></Tag>");
     }
 }

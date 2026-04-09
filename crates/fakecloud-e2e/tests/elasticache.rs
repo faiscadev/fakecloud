@@ -182,6 +182,203 @@ async fn elasticache_delete_nonexistent_subnet_group_errors() {
 }
 
 // ---------------------------------------------------------------------------
+// Tag tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn elasticache_add_and_list_tags_on_subnet_group() {
+    let server = TestServer::start().await;
+    let client = server.elasticache_client().await;
+
+    let create = client
+        .create_cache_subnet_group()
+        .cache_subnet_group_name("tag-e2e-group")
+        .cache_subnet_group_description("For tag e2e test")
+        .subnet_ids("subnet-aaa111")
+        .send()
+        .await
+        .unwrap();
+
+    let arn = create
+        .cache_subnet_group()
+        .and_then(|g| g.arn())
+        .expect("subnet group arn");
+
+    // Add tags
+    let add_resp = client
+        .add_tags_to_resource()
+        .resource_name(arn)
+        .tags(
+            aws_sdk_elasticache::types::Tag::builder()
+                .key("env")
+                .value("prod")
+                .build(),
+        )
+        .tags(
+            aws_sdk_elasticache::types::Tag::builder()
+                .key("team")
+                .value("backend")
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let tags = add_resp.tag_list();
+    assert_eq!(tags.len(), 2);
+
+    // List tags
+    let list_resp = client
+        .list_tags_for_resource()
+        .resource_name(arn)
+        .send()
+        .await
+        .unwrap();
+
+    let tags = list_resp.tag_list();
+    assert_eq!(tags.len(), 2);
+    assert_eq!(tags[0].key(), Some("env"));
+    assert_eq!(tags[0].value(), Some("prod"));
+    assert_eq!(tags[1].key(), Some("team"));
+    assert_eq!(tags[1].value(), Some("backend"));
+}
+
+#[tokio::test]
+async fn elasticache_remove_tags_from_subnet_group() {
+    let server = TestServer::start().await;
+    let client = server.elasticache_client().await;
+
+    let create = client
+        .create_cache_subnet_group()
+        .cache_subnet_group_name("tag-remove-group")
+        .cache_subnet_group_description("For remove tag test")
+        .subnet_ids("subnet-aaa111")
+        .send()
+        .await
+        .unwrap();
+
+    let arn = create
+        .cache_subnet_group()
+        .and_then(|g| g.arn())
+        .expect("subnet group arn");
+
+    client
+        .add_tags_to_resource()
+        .resource_name(arn)
+        .tags(
+            aws_sdk_elasticache::types::Tag::builder()
+                .key("env")
+                .value("prod")
+                .build(),
+        )
+        .tags(
+            aws_sdk_elasticache::types::Tag::builder()
+                .key("team")
+                .value("backend")
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    // Remove one tag
+    client
+        .remove_tags_from_resource()
+        .resource_name(arn)
+        .tag_keys("env")
+        .send()
+        .await
+        .unwrap();
+
+    // Verify only "team" remains
+    let list_resp = client
+        .list_tags_for_resource()
+        .resource_name(arn)
+        .send()
+        .await
+        .unwrap();
+
+    let tags = list_resp.tag_list();
+    assert_eq!(tags.len(), 1);
+    assert_eq!(tags[0].key(), Some("team"));
+    assert_eq!(tags[0].value(), Some("backend"));
+}
+
+#[tokio::test]
+async fn elasticache_tag_update_existing_key() {
+    let server = TestServer::start().await;
+    let client = server.elasticache_client().await;
+
+    let create = client
+        .create_cache_subnet_group()
+        .cache_subnet_group_name("tag-update-group")
+        .cache_subnet_group_description("For tag update test")
+        .subnet_ids("subnet-aaa111")
+        .send()
+        .await
+        .unwrap();
+
+    let arn = create
+        .cache_subnet_group()
+        .and_then(|g| g.arn())
+        .expect("subnet group arn");
+
+    // Add initial tag
+    client
+        .add_tags_to_resource()
+        .resource_name(arn)
+        .tags(
+            aws_sdk_elasticache::types::Tag::builder()
+                .key("env")
+                .value("dev")
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    // Update the tag value
+    client
+        .add_tags_to_resource()
+        .resource_name(arn)
+        .tags(
+            aws_sdk_elasticache::types::Tag::builder()
+                .key("env")
+                .value("prod")
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let list_resp = client
+        .list_tags_for_resource()
+        .resource_name(arn)
+        .send()
+        .await
+        .unwrap();
+
+    let tags = list_resp.tag_list();
+    assert_eq!(tags.len(), 1);
+    assert_eq!(tags[0].key(), Some("env"));
+    assert_eq!(tags[0].value(), Some("prod"));
+}
+
+#[tokio::test]
+async fn elasticache_tags_on_unknown_arn_errors() {
+    let server = TestServer::start().await;
+    let client = server.elasticache_client().await;
+
+    let result = client
+        .list_tags_for_resource()
+        .resource_name("arn:aws:elasticache:us-east-1:123456789012:subnetgroup:nonexistent")
+        .send()
+        .await;
+
+    assert!(result.is_err());
+}
+
+// ---------------------------------------------------------------------------
 // ReplicationGroup tests
 // ---------------------------------------------------------------------------
 

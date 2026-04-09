@@ -70,6 +70,7 @@ pub struct ElastiCacheState {
     pub parameter_groups: Vec<CacheParameterGroup>,
     pub subnet_groups: HashMap<String, CacheSubnetGroup>,
     pub replication_groups: HashMap<String, ReplicationGroup>,
+    pub tags: HashMap<String, Vec<(String, String)>>,
     in_progress_replication_group_ids: HashSet<String>,
 }
 
@@ -77,12 +78,17 @@ impl ElastiCacheState {
     pub fn new(account_id: &str, region: &str) -> Self {
         let parameter_groups = default_parameter_groups(account_id, region);
         let subnet_groups = default_subnet_groups(account_id, region);
+        let tags: HashMap<String, Vec<(String, String)>> = subnet_groups
+            .values()
+            .map(|g| (g.arn.clone(), Vec::new()))
+            .collect();
         Self {
             account_id: account_id.to_string(),
             region: region.to_string(),
             parameter_groups,
             subnet_groups,
             replication_groups: HashMap::new(),
+            tags,
             in_progress_replication_group_ids: HashSet::new(),
         }
     }
@@ -91,6 +97,10 @@ impl ElastiCacheState {
         self.parameter_groups = default_parameter_groups(&self.account_id, &self.region);
         self.subnet_groups = default_subnet_groups(&self.account_id, &self.region);
         self.replication_groups.clear();
+        self.tags.clear();
+        for g in self.subnet_groups.values() {
+            self.tags.insert(g.arn.clone(), Vec::new());
+        }
         self.in_progress_replication_group_ids.clear();
     }
 
@@ -110,6 +120,7 @@ impl ElastiCacheState {
     pub fn finish_replication_group_creation(&mut self, group: ReplicationGroup) {
         self.in_progress_replication_group_ids
             .remove(&group.replication_group_id);
+        self.tags.insert(group.arn.clone(), Vec::new());
         self.replication_groups
             .insert(group.replication_group_id.clone(), group);
     }
@@ -117,6 +128,14 @@ impl ElastiCacheState {
     pub fn cancel_replication_group_creation(&mut self, replication_group_id: &str) {
         self.in_progress_replication_group_ids
             .remove(replication_group_id);
+    }
+
+    pub fn register_arn(&mut self, arn: &str) {
+        self.tags.entry(arn.to_string()).or_default();
+    }
+
+    pub fn has_arn(&self, arn: &str) -> bool {
+        self.tags.contains_key(arn)
     }
 }
 
