@@ -11,15 +11,17 @@ use crate::runtime::{ElastiCacheRuntime, RuntimeError};
 use crate::state::{
     default_engine_versions, default_parameters_for_family, CacheCluster, CacheEngineVersion,
     CacheParameterGroup, CacheSnapshot, CacheSubnetGroup, ElastiCacheState, ElastiCacheUser,
-    ElastiCacheUserGroup, EngineDefaultParameter, ReplicationGroup, ServerlessCache,
-    ServerlessCacheDataStorage, ServerlessCacheEcpuPerSecond, ServerlessCacheEndpoint,
-    ServerlessCacheSnapshot, ServerlessCacheUsageLimits, SharedElastiCacheState,
+    ElastiCacheUserGroup, EngineDefaultParameter, GlobalReplicationGroup,
+    GlobalReplicationGroupMember, ReplicationGroup, ServerlessCache, ServerlessCacheDataStorage,
+    ServerlessCacheEcpuPerSecond, ServerlessCacheEndpoint, ServerlessCacheSnapshot,
+    ServerlessCacheUsageLimits, SharedElastiCacheState,
 };
 
 const ELASTICACHE_NS: &str = "http://elasticache.amazonaws.com/doc/2015-02-02/";
 const SUPPORTED_ACTIONS: &[&str] = &[
     "AddTagsToResource",
     "CreateCacheCluster",
+    "CreateGlobalReplicationGroup",
     "CreateCacheSubnetGroup",
     "CreateReplicationGroup",
     "CreateServerlessCache",
@@ -29,6 +31,7 @@ const SUPPORTED_ACTIONS: &[&str] = &[
     "CreateUserGroup",
     "DecreaseReplicaCount",
     "DeleteCacheCluster",
+    "DeleteGlobalReplicationGroup",
     "DeleteCacheSubnetGroup",
     "DeleteReplicationGroup",
     "DeleteServerlessCache",
@@ -38,6 +41,7 @@ const SUPPORTED_ACTIONS: &[&str] = &[
     "DeleteUserGroup",
     "DescribeCacheClusters",
     "DescribeCacheEngineVersions",
+    "DescribeGlobalReplicationGroups",
     "DescribeCacheParameterGroups",
     "DescribeCacheSubnetGroups",
     "DescribeEngineDefaultParameters",
@@ -47,9 +51,12 @@ const SUPPORTED_ACTIONS: &[&str] = &[
     "DescribeSnapshots",
     "DescribeUserGroups",
     "DescribeUsers",
+    "DisassociateGlobalReplicationGroup",
+    "FailoverGlobalReplicationGroup",
     "IncreaseReplicaCount",
     "ListTagsForResource",
     "ModifyCacheSubnetGroup",
+    "ModifyGlobalReplicationGroup",
     "ModifyReplicationGroup",
     "ModifyServerlessCache",
     "RemoveTagsFromResource",
@@ -85,6 +92,7 @@ impl AwsService for ElastiCacheService {
         match request.action.as_str() {
             "AddTagsToResource" => self.add_tags_to_resource(&request),
             "CreateCacheCluster" => self.create_cache_cluster(&request).await,
+            "CreateGlobalReplicationGroup" => self.create_global_replication_group(&request),
             "CreateCacheSubnetGroup" => self.create_cache_subnet_group(&request),
             "CreateReplicationGroup" => self.create_replication_group(&request).await,
             "CreateServerlessCache" => self.create_serverless_cache(&request).await,
@@ -94,6 +102,7 @@ impl AwsService for ElastiCacheService {
             "CreateUserGroup" => self.create_user_group(&request),
             "DecreaseReplicaCount" => self.decrease_replica_count(&request),
             "DeleteCacheCluster" => self.delete_cache_cluster(&request).await,
+            "DeleteGlobalReplicationGroup" => self.delete_global_replication_group(&request),
             "DeleteCacheSubnetGroup" => self.delete_cache_subnet_group(&request),
             "DeleteReplicationGroup" => self.delete_replication_group(&request).await,
             "DeleteServerlessCache" => self.delete_serverless_cache(&request).await,
@@ -103,6 +112,7 @@ impl AwsService for ElastiCacheService {
             "DeleteUserGroup" => self.delete_user_group(&request),
             "DescribeCacheClusters" => self.describe_cache_clusters(&request),
             "DescribeCacheEngineVersions" => self.describe_cache_engine_versions(&request),
+            "DescribeGlobalReplicationGroups" => self.describe_global_replication_groups(&request),
             "DescribeCacheParameterGroups" => self.describe_cache_parameter_groups(&request),
             "DescribeCacheSubnetGroups" => self.describe_cache_subnet_groups(&request),
             "DescribeEngineDefaultParameters" => self.describe_engine_default_parameters(&request),
@@ -114,9 +124,14 @@ impl AwsService for ElastiCacheService {
             "DescribeSnapshots" => self.describe_snapshots(&request),
             "DescribeUserGroups" => self.describe_user_groups(&request),
             "DescribeUsers" => self.describe_users(&request),
+            "DisassociateGlobalReplicationGroup" => {
+                self.disassociate_global_replication_group(&request)
+            }
+            "FailoverGlobalReplicationGroup" => self.failover_global_replication_group(&request),
             "IncreaseReplicaCount" => self.increase_replica_count(&request),
             "ListTagsForResource" => self.list_tags_for_resource(&request),
             "ModifyCacheSubnetGroup" => self.modify_cache_subnet_group(&request),
+            "ModifyGlobalReplicationGroup" => self.modify_global_replication_group(&request),
             "ModifyReplicationGroup" => self.modify_replication_group(&request),
             "ModifyServerlessCache" => self.modify_serverless_cache(&request),
             "RemoveTagsFromResource" => self.remove_tags_from_resource(&request),
@@ -775,6 +790,8 @@ impl ElastiCacheService {
         let group = ReplicationGroup {
             replication_group_id: replication_group_id.clone(),
             description,
+            global_replication_group_id: None,
+            global_replication_group_role: None,
             status: "available".to_string(),
             cache_node_type,
             engine,
@@ -800,6 +817,154 @@ impl ElastiCacheService {
             xml_wrap(
                 "CreateReplicationGroup",
                 &format!("<ReplicationGroup>{xml}</ReplicationGroup>"),
+                &request.request_id,
+            ),
+        ))
+    }
+
+    fn create_global_replication_group(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let suffix = required_param(request, "GlobalReplicationGroupIdSuffix")?;
+        let primary_replication_group_id = required_param(request, "PrimaryReplicationGroupId")?;
+        let description =
+            optional_param(request, "GlobalReplicationGroupDescription").unwrap_or_default();
+
+        let mut state = self.state.write();
+        let region = state.region.clone();
+        let account_id = state.account_id.clone();
+        let global_replication_group_id = global_replication_group_id(&region, suffix.as_str());
+        if state
+            .global_replication_groups
+            .contains_key(&global_replication_group_id)
+        {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "GlobalReplicationGroupAlreadyExistsFault",
+                format!("GlobalReplicationGroup {global_replication_group_id} already exists."),
+            ));
+        }
+
+        let primary_group = state
+            .replication_groups
+            .get_mut(&primary_replication_group_id)
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::NOT_FOUND,
+                    "ReplicationGroupNotFoundFault",
+                    format!("ReplicationGroup {primary_replication_group_id} not found."),
+                )
+            })?;
+
+        if primary_group.global_replication_group_id.is_some() {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidReplicationGroupStateFault",
+                format!(
+                    "ReplicationGroup {primary_replication_group_id} is already associated with a GlobalReplicationGroup."
+                ),
+            ));
+        }
+
+        primary_group.global_replication_group_id = Some(global_replication_group_id.clone());
+        primary_group.global_replication_group_role = Some("primary".to_string());
+
+        let group = GlobalReplicationGroup {
+            global_replication_group_id: global_replication_group_id.clone(),
+            global_replication_group_description: description,
+            status: "available".to_string(),
+            cache_node_type: primary_group.cache_node_type.clone(),
+            engine: primary_group.engine.clone(),
+            engine_version: primary_group.engine_version.clone(),
+            members: vec![GlobalReplicationGroupMember {
+                replication_group_id: primary_group.replication_group_id.clone(),
+                replication_group_region: region.clone(),
+                role: "primary".to_string(),
+                automatic_failover: primary_group.automatic_failover_enabled,
+                status: "associated".to_string(),
+            }],
+            cluster_enabled: false,
+            arn: format!(
+                "arn:aws:elasticache:{}:{}:globalreplicationgroup:{}",
+                region, account_id, global_replication_group_id
+            ),
+        };
+
+        let xml = global_replication_group_xml(&group, true);
+        state
+            .global_replication_groups
+            .insert(global_replication_group_id, group);
+
+        Ok(AwsResponse::xml(
+            StatusCode::OK,
+            xml_wrap(
+                "CreateGlobalReplicationGroup",
+                &format!("<GlobalReplicationGroup>{xml}</GlobalReplicationGroup>"),
+                &request.request_id,
+            ),
+        ))
+    }
+
+    fn describe_global_replication_groups(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let global_replication_group_id = optional_param(request, "GlobalReplicationGroupId");
+        let max_records = optional_usize_param(request, "MaxRecords")?;
+        let marker = optional_param(request, "Marker");
+        let show_member_info =
+            parse_optional_bool(optional_param(request, "ShowMemberInfo").as_deref())?
+                .unwrap_or(false);
+
+        let state = self.state.read();
+        let groups: Vec<&GlobalReplicationGroup> = if let Some(ref global_replication_group_id) =
+            global_replication_group_id
+        {
+            match state
+                .global_replication_groups
+                .get(global_replication_group_id)
+            {
+                Some(group) => vec![group],
+                None => {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::NOT_FOUND,
+                        "GlobalReplicationGroupNotFoundFault",
+                        format!("GlobalReplicationGroup {global_replication_group_id} not found."),
+                    ));
+                }
+            }
+        } else {
+            let mut groups: Vec<&GlobalReplicationGroup> =
+                state.global_replication_groups.values().collect();
+            groups.sort_by(|a, b| {
+                a.global_replication_group_id
+                    .cmp(&b.global_replication_group_id)
+            });
+            groups
+        };
+
+        let (page, next_marker) = paginate(&groups, marker.as_deref(), max_records);
+        let groups_xml: String = page
+            .iter()
+            .map(|group| {
+                format!(
+                    "<GlobalReplicationGroup>{}</GlobalReplicationGroup>",
+                    global_replication_group_xml(group, show_member_info)
+                )
+            })
+            .collect();
+        let marker_xml = next_marker
+            .map(|m| format!("<Marker>{}</Marker>", xml_escape(&m)))
+            .unwrap_or_default();
+
+        Ok(AwsResponse::xml(
+            StatusCode::OK,
+            xml_wrap(
+                "DescribeGlobalReplicationGroups",
+                &format!(
+                    "<GlobalReplicationGroups>{groups_xml}</GlobalReplicationGroups>{marker_xml}"
+                ),
                 &request.request_id,
             ),
         ))
@@ -853,6 +1018,49 @@ impl ElastiCacheService {
             xml_wrap(
                 "DescribeReplicationGroups",
                 &format!("<ReplicationGroups>{members_xml}</ReplicationGroups>{marker_xml}"),
+                &request.request_id,
+            ),
+        ))
+    }
+
+    fn delete_global_replication_group(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let global_replication_group_id = required_param(request, "GlobalReplicationGroupId")?;
+        let _retain_primary_replication_group =
+            parse_required_bool(request, "RetainPrimaryReplicationGroup")?;
+
+        let mut state = self.state.write();
+        let mut group = state
+            .global_replication_groups
+            .remove(&global_replication_group_id)
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::NOT_FOUND,
+                    "GlobalReplicationGroupNotFoundFault",
+                    format!("GlobalReplicationGroup {global_replication_group_id} not found."),
+                )
+            })?;
+
+        for member in &group.members {
+            if let Some(replication_group) = state
+                .replication_groups
+                .get_mut(&member.replication_group_id)
+            {
+                replication_group.global_replication_group_id = None;
+                replication_group.global_replication_group_role = None;
+            }
+        }
+
+        group.status = "deleting".to_string();
+        let xml = global_replication_group_xml(&group, true);
+
+        Ok(AwsResponse::xml(
+            StatusCode::OK,
+            xml_wrap(
+                "DeleteGlobalReplicationGroup",
+                &format!("<GlobalReplicationGroup>{xml}</GlobalReplicationGroup>"),
                 &request.request_id,
             ),
         ))
@@ -1661,6 +1869,93 @@ impl ElastiCacheService {
         ))
     }
 
+    fn modify_global_replication_group(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let global_replication_group_id = required_param(request, "GlobalReplicationGroupId")?;
+        let _apply_immediately = parse_required_bool(request, "ApplyImmediately")?;
+        let new_description = optional_param(request, "GlobalReplicationGroupDescription");
+        let new_cache_node_type = optional_param(request, "CacheNodeType");
+        let new_engine = optional_param(request, "Engine");
+        let new_engine_version = optional_param(request, "EngineVersion");
+        let new_automatic_failover =
+            parse_optional_bool(optional_param(request, "AutomaticFailoverEnabled").as_deref())?;
+
+        let mut state = self.state.write();
+        let primary_replication_group_id = state
+            .global_replication_groups
+            .get(&global_replication_group_id)
+            .and_then(primary_global_member)
+            .map(|member| member.replication_group_id.clone())
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::NOT_FOUND,
+                    "GlobalReplicationGroupNotFoundFault",
+                    format!("GlobalReplicationGroup {global_replication_group_id} not found."),
+                )
+            })?;
+
+        if let Some(ref engine) = new_engine {
+            validate_serverless_engine(engine)?;
+            let current_engine =
+                &state.global_replication_groups[&global_replication_group_id].engine;
+            if engine != current_engine {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterValue",
+                    format!(
+                        "Engine changes are not supported for GlobalReplicationGroup {global_replication_group_id}."
+                    ),
+                ));
+            }
+        }
+
+        if let Some(primary_group) = state
+            .replication_groups
+            .get_mut(&primary_replication_group_id)
+        {
+            if let Some(cache_node_type) = new_cache_node_type.clone() {
+                primary_group.cache_node_type = cache_node_type;
+            }
+            if let Some(engine_version) = new_engine_version.clone() {
+                primary_group.engine_version = engine_version;
+            }
+            if let Some(automatic_failover) = new_automatic_failover {
+                primary_group.automatic_failover_enabled = automatic_failover;
+            }
+        }
+
+        let primary_group = state.replication_groups[&primary_replication_group_id].clone();
+        let group = state
+            .global_replication_groups
+            .get_mut(&global_replication_group_id)
+            .expect("global replication group exists");
+        if let Some(description) = new_description {
+            group.global_replication_group_description = description;
+        }
+        group.cache_node_type = primary_group.cache_node_type.clone();
+        group.engine = primary_group.engine.clone();
+        group.engine_version = primary_group.engine_version.clone();
+        if let Some(member) = group
+            .members
+            .iter_mut()
+            .find(|member| member.role == "primary")
+        {
+            member.automatic_failover = primary_group.automatic_failover_enabled;
+        }
+
+        let xml = global_replication_group_xml(group, true);
+        Ok(AwsResponse::xml(
+            StatusCode::OK,
+            xml_wrap(
+                "ModifyGlobalReplicationGroup",
+                &format!("<GlobalReplicationGroup>{xml}</GlobalReplicationGroup>"),
+                &request.request_id,
+            ),
+        ))
+    }
+
     fn increase_replica_count(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let replication_group_id = required_param(request, "ReplicationGroupId")?;
         let apply_str = required_param(request, "ApplyImmediately")?;
@@ -1879,6 +2174,110 @@ impl ElastiCacheService {
             xml_wrap(
                 "TestFailover",
                 &format!("<ReplicationGroup>{xml}</ReplicationGroup>"),
+                &request.request_id,
+            ),
+        ))
+    }
+
+    fn disassociate_global_replication_group(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let global_replication_group_id = required_param(request, "GlobalReplicationGroupId")?;
+        let replication_group_id = required_param(request, "ReplicationGroupId")?;
+        let replication_group_region = required_param(request, "ReplicationGroupRegion")?;
+
+        let state = self.state.read();
+        let group = state
+            .global_replication_groups
+            .get(&global_replication_group_id)
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::NOT_FOUND,
+                    "GlobalReplicationGroupNotFoundFault",
+                    format!("GlobalReplicationGroup {global_replication_group_id} not found."),
+                )
+            })?;
+
+        let primary_member = primary_global_member(group).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidGlobalReplicationGroupState",
+                format!(
+                    "GlobalReplicationGroup {global_replication_group_id} does not have a primary member."
+                ),
+            )
+        })?;
+        if primary_member.replication_group_id != replication_group_id
+            || primary_member.replication_group_region != replication_group_region
+        {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterValue",
+                format!(
+                    "ReplicationGroup {replication_group_id} in region {replication_group_region} is not associated with GlobalReplicationGroup {global_replication_group_id}."
+                ),
+            ));
+        }
+
+        let xml = global_replication_group_xml(group, true);
+        Ok(AwsResponse::xml(
+            StatusCode::OK,
+            xml_wrap(
+                "DisassociateGlobalReplicationGroup",
+                &format!("<GlobalReplicationGroup>{xml}</GlobalReplicationGroup>"),
+                &request.request_id,
+            ),
+        ))
+    }
+
+    fn failover_global_replication_group(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let global_replication_group_id = required_param(request, "GlobalReplicationGroupId")?;
+        let primary_region = required_param(request, "PrimaryRegion")?;
+        let primary_replication_group_id = required_param(request, "PrimaryReplicationGroupId")?;
+
+        let state = self.state.read();
+        let group = state
+            .global_replication_groups
+            .get(&global_replication_group_id)
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::NOT_FOUND,
+                    "GlobalReplicationGroupNotFoundFault",
+                    format!("GlobalReplicationGroup {global_replication_group_id} not found."),
+                )
+            })?;
+
+        let primary_member = primary_global_member(group).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidGlobalReplicationGroupState",
+                format!(
+                    "GlobalReplicationGroup {global_replication_group_id} does not have a primary member."
+                ),
+            )
+        })?;
+        if primary_member.replication_group_id != primary_replication_group_id
+            || primary_member.replication_group_region != primary_region
+        {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterValue",
+                format!(
+                    "PrimaryReplicationGroupId and PrimaryRegion do not match the current primary for GlobalReplicationGroup {global_replication_group_id}."
+                ),
+            ));
+        }
+
+        let xml = global_replication_group_xml(group, true);
+        Ok(AwsResponse::xml(
+            StatusCode::OK,
+            xml_wrap(
+                "FailoverGlobalReplicationGroup",
+                &format!("<GlobalReplicationGroup>{xml}</GlobalReplicationGroup>"),
                 &request.request_id,
             ),
         ))
@@ -2336,6 +2735,16 @@ fn required_param(req: &AwsRequest, name: &str) -> Result<String, AwsServiceErro
             StatusCode::BAD_REQUEST,
             "MissingParameter",
             format!("The request must contain the parameter {name}."),
+        )
+    })
+}
+
+fn parse_required_bool(req: &AwsRequest, name: &str) -> Result<bool, AwsServiceError> {
+    parse_optional_bool(Some(&required_param(req, name)?))?.ok_or_else(|| {
+        AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidParameterValue",
+            format!("Boolean parameter {name} is invalid."),
         )
     })
 }
@@ -2815,12 +3224,31 @@ fn replication_group_xml(g: &ReplicationGroup, region: &str) -> String {
         .iter()
         .map(|c| format!("<ClusterId>{}</ClusterId>", xml_escape(c)))
         .collect();
+    let global_replication_group_info_xml = g
+        .global_replication_group_id
+        .as_ref()
+        .map(|global_replication_group_id| {
+            format!(
+                "<GlobalReplicationGroupInfo>\
+                 <GlobalReplicationGroupId>{}</GlobalReplicationGroupId>\
+                 <GlobalReplicationGroupMemberRole>{}</GlobalReplicationGroupMemberRole>\
+                 </GlobalReplicationGroupInfo>",
+                xml_escape(global_replication_group_id),
+                xml_escape(
+                    g.global_replication_group_role
+                        .as_deref()
+                        .unwrap_or("primary")
+                ),
+            )
+        })
+        .unwrap_or_default();
 
     let primary_az = format!("{region}a");
 
     format!(
         "<ReplicationGroupId>{}</ReplicationGroupId>\
          <Description>{}</Description>\
+         {global_replication_group_info_xml}\
          <Status>{}</Status>\
          <MemberClusters>{member_clusters_xml}</MemberClusters>\
          <NodeGroups>\
@@ -2871,6 +3299,77 @@ fn replication_group_xml(g: &ReplicationGroup, region: &str) -> String {
         xml_escape(&g.snapshot_window),
         xml_escape(&g.cache_node_type),
         xml_escape(&g.arn),
+    )
+}
+
+fn global_replication_group_id(region: &str, suffix: &str) -> String {
+    format!("fc-{}-{}", region, suffix)
+}
+
+fn primary_global_member(group: &GlobalReplicationGroup) -> Option<&GlobalReplicationGroupMember> {
+    group.members.iter().find(|member| member.role == "primary")
+}
+
+fn global_replication_group_xml(group: &GlobalReplicationGroup, show_member_info: bool) -> String {
+    let members_xml = if show_member_info {
+        let members_xml: String = group
+            .members
+            .iter()
+            .map(global_replication_group_member_xml)
+            .collect();
+        format!("<Members>{members_xml}</Members>")
+    } else {
+        String::new()
+    };
+    let global_node_groups_xml = if group.cluster_enabled {
+        "<GlobalNodeGroups><GlobalNodeGroup><GlobalNodeGroupId>0001</GlobalNodeGroupId><Slots>0-16383</Slots></GlobalNodeGroup></GlobalNodeGroups>".to_string()
+    } else {
+        String::new()
+    };
+
+    format!(
+        "<GlobalReplicationGroupId>{}</GlobalReplicationGroupId>\
+         <GlobalReplicationGroupDescription>{}</GlobalReplicationGroupDescription>\
+         <Status>{}</Status>\
+         <CacheNodeType>{}</CacheNodeType>\
+         <Engine>{}</Engine>\
+         <EngineVersion>{}</EngineVersion>\
+         {members_xml}\
+         <ClusterEnabled>{}</ClusterEnabled>\
+         {global_node_groups_xml}\
+         <AuthTokenEnabled>false</AuthTokenEnabled>\
+         <TransitEncryptionEnabled>false</TransitEncryptionEnabled>\
+         <AtRestEncryptionEnabled>false</AtRestEncryptionEnabled>\
+         <ARN>{}</ARN>",
+        xml_escape(&group.global_replication_group_id),
+        xml_escape(&group.global_replication_group_description),
+        xml_escape(&group.status),
+        xml_escape(&group.cache_node_type),
+        xml_escape(&group.engine),
+        xml_escape(&group.engine_version),
+        group.cluster_enabled,
+        xml_escape(&group.arn),
+    )
+}
+
+fn global_replication_group_member_xml(member: &GlobalReplicationGroupMember) -> String {
+    format!(
+        "<GlobalReplicationGroupMember>\
+         <ReplicationGroupId>{}</ReplicationGroupId>\
+         <ReplicationGroupRegion>{}</ReplicationGroupRegion>\
+         <Role>{}</Role>\
+         <AutomaticFailover>{}</AutomaticFailover>\
+         <Status>{}</Status>\
+         </GlobalReplicationGroupMember>",
+        xml_escape(&member.replication_group_id),
+        xml_escape(&member.replication_group_region),
+        xml_escape(&member.role),
+        if member.automatic_failover {
+            "enabled"
+        } else {
+            "disabled"
+        },
+        xml_escape(&member.status),
     )
 }
 
@@ -3800,6 +4299,8 @@ mod tests {
             ReplicationGroup {
                 replication_group_id: "rg-1".to_string(),
                 description: "test group".to_string(),
+                global_replication_group_id: None,
+                global_replication_group_role: None,
                 status: "available".to_string(),
                 cache_node_type: "cache.t3.micro".to_string(),
                 engine: "redis".to_string(),
@@ -3840,6 +4341,8 @@ mod tests {
                 ReplicationGroup {
                     replication_group_id: "delete-rg".to_string(),
                     description: "test group".to_string(),
+                    global_replication_group_id: None,
+                    global_replication_group_role: None,
                     status: "available".to_string(),
                     cache_node_type: "cache.t3.micro".to_string(),
                     engine: "redis".to_string(),
@@ -3909,6 +4412,8 @@ mod tests {
                 ReplicationGroup {
                     replication_group_id: group_id.to_string(),
                     description: "test group".to_string(),
+                    global_replication_group_id: None,
+                    global_replication_group_role: None,
                     status: "available".to_string(),
                     cache_node_type: "cache.t3.micro".to_string(),
                     engine: "redis".to_string(),
@@ -3980,6 +4485,213 @@ mod tests {
             );
         }
         ElastiCacheService::new(shared)
+    }
+
+    fn service_with_global_replication_group(
+        global_replication_group_id: &str,
+        replication_group_id: &str,
+    ) -> ElastiCacheService {
+        let service = service_with_replication_group(replication_group_id, 1);
+        {
+            let mut state = service.state.write();
+            state
+                .replication_groups
+                .get_mut(replication_group_id)
+                .unwrap()
+                .global_replication_group_id = Some(global_replication_group_id.to_string());
+            state
+                .replication_groups
+                .get_mut(replication_group_id)
+                .unwrap()
+                .global_replication_group_role = Some("primary".to_string());
+            state.global_replication_groups.insert(
+                global_replication_group_id.to_string(),
+                GlobalReplicationGroup {
+                    global_replication_group_id: global_replication_group_id.to_string(),
+                    global_replication_group_description: "global test group".to_string(),
+                    status: "available".to_string(),
+                    cache_node_type: "cache.t3.micro".to_string(),
+                    engine: "redis".to_string(),
+                    engine_version: "7.1".to_string(),
+                    members: vec![GlobalReplicationGroupMember {
+                        replication_group_id: replication_group_id.to_string(),
+                        replication_group_region: "us-east-1".to_string(),
+                        role: "primary".to_string(),
+                        automatic_failover: false,
+                        status: "associated".to_string(),
+                    }],
+                    cluster_enabled: false,
+                    arn: format!(
+                        "arn:aws:elasticache:us-east-1:123456789012:globalreplicationgroup:{global_replication_group_id}"
+                    ),
+                },
+            );
+        }
+        service
+    }
+
+    #[test]
+    fn create_global_replication_group_registers_metadata_and_updates_primary_group() {
+        let service = service_with_replication_group("primary-rg", 1);
+        let req = request(
+            "CreateGlobalReplicationGroup",
+            &[
+                ("GlobalReplicationGroupIdSuffix", "global-a"),
+                ("PrimaryReplicationGroupId", "primary-rg"),
+                ("GlobalReplicationGroupDescription", "global slice"),
+            ],
+        );
+
+        let resp = service.create_global_replication_group(&req).unwrap();
+        let body = String::from_utf8(resp.body.to_vec()).unwrap();
+        assert!(body.contains(
+            "<GlobalReplicationGroupDescription>global slice</GlobalReplicationGroupDescription>"
+        ));
+        assert!(body.contains("<ReplicationGroupId>primary-rg</ReplicationGroupId>"));
+        assert!(body.contains("<Role>primary</Role>"));
+
+        let state = service.state.read();
+        let primary_group = state.replication_groups.get("primary-rg").unwrap();
+        assert_eq!(
+            primary_group.global_replication_group_id.as_deref(),
+            Some("fc-us-east-1-global-a")
+        );
+        assert_eq!(
+            primary_group.global_replication_group_role.as_deref(),
+            Some("primary")
+        );
+        assert!(state
+            .global_replication_groups
+            .contains_key("fc-us-east-1-global-a"));
+    }
+
+    #[test]
+    fn describe_global_replication_groups_filters_by_id() {
+        let service = service_with_global_replication_group("fc-us-east-1-global-a", "primary-rg");
+        let req = request(
+            "DescribeGlobalReplicationGroups",
+            &[
+                ("GlobalReplicationGroupId", "fc-us-east-1-global-a"),
+                ("ShowMemberInfo", "true"),
+            ],
+        );
+
+        let resp = service.describe_global_replication_groups(&req).unwrap();
+        let body = String::from_utf8(resp.body.to_vec()).unwrap();
+        assert!(body.contains(
+            "<GlobalReplicationGroupId>fc-us-east-1-global-a</GlobalReplicationGroupId>"
+        ));
+        assert!(body.contains("<ReplicationGroupId>primary-rg</ReplicationGroupId>"));
+        assert!(body.contains("<DescribeGlobalReplicationGroupsResponse"));
+    }
+
+    #[test]
+    fn modify_global_replication_group_updates_primary_replication_group_state() {
+        let service = service_with_global_replication_group("fc-us-east-1-global-a", "primary-rg");
+        let req = request(
+            "ModifyGlobalReplicationGroup",
+            &[
+                ("GlobalReplicationGroupId", "fc-us-east-1-global-a"),
+                ("ApplyImmediately", "true"),
+                ("GlobalReplicationGroupDescription", "updated"),
+                ("CacheNodeType", "cache.m5.large"),
+                ("EngineVersion", "7.2"),
+                ("AutomaticFailoverEnabled", "true"),
+            ],
+        );
+
+        let resp = service.modify_global_replication_group(&req).unwrap();
+        let body = String::from_utf8(resp.body.to_vec()).unwrap();
+        assert!(body.contains(
+            "<GlobalReplicationGroupDescription>updated</GlobalReplicationGroupDescription>"
+        ));
+        assert!(body.contains("<CacheNodeType>cache.m5.large</CacheNodeType>"));
+        assert!(body.contains("<EngineVersion>7.2</EngineVersion>"));
+
+        let state = service.state.read();
+        let primary_group = state.replication_groups.get("primary-rg").unwrap();
+        assert_eq!(primary_group.cache_node_type, "cache.m5.large");
+        assert_eq!(primary_group.engine_version, "7.2");
+        assert!(primary_group.automatic_failover_enabled);
+    }
+
+    #[test]
+    fn delete_global_replication_group_clears_primary_group_association() {
+        let service = service_with_global_replication_group("fc-us-east-1-global-a", "primary-rg");
+        let req = request(
+            "DeleteGlobalReplicationGroup",
+            &[
+                ("GlobalReplicationGroupId", "fc-us-east-1-global-a"),
+                ("RetainPrimaryReplicationGroup", "true"),
+            ],
+        );
+
+        let resp = service.delete_global_replication_group(&req).unwrap();
+        let body = String::from_utf8(resp.body.to_vec()).unwrap();
+        assert!(body.contains("<Status>deleting</Status>"));
+
+        let state = service.state.read();
+        assert!(!state
+            .global_replication_groups
+            .contains_key("fc-us-east-1-global-a"));
+        let primary_group = state.replication_groups.get("primary-rg").unwrap();
+        assert!(primary_group.global_replication_group_id.is_none());
+        assert!(primary_group.global_replication_group_role.is_none());
+    }
+
+    #[test]
+    fn replication_group_xml_includes_global_replication_group_info() {
+        let service = service_with_global_replication_group("fc-us-east-1-global-a", "primary-rg");
+        let req = request(
+            "DescribeReplicationGroups",
+            &[("ReplicationGroupId", "primary-rg")],
+        );
+
+        let resp = service.describe_replication_groups(&req).unwrap();
+        let body = String::from_utf8(resp.body.to_vec()).unwrap();
+        assert!(body.contains("<GlobalReplicationGroupInfo>"));
+        assert!(body.contains(
+            "<GlobalReplicationGroupId>fc-us-east-1-global-a</GlobalReplicationGroupId>"
+        ));
+        assert!(body.contains(
+            "<GlobalReplicationGroupMemberRole>primary</GlobalReplicationGroupMemberRole>"
+        ));
+    }
+
+    #[test]
+    fn failover_global_replication_group_returns_current_primary() {
+        let service = service_with_global_replication_group("fc-us-east-1-global-a", "primary-rg");
+        let req = request(
+            "FailoverGlobalReplicationGroup",
+            &[
+                ("GlobalReplicationGroupId", "fc-us-east-1-global-a"),
+                ("PrimaryRegion", "us-east-1"),
+                ("PrimaryReplicationGroupId", "primary-rg"),
+            ],
+        );
+
+        let resp = service.failover_global_replication_group(&req).unwrap();
+        let body = String::from_utf8(resp.body.to_vec()).unwrap();
+        assert!(body.contains("<ReplicationGroupId>primary-rg</ReplicationGroupId>"));
+        assert!(body.contains("<FailoverGlobalReplicationGroupResponse"));
+    }
+
+    #[test]
+    fn disassociate_global_replication_group_accepts_current_primary_as_noop() {
+        let service = service_with_global_replication_group("fc-us-east-1-global-a", "primary-rg");
+        let req = request(
+            "DisassociateGlobalReplicationGroup",
+            &[
+                ("GlobalReplicationGroupId", "fc-us-east-1-global-a"),
+                ("ReplicationGroupId", "primary-rg"),
+                ("ReplicationGroupRegion", "us-east-1"),
+            ],
+        );
+
+        let resp = service.disassociate_global_replication_group(&req).unwrap();
+        let body = String::from_utf8(resp.body.to_vec()).unwrap();
+        assert!(body.contains("<ReplicationGroupId>primary-rg</ReplicationGroupId>"));
+        assert!(body.contains("<DisassociateGlobalReplicationGroupResponse"));
     }
 
     #[test]

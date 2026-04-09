@@ -68,6 +68,8 @@ pub struct CacheCluster {
 pub struct ReplicationGroup {
     pub replication_group_id: String,
     pub description: String,
+    pub global_replication_group_id: Option<String>,
+    pub global_replication_group_role: Option<String>,
     pub status: String,
     pub cache_node_type: String,
     pub engine: String,
@@ -83,6 +85,28 @@ pub struct ReplicationGroup {
     pub member_clusters: Vec<String>,
     pub snapshot_retention_limit: i32,
     pub snapshot_window: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct GlobalReplicationGroupMember {
+    pub replication_group_id: String,
+    pub replication_group_region: String,
+    pub role: String,
+    pub automatic_failover: bool,
+    pub status: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct GlobalReplicationGroup {
+    pub global_replication_group_id: String,
+    pub global_replication_group_description: String,
+    pub status: String,
+    pub cache_node_type: String,
+    pub engine: String,
+    pub engine_version: String,
+    pub members: Vec<GlobalReplicationGroupMember>,
+    pub cluster_enabled: bool,
+    pub arn: String,
 }
 
 #[derive(Debug, Clone)]
@@ -203,6 +227,7 @@ pub struct ElastiCacheState {
     pub subnet_groups: HashMap<String, CacheSubnetGroup>,
     pub cache_clusters: HashMap<String, CacheCluster>,
     pub replication_groups: HashMap<String, ReplicationGroup>,
+    pub global_replication_groups: HashMap<String, GlobalReplicationGroup>,
     pub users: HashMap<String, ElastiCacheUser>,
     pub user_groups: HashMap<String, ElastiCacheUserGroup>,
     pub snapshots: HashMap<String, CacheSnapshot>,
@@ -233,6 +258,7 @@ impl ElastiCacheState {
             subnet_groups,
             cache_clusters: HashMap::new(),
             replication_groups: HashMap::new(),
+            global_replication_groups: HashMap::new(),
             users,
             user_groups: HashMap::new(),
             snapshots: HashMap::new(),
@@ -250,6 +276,7 @@ impl ElastiCacheState {
         self.subnet_groups = default_subnet_groups(&self.account_id, &self.region);
         self.cache_clusters.clear();
         self.replication_groups.clear();
+        self.global_replication_groups.clear();
         self.users = default_users(&self.account_id, &self.region);
         self.user_groups.clear();
         self.snapshots.clear();
@@ -578,6 +605,12 @@ mod tests {
     }
 
     #[test]
+    fn state_new_has_empty_global_replication_groups() {
+        let state = ElastiCacheState::new("123456789012", "us-east-1");
+        assert!(state.global_replication_groups.is_empty());
+    }
+
+    #[test]
     fn state_new_has_empty_cache_clusters() {
         let state = ElastiCacheState::new("123456789012", "us-east-1");
         assert!(state.cache_clusters.is_empty());
@@ -752,6 +785,8 @@ mod tests {
             ReplicationGroup {
                 replication_group_id: "my-group".to_string(),
                 description: "test".to_string(),
+                global_replication_group_id: None,
+                global_replication_group_role: None,
                 status: "available".to_string(),
                 cache_node_type: "cache.t3.micro".to_string(),
                 engine: "redis".to_string(),
@@ -773,6 +808,35 @@ mod tests {
         assert_eq!(state.replication_groups.len(), 1);
         state.reset();
         assert!(state.replication_groups.is_empty());
+    }
+
+    #[test]
+    fn reset_clears_global_replication_groups() {
+        let mut state = ElastiCacheState::new("123456789012", "us-east-1");
+        state.global_replication_groups.insert(
+            "global-rg".to_string(),
+            GlobalReplicationGroup {
+                global_replication_group_id: "global-rg".to_string(),
+                global_replication_group_description: "test".to_string(),
+                status: "available".to_string(),
+                cache_node_type: "cache.t3.micro".to_string(),
+                engine: "redis".to_string(),
+                engine_version: "7.1".to_string(),
+                members: vec![GlobalReplicationGroupMember {
+                    replication_group_id: "rg-1".to_string(),
+                    replication_group_region: "us-east-1".to_string(),
+                    role: "primary".to_string(),
+                    automatic_failover: false,
+                    status: "associated".to_string(),
+                }],
+                cluster_enabled: false,
+                arn: "arn:aws:elasticache:us-east-1:123456789012:globalreplicationgroup:global-rg"
+                    .to_string(),
+            },
+        );
+        assert_eq!(state.global_replication_groups.len(), 1);
+        state.reset();
+        assert!(state.global_replication_groups.is_empty());
     }
 
     #[test]

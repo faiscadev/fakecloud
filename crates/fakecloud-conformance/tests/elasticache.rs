@@ -157,6 +157,39 @@ async fn elasticache_create_replication_group() {
     assert_eq!(group.status(), Some("available"));
 }
 
+#[test_action("elasticache", "CreateGlobalReplicationGroup", checksum = "5a6b779c")]
+#[tokio::test]
+async fn elasticache_create_global_replication_group() {
+    let server = TestServer::start().await;
+    let client = server.elasticache_client().await;
+
+    client
+        .create_replication_group()
+        .replication_group_id("primary-global-rg")
+        .replication_group_description("Primary for global test")
+        .send()
+        .await
+        .unwrap();
+
+    let response = client
+        .create_global_replication_group()
+        .global_replication_group_id_suffix("global-a")
+        .primary_replication_group_id("primary-global-rg")
+        .global_replication_group_description("Global test group")
+        .send()
+        .await
+        .unwrap();
+
+    let group = response
+        .global_replication_group()
+        .expect("global replication group");
+    assert_eq!(
+        group.global_replication_group_description(),
+        Some("Global test group")
+    );
+    assert_eq!(group.engine(), Some("redis"));
+}
+
 #[test_action("elasticache", "CreateCacheCluster", checksum = "d1b7b330")]
 #[tokio::test]
 async fn elasticache_create_cache_cluster() {
@@ -200,6 +233,51 @@ async fn elasticache_describe_replication_groups() {
     let groups = response.replication_groups();
     assert_eq!(groups.len(), 1);
     assert_eq!(groups[0].replication_group_id(), Some("desc-repl-group"));
+}
+
+#[test_action(
+    "elasticache",
+    "DescribeGlobalReplicationGroups",
+    checksum = "57ffca32"
+)]
+#[tokio::test]
+async fn elasticache_describe_global_replication_groups() {
+    let server = TestServer::start().await;
+    let client = server.elasticache_client().await;
+
+    client
+        .create_replication_group()
+        .replication_group_id("desc-global-primary")
+        .replication_group_description("Primary for global describe")
+        .send()
+        .await
+        .unwrap();
+
+    let created = client
+        .create_global_replication_group()
+        .global_replication_group_id_suffix("global-desc")
+        .primary_replication_group_id("desc-global-primary")
+        .send()
+        .await
+        .unwrap();
+    let global_id = created
+        .global_replication_group()
+        .and_then(|group| group.global_replication_group_id())
+        .expect("global replication group id")
+        .to_string();
+
+    let response = client
+        .describe_global_replication_groups()
+        .global_replication_group_id(global_id)
+        .show_member_info(true)
+        .send()
+        .await
+        .unwrap();
+
+    let groups = response.global_replication_groups();
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0].members().len(), 1);
+    assert_eq!(groups[0].members()[0].role(), Some("primary"));
 }
 
 #[test_action("elasticache", "DescribeCacheClusters", checksum = "7488fca6")]
@@ -252,6 +330,93 @@ async fn elasticache_delete_replication_group() {
 
     let group = response.replication_group().expect("replication group");
     assert_eq!(group.replication_group_id(), Some("del-repl-group"));
+}
+
+#[test_action("elasticache", "ModifyGlobalReplicationGroup", checksum = "046c2c9e")]
+#[tokio::test]
+async fn elasticache_modify_global_replication_group() {
+    let server = TestServer::start().await;
+    let client = server.elasticache_client().await;
+
+    client
+        .create_replication_group()
+        .replication_group_id("modify-global-primary")
+        .replication_group_description("Primary for global modify")
+        .send()
+        .await
+        .unwrap();
+
+    let created = client
+        .create_global_replication_group()
+        .global_replication_group_id_suffix("global-mod")
+        .primary_replication_group_id("modify-global-primary")
+        .send()
+        .await
+        .unwrap();
+    let global_id = created
+        .global_replication_group()
+        .and_then(|group| group.global_replication_group_id())
+        .expect("global replication group id")
+        .to_string();
+
+    let response = client
+        .modify_global_replication_group()
+        .global_replication_group_id(global_id)
+        .apply_immediately(true)
+        .global_replication_group_description("Updated global description")
+        .automatic_failover_enabled(true)
+        .send()
+        .await
+        .unwrap();
+
+    let group = response
+        .global_replication_group()
+        .expect("global replication group");
+    assert_eq!(
+        group.global_replication_group_description(),
+        Some("Updated global description")
+    );
+}
+
+#[test_action("elasticache", "DeleteGlobalReplicationGroup", checksum = "a7da3da4")]
+#[tokio::test]
+async fn elasticache_delete_global_replication_group() {
+    let server = TestServer::start().await;
+    let client = server.elasticache_client().await;
+
+    client
+        .create_replication_group()
+        .replication_group_id("delete-global-primary")
+        .replication_group_description("Primary for global delete")
+        .send()
+        .await
+        .unwrap();
+
+    let created = client
+        .create_global_replication_group()
+        .global_replication_group_id_suffix("global-del")
+        .primary_replication_group_id("delete-global-primary")
+        .send()
+        .await
+        .unwrap();
+    let global_id = created
+        .global_replication_group()
+        .and_then(|group| group.global_replication_group_id())
+        .expect("global replication group id")
+        .to_string();
+
+    let response = client
+        .delete_global_replication_group()
+        .global_replication_group_id(global_id)
+        .retain_primary_replication_group(true)
+        .send()
+        .await
+        .unwrap();
+
+    let group = response
+        .global_replication_group()
+        .expect("global replication group");
+    assert_eq!(group.status(), Some("deleting"));
 }
 
 #[test_action("elasticache", "DeleteCacheCluster", checksum = "72e1dd2c")]
