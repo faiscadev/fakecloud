@@ -653,6 +653,158 @@ async fn elasticache_delete_nonexistent_replication_group_errors() {
     assert!(result.is_err());
 }
 
+#[tokio::test]
+async fn elasticache_global_replication_group_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.elasticache_client().await;
+
+    client
+        .create_replication_group()
+        .replication_group_id("global-primary-rg")
+        .replication_group_description("Primary for global lifecycle")
+        .send()
+        .await
+        .unwrap();
+
+    let create_resp = client
+        .create_global_replication_group()
+        .global_replication_group_id_suffix("lifecycle")
+        .primary_replication_group_id("global-primary-rg")
+        .global_replication_group_description("Lifecycle global group")
+        .send()
+        .await
+        .unwrap();
+
+    let global_group = create_resp
+        .global_replication_group()
+        .expect("global replication group");
+    let global_id = global_group
+        .global_replication_group_id()
+        .expect("global replication group id")
+        .to_string();
+    assert_eq!(
+        global_group.global_replication_group_description(),
+        Some("Lifecycle global group")
+    );
+    assert_eq!(global_group.members().len(), 1);
+    assert_eq!(
+        global_group.members()[0].replication_group_id(),
+        Some("global-primary-rg")
+    );
+
+    let describe_resp = client
+        .describe_global_replication_groups()
+        .global_replication_group_id(&global_id)
+        .show_member_info(true)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(describe_resp.global_replication_groups().len(), 1);
+    assert_eq!(
+        describe_resp.global_replication_groups()[0].members()[0].role(),
+        Some("primary")
+    );
+
+    let replication_group = client
+        .describe_replication_groups()
+        .replication_group_id("global-primary-rg")
+        .send()
+        .await
+        .unwrap()
+        .replication_groups()[0]
+        .clone();
+    let global_info = replication_group
+        .global_replication_group_info()
+        .expect("global replication group info");
+    assert_eq!(
+        global_info.global_replication_group_id(),
+        Some(global_id.as_str())
+    );
+    assert_eq!(
+        global_info.global_replication_group_member_role(),
+        Some("primary")
+    );
+
+    let modify_resp = client
+        .modify_global_replication_group()
+        .global_replication_group_id(&global_id)
+        .apply_immediately(true)
+        .global_replication_group_description("Updated lifecycle global group")
+        .automatic_failover_enabled(true)
+        .cache_node_type("cache.m5.large")
+        .engine_version("7.2")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        modify_resp
+            .global_replication_group()
+            .and_then(|group| group.global_replication_group_description()),
+        Some("Updated lifecycle global group")
+    );
+
+    let failover_resp = client
+        .failover_global_replication_group()
+        .global_replication_group_id(&global_id)
+        .primary_region("us-east-1")
+        .primary_replication_group_id("global-primary-rg")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        failover_resp
+            .global_replication_group()
+            .map(|group| group.members().len()),
+        Some(1)
+    );
+
+    let disassociate_resp = client
+        .disassociate_global_replication_group()
+        .global_replication_group_id(&global_id)
+        .replication_group_id("global-primary-rg")
+        .replication_group_region("us-east-1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        disassociate_resp
+            .global_replication_group()
+            .map(|group| group.members().len()),
+        Some(1)
+    );
+
+    let delete_resp = client
+        .delete_global_replication_group()
+        .global_replication_group_id(&global_id)
+        .retain_primary_replication_group(true)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        delete_resp
+            .global_replication_group()
+            .and_then(|group| group.status()),
+        Some("deleting")
+    );
+
+    let result = client
+        .describe_global_replication_groups()
+        .global_replication_group_id(global_id)
+        .send()
+        .await;
+    assert!(result.is_err());
+
+    let replication_group = client
+        .describe_replication_groups()
+        .replication_group_id("global-primary-rg")
+        .send()
+        .await
+        .unwrap()
+        .replication_groups()[0]
+        .clone();
+    assert!(replication_group.global_replication_group_info().is_none());
+}
+
 // ---------------------------------------------------------------------------
 // User tests
 // ---------------------------------------------------------------------------

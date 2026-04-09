@@ -1798,6 +1798,7 @@ dependencies = [
  "chrono",
  "fakecloud-aws",
  "fakecloud-core",
+ "form_urlencoded",
  "http 1.4.0",
  "parking_lot",
  "thiserror 2.0.18",
