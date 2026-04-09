@@ -97,6 +97,21 @@ pub struct UserGroupPendingChanges {
     pub user_ids_to_remove: Vec<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct CacheSnapshot {
+    pub snapshot_name: String,
+    pub replication_group_id: String,
+    pub replication_group_description: String,
+    pub snapshot_status: String,
+    pub cache_node_type: String,
+    pub engine: String,
+    pub engine_version: String,
+    pub num_cache_clusters: i32,
+    pub arn: String,
+    pub created_at: String,
+    pub snapshot_source: String,
+}
+
 #[derive(Debug)]
 pub struct ElastiCacheState {
     pub account_id: String,
@@ -106,6 +121,7 @@ pub struct ElastiCacheState {
     pub replication_groups: HashMap<String, ReplicationGroup>,
     pub users: HashMap<String, ElastiCacheUser>,
     pub user_groups: HashMap<String, ElastiCacheUserGroup>,
+    pub snapshots: HashMap<String, CacheSnapshot>,
     pub tags: HashMap<String, Vec<(String, String)>>,
     in_progress_replication_group_ids: HashSet<String>,
 }
@@ -130,6 +146,7 @@ impl ElastiCacheState {
             replication_groups: HashMap::new(),
             users,
             user_groups: HashMap::new(),
+            snapshots: HashMap::new(),
             tags,
             in_progress_replication_group_ids: HashSet::new(),
         }
@@ -141,6 +158,7 @@ impl ElastiCacheState {
         self.replication_groups.clear();
         self.users = default_users(&self.account_id, &self.region);
         self.user_groups.clear();
+        self.snapshots.clear();
         self.tags.clear();
         for g in self.subnet_groups.values() {
             self.tags.insert(g.arn.clone(), Vec::new());
@@ -471,6 +489,36 @@ mod tests {
         assert_eq!(state.user_groups.len(), 1);
         state.reset();
         assert!(state.user_groups.is_empty());
+    }
+
+    #[test]
+    fn state_new_has_empty_snapshots() {
+        let state = ElastiCacheState::new("123456789012", "us-east-1");
+        assert!(state.snapshots.is_empty());
+    }
+
+    #[test]
+    fn reset_clears_snapshots() {
+        let mut state = ElastiCacheState::new("123456789012", "us-east-1");
+        state.snapshots.insert(
+            "my-snapshot".to_string(),
+            CacheSnapshot {
+                snapshot_name: "my-snapshot".to_string(),
+                replication_group_id: "rg-1".to_string(),
+                replication_group_description: "test".to_string(),
+                snapshot_status: "available".to_string(),
+                cache_node_type: "cache.t3.micro".to_string(),
+                engine: "redis".to_string(),
+                engine_version: "7.1".to_string(),
+                num_cache_clusters: 1,
+                arn: "arn:aws:elasticache:us-east-1:123456789012:snapshot:my-snapshot".to_string(),
+                created_at: "2024-01-01T00:00:00Z".to_string(),
+                snapshot_source: "manual".to_string(),
+            },
+        );
+        assert_eq!(state.snapshots.len(), 1);
+        state.reset();
+        assert!(state.snapshots.is_empty());
     }
 
     #[test]

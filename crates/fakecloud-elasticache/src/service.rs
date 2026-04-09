@@ -9,7 +9,7 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceErr
 use crate::runtime::{ElastiCacheRuntime, RuntimeError};
 use crate::state::{
     default_engine_versions, default_parameters_for_family, CacheEngineVersion,
-    CacheParameterGroup, CacheSubnetGroup, ElastiCacheUser, ElastiCacheUserGroup,
+    CacheParameterGroup, CacheSnapshot, CacheSubnetGroup, ElastiCacheUser, ElastiCacheUserGroup,
     EngineDefaultParameter, ReplicationGroup, SharedElastiCacheState,
 };
 
@@ -18,11 +18,13 @@ const SUPPORTED_ACTIONS: &[&str] = &[
     "AddTagsToResource",
     "CreateCacheSubnetGroup",
     "CreateReplicationGroup",
+    "CreateSnapshot",
     "CreateUser",
     "CreateUserGroup",
     "DecreaseReplicaCount",
     "DeleteCacheSubnetGroup",
     "DeleteReplicationGroup",
+    "DeleteSnapshot",
     "DeleteUser",
     "DeleteUserGroup",
     "DescribeCacheEngineVersions",
@@ -30,6 +32,7 @@ const SUPPORTED_ACTIONS: &[&str] = &[
     "DescribeCacheSubnetGroups",
     "DescribeEngineDefaultParameters",
     "DescribeReplicationGroups",
+    "DescribeSnapshots",
     "DescribeUserGroups",
     "DescribeUsers",
     "IncreaseReplicaCount",
@@ -70,11 +73,13 @@ impl AwsService for ElastiCacheService {
             "AddTagsToResource" => self.add_tags_to_resource(&request),
             "CreateCacheSubnetGroup" => self.create_cache_subnet_group(&request),
             "CreateReplicationGroup" => self.create_replication_group(&request).await,
+            "CreateSnapshot" => self.create_snapshot(&request),
             "CreateUser" => self.create_user(&request),
             "CreateUserGroup" => self.create_user_group(&request),
             "DecreaseReplicaCount" => self.decrease_replica_count(&request),
             "DeleteCacheSubnetGroup" => self.delete_cache_subnet_group(&request),
             "DeleteReplicationGroup" => self.delete_replication_group(&request).await,
+            "DeleteSnapshot" => self.delete_snapshot(&request),
             "DeleteUser" => self.delete_user(&request),
             "DeleteUserGroup" => self.delete_user_group(&request),
             "DescribeCacheEngineVersions" => self.describe_cache_engine_versions(&request),
@@ -82,6 +87,7 @@ impl AwsService for ElastiCacheService {
             "DescribeCacheSubnetGroups" => self.describe_cache_subnet_groups(&request),
             "DescribeEngineDefaultParameters" => self.describe_engine_default_parameters(&request),
             "DescribeReplicationGroups" => self.describe_replication_groups(&request),
+            "DescribeSnapshots" => self.describe_snapshots(&request),
             "DescribeUserGroups" => self.describe_user_groups(&request),
             "DescribeUsers" => self.describe_users(&request),
             "IncreaseReplicaCount" => self.increase_replica_count(&request),
@@ -616,6 +622,179 @@ impl ElastiCacheService {
             xml_wrap(
                 "DeleteReplicationGroup",
                 &format!("<ReplicationGroup>{xml}</ReplicationGroup>"),
+                &request.request_id,
+            ),
+        ))
+    }
+
+    fn create_snapshot(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let snapshot_name = required_param(request, "SnapshotName")?;
+        let replication_group_id = optional_param(request, "ReplicationGroupId");
+        let cache_cluster_id = optional_param(request, "CacheClusterId");
+
+        if replication_group_id.is_none() && cache_cluster_id.is_none() {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterCombination",
+                "At least one of ReplicationGroupId or CacheClusterId must be specified."
+                    .to_string(),
+            ));
+        }
+
+        let mut state = self.state.write();
+
+        if state.snapshots.contains_key(&snapshot_name) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "SnapshotAlreadyExistsFault",
+                format!("Snapshot {snapshot_name} already exists."),
+            ));
+        }
+
+        // Resolve the replication group: either directly by ID or via CacheClusterId
+        let group_id = if let Some(ref rg_id) = replication_group_id {
+            rg_id.clone()
+        } else {
+            let cluster_id = cache_cluster_id.as_ref().unwrap();
+            // CacheClusterId maps to a member cluster like "rg-001", find parent group
+            state
+                .replication_groups
+                .values()
+                .find(|g| g.member_clusters.contains(cluster_id))
+                .map(|g| g.replication_group_id.clone())
+                .ok_or_else(|| {
+                    AwsServiceError::aws_error(
+                        StatusCode::NOT_FOUND,
+                        "CacheClusterNotFound",
+                        format!("CacheCluster {cluster_id} not found."),
+                    )
+                })?
+        };
+
+        let group = state.replication_groups.get(&group_id).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "ReplicationGroupNotFoundFault",
+                format!("ReplicationGroup {group_id} not found."),
+            )
+        })?;
+
+        let arn = format!(
+            "arn:aws:elasticache:{}:{}:snapshot:{}",
+            state.region, state.account_id, snapshot_name
+        );
+
+        let snapshot = CacheSnapshot {
+            snapshot_name: snapshot_name.clone(),
+            replication_group_id: group.replication_group_id.clone(),
+            replication_group_description: group.description.clone(),
+            snapshot_status: "available".to_string(),
+            cache_node_type: group.cache_node_type.clone(),
+            engine: group.engine.clone(),
+            engine_version: group.engine_version.clone(),
+            num_cache_clusters: group.num_cache_clusters,
+            arn: arn.clone(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            snapshot_source: "manual".to_string(),
+        };
+
+        let xml = snapshot_xml(&snapshot);
+        state.tags.insert(arn, Vec::new());
+        state.snapshots.insert(snapshot_name, snapshot);
+
+        Ok(AwsResponse::xml(
+            StatusCode::OK,
+            xml_wrap(
+                "CreateSnapshot",
+                &format!("<Snapshot>{xml}</Snapshot>"),
+                &request.request_id,
+            ),
+        ))
+    }
+
+    fn describe_snapshots(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let snapshot_name = optional_param(request, "SnapshotName");
+        let replication_group_id = optional_param(request, "ReplicationGroupId");
+        let cache_cluster_id = optional_param(request, "CacheClusterId");
+        let max_records = optional_usize_param(request, "MaxRecords")?;
+        let marker = optional_param(request, "Marker");
+
+        let state = self.state.read();
+
+        let snapshots: Vec<&CacheSnapshot> = if let Some(ref name) = snapshot_name {
+            match state.snapshots.get(name) {
+                Some(s) => vec![s],
+                None => {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::NOT_FOUND,
+                        "SnapshotNotFoundFault",
+                        format!("Snapshot {name} not found."),
+                    ));
+                }
+            }
+        } else {
+            let mut snaps: Vec<&CacheSnapshot> = state
+                .snapshots
+                .values()
+                .filter(|s| {
+                    replication_group_id
+                        .as_ref()
+                        .is_none_or(|id| s.replication_group_id == *id)
+                })
+                .filter(|s| {
+                    cache_cluster_id.as_ref().is_none_or(|cluster_id| {
+                        state
+                            .replication_groups
+                            .get(&s.replication_group_id)
+                            .is_some_and(|g| g.member_clusters.contains(cluster_id))
+                    })
+                })
+                .collect();
+            snaps.sort_by(|a, b| a.snapshot_name.cmp(&b.snapshot_name));
+            snaps
+        };
+
+        let (page, next_marker) = paginate(&snapshots, marker.as_deref(), max_records);
+
+        let members_xml: String = page
+            .iter()
+            .map(|s| format!("<Snapshot>{}</Snapshot>", snapshot_xml(s)))
+            .collect();
+        let marker_xml = next_marker
+            .map(|m| format!("<Marker>{}</Marker>", xml_escape(&m)))
+            .unwrap_or_default();
+
+        Ok(AwsResponse::xml(
+            StatusCode::OK,
+            xml_wrap(
+                "DescribeSnapshots",
+                &format!("<Snapshots>{members_xml}</Snapshots>{marker_xml}"),
+                &request.request_id,
+            ),
+        ))
+    }
+
+    fn delete_snapshot(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let snapshot_name = required_param(request, "SnapshotName")?;
+
+        let mut state = self.state.write();
+        let mut snapshot = state.snapshots.remove(&snapshot_name).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "SnapshotNotFoundFault",
+                format!("Snapshot {snapshot_name} not found."),
+            )
+        })?;
+        state.tags.remove(&snapshot.arn);
+
+        snapshot.snapshot_status = "deleting".to_string();
+        let xml = snapshot_xml(&snapshot);
+
+        Ok(AwsResponse::xml(
+            StatusCode::OK,
+            xml_wrap(
+                "DeleteSnapshot",
+                &format!("<Snapshot>{xml}</Snapshot>"),
                 &request.request_id,
             ),
         ))
@@ -1793,6 +1972,31 @@ fn runtime_error_to_service_error(error: RuntimeError) -> AwsServiceError {
     }
 }
 
+fn snapshot_xml(s: &CacheSnapshot) -> String {
+    format!(
+        "<SnapshotName>{}</SnapshotName>\
+         <ReplicationGroupId>{}</ReplicationGroupId>\
+         <ReplicationGroupDescription>{}</ReplicationGroupDescription>\
+         <SnapshotStatus>{}</SnapshotStatus>\
+         <SnapshotSource>{}</SnapshotSource>\
+         <CacheNodeType>{}</CacheNodeType>\
+         <Engine>{}</Engine>\
+         <EngineVersion>{}</EngineVersion>\
+         <NumCacheClusters>{}</NumCacheClusters>\
+         <ARN>{}</ARN>",
+        xml_escape(&s.snapshot_name),
+        xml_escape(&s.replication_group_id),
+        xml_escape(&s.replication_group_description),
+        xml_escape(&s.snapshot_status),
+        xml_escape(&s.snapshot_source),
+        xml_escape(&s.cache_node_type),
+        xml_escape(&s.engine),
+        xml_escape(&s.engine_version),
+        s.num_cache_clusters,
+        xml_escape(&s.arn),
+    )
+}
+
 fn parameter_xml(p: &EngineDefaultParameter) -> String {
     format!(
         "<Parameter>\
@@ -2429,5 +2633,250 @@ mod tests {
             ],
         );
         assert!(service.test_failover(&req).is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // Snapshot tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn create_snapshot_returns_snapshot_xml() {
+        let service = service_with_replication_group("snap-rg", 1);
+        let req = request(
+            "CreateSnapshot",
+            &[
+                ("SnapshotName", "my-snap"),
+                ("ReplicationGroupId", "snap-rg"),
+            ],
+        );
+        let resp = service.create_snapshot(&req).unwrap();
+        let body = String::from_utf8(resp.body.to_vec()).unwrap();
+        assert!(body.contains("<SnapshotName>my-snap</SnapshotName>"));
+        assert!(body.contains("<ReplicationGroupId>snap-rg</ReplicationGroupId>"));
+        assert!(body.contains("<SnapshotStatus>available</SnapshotStatus>"));
+        assert!(body.contains("<SnapshotSource>manual</SnapshotSource>"));
+        assert!(body.contains("<Engine>redis</Engine>"));
+        assert!(body.contains("<CreateSnapshotResponse"));
+    }
+
+    #[test]
+    fn create_snapshot_via_cache_cluster_id() {
+        let service = service_with_replication_group("cc-rg", 2);
+        let req = request(
+            "CreateSnapshot",
+            &[
+                ("SnapshotName", "cluster-snap"),
+                ("CacheClusterId", "cc-rg-001"),
+            ],
+        );
+        let resp = service.create_snapshot(&req).unwrap();
+        let body = String::from_utf8(resp.body.to_vec()).unwrap();
+        assert!(body.contains("<ReplicationGroupId>cc-rg</ReplicationGroupId>"));
+    }
+
+    #[test]
+    fn create_snapshot_rejects_missing_group_and_cluster() {
+        let service = service_with_replication_group("rg", 1);
+        let req = request("CreateSnapshot", &[("SnapshotName", "bad-snap")]);
+        assert!(service.create_snapshot(&req).is_err());
+    }
+
+    #[test]
+    fn create_snapshot_rejects_duplicate_name() {
+        let service = service_with_replication_group("dup-rg", 1);
+        let req = request(
+            "CreateSnapshot",
+            &[
+                ("SnapshotName", "dup-snap"),
+                ("ReplicationGroupId", "dup-rg"),
+            ],
+        );
+        service.create_snapshot(&req).unwrap();
+        assert!(service.create_snapshot(&req).is_err());
+    }
+
+    #[test]
+    fn create_snapshot_rejects_nonexistent_group() {
+        let state = crate::state::ElastiCacheState::new("123456789012", "us-east-1");
+        let shared = std::sync::Arc::new(parking_lot::RwLock::new(state));
+        let service = ElastiCacheService::new(shared);
+        let req = request(
+            "CreateSnapshot",
+            &[
+                ("SnapshotName", "orphan"),
+                ("ReplicationGroupId", "no-such-rg"),
+            ],
+        );
+        assert!(service.create_snapshot(&req).is_err());
+    }
+
+    #[test]
+    fn create_snapshot_rejects_missing_name() {
+        let service = service_with_replication_group("rg", 1);
+        let req = request("CreateSnapshot", &[("ReplicationGroupId", "rg")]);
+        assert!(service.create_snapshot(&req).is_err());
+    }
+
+    #[test]
+    fn create_snapshot_registers_arn_for_tags() {
+        let service = service_with_replication_group("tag-rg", 1);
+        let req = request(
+            "CreateSnapshot",
+            &[
+                ("SnapshotName", "tag-snap"),
+                ("ReplicationGroupId", "tag-rg"),
+            ],
+        );
+        service.create_snapshot(&req).unwrap();
+
+        let state = service.state.read();
+        let arn = "arn:aws:elasticache:us-east-1:123456789012:snapshot:tag-snap".to_string();
+        assert!(state.tags.contains_key(&arn));
+    }
+
+    #[test]
+    fn describe_snapshots_returns_all() {
+        let service = service_with_replication_group("desc-rg", 1);
+        for name in &["snap-a", "snap-b"] {
+            let req = request(
+                "CreateSnapshot",
+                &[("SnapshotName", name), ("ReplicationGroupId", "desc-rg")],
+            );
+            service.create_snapshot(&req).unwrap();
+        }
+        let req = request("DescribeSnapshots", &[]);
+        let resp = service.describe_snapshots(&req).unwrap();
+        let body = String::from_utf8(resp.body.to_vec()).unwrap();
+        assert!(body.contains("<SnapshotName>snap-a</SnapshotName>"));
+        assert!(body.contains("<SnapshotName>snap-b</SnapshotName>"));
+        assert!(body.contains("<DescribeSnapshotsResponse"));
+    }
+
+    #[test]
+    fn describe_snapshots_filters_by_name() {
+        let service = service_with_replication_group("filt-rg", 1);
+        for name in &["snap-1", "snap-2"] {
+            let req = request(
+                "CreateSnapshot",
+                &[("SnapshotName", name), ("ReplicationGroupId", "filt-rg")],
+            );
+            service.create_snapshot(&req).unwrap();
+        }
+        let req = request("DescribeSnapshots", &[("SnapshotName", "snap-1")]);
+        let resp = service.describe_snapshots(&req).unwrap();
+        let body = String::from_utf8(resp.body.to_vec()).unwrap();
+        assert!(body.contains("<SnapshotName>snap-1</SnapshotName>"));
+        assert!(!body.contains("<SnapshotName>snap-2</SnapshotName>"));
+    }
+
+    #[test]
+    fn describe_snapshots_filters_by_replication_group() {
+        let service = service_with_replication_group("rg-a", 1);
+        let req = request(
+            "CreateSnapshot",
+            &[
+                ("SnapshotName", "rg-a-snap"),
+                ("ReplicationGroupId", "rg-a"),
+            ],
+        );
+        service.create_snapshot(&req).unwrap();
+
+        let req = request("DescribeSnapshots", &[("ReplicationGroupId", "rg-a")]);
+        let resp = service.describe_snapshots(&req).unwrap();
+        let body = String::from_utf8(resp.body.to_vec()).unwrap();
+        assert!(body.contains("<SnapshotName>rg-a-snap</SnapshotName>"));
+
+        // Filter by non-matching group returns empty
+        let req = request("DescribeSnapshots", &[("ReplicationGroupId", "rg-b")]);
+        let resp = service.describe_snapshots(&req).unwrap();
+        let body = String::from_utf8(resp.body.to_vec()).unwrap();
+        assert!(!body.contains("<SnapshotName>"));
+    }
+
+    #[test]
+    fn describe_snapshots_not_found_by_name() {
+        let state = crate::state::ElastiCacheState::new("123456789012", "us-east-1");
+        let shared = std::sync::Arc::new(parking_lot::RwLock::new(state));
+        let service = ElastiCacheService::new(shared);
+        let req = request("DescribeSnapshots", &[("SnapshotName", "nope")]);
+        assert!(service.describe_snapshots(&req).is_err());
+    }
+
+    #[test]
+    fn delete_snapshot_removes_and_returns_deleting() {
+        let service = service_with_replication_group("del-rg", 1);
+        let req = request(
+            "CreateSnapshot",
+            &[
+                ("SnapshotName", "del-snap"),
+                ("ReplicationGroupId", "del-rg"),
+            ],
+        );
+        service.create_snapshot(&req).unwrap();
+
+        let req = request("DeleteSnapshot", &[("SnapshotName", "del-snap")]);
+        let resp = service.delete_snapshot(&req).unwrap();
+        let body = String::from_utf8(resp.body.to_vec()).unwrap();
+        assert!(body.contains("<SnapshotStatus>deleting</SnapshotStatus>"));
+        assert!(body.contains("<DeleteSnapshotResponse"));
+
+        // Verify it's gone
+        assert!(!service.state.read().snapshots.contains_key("del-snap"));
+    }
+
+    #[test]
+    fn delete_snapshot_cleans_up_tags() {
+        let service = service_with_replication_group("tag-del-rg", 1);
+        let req = request(
+            "CreateSnapshot",
+            &[
+                ("SnapshotName", "tag-del-snap"),
+                ("ReplicationGroupId", "tag-del-rg"),
+            ],
+        );
+        service.create_snapshot(&req).unwrap();
+
+        let arn = "arn:aws:elasticache:us-east-1:123456789012:snapshot:tag-del-snap".to_string();
+        assert!(service.state.read().tags.contains_key(&arn));
+
+        let req = request("DeleteSnapshot", &[("SnapshotName", "tag-del-snap")]);
+        service.delete_snapshot(&req).unwrap();
+        assert!(!service.state.read().tags.contains_key(&arn));
+    }
+
+    #[test]
+    fn delete_snapshot_not_found() {
+        let state = crate::state::ElastiCacheState::new("123456789012", "us-east-1");
+        let shared = std::sync::Arc::new(parking_lot::RwLock::new(state));
+        let service = ElastiCacheService::new(shared);
+        let req = request("DeleteSnapshot", &[("SnapshotName", "nope")]);
+        assert!(service.delete_snapshot(&req).is_err());
+    }
+
+    #[test]
+    fn snapshot_xml_contains_all_fields() {
+        let snap = CacheSnapshot {
+            snapshot_name: "test-snap".to_string(),
+            replication_group_id: "rg-1".to_string(),
+            replication_group_description: "desc".to_string(),
+            snapshot_status: "available".to_string(),
+            cache_node_type: "cache.t3.micro".to_string(),
+            engine: "redis".to_string(),
+            engine_version: "7.1".to_string(),
+            num_cache_clusters: 2,
+            arn: "arn:aws:elasticache:us-east-1:123:snapshot:test-snap".to_string(),
+            created_at: "2024-01-01T00:00:00Z".to_string(),
+            snapshot_source: "manual".to_string(),
+        };
+        let xml = snapshot_xml(&snap);
+        assert!(xml.contains("<SnapshotName>test-snap</SnapshotName>"));
+        assert!(xml.contains("<ReplicationGroupId>rg-1</ReplicationGroupId>"));
+        assert!(xml.contains("<SnapshotStatus>available</SnapshotStatus>"));
+        assert!(xml.contains("<SnapshotSource>manual</SnapshotSource>"));
+        assert!(xml.contains("<CacheNodeType>cache.t3.micro</CacheNodeType>"));
+        assert!(xml.contains("<Engine>redis</Engine>"));
+        assert!(xml.contains("<EngineVersion>7.1</EngineVersion>"));
+        assert!(xml.contains("<NumCacheClusters>2</NumCacheClusters>"));
+        assert!(xml.contains("<ARN>arn:aws:elasticache:us-east-1:123:snapshot:test-snap</ARN>"));
     }
 }

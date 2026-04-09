@@ -597,6 +597,100 @@ async fn elasticache_decrease_replica_count() {
     assert_eq!(group.member_clusters().len(), 2);
 }
 
+#[test_action("elasticache", "CreateSnapshot", checksum = "10b847ad")]
+#[tokio::test]
+async fn elasticache_create_snapshot() {
+    let server = TestServer::start().await;
+    let client = server.elasticache_client().await;
+
+    client
+        .create_replication_group()
+        .replication_group_id("snap-repl-group")
+        .replication_group_description("For snapshot test")
+        .send()
+        .await
+        .unwrap();
+
+    let response = client
+        .create_snapshot()
+        .snapshot_name("test-snapshot")
+        .replication_group_id("snap-repl-group")
+        .send()
+        .await
+        .unwrap();
+
+    let snapshot = response.snapshot().expect("snapshot");
+    assert_eq!(snapshot.snapshot_name(), Some("test-snapshot"));
+    assert_eq!(snapshot.replication_group_id(), Some("snap-repl-group"));
+}
+
+#[test_action("elasticache", "DescribeSnapshots", checksum = "00f83d10")]
+#[tokio::test]
+async fn elasticache_describe_snapshots() {
+    let server = TestServer::start().await;
+    let client = server.elasticache_client().await;
+
+    client
+        .create_replication_group()
+        .replication_group_id("desc-snap-rg")
+        .replication_group_description("For describe snapshot test")
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .create_snapshot()
+        .snapshot_name("desc-snapshot")
+        .replication_group_id("desc-snap-rg")
+        .send()
+        .await
+        .unwrap();
+
+    let response = client
+        .describe_snapshots()
+        .snapshot_name("desc-snapshot")
+        .send()
+        .await
+        .unwrap();
+
+    let snapshots = response.snapshots();
+    assert_eq!(snapshots.len(), 1);
+    assert_eq!(snapshots[0].snapshot_name(), Some("desc-snapshot"));
+}
+
+#[test_action("elasticache", "DeleteSnapshot", checksum = "85aa2082")]
+#[tokio::test]
+async fn elasticache_delete_snapshot() {
+    let server = TestServer::start().await;
+    let client = server.elasticache_client().await;
+
+    client
+        .create_replication_group()
+        .replication_group_id("del-snap-rg")
+        .replication_group_description("For delete snapshot test")
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .create_snapshot()
+        .snapshot_name("del-snapshot")
+        .replication_group_id("del-snap-rg")
+        .send()
+        .await
+        .unwrap();
+
+    let response = client
+        .delete_snapshot()
+        .snapshot_name("del-snapshot")
+        .send()
+        .await
+        .unwrap();
+
+    let snapshot = response.snapshot().expect("snapshot");
+    assert_eq!(snapshot.snapshot_name(), Some("del-snapshot"));
+}
+
 #[test_action("elasticache", "TestFailover", checksum = "c08470ff")]
 #[tokio::test]
 async fn elasticache_test_failover() {
