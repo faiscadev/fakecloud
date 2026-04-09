@@ -109,6 +109,58 @@ async fn rds_describe_db_instances() {
     );
 }
 
+#[test_action("rds", "DeleteDBInstance", checksum = "22909663")]
+#[tokio::test]
+async fn rds_delete_db_instance() {
+    let server = TestServer::start().await;
+    let client = server.rds_client().await;
+
+    create_instance(&client).await;
+
+    let response = client
+        .delete_db_instance()
+        .db_instance_identifier("conf-rds-db")
+        .skip_final_snapshot(true)
+        .send()
+        .await
+        .unwrap();
+
+    let instance = response.db_instance().expect("db instance");
+    assert_eq!(instance.db_instance_identifier(), Some("conf-rds-db"));
+    assert_eq!(instance.db_instance_status(), Some("deleting"));
+
+    let error = client
+        .describe_db_instances()
+        .db_instance_identifier("conf-rds-db")
+        .send()
+        .await
+        .expect_err("instance should be deleted");
+    assert_eq!(
+        error.into_service_error().meta().code(),
+        Some("DBInstanceNotFound")
+    );
+}
+
+#[tokio::test]
+async fn rds_delete_db_instance_rejects_deletion_protection() {
+    let server = TestServer::start().await;
+    let client = server.rds_client().await;
+
+    create_instance_with_deletion_protection(&client, "conf-rds-protected-db", true).await;
+
+    let error = client
+        .delete_db_instance()
+        .db_instance_identifier("conf-rds-protected-db")
+        .skip_final_snapshot(true)
+        .send()
+        .await
+        .expect_err("deletion protection should block deletion");
+    assert_eq!(
+        error.into_service_error().meta().code(),
+        Some("InvalidDBInstanceState")
+    );
+}
+
 #[test_action("rds", "AddTagsToResource", checksum = "79e71104")]
 #[tokio::test]
 async fn rds_add_tags_to_resource() {
@@ -243,15 +295,24 @@ async fn rds_remove_tags_from_resource() {
 async fn create_instance(
     client: &aws_sdk_rds::Client,
 ) -> aws_sdk_rds::operation::create_db_instance::CreateDbInstanceOutput {
+    create_instance_with_deletion_protection(client, "conf-rds-db", false).await
+}
+
+async fn create_instance_with_deletion_protection(
+    client: &aws_sdk_rds::Client,
+    db_instance_identifier: &str,
+    deletion_protection: bool,
+) -> aws_sdk_rds::operation::create_db_instance::CreateDbInstanceOutput {
     client
         .create_db_instance()
-        .db_instance_identifier("conf-rds-db")
+        .db_instance_identifier(db_instance_identifier)
         .allocated_storage(20)
         .db_instance_class("db.t3.micro")
         .engine("postgres")
         .engine_version("16.3")
         .master_username("admin")
         .master_user_password("secret123")
+        .deletion_protection(deletion_protection)
         .db_name("appdb")
         .send()
         .await
