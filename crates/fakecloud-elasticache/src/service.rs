@@ -12,7 +12,8 @@ use crate::state::{
     default_engine_versions, default_parameters_for_family, CacheCluster, CacheEngineVersion,
     CacheParameterGroup, CacheSnapshot, CacheSubnetGroup, ElastiCacheState, ElastiCacheUser,
     ElastiCacheUserGroup, EngineDefaultParameter, GlobalReplicationGroup,
-    GlobalReplicationGroupMember, ReplicationGroup, ServerlessCache, ServerlessCacheDataStorage,
+    GlobalReplicationGroupMember, RecurringCharge, ReplicationGroup, ReservedCacheNode,
+    ReservedCacheNodesOffering, ServerlessCache, ServerlessCacheDataStorage,
     ServerlessCacheEcpuPerSecond, ServerlessCacheEndpoint, ServerlessCacheSnapshot,
     ServerlessCacheUsageLimits, SharedElastiCacheState,
 };
@@ -43,6 +44,8 @@ const SUPPORTED_ACTIONS: &[&str] = &[
     "DescribeCacheEngineVersions",
     "DescribeGlobalReplicationGroups",
     "DescribeCacheParameterGroups",
+    "DescribeReservedCacheNodes",
+    "DescribeReservedCacheNodesOfferings",
     "DescribeCacheSubnetGroups",
     "DescribeEngineDefaultParameters",
     "DescribeReplicationGroups",
@@ -114,6 +117,10 @@ impl AwsService for ElastiCacheService {
             "DescribeCacheEngineVersions" => self.describe_cache_engine_versions(&request),
             "DescribeGlobalReplicationGroups" => self.describe_global_replication_groups(&request),
             "DescribeCacheParameterGroups" => self.describe_cache_parameter_groups(&request),
+            "DescribeReservedCacheNodes" => self.describe_reserved_cache_nodes(&request),
+            "DescribeReservedCacheNodesOfferings" => {
+                self.describe_reserved_cache_nodes_offerings(&request)
+            }
             "DescribeCacheSubnetGroups" => self.describe_cache_subnet_groups(&request),
             "DescribeEngineDefaultParameters" => self.describe_engine_default_parameters(&request),
             "DescribeReplicationGroups" => self.describe_replication_groups(&request),
@@ -232,6 +239,141 @@ impl ElastiCacheService {
             xml_wrap(
                 "DescribeCacheParameterGroups",
                 &format!("<CacheParameterGroups>{members_xml}</CacheParameterGroups>{marker_xml}"),
+                &request.request_id,
+            ),
+        ))
+    }
+
+    fn describe_reserved_cache_nodes(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let reserved_cache_node_id = optional_param(request, "ReservedCacheNodeId");
+        let reserved_cache_nodes_offering_id =
+            optional_param(request, "ReservedCacheNodesOfferingId");
+        let cache_node_type = optional_param(request, "CacheNodeType");
+        let duration = parse_reserved_duration_filter(optional_param(request, "Duration"))?;
+        let product_description = optional_param(request, "ProductDescription");
+        let offering_type = optional_param(request, "OfferingType");
+        let max_records = optional_usize_param(request, "MaxRecords")?;
+        let marker = optional_param(request, "Marker");
+
+        let state = self.state.read();
+        let mut nodes: Vec<&ReservedCacheNode> = state.reserved_cache_nodes.values().collect();
+        nodes.retain(|node| {
+            reserved_cache_node_id
+                .as_ref()
+                .is_none_or(|expected| node.reserved_cache_node_id == *expected)
+                && reserved_cache_nodes_offering_id
+                    .as_ref()
+                    .is_none_or(|expected| node.reserved_cache_nodes_offering_id == *expected)
+                && cache_node_type
+                    .as_ref()
+                    .is_none_or(|expected| node.cache_node_type == *expected)
+                && duration.is_none_or(|expected| node.duration == expected)
+                && product_description
+                    .as_ref()
+                    .is_none_or(|expected| node.product_description == *expected)
+                && offering_type
+                    .as_ref()
+                    .is_none_or(|expected| node.offering_type == *expected)
+        });
+        nodes.sort_by(|left, right| {
+            left.reserved_cache_node_id
+                .cmp(&right.reserved_cache_node_id)
+        });
+
+        if let Some(ref id) = reserved_cache_node_id {
+            if nodes.is_empty() {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::NOT_FOUND,
+                    "ReservedCacheNodeNotFoundFault",
+                    format!("ReservedCacheNode not found: {id}"),
+                ));
+            }
+        }
+
+        let (page, next_marker) = paginate(&nodes, marker.as_deref(), max_records);
+        let members_xml: String = page
+            .iter()
+            .map(|node| reserved_cache_node_xml(node))
+            .collect();
+        let marker_xml = next_marker
+            .map(|value| format!("<Marker>{}</Marker>", xml_escape(&value)))
+            .unwrap_or_default();
+
+        Ok(AwsResponse::xml(
+            StatusCode::OK,
+            xml_wrap(
+                "DescribeReservedCacheNodes",
+                &format!("<ReservedCacheNodes>{members_xml}</ReservedCacheNodes>{marker_xml}"),
+                &request.request_id,
+            ),
+        ))
+    }
+
+    fn describe_reserved_cache_nodes_offerings(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let reserved_cache_nodes_offering_id =
+            optional_param(request, "ReservedCacheNodesOfferingId");
+        let cache_node_type = optional_param(request, "CacheNodeType");
+        let duration = parse_reserved_duration_filter(optional_param(request, "Duration"))?;
+        let product_description = optional_param(request, "ProductDescription");
+        let offering_type = optional_param(request, "OfferingType");
+        let max_records = optional_usize_param(request, "MaxRecords")?;
+        let marker = optional_param(request, "Marker");
+
+        let state = self.state.read();
+        let mut offerings: Vec<&ReservedCacheNodesOffering> =
+            state.reserved_cache_nodes_offerings.iter().collect();
+        offerings.retain(|offering| {
+            reserved_cache_nodes_offering_id
+                .as_ref()
+                .is_none_or(|expected| offering.reserved_cache_nodes_offering_id == *expected)
+                && cache_node_type
+                    .as_ref()
+                    .is_none_or(|expected| offering.cache_node_type == *expected)
+                && duration.is_none_or(|expected| offering.duration == expected)
+                && product_description
+                    .as_ref()
+                    .is_none_or(|expected| offering.product_description == *expected)
+                && offering_type
+                    .as_ref()
+                    .is_none_or(|expected| offering.offering_type == *expected)
+        });
+        offerings.sort_by(|left, right| {
+            left.reserved_cache_nodes_offering_id
+                .cmp(&right.reserved_cache_nodes_offering_id)
+        });
+
+        if let Some(ref id) = reserved_cache_nodes_offering_id {
+            if offerings.is_empty() {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::NOT_FOUND,
+                    "ReservedCacheNodesOfferingNotFoundFault",
+                    format!("ReservedCacheNodesOffering not found: {id}"),
+                ));
+            }
+        }
+
+        let (page, next_marker) = paginate(&offerings, marker.as_deref(), max_records);
+        let members_xml: String = page
+            .iter()
+            .map(|offering| reserved_cache_nodes_offering_xml(offering))
+            .collect();
+        let marker_xml = next_marker
+            .map(|value| format!("<Marker>{}</Marker>", xml_escape(&value)))
+            .unwrap_or_default();
+
+        Ok(AwsResponse::xml(
+            StatusCode::OK,
+            xml_wrap(
+                "DescribeReservedCacheNodesOfferings",
+                &format!(
+                    "<ReservedCacheNodesOfferings>{members_xml}</ReservedCacheNodesOfferings>{marker_xml}"
+                ),
                 &request.request_id,
             ),
         ))
@@ -2951,6 +3093,24 @@ fn optional_usize_param(req: &AwsRequest, name: &str) -> Result<Option<usize>, A
         .transpose()
 }
 
+fn parse_reserved_duration_filter(value: Option<String>) -> Result<Option<i32>, AwsServiceError> {
+    value
+        .map(|raw| match raw.as_str() {
+            "1" => Ok(31_536_000),
+            "3" => Ok(94_608_000),
+            "31536000" => Ok(31_536_000),
+            "94608000" => Ok(94_608_000),
+            _ => Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterValue",
+                format!(
+                    "Invalid value for Duration: {raw}. Valid values are 1, 3, 31536000, or 94608000."
+                ),
+            )),
+        })
+        .transpose()
+}
+
 /// Simple index-based pagination. Returns the current page and an optional next marker.
 fn paginate<T: Clone>(
     items: &[T],
@@ -3085,6 +3245,85 @@ fn engine_version_xml(v: &CacheEngineVersion) -> String {
         xml_escape(&v.cache_parameter_group_family),
         xml_escape(&v.cache_engine_description),
         xml_escape(&v.cache_engine_version_description),
+    )
+}
+
+fn recurring_charge_xml(charge: &RecurringCharge) -> String {
+    format!(
+        "<RecurringCharge>\
+         <RecurringChargeAmount>{}</RecurringChargeAmount>\
+         <RecurringChargeFrequency>{}</RecurringChargeFrequency>\
+         </RecurringCharge>",
+        charge.recurring_charge_amount,
+        xml_escape(&charge.recurring_charge_frequency),
+    )
+}
+
+fn reserved_cache_node_xml(node: &ReservedCacheNode) -> String {
+    let recurring_charges_xml: String = node
+        .recurring_charges
+        .iter()
+        .map(recurring_charge_xml)
+        .collect();
+
+    format!(
+        "<ReservedCacheNode>\
+         <ReservedCacheNodeId>{}</ReservedCacheNodeId>\
+         <ReservedCacheNodesOfferingId>{}</ReservedCacheNodesOfferingId>\
+         <CacheNodeType>{}</CacheNodeType>\
+         <StartTime>{}</StartTime>\
+         <Duration>{}</Duration>\
+         <FixedPrice>{}</FixedPrice>\
+         <UsagePrice>{}</UsagePrice>\
+         <CacheNodeCount>{}</CacheNodeCount>\
+         <ProductDescription>{}</ProductDescription>\
+         <OfferingType>{}</OfferingType>\
+         <State>{}</State>\
+         <RecurringCharges>{}</RecurringCharges>\
+         <ReservationARN>{}</ReservationARN>\
+         </ReservedCacheNode>",
+        xml_escape(&node.reserved_cache_node_id),
+        xml_escape(&node.reserved_cache_nodes_offering_id),
+        xml_escape(&node.cache_node_type),
+        xml_escape(&node.start_time),
+        node.duration,
+        node.fixed_price,
+        node.usage_price,
+        node.cache_node_count,
+        xml_escape(&node.product_description),
+        xml_escape(&node.offering_type),
+        xml_escape(&node.state),
+        recurring_charges_xml,
+        xml_escape(&node.reservation_arn),
+    )
+}
+
+fn reserved_cache_nodes_offering_xml(offering: &ReservedCacheNodesOffering) -> String {
+    let recurring_charges_xml: String = offering
+        .recurring_charges
+        .iter()
+        .map(recurring_charge_xml)
+        .collect();
+
+    format!(
+        "<ReservedCacheNodesOffering>\
+         <ReservedCacheNodesOfferingId>{}</ReservedCacheNodesOfferingId>\
+         <CacheNodeType>{}</CacheNodeType>\
+         <Duration>{}</Duration>\
+         <FixedPrice>{}</FixedPrice>\
+         <UsagePrice>{}</UsagePrice>\
+         <ProductDescription>{}</ProductDescription>\
+         <OfferingType>{}</OfferingType>\
+         <RecurringCharges>{}</RecurringCharges>\
+         </ReservedCacheNodesOffering>",
+        xml_escape(&offering.reserved_cache_nodes_offering_id),
+        xml_escape(&offering.cache_node_type),
+        offering.duration,
+        offering.fixed_price,
+        offering.usage_price,
+        xml_escape(&offering.product_description),
+        xml_escape(&offering.offering_type),
+        recurring_charges_xml,
     )
 }
 
@@ -3756,6 +3995,38 @@ mod tests {
         }
     }
 
+    fn sample_reserved_cache_node_offering(id: &str) -> ReservedCacheNodesOffering {
+        ReservedCacheNodesOffering {
+            reserved_cache_nodes_offering_id: id.to_string(),
+            cache_node_type: "cache.t3.micro".to_string(),
+            duration: 31_536_000,
+            fixed_price: 0.0,
+            usage_price: 0.011,
+            product_description: "redis".to_string(),
+            offering_type: "No Upfront".to_string(),
+            recurring_charges: Vec::new(),
+        }
+    }
+
+    fn sample_reserved_cache_node(id: &str, offering_id: &str) -> ReservedCacheNode {
+        ReservedCacheNode {
+            reserved_cache_node_id: id.to_string(),
+            reserved_cache_nodes_offering_id: offering_id.to_string(),
+            cache_node_type: "cache.t3.micro".to_string(),
+            start_time: "2024-01-01T00:00:00Z".to_string(),
+            duration: 31_536_000,
+            fixed_price: 0.0,
+            usage_price: 0.011,
+            cache_node_count: 1,
+            product_description: "redis".to_string(),
+            offering_type: "No Upfront".to_string(),
+            state: "payment-pending".to_string(),
+            recurring_charges: Vec::new(),
+            reservation_arn: "arn:aws:elasticache:us-east-1:123456789012:reserved-instance:test"
+                .to_string(),
+        }
+    }
+
     #[test]
     fn parse_member_list_extracts_indexed_values() {
         let mut params = HashMap::new();
@@ -3905,6 +4176,23 @@ mod tests {
     }
 
     #[test]
+    fn parse_reserved_duration_filter_accepts_years_and_seconds() {
+        assert_eq!(
+            parse_reserved_duration_filter(Some("1".to_string())).unwrap(),
+            Some(31_536_000)
+        );
+        assert_eq!(
+            parse_reserved_duration_filter(Some("94608000".to_string())).unwrap(),
+            Some(94_608_000)
+        );
+    }
+
+    #[test]
+    fn parse_reserved_duration_filter_rejects_invalid_value() {
+        assert!(parse_reserved_duration_filter(Some("2".to_string())).is_err());
+    }
+
+    #[test]
     fn xml_wrap_produces_valid_response() {
         let xml = xml_wrap("TestAction", "<Data>ok</Data>", "req-123");
         assert!(xml.contains("<TestActionResponse"));
@@ -3978,6 +4266,42 @@ mod tests {
     fn tag_xml_produces_valid_element() {
         let xml = tag_xml(&("env".to_string(), "prod".to_string()));
         assert_eq!(xml, "<Tag><Key>env</Key><Value>prod</Value></Tag>");
+    }
+
+    #[test]
+    fn reserved_cache_nodes_offering_xml_contains_expected_fields() {
+        let xml = reserved_cache_nodes_offering_xml(&ReservedCacheNodesOffering {
+            reserved_cache_nodes_offering_id: "offering-a".to_string(),
+            cache_node_type: "cache.r6g.large".to_string(),
+            duration: 94_608_000,
+            fixed_price: 1550.0,
+            usage_price: 0.0,
+            product_description: "redis".to_string(),
+            offering_type: "All Upfront".to_string(),
+            recurring_charges: vec![RecurringCharge {
+                recurring_charge_amount: 0.0,
+                recurring_charge_frequency: "Hourly".to_string(),
+            }],
+        });
+        assert!(
+            xml.contains("<ReservedCacheNodesOfferingId>offering-a</ReservedCacheNodesOfferingId>")
+        );
+        assert!(xml.contains("<CacheNodeType>cache.r6g.large</CacheNodeType>"));
+        assert!(xml.contains("<Duration>94608000</Duration>"));
+        assert!(xml.contains("<OfferingType>All Upfront</OfferingType>"));
+        assert!(xml.contains("<RecurringChargeFrequency>Hourly</RecurringChargeFrequency>"));
+    }
+
+    #[test]
+    fn reserved_cache_node_xml_contains_expected_fields() {
+        let xml = reserved_cache_node_xml(&sample_reserved_cache_node("rcn-a", "offering-a"));
+        assert!(xml.contains("<ReservedCacheNodeId>rcn-a</ReservedCacheNodeId>"));
+        assert!(
+            xml.contains("<ReservedCacheNodesOfferingId>offering-a</ReservedCacheNodesOfferingId>")
+        );
+        assert!(xml.contains("<StartTime>2024-01-01T00:00:00Z</StartTime>"));
+        assert!(xml.contains("<State>payment-pending</State>"));
+        assert!(xml.contains("<ReservationARN>"));
     }
 
     #[test]
@@ -4087,6 +4411,132 @@ mod tests {
         let resp = service.describe_users(&req).unwrap();
         let body = String::from_utf8(resp.body.to_vec()).unwrap();
         assert!(body.contains("<UserId>default</UserId>"));
+    }
+
+    #[test]
+    fn describe_reserved_cache_nodes_returns_empty_list_by_default() {
+        let state = crate::state::ElastiCacheState::new("123456789012", "us-east-1");
+        let shared = std::sync::Arc::new(parking_lot::RwLock::new(state));
+        let service = ElastiCacheService::new(shared);
+
+        let resp = service
+            .describe_reserved_cache_nodes(&request("DescribeReservedCacheNodes", &[]))
+            .unwrap();
+        let body = String::from_utf8(resp.body.to_vec()).unwrap();
+        assert!(body.contains("<ReservedCacheNodes></ReservedCacheNodes>"));
+    }
+
+    #[test]
+    fn describe_reserved_cache_nodes_filters_by_offering_id() {
+        let state = crate::state::ElastiCacheState::new("123456789012", "us-east-1");
+        let shared = std::sync::Arc::new(parking_lot::RwLock::new(state));
+        let service = ElastiCacheService::new(shared);
+        {
+            let mut state = service.state.write();
+            state.reserved_cache_nodes.insert(
+                "rcn-a".to_string(),
+                sample_reserved_cache_node("rcn-a", "offering-a"),
+            );
+            state.reserved_cache_nodes.insert(
+                "rcn-b".to_string(),
+                sample_reserved_cache_node("rcn-b", "offering-b"),
+            );
+        }
+
+        let resp = service
+            .describe_reserved_cache_nodes(&request(
+                "DescribeReservedCacheNodes",
+                &[("ReservedCacheNodesOfferingId", "offering-b")],
+            ))
+            .unwrap();
+        let body = String::from_utf8(resp.body.to_vec()).unwrap();
+        assert!(body.contains("<ReservedCacheNodeId>rcn-b</ReservedCacheNodeId>"));
+        assert!(!body.contains("<ReservedCacheNodeId>rcn-a</ReservedCacheNodeId>"));
+    }
+
+    #[test]
+    fn describe_reserved_cache_nodes_not_found_by_id() {
+        let state = crate::state::ElastiCacheState::new("123456789012", "us-east-1");
+        let shared = std::sync::Arc::new(parking_lot::RwLock::new(state));
+        let service = ElastiCacheService::new(shared);
+
+        assert!(service
+            .describe_reserved_cache_nodes(&request(
+                "DescribeReservedCacheNodes",
+                &[("ReservedCacheNodeId", "missing")],
+            ))
+            .is_err());
+    }
+
+    #[test]
+    fn describe_reserved_cache_nodes_offerings_filters_and_paginates() {
+        let state = crate::state::ElastiCacheState::new("123456789012", "us-east-1");
+        let shared = std::sync::Arc::new(parking_lot::RwLock::new(state));
+        let service = ElastiCacheService::new(shared);
+        {
+            let mut state = service.state.write();
+            state.reserved_cache_nodes_offerings = vec![
+                sample_reserved_cache_node_offering("offering-a"),
+                ReservedCacheNodesOffering {
+                    reserved_cache_nodes_offering_id: "offering-b".to_string(),
+                    cache_node_type: "cache.m5.large".to_string(),
+                    duration: 94_608_000,
+                    fixed_price: 0.0,
+                    usage_price: 0.033,
+                    product_description: "memcached".to_string(),
+                    offering_type: "No Upfront".to_string(),
+                    recurring_charges: Vec::new(),
+                },
+                ReservedCacheNodesOffering {
+                    reserved_cache_nodes_offering_id: "offering-c".to_string(),
+                    cache_node_type: "cache.r6g.large".to_string(),
+                    duration: 94_608_000,
+                    fixed_price: 1_550.0,
+                    usage_price: 0.0,
+                    product_description: "redis".to_string(),
+                    offering_type: "All Upfront".to_string(),
+                    recurring_charges: vec![RecurringCharge {
+                        recurring_charge_amount: 0.0,
+                        recurring_charge_frequency: "Hourly".to_string(),
+                    }],
+                },
+            ];
+        }
+
+        let filtered = service
+            .describe_reserved_cache_nodes_offerings(&request(
+                "DescribeReservedCacheNodesOfferings",
+                &[("ProductDescription", "redis"), ("Duration", "3")],
+            ))
+            .unwrap();
+        let filtered_body = String::from_utf8(filtered.body.to_vec()).unwrap();
+        assert!(filtered_body
+            .contains("<ReservedCacheNodesOfferingId>offering-c</ReservedCacheNodesOfferingId>"));
+        assert!(!filtered_body
+            .contains("<ReservedCacheNodesOfferingId>offering-b</ReservedCacheNodesOfferingId>"));
+
+        let paged = service
+            .describe_reserved_cache_nodes_offerings(&request(
+                "DescribeReservedCacheNodesOfferings",
+                &[("MaxRecords", "1")],
+            ))
+            .unwrap();
+        let paged_body = String::from_utf8(paged.body.to_vec()).unwrap();
+        assert!(paged_body.contains("<Marker>1</Marker>"));
+    }
+
+    #[test]
+    fn describe_reserved_cache_nodes_offerings_not_found_by_id() {
+        let state = crate::state::ElastiCacheState::new("123456789012", "us-east-1");
+        let shared = std::sync::Arc::new(parking_lot::RwLock::new(state));
+        let service = ElastiCacheService::new(shared);
+
+        assert!(service
+            .describe_reserved_cache_nodes_offerings(&request(
+                "DescribeReservedCacheNodesOfferings",
+                &[("ReservedCacheNodesOfferingId", "missing")],
+            ))
+            .is_err());
     }
 
     #[test]

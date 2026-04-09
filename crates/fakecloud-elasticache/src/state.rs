@@ -45,6 +45,41 @@ pub struct CacheSubnetGroup {
 }
 
 #[derive(Debug, Clone)]
+pub struct RecurringCharge {
+    pub recurring_charge_amount: f64,
+    pub recurring_charge_frequency: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ReservedCacheNode {
+    pub reserved_cache_node_id: String,
+    pub reserved_cache_nodes_offering_id: String,
+    pub cache_node_type: String,
+    pub start_time: String,
+    pub duration: i32,
+    pub fixed_price: f64,
+    pub usage_price: f64,
+    pub cache_node_count: i32,
+    pub product_description: String,
+    pub offering_type: String,
+    pub state: String,
+    pub recurring_charges: Vec<RecurringCharge>,
+    pub reservation_arn: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ReservedCacheNodesOffering {
+    pub reserved_cache_nodes_offering_id: String,
+    pub cache_node_type: String,
+    pub duration: i32,
+    pub fixed_price: f64,
+    pub usage_price: f64,
+    pub product_description: String,
+    pub offering_type: String,
+    pub recurring_charges: Vec<RecurringCharge>,
+}
+
+#[derive(Debug, Clone)]
 pub struct CacheCluster {
     pub cache_cluster_id: String,
     pub cache_node_type: String,
@@ -225,6 +260,8 @@ pub struct ElastiCacheState {
     pub region: String,
     pub parameter_groups: Vec<CacheParameterGroup>,
     pub subnet_groups: HashMap<String, CacheSubnetGroup>,
+    pub reserved_cache_nodes: HashMap<String, ReservedCacheNode>,
+    pub reserved_cache_nodes_offerings: Vec<ReservedCacheNodesOffering>,
     pub cache_clusters: HashMap<String, CacheCluster>,
     pub replication_groups: HashMap<String, ReplicationGroup>,
     pub global_replication_groups: HashMap<String, GlobalReplicationGroup>,
@@ -256,6 +293,8 @@ impl ElastiCacheState {
             region: region.to_string(),
             parameter_groups,
             subnet_groups,
+            reserved_cache_nodes: HashMap::new(),
+            reserved_cache_nodes_offerings: default_reserved_cache_nodes_offerings(),
             cache_clusters: HashMap::new(),
             replication_groups: HashMap::new(),
             global_replication_groups: HashMap::new(),
@@ -274,6 +313,8 @@ impl ElastiCacheState {
     pub fn reset(&mut self) {
         self.parameter_groups = default_parameter_groups(&self.account_id, &self.region);
         self.subnet_groups = default_subnet_groups(&self.account_id, &self.region);
+        self.reserved_cache_nodes.clear();
+        self.reserved_cache_nodes_offerings = default_reserved_cache_nodes_offerings();
         self.cache_clusters.clear();
         self.replication_groups.clear();
         self.global_replication_groups.clear();
@@ -378,6 +419,57 @@ impl ElastiCacheState {
     pub fn has_arn(&self, arn: &str) -> bool {
         self.tags.contains_key(arn)
     }
+}
+
+fn default_reserved_cache_nodes_offerings() -> Vec<ReservedCacheNodesOffering> {
+    vec![
+        ReservedCacheNodesOffering {
+            reserved_cache_nodes_offering_id: "off-cache-t3-micro-redis-1yr-no-upfront".to_string(),
+            cache_node_type: "cache.t3.micro".to_string(),
+            duration: 31_536_000,
+            fixed_price: 0.0,
+            usage_price: 0.011,
+            product_description: "redis".to_string(),
+            offering_type: "No Upfront".to_string(),
+            recurring_charges: Vec::new(),
+        },
+        ReservedCacheNodesOffering {
+            reserved_cache_nodes_offering_id: "off-cache-t3-small-redis-1yr-partial-upfront"
+                .to_string(),
+            cache_node_type: "cache.t3.small".to_string(),
+            duration: 31_536_000,
+            fixed_price: 120.0,
+            usage_price: 0.007,
+            product_description: "redis".to_string(),
+            offering_type: "Partial Upfront".to_string(),
+            recurring_charges: Vec::new(),
+        },
+        ReservedCacheNodesOffering {
+            reserved_cache_nodes_offering_id: "off-cache-m5-large-memcached-3yr-no-upfront"
+                .to_string(),
+            cache_node_type: "cache.m5.large".to_string(),
+            duration: 94_608_000,
+            fixed_price: 0.0,
+            usage_price: 0.033,
+            product_description: "memcached".to_string(),
+            offering_type: "No Upfront".to_string(),
+            recurring_charges: Vec::new(),
+        },
+        ReservedCacheNodesOffering {
+            reserved_cache_nodes_offering_id: "off-cache-r6g-large-redis-3yr-all-upfront"
+                .to_string(),
+            cache_node_type: "cache.r6g.large".to_string(),
+            duration: 94_608_000,
+            fixed_price: 1_550.0,
+            usage_price: 0.0,
+            product_description: "redis".to_string(),
+            offering_type: "All Upfront".to_string(),
+            recurring_charges: vec![RecurringCharge {
+                recurring_charge_amount: 0.0,
+                recurring_charge_frequency: "Hourly".to_string(),
+            }],
+        },
+    ]
 }
 
 pub fn default_engine_versions() -> Vec<CacheEngineVersion> {
@@ -867,6 +959,36 @@ mod tests {
         assert_eq!(state.cache_clusters.len(), 1);
         state.reset();
         assert!(state.cache_clusters.is_empty());
+    }
+
+    #[test]
+    fn reset_restores_reserved_cache_node_metadata() {
+        let mut state = ElastiCacheState::new("123456789012", "us-east-1");
+        state.reserved_cache_nodes.insert(
+            "rcn-a".to_string(),
+            ReservedCacheNode {
+                reserved_cache_node_id: "rcn-a".to_string(),
+                reserved_cache_nodes_offering_id: "offering-a".to_string(),
+                cache_node_type: "cache.t3.micro".to_string(),
+                start_time: "2024-01-01T00:00:00Z".to_string(),
+                duration: 31_536_000,
+                fixed_price: 0.0,
+                usage_price: 0.011,
+                cache_node_count: 1,
+                product_description: "redis".to_string(),
+                offering_type: "No Upfront".to_string(),
+                state: "payment-pending".to_string(),
+                recurring_charges: Vec::new(),
+                reservation_arn:
+                    "arn:aws:elasticache:us-east-1:123456789012:reserved-instance:test".to_string(),
+            },
+        );
+        state.reserved_cache_nodes_offerings.clear();
+
+        state.reset();
+
+        assert!(state.reserved_cache_nodes.is_empty());
+        assert!(!state.reserved_cache_nodes_offerings.is_empty());
     }
 
     #[test]

@@ -160,6 +160,54 @@ async fn elasticache_delete_cache_cluster_and_verify_gone() {
     assert!(result.is_err());
 }
 
+#[tokio::test]
+async fn elasticache_describe_reserved_cache_nodes_is_empty() {
+    let server = TestServer::start().await;
+    let client = server.elasticache_client().await;
+
+    let response = client.describe_reserved_cache_nodes().send().await.unwrap();
+
+    assert!(response.reserved_cache_nodes().is_empty());
+    assert!(response.marker().is_none());
+}
+
+#[tokio::test]
+async fn elasticache_describe_reserved_cache_nodes_offerings_filters_and_paginates() {
+    let server = TestServer::start().await;
+    let client = server.elasticache_client().await;
+
+    let filtered = client
+        .describe_reserved_cache_nodes_offerings()
+        .product_description("redis")
+        .duration("3")
+        .send()
+        .await
+        .unwrap();
+
+    let filtered_offerings = filtered.reserved_cache_nodes_offerings();
+    assert_eq!(filtered_offerings.len(), 1);
+    assert_eq!(filtered_offerings[0].product_description(), Some("redis"));
+    assert_eq!(filtered_offerings[0].duration(), Some(94_608_000));
+
+    let first_page = client
+        .describe_reserved_cache_nodes_offerings()
+        .max_records(1)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(first_page.reserved_cache_nodes_offerings().len(), 1);
+    let marker = first_page.marker().expect("first page marker").to_string();
+
+    let next_page = client
+        .describe_reserved_cache_nodes_offerings()
+        .max_records(1)
+        .marker(marker)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(next_page.reserved_cache_nodes_offerings().len(), 1);
+}
+
 // ---------------------------------------------------------------------------
 // CacheSubnetGroup tests
 // ---------------------------------------------------------------------------

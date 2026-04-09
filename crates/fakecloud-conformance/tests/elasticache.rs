@@ -138,6 +138,46 @@ async fn elasticache_describe_engine_default_parameters() {
     assert_eq!(params[0].parameter_name(), Some("maxmemory-policy"));
 }
 
+#[test_action("elasticache", "DescribeReservedCacheNodes", checksum = "0bdc9e3d")]
+#[tokio::test]
+async fn elasticache_describe_reserved_cache_nodes() {
+    let server = TestServer::start().await;
+    let client = server.elasticache_client().await;
+
+    let response = client.describe_reserved_cache_nodes().send().await.unwrap();
+
+    assert!(response.reserved_cache_nodes().is_empty());
+    assert!(response.marker().is_none());
+}
+
+#[test_action(
+    "elasticache",
+    "DescribeReservedCacheNodesOfferings",
+    checksum = "94ec9064"
+)]
+#[tokio::test]
+async fn elasticache_describe_reserved_cache_nodes_offerings() {
+    let server = TestServer::start().await;
+    let client = server.elasticache_client().await;
+
+    let response = client
+        .describe_reserved_cache_nodes_offerings()
+        .product_description("redis")
+        .duration("3")
+        .send()
+        .await
+        .unwrap();
+
+    let offerings = response.reserved_cache_nodes_offerings();
+    assert!(!offerings.is_empty());
+    assert!(offerings
+        .iter()
+        .all(|offering| offering.product_description() == Some("redis")));
+    assert!(offerings
+        .iter()
+        .all(|offering| offering.duration() == Some(94_608_000)));
+}
+
 #[test_action("elasticache", "CreateReplicationGroup", checksum = "d97235ac")]
 #[tokio::test]
 async fn elasticache_create_replication_group() {
