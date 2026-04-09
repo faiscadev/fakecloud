@@ -138,6 +138,76 @@ async fn elasticache_describe_engine_default_parameters() {
     assert_eq!(params[0].parameter_name(), Some("maxmemory-policy"));
 }
 
+#[test_action("elasticache", "CreateReplicationGroup", checksum = "d97235ac")]
+#[tokio::test]
+async fn elasticache_create_replication_group() {
+    let server = TestServer::start().await;
+    let client = server.elasticache_client().await;
+
+    let response = client
+        .create_replication_group()
+        .replication_group_id("test-repl-group")
+        .replication_group_description("Test replication group")
+        .send()
+        .await
+        .unwrap();
+
+    let group = response.replication_group().expect("replication group");
+    assert_eq!(group.replication_group_id(), Some("test-repl-group"));
+    assert_eq!(group.status(), Some("available"));
+}
+
+#[test_action("elasticache", "DescribeReplicationGroups", checksum = "70aa64c5")]
+#[tokio::test]
+async fn elasticache_describe_replication_groups() {
+    let server = TestServer::start().await;
+    let client = server.elasticache_client().await;
+
+    client
+        .create_replication_group()
+        .replication_group_id("desc-repl-group")
+        .replication_group_description("For describe test")
+        .send()
+        .await
+        .unwrap();
+
+    let response = client
+        .describe_replication_groups()
+        .replication_group_id("desc-repl-group")
+        .send()
+        .await
+        .unwrap();
+
+    let groups = response.replication_groups();
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0].replication_group_id(), Some("desc-repl-group"));
+}
+
+#[test_action("elasticache", "DeleteReplicationGroup", checksum = "e3cec3b6")]
+#[tokio::test]
+async fn elasticache_delete_replication_group() {
+    let server = TestServer::start().await;
+    let client = server.elasticache_client().await;
+
+    client
+        .create_replication_group()
+        .replication_group_id("del-repl-group")
+        .replication_group_description("Will be deleted")
+        .send()
+        .await
+        .unwrap();
+
+    let response = client
+        .delete_replication_group()
+        .replication_group_id("del-repl-group")
+        .send()
+        .await
+        .unwrap();
+
+    let group = response.replication_group().expect("replication group");
+    assert_eq!(group.replication_group_id(), Some("del-repl-group"));
+}
+
 #[test_action("elasticache", "DescribeCacheParameterGroups", checksum = "f2d641d8")]
 #[tokio::test]
 async fn elasticache_describe_cache_parameter_groups() {

@@ -1,32 +1,48 @@
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use http::StatusCode;
 
 use fakecloud_aws::xml::xml_escape;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 
+use crate::runtime::{ElastiCacheRuntime, RuntimeError};
 use crate::state::{
     default_engine_versions, default_parameters_for_family, CacheEngineVersion,
-    CacheParameterGroup, CacheSubnetGroup, EngineDefaultParameter, SharedElastiCacheState,
+    CacheParameterGroup, CacheSubnetGroup, EngineDefaultParameter, ReplicationGroup,
+    SharedElastiCacheState,
 };
 
 const ELASTICACHE_NS: &str = "http://elasticache.amazonaws.com/doc/2015-02-02/";
 const SUPPORTED_ACTIONS: &[&str] = &[
     "CreateCacheSubnetGroup",
+    "CreateReplicationGroup",
     "DeleteCacheSubnetGroup",
+    "DeleteReplicationGroup",
     "DescribeCacheEngineVersions",
     "DescribeCacheParameterGroups",
     "DescribeCacheSubnetGroups",
     "DescribeEngineDefaultParameters",
+    "DescribeReplicationGroups",
     "ModifyCacheSubnetGroup",
 ];
 
 pub struct ElastiCacheService {
     state: SharedElastiCacheState,
+    runtime: Option<Arc<ElastiCacheRuntime>>,
 }
 
 impl ElastiCacheService {
     pub fn new(state: SharedElastiCacheState) -> Self {
-        Self { state }
+        Self {
+            state,
+            runtime: None,
+        }
+    }
+
+    pub fn with_runtime(mut self, runtime: Arc<ElastiCacheRuntime>) -> Self {
+        self.runtime = Some(runtime);
+        self
     }
 }
 
@@ -39,11 +55,14 @@ impl AwsService for ElastiCacheService {
     async fn handle(&self, request: AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         match request.action.as_str() {
             "CreateCacheSubnetGroup" => self.create_cache_subnet_group(&request),
+            "CreateReplicationGroup" => self.create_replication_group(&request).await,
             "DeleteCacheSubnetGroup" => self.delete_cache_subnet_group(&request),
+            "DeleteReplicationGroup" => self.delete_replication_group(&request).await,
             "DescribeCacheEngineVersions" => self.describe_cache_engine_versions(&request),
             "DescribeCacheParameterGroups" => self.describe_cache_parameter_groups(&request),
             "DescribeCacheSubnetGroups" => self.describe_cache_subnet_groups(&request),
             "DescribeEngineDefaultParameters" => self.describe_engine_default_parameters(&request),
+            "DescribeReplicationGroups" => self.describe_replication_groups(&request),
             "ModifyCacheSubnetGroup" => self.modify_cache_subnet_group(&request),
             _ => Err(AwsServiceError::action_not_implemented(
                 self.service_name(),
@@ -356,6 +375,192 @@ impl ElastiCacheService {
             ),
         ))
     }
+
+    async fn create_replication_group(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let replication_group_id = required_param(request, "ReplicationGroupId")?;
+        let description = required_param(request, "ReplicationGroupDescription")?;
+        let engine = optional_param(request, "Engine").unwrap_or_else(|| "redis".to_string());
+        let engine_version =
+            optional_param(request, "EngineVersion").unwrap_or_else(|| "7.1".to_string());
+        let cache_node_type = optional_param(request, "CacheNodeType")
+            .unwrap_or_else(|| "cache.t3.micro".to_string());
+        let num_cache_clusters = optional_param(request, "NumCacheClusters")
+            .and_then(|v| v.parse::<i32>().ok())
+            .unwrap_or(1);
+        let automatic_failover =
+            parse_optional_bool(optional_param(request, "AutomaticFailoverEnabled").as_deref())?
+                .unwrap_or(false);
+        let port = optional_param(request, "Port")
+            .and_then(|v| v.parse::<u16>().ok())
+            .unwrap_or(6379);
+
+        // Check for duplicates
+        {
+            let state = self.state.read();
+            if state.replication_groups.contains_key(&replication_group_id) {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ReplicationGroupAlreadyExistsFault",
+                    format!("ReplicationGroup {replication_group_id} already exists."),
+                ));
+            }
+        }
+
+        let runtime = self.runtime.as_ref().ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "InvalidParameterValue",
+                "Docker/Podman is required for ElastiCache replication groups but is not available"
+                    .to_string(),
+            )
+        })?;
+
+        let running = runtime
+            .ensure_redis(&replication_group_id, port)
+            .await
+            .map_err(runtime_error_to_service_error)?;
+
+        let member_clusters: Vec<String> = (1..=num_cache_clusters)
+            .map(|i| format!("{replication_group_id}-{i:03}"))
+            .collect();
+
+        let (arn, region) = {
+            let state = self.state.read();
+            let arn = format!(
+                "arn:aws:elasticache:{}:{}:replicationgroup:{}",
+                state.region, state.account_id, replication_group_id
+            );
+            (arn, state.region.clone())
+        };
+
+        let group = ReplicationGroup {
+            replication_group_id: replication_group_id.clone(),
+            description,
+            status: "available".to_string(),
+            cache_node_type,
+            engine,
+            engine_version,
+            num_cache_clusters,
+            automatic_failover_enabled: automatic_failover,
+            endpoint_address: "127.0.0.1".to_string(),
+            endpoint_port: running.host_port,
+            arn,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            container_id: running.container_id,
+            host_port: running.host_port,
+            member_clusters,
+        };
+
+        let xml = replication_group_xml(&group, &region);
+        self.state
+            .write()
+            .replication_groups
+            .insert(replication_group_id, group);
+
+        Ok(AwsResponse::xml(
+            StatusCode::OK,
+            xml_wrap(
+                "CreateReplicationGroup",
+                &format!("<ReplicationGroup>{xml}</ReplicationGroup>"),
+                &request.request_id,
+            ),
+        ))
+    }
+
+    fn describe_replication_groups(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let group_id = optional_param(request, "ReplicationGroupId");
+        let max_records = optional_usize_param(request, "MaxRecords")?;
+        let marker = optional_param(request, "Marker");
+
+        let state = self.state.read();
+        let region = state.region.clone();
+
+        let groups: Vec<&ReplicationGroup> = if let Some(ref id) = group_id {
+            match state.replication_groups.get(id) {
+                Some(g) => vec![g],
+                None => {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::NOT_FOUND,
+                        "ReplicationGroupNotFoundFault",
+                        format!("ReplicationGroup {id} not found."),
+                    ));
+                }
+            }
+        } else {
+            let mut groups: Vec<&ReplicationGroup> = state.replication_groups.values().collect();
+            groups.sort_by(|a, b| a.replication_group_id.cmp(&b.replication_group_id));
+            groups
+        };
+
+        let (page, next_marker) = paginate(&groups, marker.as_deref(), max_records);
+
+        let members_xml: String = page
+            .iter()
+            .map(|g| {
+                format!(
+                    "<ReplicationGroup>{}</ReplicationGroup>",
+                    replication_group_xml(g, &region)
+                )
+            })
+            .collect();
+        let marker_xml = next_marker
+            .map(|m| format!("<Marker>{}</Marker>", xml_escape(&m)))
+            .unwrap_or_default();
+
+        Ok(AwsResponse::xml(
+            StatusCode::OK,
+            xml_wrap(
+                "DescribeReplicationGroups",
+                &format!("<ReplicationGroups>{members_xml}</ReplicationGroups>{marker_xml}"),
+                &request.request_id,
+            ),
+        ))
+    }
+
+    async fn delete_replication_group(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let replication_group_id = required_param(request, "ReplicationGroupId")?;
+
+        let group = {
+            let mut state = self.state.write();
+            state
+                .replication_groups
+                .remove(&replication_group_id)
+                .ok_or_else(|| {
+                    AwsServiceError::aws_error(
+                        StatusCode::NOT_FOUND,
+                        "ReplicationGroupNotFoundFault",
+                        format!("ReplicationGroup {replication_group_id} not found."),
+                    )
+                })?
+        };
+
+        if let Some(ref runtime) = self.runtime {
+            runtime.stop_container(&replication_group_id).await;
+        }
+
+        let region = self.state.read().region.clone();
+        let mut deleted_group = group;
+        deleted_group.status = "deleting".to_string();
+        let xml = replication_group_xml(&deleted_group, &region);
+
+        Ok(AwsResponse::xml(
+            StatusCode::OK,
+            xml_wrap(
+                "DeleteReplicationGroup",
+                &format!("<ReplicationGroup>{xml}</ReplicationGroup>"),
+                &request.request_id,
+            ),
+        ))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -557,6 +762,85 @@ fn cache_subnet_group_xml(g: &CacheSubnetGroup, region: &str) -> String {
         xml_escape(&g.vpc_id),
         xml_escape(&g.arn),
     )
+}
+
+fn replication_group_xml(g: &ReplicationGroup, region: &str) -> String {
+    let member_clusters_xml: String = g
+        .member_clusters
+        .iter()
+        .map(|c| format!("<ClusterId>{}</ClusterId>", xml_escape(c)))
+        .collect();
+
+    let primary_az = format!("{region}a");
+
+    format!(
+        "<ReplicationGroupId>{}</ReplicationGroupId>\
+         <Description>{}</Description>\
+         <Status>{}</Status>\
+         <MemberClusters>{member_clusters_xml}</MemberClusters>\
+         <NodeGroups>\
+         <NodeGroup>\
+         <NodeGroupId>0001</NodeGroupId>\
+         <Status>available</Status>\
+         <PrimaryEndpoint>\
+         <Address>{}</Address>\
+         <Port>{}</Port>\
+         </PrimaryEndpoint>\
+         <ReaderEndpoint>\
+         <Address>{}</Address>\
+         <Port>{}</Port>\
+         </ReaderEndpoint>\
+         <NodeGroupMembers>\
+         <NodeGroupMember>\
+         <CacheClusterId>{}</CacheClusterId>\
+         <CacheNodeId>0001</CacheNodeId>\
+         <PreferredAvailabilityZone>{}</PreferredAvailabilityZone>\
+         <CurrentRole>primary</CurrentRole>\
+         </NodeGroupMember>\
+         </NodeGroupMembers>\
+         </NodeGroup>\
+         </NodeGroups>\
+         <AutomaticFailover>{}</AutomaticFailover>\
+         <SnapshotRetentionLimit>0</SnapshotRetentionLimit>\
+         <SnapshotWindow>05:00-09:00</SnapshotWindow>\
+         <ClusterEnabled>false</ClusterEnabled>\
+         <CacheNodeType>{}</CacheNodeType>\
+         <TransitEncryptionEnabled>false</TransitEncryptionEnabled>\
+         <AtRestEncryptionEnabled>false</AtRestEncryptionEnabled>\
+         <ARN>{}</ARN>",
+        xml_escape(&g.replication_group_id),
+        xml_escape(&g.description),
+        xml_escape(&g.status),
+        xml_escape(&g.endpoint_address),
+        g.endpoint_port,
+        xml_escape(&g.endpoint_address),
+        g.endpoint_port,
+        xml_escape(g.member_clusters.first().map(|s| s.as_str()).unwrap_or("")),
+        xml_escape(&primary_az),
+        if g.automatic_failover_enabled {
+            "enabled"
+        } else {
+            "disabled"
+        },
+        xml_escape(&g.cache_node_type),
+        xml_escape(&g.arn),
+    )
+}
+
+fn runtime_error_to_service_error(error: RuntimeError) -> AwsServiceError {
+    match error {
+        RuntimeError::Unavailable => AwsServiceError::aws_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "InvalidParameterValue",
+            "Docker/Podman is required for ElastiCache replication groups but is not available"
+                .to_string(),
+        ),
+        RuntimeError::ContainerStartFailed(msg) => AwsServiceError::aws_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "InvalidParameterValue",
+            format!("Failed to start Redis container: {msg}"),
+        ),
+    }
 }
 
 fn parameter_xml(p: &EngineDefaultParameter) -> String {

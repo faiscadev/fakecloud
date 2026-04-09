@@ -182,6 +182,123 @@ async fn elasticache_delete_nonexistent_subnet_group_errors() {
 }
 
 // ---------------------------------------------------------------------------
+// ReplicationGroup tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn elasticache_create_replication_group_and_describe() {
+    let server = TestServer::start().await;
+    let client = server.elasticache_client().await;
+
+    let create_resp = client
+        .create_replication_group()
+        .replication_group_id("my-repl-group")
+        .replication_group_description("My test replication group")
+        .send()
+        .await
+        .unwrap();
+
+    let group = create_resp.replication_group().expect("replication group");
+    assert_eq!(group.replication_group_id(), Some("my-repl-group"));
+    assert_eq!(group.description(), Some("My test replication group"));
+    assert_eq!(group.status(), Some("available"));
+
+    // Verify endpoint is populated and reachable
+    let node_groups = group.node_groups();
+    assert!(!node_groups.is_empty());
+    let primary_endpoint = node_groups[0].primary_endpoint().expect("primary endpoint");
+    let port = primary_endpoint.port().expect("endpoint port");
+    assert!(port > 0);
+
+    // Try a TCP connect to verify Redis is reachable
+    let addr = format!("127.0.0.1:{port}");
+    let stream = tokio::net::TcpStream::connect(&addr).await;
+    assert!(
+        stream.is_ok(),
+        "should be able to connect to Redis at {addr}"
+    );
+
+    // Verify it appears in describe
+    let describe_resp = client
+        .describe_replication_groups()
+        .replication_group_id("my-repl-group")
+        .send()
+        .await
+        .unwrap();
+
+    let groups = describe_resp.replication_groups();
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0].replication_group_id(), Some("my-repl-group"));
+}
+
+#[tokio::test]
+async fn elasticache_delete_replication_group_and_verify_gone() {
+    let server = TestServer::start().await;
+    let client = server.elasticache_client().await;
+
+    client
+        .create_replication_group()
+        .replication_group_id("del-repl-group")
+        .replication_group_description("Will be deleted")
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .delete_replication_group()
+        .replication_group_id("del-repl-group")
+        .send()
+        .await
+        .unwrap();
+
+    // Verify it's gone
+    let result = client
+        .describe_replication_groups()
+        .replication_group_id("del-repl-group")
+        .send()
+        .await;
+
+    assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn elasticache_create_duplicate_replication_group_errors() {
+    let server = TestServer::start().await;
+    let client = server.elasticache_client().await;
+
+    client
+        .create_replication_group()
+        .replication_group_id("dup-repl-group")
+        .replication_group_description("First")
+        .send()
+        .await
+        .unwrap();
+
+    let result = client
+        .create_replication_group()
+        .replication_group_id("dup-repl-group")
+        .replication_group_description("Second")
+        .send()
+        .await;
+
+    assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn elasticache_delete_nonexistent_replication_group_errors() {
+    let server = TestServer::start().await;
+    let client = server.elasticache_client().await;
+
+    let result = client
+        .delete_replication_group()
+        .replication_group_id("nonexistent-group")
+        .send()
+        .await;
+
+    assert!(result.is_err());
+}
+
+// ---------------------------------------------------------------------------
 // Existing tests
 // ---------------------------------------------------------------------------
 

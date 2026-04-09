@@ -1794,10 +1794,13 @@ name = "fakecloud-elasticache"
 version = "0.5.1"
 dependencies = [
  "async-trait",
+ "chrono",
  "fakecloud-aws",
  "fakecloud-core",
  "http 1.4.0",
  "parking_lot",
+ "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]
