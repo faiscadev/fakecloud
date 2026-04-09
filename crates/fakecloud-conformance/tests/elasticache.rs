@@ -208,6 +208,156 @@ async fn elasticache_delete_replication_group() {
     assert_eq!(group.replication_group_id(), Some("del-repl-group"));
 }
 
+#[test_action("elasticache", "AddTagsToResource", checksum = "cf656420")]
+#[tokio::test]
+async fn elasticache_add_tags_to_resource() {
+    let server = TestServer::start().await;
+    let client = server.elasticache_client().await;
+
+    let create = client
+        .create_cache_subnet_group()
+        .cache_subnet_group_name("tag-test-group")
+        .cache_subnet_group_description("For tag test")
+        .subnet_ids("subnet-abc123")
+        .send()
+        .await
+        .unwrap();
+
+    let arn = create
+        .cache_subnet_group()
+        .and_then(|g| g.arn())
+        .expect("subnet group arn");
+
+    let response = client
+        .add_tags_to_resource()
+        .resource_name(arn)
+        .tags(
+            aws_sdk_elasticache::types::Tag::builder()
+                .key("env")
+                .value("dev")
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let tags = response.tag_list();
+    assert_eq!(tags.len(), 1);
+    assert_eq!(tags[0].key(), Some("env"));
+    assert_eq!(tags[0].value(), Some("dev"));
+}
+
+#[test_action("elasticache", "ListTagsForResource", checksum = "a3fcc3e4")]
+#[tokio::test]
+async fn elasticache_list_tags_for_resource() {
+    let server = TestServer::start().await;
+    let client = server.elasticache_client().await;
+
+    let create = client
+        .create_cache_subnet_group()
+        .cache_subnet_group_name("list-tag-group")
+        .cache_subnet_group_description("For list tag test")
+        .subnet_ids("subnet-abc123")
+        .send()
+        .await
+        .unwrap();
+
+    let arn = create
+        .cache_subnet_group()
+        .and_then(|g| g.arn())
+        .expect("subnet group arn");
+
+    client
+        .add_tags_to_resource()
+        .resource_name(arn)
+        .tags(
+            aws_sdk_elasticache::types::Tag::builder()
+                .key("env")
+                .value("dev")
+                .build(),
+        )
+        .tags(
+            aws_sdk_elasticache::types::Tag::builder()
+                .key("team")
+                .value("core")
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let response = client
+        .list_tags_for_resource()
+        .resource_name(arn)
+        .send()
+        .await
+        .unwrap();
+
+    let tags = response.tag_list();
+    assert_eq!(tags.len(), 2);
+    assert_eq!(tags[0].key(), Some("env"));
+    assert_eq!(tags[1].key(), Some("team"));
+}
+
+#[test_action("elasticache", "RemoveTagsFromResource", checksum = "7e9e103c")]
+#[tokio::test]
+async fn elasticache_remove_tags_from_resource() {
+    let server = TestServer::start().await;
+    let client = server.elasticache_client().await;
+
+    let create = client
+        .create_cache_subnet_group()
+        .cache_subnet_group_name("remove-tag-group")
+        .cache_subnet_group_description("For remove tag test")
+        .subnet_ids("subnet-abc123")
+        .send()
+        .await
+        .unwrap();
+
+    let arn = create
+        .cache_subnet_group()
+        .and_then(|g| g.arn())
+        .expect("subnet group arn");
+
+    client
+        .add_tags_to_resource()
+        .resource_name(arn)
+        .tags(
+            aws_sdk_elasticache::types::Tag::builder()
+                .key("env")
+                .value("dev")
+                .build(),
+        )
+        .tags(
+            aws_sdk_elasticache::types::Tag::builder()
+                .key("team")
+                .value("core")
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .remove_tags_from_resource()
+        .resource_name(arn)
+        .tag_keys("env")
+        .send()
+        .await
+        .unwrap();
+
+    let response = client
+        .list_tags_for_resource()
+        .resource_name(arn)
+        .send()
+        .await
+        .unwrap();
+
+    let tags = response.tag_list();
+    assert_eq!(tags.len(), 1);
+    assert_eq!(tags[0].key(), Some("team"));
+}
+
 #[test_action("elasticache", "DescribeCacheParameterGroups", checksum = "f2d641d8")]
 #[tokio::test]
 async fn elasticache_describe_cache_parameter_groups() {

@@ -1794,6 +1794,7 @@ name = "fakecloud-elasticache"
 version = "0.5.1"
 dependencies = [
  "async-trait",
+ "bytes",
  "chrono",
  "fakecloud-aws",
  "fakecloud-core",
