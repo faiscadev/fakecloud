@@ -113,10 +113,13 @@ impl ElastiCacheState {
         let parameter_groups = default_parameter_groups(account_id, region);
         let subnet_groups = default_subnet_groups(account_id, region);
         let users = default_users(account_id, region);
-        let tags: HashMap<String, Vec<(String, String)>> = subnet_groups
+        let mut tags: HashMap<String, Vec<(String, String)>> = subnet_groups
             .values()
             .map(|g| (g.arn.clone(), Vec::new()))
             .collect();
+        for user in users.values() {
+            tags.insert(user.arn.clone(), Vec::new());
+        }
         Self {
             account_id: account_id.to_string(),
             region: region.to_string(),
@@ -139,6 +142,9 @@ impl ElastiCacheState {
         self.tags.clear();
         for g in self.subnet_groups.values() {
             self.tags.insert(g.arn.clone(), Vec::new());
+        }
+        for user in self.users.values() {
+            self.tags.insert(user.arn.clone(), Vec::new());
         }
         self.in_progress_replication_group_ids.clear();
     }

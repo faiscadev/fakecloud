@@ -639,7 +639,35 @@ impl ElastiCacheService {
                 "AuthenticationMode.Passwords",
                 "member",
             );
-            (mode.clone(), mode_passwords.len() as i32)
+            match mode.as_str() {
+                "password" => {
+                    if mode_passwords.is_empty() {
+                        return Err(AwsServiceError::aws_error(
+                            StatusCode::BAD_REQUEST,
+                            "InvalidParameterValue",
+                            "At least one password is required when AuthenticationMode.Type is password.".to_string(),
+                        ));
+                    }
+                    ("password".to_string(), mode_passwords.len() as i32)
+                }
+                "no-password-required" | "iam" => {
+                    if !mode_passwords.is_empty() {
+                        return Err(AwsServiceError::aws_error(
+                            StatusCode::BAD_REQUEST,
+                            "InvalidParameterValue",
+                            format!("Passwords cannot be provided when AuthenticationMode.Type is {mode}."),
+                        ));
+                    }
+                    (mode.clone(), 0)
+                }
+                _ => {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "InvalidParameterValue",
+                        format!("Invalid value for AuthenticationMode.Type: {mode}. Supported values: password, iam, no-password-required"),
+                    ));
+                }
+            }
         } else if !passwords.is_empty() {
             ("password".to_string(), passwords.len() as i32)
         } else {
@@ -802,14 +830,27 @@ impl ElastiCacheService {
             ));
         }
 
-        // Validate all referenced users exist
+        // Validate all referenced users exist and have a matching engine
         for uid in &user_ids {
-            if !state.users.contains_key(uid) {
-                return Err(AwsServiceError::aws_error(
-                    StatusCode::NOT_FOUND,
-                    "UserNotFoundFault",
-                    format!("User {uid} not found."),
-                ));
+            match state.users.get(uid) {
+                None => {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::NOT_FOUND,
+                        "UserNotFoundFault",
+                        format!("User {uid} not found."),
+                    ));
+                }
+                Some(user) if user.engine != engine => {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "InvalidParameterValue",
+                        format!(
+                            "User {uid} has engine {} which does not match the user group engine {engine}.",
+                            user.engine
+                        ),
+                    ));
+                }
+                _ => {}
             }
         }
 
