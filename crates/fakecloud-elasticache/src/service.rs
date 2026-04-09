@@ -331,7 +331,9 @@ impl ElastiCacheService {
             ));
         }
 
-        if state.subnet_groups.remove(&name).is_none() {
+        if let Some(group) = state.subnet_groups.remove(&name) {
+            state.tags.remove(&group.arn);
+        } else {
             return Err(AwsServiceError::aws_error(
                 StatusCode::NOT_FOUND,
                 "CacheSubnetGroupNotFoundFault",
@@ -564,7 +566,7 @@ impl ElastiCacheService {
 
         let group = {
             let mut state = self.state.write();
-            state
+            let g = state
                 .replication_groups
                 .remove(&replication_group_id)
                 .ok_or_else(|| {
@@ -573,7 +575,9 @@ impl ElastiCacheService {
                         "ReplicationGroupNotFoundFault",
                         format!("ReplicationGroup {replication_group_id} not found."),
                     )
-                })?
+                })?;
+            state.tags.remove(&g.arn);
+            g
         };
 
         if let Some(ref runtime) = self.runtime {
