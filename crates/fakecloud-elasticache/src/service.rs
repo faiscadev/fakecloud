@@ -3042,7 +3042,7 @@ fn serverless_cache_xml(cache: &ServerlessCache) -> String {
         let members: String = cache
             .security_group_ids
             .iter()
-            .map(|id| format!("<member>{}</member>", xml_escape(id)))
+            .map(|id| format!("<SecurityGroupId>{}</SecurityGroupId>", xml_escape(id)))
             .collect();
         format!("<SecurityGroupIds>{members}</SecurityGroupIds>")
     };
@@ -4071,7 +4071,9 @@ mod tests {
         assert!(xml.contains(
             "<ReaderEndpoint><Address>127.0.0.1</Address><Port>6379</Port></ReaderEndpoint>"
         ));
-        assert!(xml.contains("<SecurityGroupIds><member>sg-123</member></SecurityGroupIds>"));
+        assert!(xml.contains(
+            "<SecurityGroupIds><SecurityGroupId>sg-123</SecurityGroupId></SecurityGroupIds>"
+        ));
         assert!(xml.contains("<SubnetIds><member>subnet-123</member></SubnetIds>"));
         assert!(xml.contains("<CacheUsageLimits>"));
     }
@@ -4163,7 +4165,9 @@ mod tests {
         let resp = service.modify_serverless_cache(&req).unwrap();
         let body = String::from_utf8(resp.body.to_vec()).unwrap();
         assert!(body.contains("<Description>updated</Description>"));
-        assert!(body.contains("<SecurityGroupIds><member>sg-999</member></SecurityGroupIds>"));
+        assert!(body.contains(
+            "<SecurityGroupIds><SecurityGroupId>sg-999</SecurityGroupId></SecurityGroupIds>"
+        ));
         assert!(body.contains("<SnapshotRetentionLimit>7</SnapshotRetentionLimit>"));
         assert!(body.contains("<DailySnapshotTime>05:00</DailySnapshotTime>"));
     }
