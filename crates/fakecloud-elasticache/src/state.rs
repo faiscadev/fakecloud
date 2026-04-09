@@ -61,6 +61,8 @@ pub struct ReplicationGroup {
     pub container_id: String,
     pub host_port: u16,
     pub member_clusters: Vec<String>,
+    pub snapshot_retention_limit: i32,
+    pub snapshot_window: String,
 }
 
 #[derive(Debug, Clone)]
@@ -493,6 +495,8 @@ mod tests {
                 container_id: "abc123".to_string(),
                 host_port: 12345,
                 member_clusters: vec!["my-group-001".to_string()],
+                snapshot_retention_limit: 0,
+                snapshot_window: "05:00-09:00".to_string(),
             },
         );
         assert_eq!(state.replication_groups.len(), 1);

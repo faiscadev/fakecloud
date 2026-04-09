@@ -512,3 +512,114 @@ async fn elasticache_describe_cache_parameter_groups() {
         Some("default.valkey8")
     );
 }
+
+#[test_action("elasticache", "ModifyReplicationGroup", checksum = "df9899e6")]
+#[tokio::test]
+async fn elasticache_modify_replication_group() {
+    let server = TestServer::start().await;
+    let client = server.elasticache_client().await;
+
+    client
+        .create_replication_group()
+        .replication_group_id("mod-repl-group")
+        .replication_group_description("Original description")
+        .send()
+        .await
+        .unwrap();
+
+    let response = client
+        .modify_replication_group()
+        .replication_group_id("mod-repl-group")
+        .replication_group_description("Updated description")
+        .send()
+        .await
+        .unwrap();
+
+    let group = response.replication_group().expect("replication group");
+    assert_eq!(group.replication_group_id(), Some("mod-repl-group"));
+    assert_eq!(group.description(), Some("Updated description"));
+}
+
+#[test_action("elasticache", "IncreaseReplicaCount", checksum = "e5ca0f20")]
+#[tokio::test]
+async fn elasticache_increase_replica_count() {
+    let server = TestServer::start().await;
+    let client = server.elasticache_client().await;
+
+    client
+        .create_replication_group()
+        .replication_group_id("inc-repl-group")
+        .replication_group_description("For increase test")
+        .send()
+        .await
+        .unwrap();
+
+    let response = client
+        .increase_replica_count()
+        .replication_group_id("inc-repl-group")
+        .new_replica_count(2)
+        .apply_immediately(true)
+        .send()
+        .await
+        .unwrap();
+
+    let group = response.replication_group().expect("replication group");
+    assert_eq!(group.replication_group_id(), Some("inc-repl-group"));
+    assert_eq!(group.member_clusters().len(), 3);
+}
+
+#[test_action("elasticache", "DecreaseReplicaCount", checksum = "cab83215")]
+#[tokio::test]
+async fn elasticache_decrease_replica_count() {
+    let server = TestServer::start().await;
+    let client = server.elasticache_client().await;
+
+    client
+        .create_replication_group()
+        .replication_group_id("dec-repl-group")
+        .replication_group_description("For decrease test")
+        .num_cache_clusters(3)
+        .send()
+        .await
+        .unwrap();
+
+    let response = client
+        .decrease_replica_count()
+        .replication_group_id("dec-repl-group")
+        .new_replica_count(1)
+        .apply_immediately(true)
+        .send()
+        .await
+        .unwrap();
+
+    let group = response.replication_group().expect("replication group");
+    assert_eq!(group.replication_group_id(), Some("dec-repl-group"));
+    assert_eq!(group.member_clusters().len(), 2);
+}
+
+#[test_action("elasticache", "TestFailover", checksum = "c08470ff")]
+#[tokio::test]
+async fn elasticache_test_failover() {
+    let server = TestServer::start().await;
+    let client = server.elasticache_client().await;
+
+    client
+        .create_replication_group()
+        .replication_group_id("fo-repl-group")
+        .replication_group_description("For failover test")
+        .send()
+        .await
+        .unwrap();
+
+    let response = client
+        .test_failover()
+        .replication_group_id("fo-repl-group")
+        .node_group_id("0001")
+        .send()
+        .await
+        .unwrap();
+
+    let group = response.replication_group().expect("replication group");
+    assert_eq!(group.replication_group_id(), Some("fo-repl-group"));
+    assert_eq!(group.status(), Some("available"));
+}

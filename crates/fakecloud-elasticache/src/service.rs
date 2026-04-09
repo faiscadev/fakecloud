@@ -20,6 +20,7 @@ const SUPPORTED_ACTIONS: &[&str] = &[
     "CreateReplicationGroup",
     "CreateUser",
     "CreateUserGroup",
+    "DecreaseReplicaCount",
     "DeleteCacheSubnetGroup",
     "DeleteReplicationGroup",
     "DeleteUser",
@@ -31,9 +32,12 @@ const SUPPORTED_ACTIONS: &[&str] = &[
     "DescribeReplicationGroups",
     "DescribeUserGroups",
     "DescribeUsers",
+    "IncreaseReplicaCount",
     "ListTagsForResource",
     "ModifyCacheSubnetGroup",
+    "ModifyReplicationGroup",
     "RemoveTagsFromResource",
+    "TestFailover",
 ];
 
 pub struct ElastiCacheService {
@@ -68,6 +72,7 @@ impl AwsService for ElastiCacheService {
             "CreateReplicationGroup" => self.create_replication_group(&request).await,
             "CreateUser" => self.create_user(&request),
             "CreateUserGroup" => self.create_user_group(&request),
+            "DecreaseReplicaCount" => self.decrease_replica_count(&request),
             "DeleteCacheSubnetGroup" => self.delete_cache_subnet_group(&request),
             "DeleteReplicationGroup" => self.delete_replication_group(&request).await,
             "DeleteUser" => self.delete_user(&request),
@@ -79,9 +84,12 @@ impl AwsService for ElastiCacheService {
             "DescribeReplicationGroups" => self.describe_replication_groups(&request),
             "DescribeUserGroups" => self.describe_user_groups(&request),
             "DescribeUsers" => self.describe_users(&request),
+            "IncreaseReplicaCount" => self.increase_replica_count(&request),
             "ListTagsForResource" => self.list_tags_for_resource(&request),
             "ModifyCacheSubnetGroup" => self.modify_cache_subnet_group(&request),
+            "ModifyReplicationGroup" => self.modify_replication_group(&request),
             "RemoveTagsFromResource" => self.remove_tags_from_resource(&request),
+            "TestFailover" => self.test_failover(&request),
             _ => Err(AwsServiceError::action_not_implemented(
                 self.service_name(),
                 &request.action,
@@ -502,6 +510,8 @@ impl ElastiCacheService {
             container_id: running.container_id,
             host_port: running.host_port,
             member_clusters,
+            snapshot_retention_limit: 0,
+            snapshot_window: "05:00-09:00".to_string(),
         };
 
         let xml = replication_group_xml(&group, &region);
@@ -605,6 +615,306 @@ impl ElastiCacheService {
             StatusCode::OK,
             xml_wrap(
                 "DeleteReplicationGroup",
+                &format!("<ReplicationGroup>{xml}</ReplicationGroup>"),
+                &request.request_id,
+            ),
+        ))
+    }
+
+    fn modify_replication_group(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let replication_group_id = required_param(request, "ReplicationGroupId")?;
+
+        let new_description = optional_param(request, "ReplicationGroupDescription");
+        let new_cache_node_type = optional_param(request, "CacheNodeType");
+        let new_engine_version = optional_param(request, "EngineVersion");
+        let new_automatic_failover =
+            parse_optional_bool(optional_param(request, "AutomaticFailoverEnabled").as_deref())?;
+        let new_snapshot_retention_limit = optional_param(request, "SnapshotRetentionLimit")
+            .map(|v| {
+                v.parse::<i32>().map_err(|_| {
+                    AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "InvalidParameterValue",
+                        format!("Invalid value for SnapshotRetentionLimit: '{v}'"),
+                    )
+                })
+            })
+            .transpose()?;
+        let new_snapshot_window = optional_param(request, "SnapshotWindow");
+        let user_group_ids_to_add =
+            parse_member_list(&request.query_params, "UserGroupIdsToAdd", "member");
+        let user_group_ids_to_remove =
+            parse_member_list(&request.query_params, "UserGroupIdsToRemove", "member");
+
+        let mut state = self.state.write();
+
+        let group = state
+            .replication_groups
+            .get_mut(&replication_group_id)
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::NOT_FOUND,
+                    "ReplicationGroupNotFoundFault",
+                    format!("ReplicationGroup {replication_group_id} not found."),
+                )
+            })?;
+
+        if let Some(desc) = new_description {
+            group.description = desc;
+        }
+        if let Some(node_type) = new_cache_node_type {
+            group.cache_node_type = node_type;
+        }
+        if let Some(version) = new_engine_version {
+            group.engine_version = version;
+        }
+        if let Some(af) = new_automatic_failover {
+            group.automatic_failover_enabled = af;
+        }
+        if let Some(limit) = new_snapshot_retention_limit {
+            group.snapshot_retention_limit = limit;
+        }
+        if let Some(window) = new_snapshot_window {
+            group.snapshot_window = window;
+        }
+
+        // Associate/disassociate user groups
+        for ug_id in &user_group_ids_to_add {
+            if let Some(ug) = state.user_groups.get_mut(ug_id) {
+                if !ug.replication_groups.contains(&replication_group_id) {
+                    ug.replication_groups.push(replication_group_id.clone());
+                }
+            }
+        }
+        for ug_id in &user_group_ids_to_remove {
+            if let Some(ug) = state.user_groups.get_mut(ug_id) {
+                ug.replication_groups
+                    .retain(|id| id != &replication_group_id);
+            }
+        }
+
+        let group = state.replication_groups[&replication_group_id].clone();
+        let region = state.region.clone();
+        let xml = replication_group_xml(&group, &region);
+
+        Ok(AwsResponse::xml(
+            StatusCode::OK,
+            xml_wrap(
+                "ModifyReplicationGroup",
+                &format!("<ReplicationGroup>{xml}</ReplicationGroup>"),
+                &request.request_id,
+            ),
+        ))
+    }
+
+    fn increase_replica_count(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let replication_group_id = required_param(request, "ReplicationGroupId")?;
+        let apply_str = required_param(request, "ApplyImmediately")?;
+        let _apply_immediately = parse_optional_bool(Some(&apply_str))?.ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterValue",
+                format!(
+                    "Invalid boolean value for ApplyImmediately: '{}'",
+                    apply_str
+                ),
+            )
+        })?;
+
+        let new_replica_count = optional_param(request, "NewReplicaCount")
+            .map(|v| {
+                v.parse::<i32>().map_err(|_| {
+                    AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "InvalidParameterValue",
+                        format!("Invalid value for NewReplicaCount: '{v}'"),
+                    )
+                })
+            })
+            .transpose()?
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "MissingParameter",
+                    "The request must contain the parameter NewReplicaCount.".to_string(),
+                )
+            })?;
+
+        if new_replica_count < 1 {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterValue",
+                format!("NewReplicaCount must be a positive integer, got {new_replica_count}"),
+            ));
+        }
+
+        let mut state = self.state.write();
+
+        let group = state
+            .replication_groups
+            .get_mut(&replication_group_id)
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::NOT_FOUND,
+                    "ReplicationGroupNotFoundFault",
+                    format!("ReplicationGroup {replication_group_id} not found."),
+                )
+            })?;
+
+        // new_replica_count is number of replicas (excluding primary), so total clusters = replicas + 1
+        let new_total = new_replica_count + 1;
+        if new_total <= group.num_cache_clusters {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterValue",
+                format!(
+                    "NewReplicaCount ({new_replica_count}) must result in more clusters than current count ({}).",
+                    group.num_cache_clusters
+                ),
+            ));
+        }
+
+        group.num_cache_clusters = new_total;
+        group.member_clusters = (1..=new_total)
+            .map(|i| format!("{replication_group_id}-{i:03}"))
+            .collect();
+
+        let group = group.clone();
+        let region = state.region.clone();
+        let xml = replication_group_xml(&group, &region);
+
+        Ok(AwsResponse::xml(
+            StatusCode::OK,
+            xml_wrap(
+                "IncreaseReplicaCount",
+                &format!("<ReplicationGroup>{xml}</ReplicationGroup>"),
+                &request.request_id,
+            ),
+        ))
+    }
+
+    fn decrease_replica_count(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let replication_group_id = required_param(request, "ReplicationGroupId")?;
+        let apply_str = required_param(request, "ApplyImmediately")?;
+        let _apply_immediately = parse_optional_bool(Some(&apply_str))?.ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterValue",
+                format!(
+                    "Invalid boolean value for ApplyImmediately: '{}'",
+                    apply_str
+                ),
+            )
+        })?;
+
+        let new_replica_count = optional_param(request, "NewReplicaCount")
+            .map(|v| {
+                v.parse::<i32>().map_err(|_| {
+                    AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "InvalidParameterValue",
+                        format!("Invalid value for NewReplicaCount: '{v}'"),
+                    )
+                })
+            })
+            .transpose()?
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "MissingParameter",
+                    "The request must contain the parameter NewReplicaCount.".to_string(),
+                )
+            })?;
+
+        if new_replica_count < 0 {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterValue",
+                format!("NewReplicaCount must be non-negative, got {new_replica_count}"),
+            ));
+        }
+
+        let mut state = self.state.write();
+
+        let group = state
+            .replication_groups
+            .get_mut(&replication_group_id)
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::NOT_FOUND,
+                    "ReplicationGroupNotFoundFault",
+                    format!("ReplicationGroup {replication_group_id} not found."),
+                )
+            })?;
+
+        // new_replica_count is number of replicas (excluding primary), so total clusters = replicas + 1
+        let new_total = new_replica_count + 1;
+        if new_total >= group.num_cache_clusters {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterValue",
+                format!(
+                    "NewReplicaCount ({new_replica_count}) must result in fewer clusters than current count ({}).",
+                    group.num_cache_clusters
+                ),
+            ));
+        }
+
+        group.num_cache_clusters = new_total;
+        group.member_clusters = (1..=new_total)
+            .map(|i| format!("{replication_group_id}-{i:03}"))
+            .collect();
+
+        let group = group.clone();
+        let region = state.region.clone();
+        let xml = replication_group_xml(&group, &region);
+
+        Ok(AwsResponse::xml(
+            StatusCode::OK,
+            xml_wrap(
+                "DecreaseReplicaCount",
+                &format!("<ReplicationGroup>{xml}</ReplicationGroup>"),
+                &request.request_id,
+            ),
+        ))
+    }
+
+    fn test_failover(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let replication_group_id = required_param(request, "ReplicationGroupId")?;
+        let node_group_id = required_param(request, "NodeGroupId")?;
+
+        let state = self.state.read();
+
+        let group = state
+            .replication_groups
+            .get(&replication_group_id)
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::NOT_FOUND,
+                    "ReplicationGroupNotFoundFault",
+                    format!("ReplicationGroup {replication_group_id} not found."),
+                )
+            })?;
+
+        // Our replication groups always have a single node group with ID "0001"
+        if node_group_id != "0001" {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "NodeGroupNotFoundFault",
+                format!("NodeGroup {node_group_id} not found in ReplicationGroup {replication_group_id}."),
+            ));
+        }
+
+        let region = state.region.clone();
+        let xml = replication_group_xml(group, &region);
+
+        Ok(AwsResponse::xml(
+            StatusCode::OK,
+            xml_wrap(
+                "TestFailover",
                 &format!("<ReplicationGroup>{xml}</ReplicationGroup>"),
                 &request.request_id,
             ),
@@ -1340,8 +1650,8 @@ fn replication_group_xml(g: &ReplicationGroup, region: &str) -> String {
          </NodeGroup>\
          </NodeGroups>\
          <AutomaticFailover>{}</AutomaticFailover>\
-         <SnapshotRetentionLimit>0</SnapshotRetentionLimit>\
-         <SnapshotWindow>05:00-09:00</SnapshotWindow>\
+         <SnapshotRetentionLimit>{}</SnapshotRetentionLimit>\
+         <SnapshotWindow>{}</SnapshotWindow>\
          <ClusterEnabled>false</ClusterEnabled>\
          <CacheNodeType>{}</CacheNodeType>\
          <TransitEncryptionEnabled>false</TransitEncryptionEnabled>\
@@ -1361,6 +1671,8 @@ fn replication_group_xml(g: &ReplicationGroup, region: &str) -> String {
         } else {
             "disabled"
         },
+        g.snapshot_retention_limit,
+        xml_escape(&g.snapshot_window),
         xml_escape(&g.cache_node_type),
         xml_escape(&g.arn),
     )
@@ -1876,5 +2188,226 @@ mod tests {
 
         let req = request("DescribeUserGroups", &[("UserGroupId", "delgroup")]);
         assert!(service.describe_user_groups(&req).is_err());
+    }
+
+    fn service_with_replication_group(group_id: &str, num_clusters: i32) -> ElastiCacheService {
+        let state = crate::state::ElastiCacheState::new("123456789012", "us-east-1");
+        let shared = std::sync::Arc::new(parking_lot::RwLock::new(state));
+        {
+            let mut s = shared.write();
+            let member_clusters: Vec<String> = (1..=num_clusters)
+                .map(|i| format!("{group_id}-{i:03}"))
+                .collect();
+            let arn =
+                format!("arn:aws:elasticache:us-east-1:123456789012:replicationgroup:{group_id}");
+            s.tags.insert(arn.clone(), Vec::new());
+            s.replication_groups.insert(
+                group_id.to_string(),
+                ReplicationGroup {
+                    replication_group_id: group_id.to_string(),
+                    description: "test group".to_string(),
+                    status: "available".to_string(),
+                    cache_node_type: "cache.t3.micro".to_string(),
+                    engine: "redis".to_string(),
+                    engine_version: "7.1".to_string(),
+                    num_cache_clusters: num_clusters,
+                    automatic_failover_enabled: false,
+                    endpoint_address: "127.0.0.1".to_string(),
+                    endpoint_port: 6379,
+                    arn,
+                    created_at: "2024-01-01T00:00:00Z".to_string(),
+                    container_id: "abc123".to_string(),
+                    host_port: 6379,
+                    member_clusters,
+                    snapshot_retention_limit: 0,
+                    snapshot_window: "05:00-09:00".to_string(),
+                },
+            );
+        }
+        ElastiCacheService::new(shared)
+    }
+
+    #[test]
+    fn modify_replication_group_updates_description() {
+        let service = service_with_replication_group("my-rg", 1);
+        let req = request(
+            "ModifyReplicationGroup",
+            &[
+                ("ReplicationGroupId", "my-rg"),
+                ("ReplicationGroupDescription", "Updated description"),
+            ],
+        );
+        let resp = service.modify_replication_group(&req).unwrap();
+        let body = String::from_utf8(resp.body.to_vec()).unwrap();
+        assert!(body.contains("<Description>Updated description</Description>"));
+        assert!(body.contains("<ModifyReplicationGroupResponse"));
+    }
+
+    #[test]
+    fn modify_replication_group_updates_multiple_fields() {
+        let service = service_with_replication_group("my-rg", 1);
+        let req = request(
+            "ModifyReplicationGroup",
+            &[
+                ("ReplicationGroupId", "my-rg"),
+                ("CacheNodeType", "cache.m5.large"),
+                ("AutomaticFailoverEnabled", "true"),
+                ("SnapshotRetentionLimit", "5"),
+                ("SnapshotWindow", "02:00-06:00"),
+            ],
+        );
+        let resp = service.modify_replication_group(&req).unwrap();
+        let body = String::from_utf8(resp.body.to_vec()).unwrap();
+        assert!(body.contains("<CacheNodeType>cache.m5.large</CacheNodeType>"));
+        assert!(body.contains("<AutomaticFailover>enabled</AutomaticFailover>"));
+        assert!(body.contains("<SnapshotRetentionLimit>5</SnapshotRetentionLimit>"));
+        assert!(body.contains("<SnapshotWindow>02:00-06:00</SnapshotWindow>"));
+    }
+
+    #[test]
+    fn modify_replication_group_not_found() {
+        let state = crate::state::ElastiCacheState::new("123456789012", "us-east-1");
+        let shared = std::sync::Arc::new(parking_lot::RwLock::new(state));
+        let service = ElastiCacheService::new(shared);
+        let req = request(
+            "ModifyReplicationGroup",
+            &[("ReplicationGroupId", "nonexistent")],
+        );
+        assert!(service.modify_replication_group(&req).is_err());
+    }
+
+    #[test]
+    fn increase_replica_count_updates_member_clusters() {
+        let service = service_with_replication_group("my-rg", 1);
+        let req = request(
+            "IncreaseReplicaCount",
+            &[
+                ("ReplicationGroupId", "my-rg"),
+                ("ApplyImmediately", "true"),
+                ("NewReplicaCount", "2"),
+            ],
+        );
+        let resp = service.increase_replica_count(&req).unwrap();
+        let body = String::from_utf8(resp.body.to_vec()).unwrap();
+        assert!(body.contains("<ClusterId>my-rg-001</ClusterId>"));
+        assert!(body.contains("<ClusterId>my-rg-002</ClusterId>"));
+        assert!(body.contains("<ClusterId>my-rg-003</ClusterId>"));
+        assert!(body.contains("<IncreaseReplicaCountResponse"));
+    }
+
+    #[test]
+    fn increase_replica_count_rejects_same_or_lower() {
+        let service = service_with_replication_group("my-rg", 3);
+        let req = request(
+            "IncreaseReplicaCount",
+            &[
+                ("ReplicationGroupId", "my-rg"),
+                ("ApplyImmediately", "true"),
+                ("NewReplicaCount", "2"),
+            ],
+        );
+        assert!(service.increase_replica_count(&req).is_err());
+    }
+
+    #[test]
+    fn increase_replica_count_not_found() {
+        let state = crate::state::ElastiCacheState::new("123456789012", "us-east-1");
+        let shared = std::sync::Arc::new(parking_lot::RwLock::new(state));
+        let service = ElastiCacheService::new(shared);
+        let req = request(
+            "IncreaseReplicaCount",
+            &[
+                ("ReplicationGroupId", "nonexistent"),
+                ("ApplyImmediately", "true"),
+                ("NewReplicaCount", "2"),
+            ],
+        );
+        assert!(service.increase_replica_count(&req).is_err());
+    }
+
+    #[test]
+    fn decrease_replica_count_updates_member_clusters() {
+        let service = service_with_replication_group("my-rg", 3);
+        let req = request(
+            "DecreaseReplicaCount",
+            &[
+                ("ReplicationGroupId", "my-rg"),
+                ("ApplyImmediately", "true"),
+                ("NewReplicaCount", "1"),
+            ],
+        );
+        let resp = service.decrease_replica_count(&req).unwrap();
+        let body = String::from_utf8(resp.body.to_vec()).unwrap();
+        assert!(body.contains("<ClusterId>my-rg-001</ClusterId>"));
+        assert!(body.contains("<ClusterId>my-rg-002</ClusterId>"));
+        assert!(!body.contains("<ClusterId>my-rg-003</ClusterId>"));
+        assert!(body.contains("<DecreaseReplicaCountResponse"));
+    }
+
+    #[test]
+    fn decrease_replica_count_validates_minimum() {
+        let service = service_with_replication_group("my-rg", 1);
+        // NewReplicaCount=0 means total=1, which is not fewer than current 1
+        let req = request(
+            "DecreaseReplicaCount",
+            &[
+                ("ReplicationGroupId", "my-rg"),
+                ("ApplyImmediately", "true"),
+                ("NewReplicaCount", "0"),
+            ],
+        );
+        assert!(service.decrease_replica_count(&req).is_err());
+    }
+
+    #[test]
+    fn decrease_replica_count_rejects_negative() {
+        let service = service_with_replication_group("my-rg", 2);
+        let req = request(
+            "DecreaseReplicaCount",
+            &[
+                ("ReplicationGroupId", "my-rg"),
+                ("ApplyImmediately", "true"),
+                ("NewReplicaCount", "-1"),
+            ],
+        );
+        assert!(service.decrease_replica_count(&req).is_err());
+    }
+
+    #[test]
+    fn test_failover_validates_node_group() {
+        let service = service_with_replication_group("my-rg", 1);
+        let req = request(
+            "TestFailover",
+            &[("ReplicationGroupId", "my-rg"), ("NodeGroupId", "0001")],
+        );
+        let resp = service.test_failover(&req).unwrap();
+        let body = String::from_utf8(resp.body.to_vec()).unwrap();
+        assert!(body.contains("<Status>available</Status>"));
+        assert!(body.contains("<TestFailoverResponse"));
+    }
+
+    #[test]
+    fn test_failover_rejects_invalid_node_group() {
+        let service = service_with_replication_group("my-rg", 1);
+        let req = request(
+            "TestFailover",
+            &[("ReplicationGroupId", "my-rg"), ("NodeGroupId", "9999")],
+        );
+        assert!(service.test_failover(&req).is_err());
+    }
+
+    #[test]
+    fn test_failover_not_found() {
+        let state = crate::state::ElastiCacheState::new("123456789012", "us-east-1");
+        let shared = std::sync::Arc::new(parking_lot::RwLock::new(state));
+        let service = ElastiCacheService::new(shared);
+        let req = request(
+            "TestFailover",
+            &[
+                ("ReplicationGroupId", "nonexistent"),
+                ("NodeGroupId", "0001"),
+            ],
+        );
+        assert!(service.test_failover(&req).is_err());
     }
 }
