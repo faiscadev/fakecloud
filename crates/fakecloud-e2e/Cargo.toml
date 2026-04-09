@@ -7,10 +7,10 @@ version.workspace = true
 publish = false
 
 [dependencies]
+serde_json = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
-serde_json = { workspace = true }
 aws-config = "1"
 aws-sdk-sqs = "1"
 aws-sdk-sns = "1"

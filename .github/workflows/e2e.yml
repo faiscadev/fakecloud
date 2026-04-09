@@ -16,10 +16,14 @@ jobs:
       matrix: ${{ steps.matrix.outputs.matrix }}
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build E2E partition tool
+        run: cargo build -q -p fakecloud-e2e --bin e2e_nextest_partitions
 
       - id: matrix
         name: Generate E2E matrix
-        run: echo "matrix=$(python3 scripts/e2e_nextest_partitions.py matrix)" >> "$GITHUB_OUTPUT"
+        run: echo "matrix=$(./target/debug/e2e_nextest_partitions matrix)" >> "$GITHUB_OUTPUT"
 
   e2e-partition-check:
     runs-on: ubuntu-latest
@@ -29,11 +33,14 @@ jobs:
       - uses: taiki-e/install-action@nextest
       - uses: Swatinem/rust-cache@v2
 
+      - name: Build E2E partition tool
+        run: cargo build -q -p fakecloud-e2e --bin e2e_nextest_partitions
+
       - name: Prune Docker state before tests
         run: docker system prune -af --volumes || true
 
       - name: Verify E2E partition coverage
-        run: python3 scripts/e2e_nextest_partitions.py check
+        run: ./target/debug/e2e_nextest_partitions check
 
       - name: Prune Docker state after tests
         if: always()
