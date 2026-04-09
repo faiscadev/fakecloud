@@ -101,7 +101,7 @@ class RdsInstance:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> RdsInstance:
         d = _convert_keys(data)
-        d["tags"] = [RdsTag.from_dict(tag) for tag in data.get("tags", [])]
+        d["tags"] = [RdsTag.from_dict(tag) for tag in d.get("tags", [])]
         return cls(**d)
 
 

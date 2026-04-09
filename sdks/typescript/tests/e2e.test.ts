@@ -41,10 +41,7 @@ import {
   EventBridgeClient,
   PutEventsCommand,
 } from "@aws-sdk/client-eventbridge";
-import {
-  RDSClient,
-  CreateDBInstanceCommand,
-} from "@aws-sdk/client-rds";
+import { RDSClient, CreateDBInstanceCommand } from "@aws-sdk/client-rds";
 
 function getEndpoint(): string {
   const ep = process.env.FAKECLOUD_ENDPOINT;
