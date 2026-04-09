@@ -66,5 +66,9 @@
   "rds": {
     "repo_dir": "rds",
     "service_name": "rds"
+  },
+  "elasticache": {
+    "repo_dir": "elasticache",
+    "service_name": "elasticache"
   }
 }
