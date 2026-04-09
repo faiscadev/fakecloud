@@ -162,6 +162,19 @@ async fn main() {
         tracing::info!("Docker/Podman not available — RDS CreateDBInstance will return errors");
     }
 
+    let elasticache_runtime =
+        fakecloud_elasticache::runtime::ElastiCacheRuntime::new().map(Arc::new);
+    if let Some(ref rt) = elasticache_runtime {
+        tracing::info!(
+            cli = rt.cli_name(),
+            "ElastiCache execution enabled via container runtime"
+        );
+    } else {
+        tracing::info!(
+            "Docker/Podman not available — ElastiCache CreateReplicationGroup will return errors"
+        );
+    }
+
     // Cross-service delivery bus
     // Step 1: SQS delivery (SNS and EventBridge can push messages into SQS queues)
     let sqs_delivery = Arc::new(fakecloud_sqs::delivery::SqsDeliveryImpl::new(
@@ -266,6 +279,7 @@ async fn main() {
         elasticache: elasticache_state.clone(),
         container_runtime: container_runtime.clone(),
         rds_runtime: rds_runtime.clone(),
+        elasticache_runtime: elasticache_runtime.clone(),
     };
 
     // Step 5: CloudFormation delivery (custom resources can invoke Lambda)
@@ -379,7 +393,11 @@ async fn main() {
         rds_service = rds_service.with_runtime(rt.clone());
     }
     registry.register(Arc::new(rds_service));
-    registry.register(Arc::new(ElastiCacheService::new(elasticache_state)));
+    let mut elasticache_service = ElastiCacheService::new(elasticache_state);
+    if let Some(ref rt) = elasticache_runtime {
+        elasticache_service = elasticache_service.with_runtime(rt.clone());
+    }
+    registry.register(Arc::new(elasticache_service));
 
     // Spawn background tasks
     let lifecycle_processor = fakecloud_s3::lifecycle::LifecycleProcessor::new(s3_state);
@@ -1068,6 +1086,9 @@ async fn main() {
     if let Some(rt) = rds_runtime {
         rt.stop_all().await;
     }
+    if let Some(rt) = elasticache_runtime {
+        rt.stop_all().await;
+    }
 }
 
 #[derive(Clone)]
@@ -1091,6 +1112,7 @@ struct ResetState {
     elasticache: fakecloud_elasticache::state::SharedElastiCacheState,
     container_runtime: Option<Arc<fakecloud_lambda::runtime::ContainerRuntime>>,
     rds_runtime: Option<Arc<fakecloud_rds::runtime::RdsRuntime>>,
+    elasticache_runtime: Option<Arc<fakecloud_elasticache::runtime::ElastiCacheRuntime>>,
 }
 
 impl ResetState {
@@ -1168,6 +1190,10 @@ impl ResetState {
             }
             "elasticache" => {
                 self.elasticache.write().reset();
+                if let Some(ref rt) = self.elasticache_runtime {
+                    let rt = rt.clone();
+                    tokio::spawn(async move { rt.stop_all().await });
+                }
             }
             _ => {
                 return Err(format!("Unknown service: {service}"));
@@ -1221,6 +1247,10 @@ impl ResetState {
             tokio::spawn(async move { rt.stop_all().await });
         }
         self.elasticache.write().reset();
+        if let Some(ref rt) = self.elasticache_runtime {
+            let rt = rt.clone();
+            tokio::spawn(async move { rt.stop_all().await });
+        }
         tracing::info!("state reset via reset API");
         axum::Json(types::ResetResponse {
             status: "ok".to_string(),
@@ -1339,6 +1369,7 @@ mod tests {
             )),
             container_runtime: None,
             rds_runtime: None,
+            elasticache_runtime: None,
         };
 
         state.reset_service("rds").expect("reset rds");

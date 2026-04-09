@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use parking_lot::RwLock;
@@ -44,12 +44,33 @@ pub struct CacheSubnetGroup {
     pub arn: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct ReplicationGroup {
+    pub replication_group_id: String,
+    pub description: String,
+    pub status: String,
+    pub cache_node_type: String,
+    pub engine: String,
+    pub engine_version: String,
+    pub num_cache_clusters: i32,
+    pub automatic_failover_enabled: bool,
+    pub endpoint_address: String,
+    pub endpoint_port: u16,
+    pub arn: String,
+    pub created_at: String,
+    pub container_id: String,
+    pub host_port: u16,
+    pub member_clusters: Vec<String>,
+}
+
 #[derive(Debug)]
 pub struct ElastiCacheState {
     pub account_id: String,
     pub region: String,
     pub parameter_groups: Vec<CacheParameterGroup>,
     pub subnet_groups: HashMap<String, CacheSubnetGroup>,
+    pub replication_groups: HashMap<String, ReplicationGroup>,
+    in_progress_replication_group_ids: HashSet<String>,
 }
 
 impl ElastiCacheState {
@@ -61,12 +82,41 @@ impl ElastiCacheState {
             region: region.to_string(),
             parameter_groups,
             subnet_groups,
+            replication_groups: HashMap::new(),
+            in_progress_replication_group_ids: HashSet::new(),
         }
     }
 
     pub fn reset(&mut self) {
         self.parameter_groups = default_parameter_groups(&self.account_id, &self.region);
         self.subnet_groups = default_subnet_groups(&self.account_id, &self.region);
+        self.replication_groups.clear();
+        self.in_progress_replication_group_ids.clear();
+    }
+
+    pub fn begin_replication_group_creation(&mut self, replication_group_id: &str) -> bool {
+        if self.replication_groups.contains_key(replication_group_id)
+            || self
+                .in_progress_replication_group_ids
+                .contains(replication_group_id)
+        {
+            return false;
+        }
+        self.in_progress_replication_group_ids
+            .insert(replication_group_id.to_string());
+        true
+    }
+
+    pub fn finish_replication_group_creation(&mut self, group: ReplicationGroup) {
+        self.in_progress_replication_group_ids
+            .remove(&group.replication_group_id);
+        self.replication_groups
+            .insert(group.replication_group_id.clone(), group);
+    }
+
+    pub fn cancel_replication_group_creation(&mut self, replication_group_id: &str) {
+        self.in_progress_replication_group_ids
+            .remove(replication_group_id);
     }
 }
 
@@ -266,5 +316,51 @@ mod tests {
     fn default_parameters_for_unknown_family_returns_empty() {
         let params = default_parameters_for_family("unknown");
         assert!(params.is_empty());
+    }
+
+    #[test]
+    fn state_new_has_empty_replication_groups() {
+        let state = ElastiCacheState::new("123456789012", "us-east-1");
+        assert!(state.replication_groups.is_empty());
+    }
+
+    #[test]
+    fn begin_replication_group_creation_rejects_duplicate_ids() {
+        let mut state = ElastiCacheState::new("123456789012", "us-east-1");
+
+        assert!(state.begin_replication_group_creation("rg-1"));
+        assert!(!state.begin_replication_group_creation("rg-1"));
+
+        state.cancel_replication_group_creation("rg-1");
+        assert!(state.begin_replication_group_creation("rg-1"));
+    }
+
+    #[test]
+    fn reset_clears_replication_groups() {
+        let mut state = ElastiCacheState::new("123456789012", "us-east-1");
+        state.replication_groups.insert(
+            "my-group".to_string(),
+            ReplicationGroup {
+                replication_group_id: "my-group".to_string(),
+                description: "test".to_string(),
+                status: "available".to_string(),
+                cache_node_type: "cache.t3.micro".to_string(),
+                engine: "redis".to_string(),
+                engine_version: "7.1".to_string(),
+                num_cache_clusters: 1,
+                automatic_failover_enabled: false,
+                endpoint_address: "127.0.0.1".to_string(),
+                endpoint_port: 6379,
+                arn: "arn:aws:elasticache:us-east-1:123456789012:replicationgroup:my-group"
+                    .to_string(),
+                created_at: "2024-01-01T00:00:00Z".to_string(),
+                container_id: "abc123".to_string(),
+                host_port: 12345,
+                member_clusters: vec!["my-group-001".to_string()],
+            },
+        );
+        assert_eq!(state.replication_groups.len(), 1);
+        state.reset();
+        assert!(state.replication_groups.is_empty());
     }
 }
