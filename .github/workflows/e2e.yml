@@ -10,119 +10,78 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  e2e-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: matrix
+        name: Generate E2E matrix
+        run: echo "matrix=$(python3 scripts/e2e_nextest_partitions.py matrix)" >> "$GITHUB_OUTPUT"
+
+  e2e-partition-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@nextest
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Prune Docker state before tests
+        run: docker system prune -af --volumes || true
+
+      - name: Verify E2E partition coverage
+        run: python3 scripts/e2e_nextest_partitions.py check
+
+      - name: Prune Docker state after tests
+        if: always()
+        run: docker system prune -af --volumes || true
+
   e2e:
+    name: E2E ${{ matrix.name }}
+    needs: [e2e-matrix, e2e-partition-check]
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.e2e-matrix.outputs.matrix) }}
+    env:
+      NEXTEST_FILTER: ${{ matrix.filter }}
+      NEXTEST_PARTITION: ${{ matrix.partition }}
+      INSTALL_PODMAN: ${{ matrix.install_podman }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Prune Docker state before tests
-        run: docker system prune -af --volumes || true
-
-      - name: Build server
-        run: cargo build --bin fakecloud
-
-      - name: Run E2E tests
-        run: |
-          cargo test -p fakecloud-e2e \
-            --test cloudformation \
-            --test cognito \
-            --test cross_service \
-            --test dynamodb \
-            --test elasticache \
-            --test eventbridge \
-            --test iam \
-            --test kinesis \
-            --test kms \
-            --test lambda_integration \
-            --test logs \
-            --test multiservice \
-            --test rds \
-            --test s3 \
-            --test sdk \
-            --test secretsmanager \
-            --test ses \
-            --test ses_receipt_rules \
-            --test ses_v1 \
-            --test smoke \
-            --test sns \
-            --test sqs \
-            --test ssm
-
-      - name: Prune Docker state after tests
-        if: always()
-        run: docker system prune -af --volumes || true
-
-  e2e-lambda:
-    name: E2E Lambda API
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Prune Docker state before tests
-        run: docker system prune -af --volumes || true
-
-      - name: Build server
-        run: cargo build --bin fakecloud
-
-      - name: Run Lambda API E2E tests
-        run: cargo test -p fakecloud-e2e --test lambda -- --skip lambda_invoke_docker --skip lambda_invoke_podman
-
-      - name: Prune Docker state after tests
-        if: always()
-        run: docker system prune -af --volumes || true
-
-  e2e-lambda-runtimes:
-    name: E2E Lambda runtimes
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Prune Docker state before tests
-        run: docker system prune -af --volumes || true
-
-      - name: Build server
-        run: cargo build --bin fakecloud
-
-      - name: Run Lambda runtime E2E tests
-        run: cargo test -p fakecloud-e2e --test lambda_invoke
-
-      - name: Prune Docker state after tests
-        if: always()
-        run: docker system prune -af --volumes || true
-
-  e2e-lambda-container-clis:
-    name: E2E Lambda container CLIs
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@nextest
       - uses: Swatinem/rust-cache@v2
 
       - name: Install podman
+        if: matrix.install_podman
         run: sudo apt-get update && sudo apt-get install -y podman
 
-      - name: Prune Docker and podman state before tests
+      - name: Prune container state before tests
         run: |
           docker system prune -af --volumes || true
-          podman system prune -af || true
+          if [ "$INSTALL_PODMAN" = "true" ]; then
+            podman system prune -af || true
+          fi
 
       - name: Build server
         run: cargo build --bin fakecloud
 
-      - name: Run Lambda Docker CLI E2E test
-        run: cargo test -p fakecloud-e2e --test lambda lambda_invoke_docker -- --exact
+      - name: Run nextest partition
+        run: |
+          cmd=(cargo nextest run -P ci -p fakecloud-e2e -E "$NEXTEST_FILTER")
+          if [ -n "$NEXTEST_PARTITION" ]; then
+            cmd+=(--partition "$NEXTEST_PARTITION")
+          fi
+          "${cmd[@]}"
 
-      - name: Run Lambda podman CLI E2E test
-        run: cargo test -p fakecloud-e2e --test lambda lambda_invoke_podman -- --exact
-
-      - name: Prune Docker and podman state after tests
+      - name: Prune container state after tests
         if: always()
         run: |
           docker system prune -af --volumes || true
-          podman system prune -af || true
+          if [ "$INSTALL_PODMAN" = "true" ]; then
+            podman system prune -af || true
+          fi
