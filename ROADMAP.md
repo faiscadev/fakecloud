@@ -18,10 +18,6 @@ Full RDS API with real database engines. The approach: implement the complete AW
 
 Container registry and container orchestration. ECR provides image storage and lifecycle management. ECS provides clusters, services, task definitions, and task execution — backed by real Docker containers.
 
-### ElastiCache
-
-Full ElastiCache API backed by real Redis instances via Docker. Create, modify, and delete cache clusters through the standard API, with actual Redis available for your application to connect to.
-
 ### Elastic Load Balancing
 
 Application Load Balancers, target groups, listeners, and routing rules. Configuration management and basic request routing.
@@ -87,6 +83,8 @@ Java.
 ## Design principles
 
 **Smart proxy pattern** — For services that wrap stateful software (RDS, ElastiCache, ECS), fakecloud implements the full AWS API and delegates execution to real software via Docker. This gives you API compatibility and real behavior in one package.
+
+**Shipped slices** — ElastiCache is no longer just planned work. The current implementation covers cache clusters, replication groups, global replication groups, serverless caches and snapshots, subnet groups, users/user groups, tagging, and Docker-backed Redis for the implemented creation flows.
 
 **No stubs** — Every operation either does what AWS does or returns an explicit error. We don't return fake success responses for things we haven't implemented.
 

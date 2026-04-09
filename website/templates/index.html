@@ -8,7 +8,7 @@
   <div class="container">
     <h1>fake<span>cloud</span></h1>
     <p class="tagline">Local AWS cloud emulator for integration tests. Run your app with normal AWS clients, stay fully local, and use fakecloud SDKs when your tests need deeper visibility.</p>
-    <p class="hero-proof">15 services. 922 operations. 100% conformance across implemented APIs.</p>
+    <p class="hero-proof">18 services. 990 operations. 100% conformance across implemented APIs.</p>
     <div class="btn-group">
       <a href="#quickstart" class="btn">Get Started</a>
       <a href="#compare" class="btn btn-outline">Why fakecloud</a>
@@ -47,13 +47,13 @@
       </div>
       <div class="feature">
         <div class="label">Coverage</div>
-        <h3>15 AWS services</h3>
-        <p>S3, SQS, SNS, EventBridge, IAM, STS, SSM, DynamoDB, Lambda, Secrets Manager, CloudWatch Logs, KMS, CloudFormation, SES, and Cognito User Pools.</p>
+        <h3>18 AWS services</h3>
+        <p>S3, SQS, SNS, EventBridge, IAM, STS, SSM, DynamoDB, Lambda, Secrets Manager, CloudWatch Logs, KMS, CloudFormation, SES, Cognito User Pools, Kinesis, RDS, and ElastiCache.</p>
       </div>
       <div class="feature">
         <div class="label">Tested</div>
         <h3>Conformance tested</h3>
-        <p>100% conformance across all 922 implemented API operations, backed by model-driven conformance coverage plus end-to-end tests against the official AWS SDKs.</p>
+        <p>100% conformance across all 990 implemented API operations, backed by model-driven conformance coverage plus end-to-end tests against the official AWS SDKs.</p>
       </div>
       <div class="feature">
         <div class="label">Real behavior</div>
@@ -142,7 +142,7 @@
           <tr><td>Startup time</td><td class="check">~500ms</td><td class="cross">~3s</td></tr>
           <tr><td>Idle memory</td><td class="check">~10 MiB</td><td class="cross">~150 MiB</td></tr>
           <tr><td>Install size</td><td class="check">~19 MB binary</td><td class="cross">~1 GB Docker image</td></tr>
-          <tr><td>AWS services</td><td>15</td><td>30+</td></tr>
+          <tr><td>AWS services</td><td>18</td><td>30+</td></tr>
           <tr><td>Test assertion SDKs</td><td class="check">TypeScript, Python, Go, Rust</td><td>Python, Java</td></tr>
           <tr><td>Cognito User Pools</td><td class="check">80 operations</td><td class="cross">Paid only</td></tr>
           <tr><td>SES v2</td><td class="check">97 operations</td><td class="cross">Paid only</td></tr>
@@ -172,6 +172,9 @@
       <div class="service"><div class="name">CloudFormation</div><div class="proto">Query protocol</div></div>
       <div class="service"><div class="name">SES</div><div class="proto">REST + Query protocol</div></div>
       <div class="service"><div class="name">Cognito User Pools</div><div class="proto">JSON protocol</div></div>
+      <div class="service"><div class="name">Kinesis</div><div class="proto">JSON protocol</div></div>
+      <div class="service"><div class="name">RDS</div><div class="proto">Query protocol</div></div>
+      <div class="service"><div class="name">ElastiCache</div><div class="proto">Query protocol</div></div>
     </div>
   </div>
 </section>

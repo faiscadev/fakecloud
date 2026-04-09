@@ -4,7 +4,7 @@
 
 ## Overview
 
-fakecloud emulates 15 AWS services locally for integration testing and development. It is a single Rust binary — no Docker required, no signup, starts in under 100ms. Point any AWS SDK or the AWS CLI at `http://localhost:4566` with dummy credentials.
+fakecloud emulates 18 AWS services locally for integration testing and development. It is a single Rust binary — no Docker required, no signup, starts in under 100ms. Point any AWS SDK or the AWS CLI at `http://localhost:4566` with dummy credentials.
 
 Key design principles:
 - **Correctness over coverage**: Every implemented service targets 100% behavioral parity with real AWS, verified by automated conformance tests against AWS Smithy models
@@ -70,7 +70,7 @@ fakecloud listens at `http://localhost:4566`.
 ### Health check
 ```sh
 curl http://localhost:4566/_fakecloud/health
-# Returns: {"status":"ok","version":"0.3.0","services":["cloudformation","cognito-idp","dynamodb","sqs","sns","events","iam","sts","ssm","lambda","secretsmanager","logs","kms","s3","ses"]}
+# Returns: {"status":"ok","version":"0.5.1","services":["cloudformation","cognito-idp","dynamodb","elasticache","events","iam","kinesis","kms","lambda","logs","rds","s3","secretsmanager","ses","sns","sqs","ssm","sts"]}
 ```
 
 ## Using with AWS SDKs
@@ -283,6 +283,30 @@ Features: user pools with configurable policies, app client CRUD, user signup/co
 
 Protocol: JSON (JSON body, `X-Amz-Target` header, JSON responses)
 
+### Kinesis (14 actions)
+
+CreateStream, DescribeStream, DescribeStreamSummary, ListStreams, DeleteStream, GetRecords, GetShardIterator, PutRecord, PutRecords, AddTagsToStream, ListTagsForStream, RemoveTagsFromStream, IncreaseStreamRetentionPeriod, DecreaseStreamRetentionPeriod
+
+Features: stream creation and deletion, shard iterators and record reads, batched writes, retention period updates, and stream tagging.
+
+Protocol: JSON (JSON body, `X-Amz-Target` header, JSON responses)
+
+### RDS (10 actions)
+
+AddTagsToResource, CreateDBInstance, DeleteDBInstance, DescribeDBEngineVersions, DescribeDBInstances, DescribeOrderableDBInstanceOptions, ListTagsForResource, ModifyDBInstance, RebootDBInstance, RemoveTagsFromResource
+
+Features: DB instance lifecycle, engine and version discovery, orderable instance options, modification and reboot flows, tagging, and Docker-backed PostgreSQL execution for created instances.
+
+Protocol: Query (form-encoded body, `Action` parameter, XML responses)
+
+### ElastiCache (44 actions)
+
+AddTagsToResource, CreateCacheCluster, CreateGlobalReplicationGroup, CreateCacheSubnetGroup, CreateReplicationGroup, CreateServerlessCache, CreateServerlessCacheSnapshot, CreateSnapshot, CreateUser, CreateUserGroup, DecreaseReplicaCount, DeleteCacheCluster, DeleteGlobalReplicationGroup, DeleteCacheSubnetGroup, DeleteReplicationGroup, DeleteServerlessCache, DeleteServerlessCacheSnapshot, DeleteSnapshot, DeleteUser, DeleteUserGroup, DescribeCacheClusters, DescribeCacheEngineVersions, DescribeGlobalReplicationGroups, DescribeCacheParameterGroups, DescribeReservedCacheNodes, DescribeReservedCacheNodesOfferings, DescribeCacheSubnetGroups, DescribeEngineDefaultParameters, DescribeReplicationGroups, DescribeServerlessCaches, DescribeServerlessCacheSnapshots, DescribeSnapshots, DescribeUserGroups, DescribeUsers, DisassociateGlobalReplicationGroup, FailoverGlobalReplicationGroup, IncreaseReplicaCount, ListTagsForResource, ModifyCacheSubnetGroup, ModifyGlobalReplicationGroup, ModifyReplicationGroup, ModifyServerlessCache, RemoveTagsFromResource, TestFailover
+
+Features: cache clusters, replication groups, global replication groups, serverless caches and snapshots, subnet groups, users and user groups, failover and replica-count changes, tagging, and Docker-backed Redis for implemented creation flows.
+
+Protocol: Query (form-encoded body, `Action` parameter, XML responses)
+
 ## Cross-Service Integration
 
 fakecloud implements real cross-service message delivery:
@@ -300,8 +324,8 @@ fakecloud implements real cross-service message delivery:
 
 fakecloud handles three AWS protocol families:
 
-- **Query protocol** (SQS, SNS, IAM, STS, CloudFormation, SES v1): form-encoded body with `Action` parameter, XML responses
-- **JSON protocol** (SSM, EventBridge, DynamoDB, Secrets Manager, CloudWatch Logs, KMS, Cognito User Pools): JSON body, `X-Amz-Target` header, JSON responses
+- **Query protocol** (SQS, SNS, IAM, STS, CloudFormation, SES v1, RDS, ElastiCache): form-encoded body with `Action` parameter, XML responses
+- **JSON protocol** (SSM, EventBridge, DynamoDB, Secrets Manager, CloudWatch Logs, KMS, Cognito User Pools, Kinesis): JSON body, `X-Amz-Target` header, JSON responses
 - **REST protocol** (S3, Lambda, SES v2): HTTP method + path-based routing, XML or JSON responses
 
 SigV4 signatures are parsed for service routing but never validated. Use any dummy credentials.
