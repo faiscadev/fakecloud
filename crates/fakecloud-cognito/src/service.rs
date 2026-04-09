@@ -1369,20 +1369,64 @@ impl CognitoService {
     fn list_users(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
 
-        let pool_id = body["UserPoolId"]
-            .as_str()
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| {
-                AwsServiceError::aws_error(
+        let pool_id = require_str(&body, "UserPoolId")?;
+        if pool_id.len() > 55 {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterException",
+                "UserPoolId must be 55 characters or fewer",
+            ));
+        }
+
+        let limit = match body.get("Limit") {
+            Some(Value::Number(n)) => {
+                let limit = n.as_i64().ok_or_else(|| {
+                    AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "InvalidParameterException",
+                        "Limit must be between 1 and 60",
+                    )
+                })?;
+                if !(1..=60).contains(&limit) {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "InvalidParameterException",
+                        "Limit must be between 1 and 60",
+                    ));
+                }
+                limit as usize
+            }
+            Some(_) => {
+                return Err(AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
                     "InvalidParameterException",
-                    "UserPoolId is required",
-                )
-            })?;
-
-        let limit = body["Limit"].as_i64().unwrap_or(60).clamp(1, 60) as usize;
+                    "Limit must be between 1 and 60",
+                ));
+            }
+            None => 60,
+        };
         let pagination_token = body["PaginationToken"].as_str();
         let filter_str = body["Filter"].as_str();
+
+        if let Some(filter) = filter_str {
+            if filter.len() > 256 {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterException",
+                    "Filter must be 256 characters or fewer",
+                ));
+            }
+        }
+
+        if let Some(token) = pagination_token {
+            if token.is_empty() {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterException",
+                    "PaginationToken must not be empty",
+                ));
+            }
+        }
 
         let state = self.state.read();
 
@@ -8165,6 +8209,91 @@ mod tests {
         let resp_body: Value = serde_json::from_slice(&resp.body).unwrap();
         let pool_id = resp_body["UserPool"]["Id"].as_str().unwrap().to_string();
         (svc, pool_id)
+    }
+
+    #[test]
+    fn list_users_requires_user_pool_id() {
+        let (svc, _) = setup_svc_with_pool();
+
+        for body in [r#"{}"#, ""] {
+            let req = make_req("ListUsers", body);
+            match svc.list_users(&req) {
+                Err(e) => assert_eq!(e.code(), "InvalidParameterException"),
+                Ok(_) => panic!("Expected InvalidParameterException for body {body:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn list_users_validates_limit_bounds() {
+        let (svc, pool_id) = setup_svc_with_pool();
+
+        for limit in [0, 61] {
+            let body = serde_json::to_string(&json!({
+                "UserPoolId": pool_id,
+                "Limit": limit,
+            }))
+            .unwrap();
+            let req = make_req("ListUsers", &body);
+            match svc.list_users(&req) {
+                Err(e) => assert_eq!(e.code(), "InvalidParameterException"),
+                Ok(_) => panic!("Expected InvalidParameterException for limit {limit}"),
+            }
+        }
+    }
+
+    #[test]
+    fn list_users_validates_optional_field_lengths() {
+        let (svc, pool_id) = setup_svc_with_pool();
+
+        let long_filter = "a".repeat(257);
+        let body = serde_json::to_string(&json!({
+            "UserPoolId": pool_id,
+            "Filter": long_filter,
+        }))
+        .unwrap();
+        let req = make_req("ListUsers", &body);
+        match svc.list_users(&req) {
+            Err(e) => assert_eq!(e.code(), "InvalidParameterException"),
+            Ok(_) => panic!("Expected InvalidParameterException for oversized filter"),
+        }
+
+        let body = serde_json::to_string(&json!({
+            "UserPoolId": pool_id,
+            "PaginationToken": "",
+        }))
+        .unwrap();
+        let req = make_req("ListUsers", &body);
+        match svc.list_users(&req) {
+            Err(e) => assert_eq!(e.code(), "InvalidParameterException"),
+            Ok(_) => panic!("Expected InvalidParameterException for empty pagination token"),
+        }
+    }
+
+    #[test]
+    fn list_users_validates_user_pool_id_length() {
+        let (svc, _) = setup_svc_with_pool();
+
+        let body = serde_json::to_string(&json!({
+            "UserPoolId": "",
+        }))
+        .unwrap();
+        let req = make_req("ListUsers", &body);
+        match svc.list_users(&req) {
+            Err(e) => assert_eq!(e.code(), "InvalidParameterException"),
+            Ok(_) => panic!("Expected InvalidParameterException for empty UserPoolId"),
+        }
+
+        let long_pool_id = format!("{}suffix", "a".repeat(50));
+        let body = serde_json::to_string(&json!({
+            "UserPoolId": long_pool_id,
+        }))
+        .unwrap();
+        let req = make_req("ListUsers", &body);
+        match svc.list_users(&req) {
+            Err(e) => assert_eq!(e.code(), "InvalidParameterException"),
+            Ok(_) => panic!("Expected InvalidParameterException for oversized UserPoolId"),
+        }
     }
 
     #[test]
