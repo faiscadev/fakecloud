@@ -22,6 +22,8 @@ const SUPPORTED_ACTIONS: &[&str] = &[
     "DescribeDBInstances",
     "DescribeOrderableDBInstanceOptions",
     "ListTagsForResource",
+    "ModifyDBInstance",
+    "RebootDBInstance",
     "RemoveTagsFromResource",
 ];
 
@@ -61,6 +63,8 @@ impl AwsService for RdsService {
                 self.describe_orderable_db_instance_options(&request)
             }
             "ListTagsForResource" => self.list_tags_for_resource(&request),
+            "ModifyDBInstance" => self.modify_db_instance(&request),
+            "RebootDBInstance" => self.reboot_db_instance(&request).await,
             "RemoveTagsFromResource" => self.remove_tags_from_resource(&request),
             _ => Err(AwsServiceError::action_not_implemented(
                 self.service_name(),
@@ -237,6 +241,124 @@ impl RdsService {
                 &format!(
                     "<DBInstance>{}</DBInstance>",
                     db_instance_xml(&instance, Some("deleting"))
+                ),
+                &request.request_id,
+            ),
+        ))
+    }
+
+    fn modify_db_instance(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let db_instance_identifier = required_param(request, "DBInstanceIdentifier")?;
+        let db_instance_class = optional_param(request, "DBInstanceClass");
+        let deletion_protection =
+            parse_optional_bool(optional_param(request, "DeletionProtection").as_deref())?;
+        let apply_immediately =
+            parse_optional_bool(optional_param(request, "ApplyImmediately").as_deref())?;
+
+        if apply_immediately == Some(false) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterValue",
+                "ApplyImmediately=false is not yet supported for ModifyDBInstance.",
+            ));
+        }
+        if db_instance_class.is_none() && deletion_protection.is_none() {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterCombination",
+                "At least one supported mutable field must be provided.",
+            ));
+        }
+        if let Some(ref class) = db_instance_class {
+            validate_db_instance_class(class)?;
+        }
+
+        let mut state = self.state.write();
+        let instance = state
+            .instances
+            .get_mut(&db_instance_identifier)
+            .ok_or_else(|| db_instance_not_found(&db_instance_identifier))?;
+
+        if let Some(class) = db_instance_class {
+            instance.db_instance_class = class;
+        }
+        if let Some(deletion_protection) = deletion_protection {
+            instance.deletion_protection = deletion_protection;
+        }
+
+        Ok(AwsResponse::xml(
+            StatusCode::OK,
+            xml_wrap(
+                "ModifyDBInstance",
+                &format!(
+                    "<DBInstance>{}</DBInstance>",
+                    db_instance_xml(instance, Some("modifying"))
+                ),
+                &request.request_id,
+            ),
+        ))
+    }
+
+    async fn reboot_db_instance(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let db_instance_identifier = required_param(request, "DBInstanceIdentifier")?;
+        let force_failover =
+            parse_optional_bool(optional_param(request, "ForceFailover").as_deref())?;
+        if force_failover == Some(true) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterCombination",
+                "ForceFailover is not supported for single-instance PostgreSQL DB instances.",
+            ));
+        }
+
+        let instance = {
+            let state = self.state.read();
+            state
+                .instances
+                .get(&db_instance_identifier)
+                .cloned()
+                .ok_or_else(|| db_instance_not_found(&db_instance_identifier))?
+        };
+
+        let runtime = self.runtime.as_ref().ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "InvalidParameterValue",
+                "Docker/Podman is required for RDS DB instances but is not available",
+            )
+        })?;
+
+        let running = runtime
+            .restart_container(
+                &db_instance_identifier,
+                &instance.master_username,
+                &instance.master_user_password,
+                instance.db_name.as_deref().unwrap_or("postgres"),
+            )
+            .await
+            .map_err(runtime_error_to_service_error)?;
+
+        let instance = {
+            let mut state = self.state.write();
+            let instance = state
+                .instances
+                .get_mut(&db_instance_identifier)
+                .ok_or_else(|| db_instance_not_found(&db_instance_identifier))?;
+            instance.host_port = running.host_port;
+            instance.port = i32::from(running.host_port);
+            instance.clone()
+        };
+
+        Ok(AwsResponse::xml(
+            StatusCode::OK,
+            xml_wrap(
+                "RebootDBInstance",
+                &format!(
+                    "<DBInstance>{}</DBInstance>",
+                    db_instance_xml(&instance, Some("rebooting"))
                 ),
                 &request.request_id,
             ),
@@ -573,6 +695,11 @@ fn validate_create_request(
             format!("EngineVersion '{engine_version}' is not supported yet."),
         ));
     }
+    validate_db_instance_class(db_instance_class)?;
+    Ok(())
+}
+
+fn validate_db_instance_class(db_instance_class: &str) -> Result<(), AwsServiceError> {
     if db_instance_class != "db.t3.micro" {
         return Err(AwsServiceError::aws_error(
             StatusCode::BAD_REQUEST,

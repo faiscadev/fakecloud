@@ -141,6 +141,48 @@ async fn rds_delete_db_instance() {
     );
 }
 
+#[test_action("rds", "ModifyDBInstance", checksum = "08b493a8")]
+#[tokio::test]
+async fn rds_modify_db_instance() {
+    let server = TestServer::start().await;
+    let client = server.rds_client().await;
+
+    create_instance(&client).await;
+
+    let response = client
+        .modify_db_instance()
+        .db_instance_identifier("conf-rds-db")
+        .deletion_protection(true)
+        .apply_immediately(true)
+        .send()
+        .await
+        .unwrap();
+
+    let instance = response.db_instance().expect("db instance");
+    assert_eq!(instance.db_instance_status(), Some("modifying"));
+    assert_eq!(instance.deletion_protection(), Some(true));
+}
+
+#[test_action("rds", "RebootDBInstance", checksum = "cd4d463b")]
+#[tokio::test]
+async fn rds_reboot_db_instance() {
+    let server = TestServer::start().await;
+    let client = server.rds_client().await;
+
+    create_instance(&client).await;
+
+    let response = client
+        .reboot_db_instance()
+        .db_instance_identifier("conf-rds-db")
+        .send()
+        .await
+        .unwrap();
+
+    let instance = response.db_instance().expect("db instance");
+    assert_eq!(instance.db_instance_identifier(), Some("conf-rds-db"));
+    assert_eq!(instance.db_instance_status(), Some("rebooting"));
+}
+
 #[tokio::test]
 async fn rds_delete_db_instance_rejects_deletion_protection() {
     let server = TestServer::start().await;

@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use parking_lot::RwLock;
+use tokio_postgres::NoTls;
 
 #[derive(Debug, Clone)]
 pub struct RunningDbContainer {
@@ -109,7 +110,7 @@ impl RdsRuntime {
             }
         };
         if let Err(error) = self
-            .wait_for_postgres(&container_id, username, db_name, host_port)
+            .wait_for_postgres(username, password, db_name, host_port)
             .await
         {
             self.remove_container(&container_id).await;
@@ -131,6 +132,46 @@ impl RdsRuntime {
         if let Some(container) = container {
             self.remove_container(&container.container_id).await;
         }
+    }
+
+    pub async fn restart_container(
+        &self,
+        db_instance_identifier: &str,
+        username: &str,
+        password: &str,
+        db_name: &str,
+    ) -> Result<RunningDbContainer, RuntimeError> {
+        let running = self
+            .containers
+            .read()
+            .get(db_instance_identifier)
+            .cloned()
+            .ok_or(RuntimeError::Unavailable)?;
+
+        let output = tokio::process::Command::new(&self.cli)
+            .args(["restart", &running.container_id])
+            .output()
+            .await
+            .map_err(|e| RuntimeError::ContainerStartFailed(e.to_string()))?;
+
+        if !output.status.success() {
+            return Err(RuntimeError::ContainerStartFailed(format!(
+                "container restart failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+
+        let host_port = self.lookup_port(&running.container_id).await?;
+        self.wait_for_postgres(username, password, db_name, host_port)
+            .await?;
+        let running = RunningDbContainer {
+            container_id: running.container_id,
+            host_port,
+        };
+        self.containers
+            .write()
+            .insert(db_instance_identifier.to_string(), running.clone());
+        Ok(running)
     }
 
     pub async fn stop_all(&self) {
@@ -169,36 +210,25 @@ impl RdsRuntime {
 
     async fn wait_for_postgres(
         &self,
-        container_id: &str,
         username: &str,
+        password: &str,
         db_name: &str,
         host_port: u16,
     ) -> Result<(), RuntimeError> {
         for _ in 0..40 {
             tokio::time::sleep(Duration::from_millis(500)).await;
-            if tokio::net::TcpStream::connect(format!("127.0.0.1:{host_port}"))
-                .await
-                .is_err()
+            let connection_string = format!(
+                "host=127.0.0.1 port={host_port} user={username} password={password} dbname={db_name}"
+            );
+            if let Ok((client, connection)) =
+                tokio_postgres::connect(&connection_string, NoTls).await
             {
-                continue;
-            }
-
-            let output = tokio::process::Command::new(&self.cli)
-                .args([
-                    "exec",
-                    container_id,
-                    "pg_isready",
-                    "-U",
-                    username,
-                    "-d",
-                    db_name,
-                ])
-                .output()
-                .await
-                .map_err(|e| RuntimeError::ContainerStartFailed(e.to_string()))?;
-
-            if output.status.success() {
-                return Ok(());
+                tokio::spawn(async move {
+                    let _ = connection.await;
+                });
+                if client.simple_query("SELECT 1").await.is_ok() {
+                    return Ok(());
+                }
             }
         }
 

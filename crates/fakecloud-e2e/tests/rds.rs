@@ -212,6 +212,105 @@ async fn rds_delete_db_instance_respects_deletion_protection() {
     assert_eq!(response.db_instances().len(), 1);
 }
 
+#[tokio::test]
+async fn rds_modify_db_instance() {
+    let server = TestServer::start().await;
+    let client = server.rds_client().await;
+
+    create_instance(&client, "orders-modify-db").await;
+
+    let response = client
+        .modify_db_instance()
+        .db_instance_identifier("orders-modify-db")
+        .deletion_protection(true)
+        .apply_immediately(true)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        response
+            .db_instance()
+            .and_then(|instance| instance.deletion_protection()),
+        Some(true)
+    );
+
+    let delete_error = client
+        .delete_db_instance()
+        .db_instance_identifier("orders-modify-db")
+        .skip_final_snapshot(true)
+        .send()
+        .await
+        .expect_err("deletion protection should block deletion");
+    assert_eq!(
+        delete_error.into_service_error().meta().code(),
+        Some("InvalidDBInstanceState")
+    );
+}
+
+#[tokio::test]
+async fn rds_reboot_db_instance() {
+    let server = TestServer::start().await;
+    let client = server.rds_client().await;
+
+    create_instance(&client, "orders-reboot-db").await;
+
+    let response = client
+        .reboot_db_instance()
+        .db_instance_identifier("orders-reboot-db")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        response
+            .db_instance()
+            .and_then(|instance| instance.db_instance_status()),
+        Some("rebooting")
+    );
+
+    let describe_after = client
+        .describe_db_instances()
+        .db_instance_identifier("orders-reboot-db")
+        .send()
+        .await
+        .unwrap();
+    let endpoint = describe_after.db_instances()[0]
+        .endpoint()
+        .expect("endpoint after reboot");
+    let address = endpoint.address().expect("address after reboot");
+    let port = endpoint.port().expect("port after reboot");
+
+    let (db_client, connection) = connect_with_retry(address, port, "admin", "secret123", "appdb")
+        .await
+        .expect("reconnect after reboot");
+    tokio::spawn(connection);
+    let row = db_client
+        .query_one("SELECT 1", &[])
+        .await
+        .expect("select 1");
+    let value: i32 = row.get(0);
+    assert_eq!(value, 1);
+}
+
+#[tokio::test]
+async fn rds_reboot_db_instance_rejects_force_failover() {
+    let server = TestServer::start().await;
+    let client = server.rds_client().await;
+
+    create_instance(&client, "orders-force-failover-db").await;
+
+    let error = client
+        .reboot_db_instance()
+        .db_instance_identifier("orders-force-failover-db")
+        .force_failover(true)
+        .send()
+        .await
+        .expect_err("force failover should be rejected");
+    assert_eq!(
+        error.into_service_error().meta().code(),
+        Some("InvalidParameterCombination")
+    );
+}
+
 async fn create_instance(
     client: &aws_sdk_rds::Client,
     db_instance_identifier: &str,

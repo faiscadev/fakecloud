@@ -66,6 +66,7 @@ reqwest = { version = "0.13", features = ["json"] }
 zip = "2"
 tempfile = "3"
 regex = "1"
+tokio-postgres = "0.7"
 
 # Internal crates
 fakecloud-core = { path = "crates/fakecloud-core", version = "0.5.1" }

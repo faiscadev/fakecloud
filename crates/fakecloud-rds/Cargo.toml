@@ -20,3 +20,4 @@ tokio = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
 thiserror = { workspace = true }
+tokio-postgres = { workspace = true }
