@@ -82,6 +82,12 @@ pub fn service_protocol(service_name: &str) -> Protocol {
         "kms" => Protocol::Json {
             target_prefix: "TrentService",
         },
+        "cognito-idp" => Protocol::Json {
+            target_prefix: "AWSCognitoIdentityProviderService",
+        },
+        "kinesis" => Protocol::Json {
+            target_prefix: "Kinesis_20131202",
+        },
         "s3" => Protocol::Rest,
         "lambda" => Protocol::Rest,
         _ => Protocol::Query,
