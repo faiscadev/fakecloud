@@ -170,6 +170,9 @@ jobs:
           publish fakecloud-kms
           publish fakecloud-ses
           publish fakecloud-cognito
+          publish fakecloud-rds
+          publish fakecloud-elasticache
+          publish fakecloud-kinesis
 
           # Layer 4: depend on layer 3 crates
           publish fakecloud-s3             # depends on kms
