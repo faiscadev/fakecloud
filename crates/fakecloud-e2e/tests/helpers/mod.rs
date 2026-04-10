@@ -317,6 +317,7 @@ async fn wait_for_port(child: &mut Child, port: u16) -> bool {
 }
 
 /// Decompress gzipped data
+#[allow(dead_code)]
 pub fn gunzip(data: &[u8]) -> Vec<u8> {
     use std::io::Read;
     let mut decoder = flate2::read::GzDecoder::new(data);
