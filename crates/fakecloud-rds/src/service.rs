@@ -1343,8 +1343,18 @@ impl RdsService {
 
         let vpc_id = format!("vpc-{}", uuid::Uuid::new_v4().simple());
         let subnet_availability_zones: Vec<String> = (0..subnet_ids.len())
-            .map(|i| format!("{}{}", &state.region, char::from(b'a' + (i % 3) as u8)))
+            .map(|i| format!("{}{}", &state.region, char::from(b'a' + (i % 6) as u8)))
             .collect();
+
+        // Validate that subnets span at least 2 unique Availability Zones
+        let unique_azs: std::collections::HashSet<_> = subnet_availability_zones.iter().collect();
+        if unique_azs.len() < 2 {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "DBSubnetGroupDoesNotCoverEnoughAZs",
+                "DB Subnet Group must contain at least 2 subnets in different Availability Zones.",
+            ));
+        }
 
         let db_subnet_group_arn = state.db_subnet_group_arn(&db_subnet_group_name);
         let tags = parse_tags(request)?;
@@ -1496,8 +1506,18 @@ impl RdsService {
             })?;
 
         let subnet_availability_zones: Vec<String> = (0..subnet_ids.len())
-            .map(|i| format!("{}{}", &region, char::from(b'a' + (i % 3) as u8)))
+            .map(|i| format!("{}{}", &region, char::from(b'a' + (i % 6) as u8)))
             .collect();
+
+        // Validate that subnets span at least 2 unique Availability Zones
+        let unique_azs: std::collections::HashSet<_> = subnet_availability_zones.iter().collect();
+        if unique_azs.len() < 2 {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "DBSubnetGroupDoesNotCoverEnoughAZs",
+                "DB Subnet Group must contain at least 2 subnets in different Availability Zones.",
+            ));
+        }
 
         subnet_group.subnet_ids = subnet_ids;
         subnet_group.subnet_availability_zones = subnet_availability_zones;
