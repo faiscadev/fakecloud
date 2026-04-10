@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use base64::Engine;
 use chrono::Utc;
 use fakecloud_core::delivery::KinesisDelivery;
 
@@ -19,13 +20,10 @@ impl KinesisDeliveryImpl {
 impl KinesisDelivery for KinesisDeliveryImpl {
     fn put_record(&self, stream_arn: &str, data: &str, partition_key: &str) {
         // Extract stream name from ARN: arn:aws:kinesis:region:account:stream/StreamName
-        let stream_name = if let Some(name_part) = stream_arn.split("/stream/").nth(1) {
-            name_part
-        } else if let Some(name_part) = stream_arn.split(':').next_back() {
-            // Fallback: take the last segment
+        let stream_name = if let Some(name_part) = stream_arn.rsplit('/').next() {
+            // Handles both arn:aws:kinesis:region:account:stream/Name and plain name
             name_part
         } else {
-            // If it's not an ARN, assume it's the stream name
             stream_arn
         };
 
@@ -46,8 +44,11 @@ impl KinesisDelivery for KinesisDeliveryImpl {
                 let now = Utc::now();
                 let sequence_number = now.timestamp_nanos_opt().unwrap_or(0).to_string();
 
-                // Data is base64-encoded string, convert to bytes
-                let data_bytes = data.as_bytes().to_vec();
+                // Data is base64-encoded; decode to raw bytes for storage.
+                // GetRecords will base64-encode when returning, matching AWS behavior.
+                let data_bytes = base64::engine::general_purpose::STANDARD
+                    .decode(data)
+                    .unwrap_or_else(|_| data.as_bytes().to_vec());
 
                 shard.records.push(KinesisRecord {
                     sequence_number: sequence_number.clone(),
