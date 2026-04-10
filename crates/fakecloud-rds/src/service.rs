@@ -952,8 +952,6 @@ impl RdsService {
             return Err(runtime_error_to_service_error(e));
         }
 
-        let mut state = self.state.write();
-
         let replica = DbInstance {
             db_instance_identifier: db_instance_identifier.clone(),
             db_instance_arn,
@@ -978,19 +976,29 @@ impl RdsService {
             read_replica_db_instance_identifiers: Vec::new(),
         };
 
-        match state.instances.get_mut(&source_db_instance_identifier) {
-            Some(source) => {
-                source
-                    .read_replica_db_instance_identifiers
-                    .push(db_instance_identifier.clone());
+        let source_missing = {
+            let mut state = self.state.write();
+            match state.instances.get_mut(&source_db_instance_identifier) {
+                Some(source) => {
+                    source
+                        .read_replica_db_instance_identifiers
+                        .push(db_instance_identifier.clone());
+                    state.finish_instance_creation(replica.clone());
+                    false
+                }
+                None => {
+                    state.cancel_instance_creation(&db_instance_identifier);
+                    true
+                }
             }
-            None => {
-                state.cancel_instance_creation(&db_instance_identifier);
-                return Err(db_instance_not_found(&source_db_instance_identifier));
-            }
-        }
+        };
 
-        state.finish_instance_creation(replica.clone());
+        if source_missing {
+            runtime
+                .stop_container(&db_instance_identifier)
+                .await;
+            return Err(db_instance_not_found(&source_db_instance_identifier));
+        }
 
         Ok(AwsResponse::xml(
             StatusCode::OK,
