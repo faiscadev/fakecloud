@@ -9,7 +9,7 @@ fakecloud emulates 18 AWS services locally for integration testing and developme
 Key design principles:
 - **Correctness over coverage**: Every implemented service targets 100% behavioral parity with real AWS, verified by automated conformance tests against AWS Smithy models
 - **Zero friction**: No auth tokens, no accounts, no config files needed
-- **Cross-service integration**: Services talk to each other (S3 notifications deliver to SNS/SQS, SNS fans out to SQS, EventBridge rules fire on schedule and deliver to targets)
+- **Cross-service integration**: 28 service-to-service integrations — S3 notifications, SNS fanout, EventBridge rules, DynamoDB Streams, CloudWatch Logs subscriptions, Cognito triggers, and more
 
 fakecloud is NOT a production-ready cloud replacement. It is for integration testing and local development.
 
@@ -311,13 +311,20 @@ Protocol: Query (form-encoded body, `Action` parameter, XML responses)
 
 fakecloud implements real cross-service message delivery:
 
-- **S3 -> SNS/SQS**: Bucket notification configurations deliver to SNS topics and SQS queues on object create/delete
-- **SNS -> SQS**: Publishing to an SNS topic delivers to all SQS subscriptions
-- **SNS -> HTTP/HTTPS**: Publishing to an SNS topic delivers to HTTP endpoints
-- **EventBridge -> SNS/SQS**: PutEvents and scheduled rules deliver to SNS and SQS targets
-- **S3 Lifecycle**: Background processor expires objects and transitions storage classes based on lifecycle rules
+- **SNS -> SQS/Lambda/HTTP**: Fan-out delivery to all subscription types
+- **S3 -> SNS/SQS/Lambda/EventBridge**: Bucket notifications on object create/delete
+- **EventBridge -> SNS/SQS/Lambda/Logs/Kinesis/HTTP**: Rules deliver to targets on schedule or event match, including API Destinations
+- **SQS -> Lambda**: Event source mapping polls and invokes
+- **Kinesis -> Lambda**: Event source mapping polls shards and invokes
+- **DynamoDB Streams -> Lambda**: Event source mapping polls stream records and invokes
+- **DynamoDB -> Kinesis**: Table changes stream to Kinesis Data Streams
+- **CloudWatch Logs -> Lambda/Kinesis/SQS**: Subscription filters deliver log events
+- **Cognito -> Lambda**: Pre-signup, post-confirmation, pre/post-auth, custom message, token generation, migration, and custom auth challenge triggers
 - **SES -> SNS/EventBridge**: Email event fanout (send, delivery, bounce, complaint) via configured event destinations
 - **SES Inbound -> S3/SNS/Lambda**: Receipt rules evaluate inbound email and execute S3, SNS, and Lambda actions
+- **CloudFormation -> Lambda/SNS**: Custom resources invoke via ServiceToken, stack events notify via NotificationARNs
+- **SecretsManager -> Lambda**: Rotation invokes Lambda for all 4 steps
+- **S3 Lifecycle**: Background expiration and storage class transitions
 - **EventBridge Scheduler**: Cron and rate-based rules fire on schedule
 
 ## Protocol Notes

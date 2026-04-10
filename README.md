@@ -25,7 +25,7 @@ Part of the [faisca project family](https://faisca.dev).
 - Run your app against normal AWS SDKs, CLI tools, and IaC
 - Stay fully local with no AWS account, no auth token, and no paid tier
 - Assert what happened with first-party fakecloud SDKs for TypeScript, Python, Go, and Rust
-- Test cross-service behavior like SES -> SNS/EventBridge, S3 -> SQS/SNS/Lambda, and SQS -> Lambda
+- Test cross-service behavior like SES -> SNS/EventBridge, S3 -> SQS/SNS/Lambda/EventBridge, SQS -> Lambda, and DynamoDB Streams -> Lambda
 - Use a fast single binary or Docker image, depending on your setup
 
 ## Why fakecloud?
@@ -185,13 +185,18 @@ Services talk to each other — this is the kind of behavior that matters in
 integration tests:
 
 - **SNS -> SQS/Lambda/HTTP**: Fan-out delivery to all subscription types
-- **EventBridge -> SNS/SQS/Lambda/Logs**: Rules deliver to targets on schedule or event match
-- **S3 -> SNS/SQS/Lambda**: Bucket notifications on object create/delete
+- **S3 -> SNS/SQS/Lambda/EventBridge**: Bucket notifications on object create/delete
+- **EventBridge -> SNS/SQS/Lambda/Logs/Kinesis/HTTP**: Rules deliver to targets on schedule or event match, including API Destinations
 - **SQS -> Lambda**: Event source mapping polls and invokes
-- **SecretsManager -> Lambda**: Rotation invokes Lambda for all 4 steps
+- **Kinesis -> Lambda**: Event source mapping polls shards and invokes
+- **DynamoDB Streams -> Lambda**: Event source mapping polls stream records and invokes
+- **DynamoDB -> Kinesis**: Table changes stream to Kinesis Data Streams
+- **CloudWatch Logs -> Lambda/Kinesis/SQS**: Subscription filters deliver log events
+- **Cognito -> Lambda**: Pre-signup, post-confirmation, pre/post-auth, custom message, token generation, migration, and custom auth challenge triggers
 - **SES -> SNS/EventBridge**: Email event fanout (send, delivery, bounce, complaint) via configured event destinations
 - **SES Inbound -> S3/SNS/Lambda**: Receipt rules evaluate inbound email and execute S3, SNS, and Lambda actions
-- **CloudFormation -> Lambda**: Custom resources invoke via ServiceToken
+- **CloudFormation -> Lambda/SNS**: Custom resources invoke via ServiceToken, stack events notify via NotificationARNs
+- **SecretsManager -> Lambda**: Rotation invokes Lambda for all 4 steps
 - **S3 Lifecycle**: Background expiration and storage class transitions
 - **EventBridge Scheduler**: Cron and rate-based rules fire on schedule
 
