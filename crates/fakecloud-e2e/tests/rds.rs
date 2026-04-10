@@ -722,3 +722,90 @@ async fn vpc_security_groups() {
         Some("sg-updated3")
     );
 }
+
+#[tokio::test]
+async fn final_snapshot_on_delete() {
+    let server = TestServer::start().await;
+    let client = server.rds_client().await;
+
+    // Create instance
+    let response = client
+        .create_db_instance()
+        .db_instance_identifier("e2e-rds-final")
+        .allocated_storage(20)
+        .db_instance_class("db.t3.micro")
+        .engine("postgres")
+        .engine_version("16.3")
+        .master_username("admin")
+        .master_user_password("secret123")
+        .db_name("testdb")
+        .send()
+        .await
+        .unwrap();
+
+    let instance = response.db_instance().expect("db instance");
+    let port = instance.endpoint().unwrap().port().unwrap();
+
+    // Wait for instance and insert test data
+    let (postgres, connection) =
+        connect_with_retry("127.0.0.1", port, "admin", "secret123", "testdb")
+            .await
+            .expect("connect to db");
+
+    tokio::spawn(connection);
+
+    postgres
+        .execute("CREATE TABLE test_final (id INT, value TEXT)", &[])
+        .await
+        .expect("create table");
+    postgres
+        .execute("INSERT INTO test_final VALUES (1, 'preserved')", &[])
+        .await
+        .expect("insert data");
+
+    // Delete with final snapshot
+    client
+        .delete_db_instance()
+        .db_instance_identifier("e2e-rds-final")
+        .final_db_snapshot_identifier("e2e-final-snap")
+        .send()
+        .await
+        .unwrap();
+
+    // Verify snapshot exists
+    let snapshots = client
+        .describe_db_snapshots()
+        .db_snapshot_identifier("e2e-final-snap")
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(snapshots.db_snapshots().len(), 1);
+
+    // Restore from snapshot and verify data
+    let response = client
+        .restore_db_instance_from_db_snapshot()
+        .db_instance_identifier("e2e-rds-restored")
+        .db_snapshot_identifier("e2e-final-snap")
+        .send()
+        .await
+        .unwrap();
+
+    let restored = response.db_instance().expect("db instance");
+    let restored_port = restored.endpoint().unwrap().port().unwrap();
+
+    let (postgres, connection) =
+        connect_with_retry("127.0.0.1", restored_port, "admin", "secret123", "testdb")
+            .await
+            .expect("connect to restored db");
+
+    tokio::spawn(connection);
+
+    let row = postgres
+        .query_one("SELECT value FROM test_final WHERE id = 1", &[])
+        .await
+        .expect("query restored data");
+
+    let value: &str = row.get(0);
+    assert_eq!(value, "preserved");
+}

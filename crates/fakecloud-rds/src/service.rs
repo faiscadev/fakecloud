@@ -233,12 +233,91 @@ impl RdsService {
                 "FinalDBSnapshotIdentifier cannot be specified when SkipFinalSnapshot is enabled.",
             ));
         }
-        if !skip_final_snapshot {
+        if !skip_final_snapshot && final_db_snapshot_identifier.is_none() {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "InvalidParameterCombination",
-                "SkipFinalSnapshot must be enabled until final snapshot support is implemented.",
+                "FinalDBSnapshotIdentifier is required when SkipFinalSnapshot is false or not specified.",
             ));
+        }
+
+        // Create final snapshot if requested
+        if let Some(ref snapshot_id) = final_db_snapshot_identifier {
+            let runtime = self.runtime.as_ref().ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "InvalidParameterValue",
+                    "Docker/Podman is required for RDS snapshots but is not available",
+                )
+            })?;
+
+            let (instance_for_snapshot, db_name) = {
+                let state = self.state.read();
+
+                if state.snapshots.contains_key(snapshot_id) {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::CONFLICT,
+                        "DBSnapshotAlreadyExists",
+                        format!("DBSnapshot {snapshot_id} already exists."),
+                    ));
+                }
+
+                let instance = state
+                    .instances
+                    .get(&db_instance_identifier)
+                    .cloned()
+                    .ok_or_else(|| db_instance_not_found(&db_instance_identifier))?;
+
+                let db_name = instance
+                    .db_name
+                    .as_deref()
+                    .unwrap_or("postgres")
+                    .to_string();
+
+                (instance, db_name)
+            };
+
+            let dump_data = runtime
+                .dump_database(
+                    &db_instance_identifier,
+                    &instance_for_snapshot.master_username,
+                    &db_name,
+                )
+                .await
+                .map_err(runtime_error_to_service_error)?;
+
+            let mut state = self.state.write();
+
+            if state.snapshots.contains_key(snapshot_id) {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::CONFLICT,
+                    "DBSnapshotAlreadyExists",
+                    format!("DBSnapshot {snapshot_id} already exists."),
+                ));
+            }
+
+            let snapshot_arn = state.db_snapshot_arn(snapshot_id);
+
+            let snapshot = DbSnapshot {
+                db_snapshot_identifier: snapshot_id.clone(),
+                db_snapshot_arn: snapshot_arn,
+                db_instance_identifier: db_instance_identifier.clone(),
+                snapshot_create_time: Utc::now(),
+                engine: instance_for_snapshot.engine.clone(),
+                engine_version: instance_for_snapshot.engine_version.clone(),
+                allocated_storage: instance_for_snapshot.allocated_storage,
+                status: "available".to_string(),
+                port: instance_for_snapshot.port,
+                master_username: instance_for_snapshot.master_username.clone(),
+                db_name: instance_for_snapshot.db_name.clone(),
+                dbi_resource_id: instance_for_snapshot.dbi_resource_id.clone(),
+                snapshot_type: "manual".to_string(),
+                master_user_password: instance_for_snapshot.master_user_password.clone(),
+                tags: Vec::new(),
+                dump_data,
+            };
+
+            state.snapshots.insert(snapshot_id.clone(), snapshot);
         }
 
         let instance = {

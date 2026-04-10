@@ -812,3 +812,54 @@ async fn rds_modify_db_instance_vpc_security_groups() {
         Some("sg-modified3")
     );
 }
+
+#[test_action("rds", "DeleteDBInstance", checksum = "22909663")]
+#[tokio::test]
+async fn rds_delete_db_instance_with_final_snapshot() {
+    let server = TestServer::start().await;
+    let client = server.rds_client().await;
+
+    // Create instance
+    client
+        .create_db_instance()
+        .db_instance_identifier("conf-rds-final")
+        .allocated_storage(20)
+        .db_instance_class("db.t3.micro")
+        .engine("postgres")
+        .engine_version("16.3")
+        .master_username("admin")
+        .master_user_password("secret123")
+        .send()
+        .await
+        .unwrap();
+
+    // Delete with final snapshot
+    let response = client
+        .delete_db_instance()
+        .db_instance_identifier("conf-rds-final")
+        .final_db_snapshot_identifier("conf-final-snap")
+        .send()
+        .await
+        .unwrap();
+
+    let instance = response.db_instance().expect("db instance");
+    assert_eq!(instance.db_instance_identifier(), Some("conf-rds-final"));
+
+    // Verify snapshot was created
+    let snapshots = client
+        .describe_db_snapshots()
+        .db_snapshot_identifier("conf-final-snap")
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(snapshots.db_snapshots().len(), 1);
+    assert_eq!(
+        snapshots.db_snapshots()[0].db_snapshot_identifier(),
+        Some("conf-final-snap")
+    );
+    assert_eq!(
+        snapshots.db_snapshots()[0].db_instance_identifier(),
+        Some("conf-rds-final")
+    );
+}
