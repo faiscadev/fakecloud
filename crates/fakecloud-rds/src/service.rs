@@ -1046,7 +1046,7 @@ impl RdsService {
 
         let vpc_id = format!("vpc-{}", uuid::Uuid::new_v4().simple());
         let subnet_availability_zones: Vec<String> = (0..subnet_ids.len())
-            .map(|i| format!("{}{}",  &state.region, char::from(b'a' + (i % 3) as u8)))
+            .map(|i| format!("{}{}", &state.region, char::from(b'a' + (i % 3) as u8)))
             .collect();
 
         let db_subnet_group_arn = state.db_subnet_group_arn(&db_subnet_group_name);
@@ -1092,20 +1092,19 @@ impl RdsService {
                 .subnet_groups
                 .get(name)
                 .map(|sg| vec![sg])
-                .unwrap_or_else(Vec::new)
+                .unwrap_or_default()
         } else {
             state.subnet_groups.values().collect()
         };
 
-        if db_subnet_group_name.is_some() && subnet_groups.is_empty() {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::NOT_FOUND,
-                "DBSubnetGroupNotFoundFault",
-                format!(
-                    "DBSubnetGroup {} not found.",
-                    db_subnet_group_name.unwrap()
-                ),
-            ));
+        if let Some(name) = &db_subnet_group_name {
+            if subnet_groups.is_empty() {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::NOT_FOUND,
+                    "DBSubnetGroupNotFoundFault",
+                    format!("DBSubnetGroup {} not found.", name),
+                ));
+            }
         }
 
         let body = subnet_groups
