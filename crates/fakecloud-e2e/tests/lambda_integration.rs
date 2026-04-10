@@ -14,7 +14,8 @@ fn dockerized_endpoint(server: &TestServer) -> String {
 fn dockerized_queue_url(server: &TestServer, queue_name: &str) -> String {
     format!(
         "http://host.docker.internal:{}/123456789012/{}",
-        server.port(), queue_name
+        server.port(),
+        queue_name
     )
 }
 
@@ -87,7 +88,6 @@ def lambda_handler(event, context):
     return {"statusCode": 200, "body": "marker sent"}
 "#
 }
-
 
 /// Helper: create the result SQS queue and a Lambda function that writes to it.
 /// Returns (result_queue_url, lambda_function_name).
