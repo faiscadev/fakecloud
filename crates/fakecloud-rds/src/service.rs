@@ -994,9 +994,7 @@ impl RdsService {
         };
 
         if source_missing {
-            runtime
-                .stop_container(&db_instance_identifier)
-                .await;
+            runtime.stop_container(&db_instance_identifier).await;
             return Err(db_instance_not_found(&source_db_instance_identifier));
         }
 
