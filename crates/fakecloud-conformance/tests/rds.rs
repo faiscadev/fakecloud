@@ -726,3 +726,89 @@ async fn rds_delete_db_parameter_group() {
         Some("DBParameterGroupNotFound")
     );
 }
+
+#[test_action("rds", "CreateDBInstance", checksum = "66cdd119")]
+#[tokio::test]
+async fn rds_create_db_instance_with_vpc_security_groups() {
+    let server = TestServer::start().await;
+    let client = server.rds_client().await;
+
+    let response = client
+        .create_db_instance()
+        .db_instance_identifier("conf-rds-sg")
+        .allocated_storage(20)
+        .db_instance_class("db.t3.micro")
+        .engine("postgres")
+        .engine_version("16.3")
+        .master_username("admin")
+        .master_user_password("secret123")
+        .vpc_security_group_ids("sg-12345678")
+        .vpc_security_group_ids("sg-87654321")
+        .send()
+        .await
+        .unwrap();
+
+    let instance = response.db_instance().expect("db instance");
+    assert_eq!(instance.db_instance_identifier(), Some("conf-rds-sg"));
+
+    let sg_memberships = instance.vpc_security_groups();
+    assert_eq!(sg_memberships.len(), 2);
+    assert_eq!(
+        sg_memberships[0].vpc_security_group_id(),
+        Some("sg-12345678")
+    );
+    assert_eq!(sg_memberships[0].status(), Some("active"));
+    assert_eq!(
+        sg_memberships[1].vpc_security_group_id(),
+        Some("sg-87654321")
+    );
+    assert_eq!(sg_memberships[1].status(), Some("active"));
+}
+
+#[test_action("rds", "ModifyDBInstance", checksum = "08b493a8")]
+#[tokio::test]
+async fn rds_modify_db_instance_vpc_security_groups() {
+    let server = TestServer::start().await;
+    let client = server.rds_client().await;
+
+    client
+        .create_db_instance()
+        .db_instance_identifier("conf-rds-sg-modify")
+        .allocated_storage(20)
+        .db_instance_class("db.t3.micro")
+        .engine("postgres")
+        .engine_version("16.3")
+        .master_username("admin")
+        .master_user_password("secret123")
+        .vpc_security_group_ids("sg-original")
+        .send()
+        .await
+        .unwrap();
+
+    let response = client
+        .modify_db_instance()
+        .db_instance_identifier("conf-rds-sg-modify")
+        .vpc_security_group_ids("sg-modified1")
+        .vpc_security_group_ids("sg-modified2")
+        .vpc_security_group_ids("sg-modified3")
+        .apply_immediately(true)
+        .send()
+        .await
+        .unwrap();
+
+    let instance = response.db_instance().expect("db instance");
+    let sg_memberships = instance.vpc_security_groups();
+    assert_eq!(sg_memberships.len(), 3);
+    assert_eq!(
+        sg_memberships[0].vpc_security_group_id(),
+        Some("sg-modified1")
+    );
+    assert_eq!(
+        sg_memberships[1].vpc_security_group_id(),
+        Some("sg-modified2")
+    );
+    assert_eq!(
+        sg_memberships[2].vpc_security_group_id(),
+        Some("sg-modified3")
+    );
+}

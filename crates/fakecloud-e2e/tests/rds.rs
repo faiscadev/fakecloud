@@ -634,3 +634,91 @@ async fn connect_with_retry(
 
     Err(last_error.expect("postgres connection error"))
 }
+
+#[tokio::test]
+async fn vpc_security_groups() {
+    let server = TestServer::start().await;
+    let client = server.rds_client().await;
+
+    // Create instance with VPC security groups
+    let response = client
+        .create_db_instance()
+        .db_instance_identifier("e2e-rds-sg")
+        .allocated_storage(20)
+        .db_instance_class("db.t3.micro")
+        .engine("postgres")
+        .engine_version("16.3")
+        .master_username("admin")
+        .master_user_password("secret123")
+        .db_name("sgtest")
+        .vpc_security_group_ids("sg-initial1")
+        .vpc_security_group_ids("sg-initial2")
+        .send()
+        .await
+        .unwrap();
+
+    let instance = response.db_instance().expect("db instance");
+    let sg_memberships = instance.vpc_security_groups();
+    assert_eq!(sg_memberships.len(), 2);
+    assert_eq!(
+        sg_memberships[0].vpc_security_group_id(),
+        Some("sg-initial1")
+    );
+    assert_eq!(
+        sg_memberships[1].vpc_security_group_id(),
+        Some("sg-initial2")
+    );
+
+    // Modify security groups
+    let response = client
+        .modify_db_instance()
+        .db_instance_identifier("e2e-rds-sg")
+        .vpc_security_group_ids("sg-updated1")
+        .vpc_security_group_ids("sg-updated2")
+        .vpc_security_group_ids("sg-updated3")
+        .apply_immediately(true)
+        .send()
+        .await
+        .unwrap();
+
+    let instance = response.db_instance().expect("db instance");
+    let sg_memberships = instance.vpc_security_groups();
+    assert_eq!(sg_memberships.len(), 3);
+    assert_eq!(
+        sg_memberships[0].vpc_security_group_id(),
+        Some("sg-updated1")
+    );
+    assert_eq!(
+        sg_memberships[1].vpc_security_group_id(),
+        Some("sg-updated2")
+    );
+    assert_eq!(
+        sg_memberships[2].vpc_security_group_id(),
+        Some("sg-updated3")
+    );
+
+    // Verify persistence in describe
+    let response = client
+        .describe_db_instances()
+        .db_instance_identifier("e2e-rds-sg")
+        .send()
+        .await
+        .unwrap();
+
+    let instances = response.db_instances();
+    assert_eq!(instances.len(), 1);
+    let sg_memberships = instances[0].vpc_security_groups();
+    assert_eq!(sg_memberships.len(), 3);
+    assert_eq!(
+        sg_memberships[0].vpc_security_group_id(),
+        Some("sg-updated1")
+    );
+    assert_eq!(
+        sg_memberships[1].vpc_security_group_id(),
+        Some("sg-updated2")
+    );
+    assert_eq!(
+        sg_memberships[2].vpc_security_group_id(),
+        Some("sg-updated3")
+    );
+}
