@@ -42,7 +42,7 @@ pub struct DbInstance {
     pub pending_modified_values: Option<PendingModifiedValues>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct PendingModifiedValues {
     pub db_instance_class: Option<String>,
     pub allocated_storage: Option<i32>,
@@ -50,6 +50,22 @@ pub struct PendingModifiedValues {
     pub multi_az: Option<bool>,
     pub engine_version: Option<String>,
     pub master_user_password: Option<String>,
+}
+
+impl fmt::Debug for PendingModifiedValues {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PendingModifiedValues")
+            .field("db_instance_class", &self.db_instance_class)
+            .field("allocated_storage", &self.allocated_storage)
+            .field("backup_retention_period", &self.backup_retention_period)
+            .field("multi_az", &self.multi_az)
+            .field("engine_version", &self.engine_version)
+            .field(
+                "master_user_password",
+                &self.master_user_password.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
 }
 
 impl fmt::Debug for DbInstance {
