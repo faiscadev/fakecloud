@@ -889,3 +889,42 @@ async fn pagination_with_real_instances() {
         assert!(collected_ids.contains(id), "Missing instance: {}", id);
     }
 }
+#[tokio::test]
+async fn rds_parameter_group_families() {
+    let server = TestServer::start().await;
+    let client = server.rds_client().await;
+
+    // Test all supported parameter group families
+    let families = vec![
+        "postgres16",
+        "postgres15",
+        "mysql8.0",
+        "mariadb10.11",
+    ];
+
+    for family in families {
+        let group_name = format!("test-pg-{}", family.replace('.', "-"));
+        client
+            .create_db_parameter_group()
+            .db_parameter_group_name(&group_name)
+            .db_parameter_group_family(family)
+            .description(format!("Test parameter group for {}", family))
+            .send()
+            .await
+            .unwrap();
+    }
+
+    // Test invalid family
+    let error = client
+        .create_db_parameter_group()
+        .db_parameter_group_name("test-invalid")
+        .db_parameter_group_family("postgres99")
+        .description("Invalid family")
+        .send()
+        .await
+        .expect_err("Invalid family should be rejected");
+    assert_eq!(
+        error.into_service_error().meta().code(),
+        Some("InvalidParameterValue")
+    );
+}

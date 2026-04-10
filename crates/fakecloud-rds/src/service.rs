@@ -1525,13 +1525,23 @@ impl RdsService {
         let db_parameter_group_family = required_param(request, "DBParameterGroupFamily")?;
         let description = required_param(request, "Description")?;
 
-        if db_parameter_group_family != "postgres16" {
+        // Validate parameter group family against supported engines and versions
+        let valid_families = [
+            "postgres16",
+            "postgres15",
+            "postgres14",
+            "postgres13",
+            "mysql8.0",
+            "mysql5.7",
+            "mariadb10.11",
+            "mariadb10.6",
+        ];
+
+        if !valid_families.contains(&db_parameter_group_family.as_str()) {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "InvalidParameterValue",
-                format!(
-                    "DBParameterGroupFamily '{db_parameter_group_family}' is not supported yet."
-                ),
+                format!("DBParameterGroupFamily '{db_parameter_group_family}' is not supported."),
             ));
         }
 
