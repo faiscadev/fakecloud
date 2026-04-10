@@ -1,6 +1,6 @@
 +++
 title = "700 commits in 6 days: how to trust LLM-generated code"
-date = 2026-04-09
+date = 2026-04-10
 draft = false
 description = "fakecloud went from zero to 17 AWS services in 6 days using LLMs. Here's how tests, CI, and architecture steering made that possible without shipping garbage."
 
