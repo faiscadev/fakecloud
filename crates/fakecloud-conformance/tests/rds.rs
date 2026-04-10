@@ -451,6 +451,44 @@ async fn rds_restore_db_instance_from_db_snapshot() {
     assert_eq!(instance.db_name(), Some("appdb"));
 }
 
+#[test_action("rds", "CreateDBInstanceReadReplica", checksum = "23be1880")]
+#[tokio::test]
+async fn rds_create_db_instance_read_replica() {
+    let server = TestServer::start().await;
+    let client = server.rds_client().await;
+
+    create_instance(&client).await;
+
+    let response = client
+        .create_db_instance_read_replica()
+        .db_instance_identifier("conf-read-replica")
+        .source_db_instance_identifier("conf-rds-db")
+        .send()
+        .await
+        .unwrap();
+
+    let replica = response.db_instance().unwrap();
+    assert_eq!(replica.db_instance_identifier(), Some("conf-read-replica"));
+    assert_eq!(replica.engine(), Some("postgres"));
+    assert_eq!(
+        replica.read_replica_source_db_instance_identifier(),
+        Some("conf-rds-db")
+    );
+
+    let describe = client
+        .describe_db_instances()
+        .db_instance_identifier("conf-rds-db")
+        .send()
+        .await
+        .unwrap();
+    let source = &describe.db_instances()[0];
+    assert_eq!(source.read_replica_db_instance_identifiers().len(), 1);
+    assert_eq!(
+        source.read_replica_db_instance_identifiers()[0],
+        "conf-read-replica"
+    );
+}
+
 async fn create_instance(
     client: &aws_sdk_rds::Client,
 ) -> aws_sdk_rds::operation::create_db_instance::CreateDbInstanceOutput {
