@@ -1456,6 +1456,8 @@ mod tests {
                 key: "env".to_string(),
                 value: "test".to_string(),
             }],
+            read_replica_source_db_instance_identifier: None,
+            read_replica_db_instance_identifiers: Vec::new(),
         };
 
         let response = rds_instance_response(&instance);
