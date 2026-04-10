@@ -102,6 +102,10 @@ mod tests {
             kinesis_destinations: vec![],
             contributor_insights_status: "DISABLED".to_string(),
             contributor_insights_counters: HashMap::new(),
+            stream_enabled: false,
+            stream_view_type: None,
+            stream_arn: None,
+            stream_records: Arc::new(RwLock::new(Vec::new())),
         }
     }
 

@@ -1,4 +1,5 @@
 use chrono::Utc;
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -657,6 +658,10 @@ impl ResourceProvisioner {
             kinesis_destinations: Vec::new(),
             contributor_insights_status: "DISABLED".to_string(),
             contributor_insights_counters: HashMap::new(),
+            stream_enabled: false,
+            stream_view_type: None,
+            stream_arn: None,
+            stream_records: Arc::new(RwLock::new(Vec::new())),
         };
 
         state.tables.insert(table_name.to_string(), table);

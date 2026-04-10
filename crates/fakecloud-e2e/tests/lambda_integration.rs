@@ -353,6 +353,102 @@ async fn s3_to_lambda_notification_executes_code() {
     );
 }
 
+#[tokio::test]
+#[ignore] // Requires Docker with host.docker.internal networking
+async fn dynamodb_streams_to_lambda_executes_code() {
+    let server = TestServer::start().await;
+    let dynamodb = server.dynamodb_client().await;
+    let sqs = server.sqs_client().await;
+    let lambda = server.lambda_client().await;
+
+    let result_queue_url = create_marker_lambda(
+        &server,
+        &sqs,
+        &lambda,
+        "streams-lambda-result",
+        "streams-handler",
+    )
+    .await;
+
+    // Create DynamoDB table with streams enabled
+    use aws_sdk_dynamodb::types::{
+        AttributeDefinition, BillingMode, KeySchemaElement, KeyType, ScalarAttributeType,
+        StreamSpecification, StreamViewType,
+    };
+
+    dynamodb
+        .create_table()
+        .table_name("StreamsTable")
+        .key_schema(
+            KeySchemaElement::builder()
+                .attribute_name("pk")
+                .key_type(KeyType::Hash)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            AttributeDefinition::builder()
+                .attribute_name("pk")
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .billing_mode(BillingMode::PayPerRequest)
+        .stream_specification(
+            StreamSpecification::builder()
+                .stream_enabled(true)
+                .stream_view_type(StreamViewType::NewAndOldImages)
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    // Get the stream ARN
+    let table_desc = dynamodb
+        .describe_table()
+        .table_name("StreamsTable")
+        .send()
+        .await
+        .unwrap();
+    let stream_arn = table_desc
+        .table()
+        .unwrap()
+        .latest_stream_arn()
+        .unwrap()
+        .to_string();
+
+    // Create event source mapping: DynamoDB stream -> Lambda
+    lambda
+        .create_event_source_mapping()
+        .event_source_arn(&stream_arn)
+        .function_name("streams-handler")
+        .batch_size(10)
+        .enabled(true)
+        .send()
+        .await
+        .unwrap();
+
+    // Put an item to trigger the stream
+    use aws_sdk_dynamodb::types::AttributeValue;
+    dynamodb
+        .put_item()
+        .table_name("StreamsTable")
+        .item("pk", AttributeValue::S("test-key".to_string()))
+        .item("data", AttributeValue::S("test-value".to_string()))
+        .send()
+        .await
+        .unwrap();
+
+    // Verify the Lambda ACTUALLY EXECUTED by checking the result queue
+    assert!(
+        check_marker(&sqs, &result_queue_url).await,
+        "Lambda did not actually execute: no marker found in result queue. \
+         DynamoDB Streams->Lambda integration does not invoke the Docker runtime."
+    );
+}
+
 // EXPECTED TO FAIL: Lambda cross-service execution not yet wired up
 //
 // SecretsManager RotateSecret with a rotation Lambda ARN should invoke the
