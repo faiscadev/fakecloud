@@ -895,12 +895,7 @@ async fn rds_parameter_group_families() {
     let client = server.rds_client().await;
 
     // Test all supported parameter group families
-    let families = vec![
-        "postgres16",
-        "postgres15",
-        "mysql8.0",
-        "mariadb10.11",
-    ];
+    let families = vec!["postgres16", "postgres15", "mysql8.0", "mariadb10.11"];
 
     for family in families {
         let group_name = format!("test-pg-{}", family.replace('.', "-"));
