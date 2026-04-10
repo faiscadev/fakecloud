@@ -9,8 +9,8 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceErr
 
 use crate::runtime::{RdsRuntime, RuntimeError};
 use crate::state::{
-    default_engine_versions, default_orderable_options, DbInstance, DbSnapshot, DbSubnetGroup,
-    EngineVersionInfo, OrderableDbInstanceOption, RdsTag, SharedRdsState,
+    default_engine_versions, default_orderable_options, DbInstance, DbParameterGroup, DbSnapshot,
+    DbSubnetGroup, EngineVersionInfo, OrderableDbInstanceOption, RdsTag, SharedRdsState,
 };
 
 const RDS_NS: &str = "http://rds.amazonaws.com/doc/2014-10-31/";
@@ -18,18 +18,22 @@ const SUPPORTED_ACTIONS: &[&str] = &[
     "AddTagsToResource",
     "CreateDBInstance",
     "CreateDBInstanceReadReplica",
+    "CreateDBParameterGroup",
     "CreateDBSnapshot",
     "CreateDBSubnetGroup",
     "DeleteDBInstance",
+    "DeleteDBParameterGroup",
     "DeleteDBSnapshot",
     "DeleteDBSubnetGroup",
     "DescribeDBEngineVersions",
     "DescribeDBInstances",
+    "DescribeDBParameterGroups",
     "DescribeDBSnapshots",
     "DescribeDBSubnetGroups",
     "DescribeOrderableDBInstanceOptions",
     "ListTagsForResource",
     "ModifyDBInstance",
+    "ModifyDBParameterGroup",
     "ModifyDBSubnetGroup",
     "RebootDBInstance",
     "RemoveTagsFromResource",
@@ -66,13 +70,16 @@ impl AwsService for RdsService {
             "AddTagsToResource" => self.add_tags_to_resource(&request),
             "CreateDBInstance" => self.create_db_instance(&request).await,
             "CreateDBInstanceReadReplica" => self.create_db_instance_read_replica(&request).await,
+            "CreateDBParameterGroup" => self.create_db_parameter_group(&request),
             "CreateDBSnapshot" => self.create_db_snapshot(&request).await,
             "CreateDBSubnetGroup" => self.create_db_subnet_group(&request),
             "DeleteDBInstance" => self.delete_db_instance(&request).await,
+            "DeleteDBParameterGroup" => self.delete_db_parameter_group(&request),
             "DeleteDBSnapshot" => self.delete_db_snapshot(&request),
             "DeleteDBSubnetGroup" => self.delete_db_subnet_group(&request),
             "DescribeDBEngineVersions" => self.describe_db_engine_versions(&request),
             "DescribeDBInstances" => self.describe_db_instances(&request),
+            "DescribeDBParameterGroups" => self.describe_db_parameter_groups(&request),
             "DescribeDBSnapshots" => self.describe_db_snapshots(&request),
             "DescribeDBSubnetGroups" => self.describe_db_subnet_groups(&request),
             "DescribeOrderableDBInstanceOptions" => {
@@ -80,6 +87,7 @@ impl AwsService for RdsService {
             }
             "ListTagsForResource" => self.list_tags_for_resource(&request),
             "ModifyDBInstance" => self.modify_db_instance(&request),
+            "ModifyDBParameterGroup" => self.modify_db_parameter_group(&request),
             "ModifyDBSubnetGroup" => self.modify_db_subnet_group(&request),
             "RebootDBInstance" => self.reboot_db_instance(&request).await,
             "RemoveTagsFromResource" => self.remove_tags_from_resource(&request),
@@ -1204,6 +1212,168 @@ impl RdsService {
             ),
         ))
     }
+
+    fn create_db_parameter_group(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let db_parameter_group_name = required_param(request, "DBParameterGroupName")?;
+        let db_parameter_group_family = required_param(request, "DBParameterGroupFamily")?;
+        let description = required_param(request, "Description")?;
+
+        if db_parameter_group_family != "postgres16" {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterValue",
+                format!("DBParameterGroupFamily '{db_parameter_group_family}' is not supported yet."),
+            ));
+        }
+
+        let mut state = self.state.write();
+
+        if state.parameter_groups.contains_key(&db_parameter_group_name) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::CONFLICT,
+                "DBParameterGroupAlreadyExists",
+                format!("DBParameterGroup {db_parameter_group_name} already exists."),
+            ));
+        }
+
+        let db_parameter_group_arn = state.db_parameter_group_arn(&db_parameter_group_name);
+        let tags = parse_tags(request)?;
+
+        let parameter_group = DbParameterGroup {
+            db_parameter_group_name: db_parameter_group_name.clone(),
+            db_parameter_group_arn,
+            db_parameter_group_family,
+            description,
+            parameters: std::collections::HashMap::new(),
+            tags,
+        };
+
+        state
+            .parameter_groups
+            .insert(db_parameter_group_name, parameter_group.clone());
+
+        Ok(AwsResponse::xml(
+            StatusCode::OK,
+            xml_wrap(
+                "CreateDBParameterGroup",
+                &format!(
+                    "<DBParameterGroup>{}</DBParameterGroup>",
+                    db_parameter_group_xml(&parameter_group)
+                ),
+                &request.request_id,
+            ),
+        ))
+    }
+
+    fn describe_db_parameter_groups(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let db_parameter_group_name = optional_param(request, "DBParameterGroupName");
+
+        let state = self.state.read();
+
+        let parameter_groups: Vec<&DbParameterGroup> = if let Some(name) = &db_parameter_group_name {
+            state
+                .parameter_groups
+                .get(name)
+                .map(|pg| vec![pg])
+                .unwrap_or_else(Vec::new)
+        } else {
+            state.parameter_groups.values().collect()
+        };
+
+        if db_parameter_group_name.is_some() && parameter_groups.is_empty() {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "DBParameterGroupNotFound",
+                format!(
+                    "DBParameterGroup {} not found.",
+                    db_parameter_group_name.unwrap()
+                ),
+            ));
+        }
+
+        let body = parameter_groups
+            .iter()
+            .map(|pg| format!("<DBParameterGroup>{}</DBParameterGroup>", db_parameter_group_xml(pg)))
+            .collect::<Vec<_>>()
+            .join("");
+
+        Ok(AwsResponse::xml(
+            StatusCode::OK,
+            xml_wrap(
+                "DescribeDBParameterGroups",
+                &format!("<DBParameterGroups>{}</DBParameterGroups>", body),
+                &request.request_id,
+            ),
+        ))
+    }
+
+    fn delete_db_parameter_group(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let db_parameter_group_name = required_param(request, "DBParameterGroupName")?;
+
+        let mut state = self.state.write();
+
+        if db_parameter_group_name.starts_with("default.") {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterValue",
+                "Cannot delete default parameter groups.",
+            ));
+        }
+
+        if state.parameter_groups.remove(&db_parameter_group_name).is_none() {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "DBParameterGroupNotFound",
+                format!("DBParameterGroup {db_parameter_group_name} not found."),
+            ));
+        }
+
+        Ok(AwsResponse::xml(
+            StatusCode::OK,
+            xml_wrap("DeleteDBParameterGroup", "", &request.request_id),
+        ))
+    }
+
+    fn modify_db_parameter_group(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let db_parameter_group_name = required_param(request, "DBParameterGroupName")?;
+
+        let mut state = self.state.write();
+
+        let parameter_group = state
+            .parameter_groups
+            .get_mut(&db_parameter_group_name)
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::NOT_FOUND,
+                    "DBParameterGroupNotFound",
+                    format!("DBParameterGroup {db_parameter_group_name} not found."),
+                )
+            })?;
+
+        if let Some(new_description) = optional_param(request, "Description") {
+            parameter_group.description = new_description;
+        }
+
+        let parameter_group_clone = parameter_group.clone();
+
+        Ok(AwsResponse::xml(
+            StatusCode::OK,
+            xml_wrap(
+                "ModifyDBParameterGroup",
+                &format!(
+                    "<DBParameterGroupName>{}</DBParameterGroupName>",
+                    xml_escape(&parameter_group_clone.db_parameter_group_name)
+                ),
+                &request.request_id,
+            ),
+        ))
+    }
 }
 
 fn optional_param(req: &AwsRequest, name: &str) -> Option<String> {
@@ -1664,6 +1834,19 @@ fn db_subnet_group_xml(subnet_group: &DbSubnetGroup) -> String {
         xml_escape(&subnet_group.vpc_id),
         subnets_xml,
         xml_escape(&subnet_group.db_subnet_group_arn),
+    )
+}
+
+fn db_parameter_group_xml(parameter_group: &DbParameterGroup) -> String {
+    format!(
+        "<DBParameterGroupName>{}</DBParameterGroupName>\
+         <DBParameterGroupFamily>{}</DBParameterGroupFamily>\
+         <Description>{}</Description>\
+         <DBParameterGroupArn>{}</DBParameterGroupArn>",
+        xml_escape(&parameter_group.db_parameter_group_name),
+        xml_escape(&parameter_group.db_parameter_group_family),
+        xml_escape(&parameter_group.description),
+        xml_escape(&parameter_group.db_parameter_group_arn),
     )
 }
 
