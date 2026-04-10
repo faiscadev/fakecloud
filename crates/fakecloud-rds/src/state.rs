@@ -125,6 +125,7 @@ pub struct RdsState {
     pub in_progress_instance_ids: HashSet<String>,
     pub snapshots: HashMap<String, DbSnapshot>,
     pub subnet_groups: HashMap<String, DbSubnetGroup>,
+    pub parameter_groups: HashMap<String, DbParameterGroup>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -159,6 +160,16 @@ pub struct DbSubnetGroup {
     pub tags: Vec<RdsTag>,
 }
 
+#[derive(Debug, Clone)]
+pub struct DbParameterGroup {
+    pub db_parameter_group_name: String,
+    pub db_parameter_group_arn: String,
+    pub db_parameter_group_family: String,
+    pub description: String,
+    pub parameters: HashMap<String, String>,
+    pub tags: Vec<RdsTag>,
+}
+
 impl RdsState {
     pub fn new(account_id: &str, region: &str) -> Self {
         Self {
@@ -168,6 +179,7 @@ impl RdsState {
             in_progress_instance_ids: HashSet::new(),
             snapshots: HashMap::new(),
             subnet_groups: HashMap::new(),
+            parameter_groups: default_parameter_groups(account_id, region),
         }
     }
 
@@ -176,6 +188,7 @@ impl RdsState {
         self.in_progress_instance_ids.clear();
         self.snapshots.clear();
         self.subnet_groups.clear();
+        self.parameter_groups = default_parameter_groups(&self.account_id, &self.region);
     }
 
     pub fn db_instance_arn(&self, db_instance_identifier: &str) -> String {
@@ -204,6 +217,16 @@ impl RdsState {
             &self.region,
             &self.account_id,
             &format!("subgrp:{db_subnet_group_name}"),
+        )
+        .to_string()
+    }
+
+    pub fn db_parameter_group_arn(&self, db_parameter_group_name: &str) -> String {
+        Arn::new(
+            "rds",
+            &self.region,
+            &self.account_id,
+            &format!("pg:{db_parameter_group_name}"),
         )
         .to_string()
     }
@@ -259,6 +282,24 @@ pub fn default_orderable_options() -> Vec<OrderableDbInstanceOption> {
         min_storage_size: 20,
         max_storage_size: 16384,
     }]
+}
+
+pub fn default_parameter_groups(account_id: &str, region: &str) -> HashMap<String, DbParameterGroup> {
+    let mut groups = HashMap::new();
+
+    let default_group = DbParameterGroup {
+        db_parameter_group_name: "default.postgres16".to_string(),
+        db_parameter_group_arn: format!(
+            "arn:aws:rds:{region}:{account_id}:pg:default.postgres16"
+        ),
+        db_parameter_group_family: "postgres16".to_string(),
+        description: "Default parameter group for postgres16".to_string(),
+        parameters: HashMap::new(),
+        tags: Vec::new(),
+    };
+
+    groups.insert("default.postgres16".to_string(), default_group);
+    groups
 }
 
 #[cfg(test)]

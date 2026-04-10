@@ -639,3 +639,90 @@ async fn rds_delete_db_subnet_group() {
         Some("DBSubnetGroupNotFoundFault")
     );
 }
+
+#[test_action("rds", "CreateDBParameterGroup", checksum = "d0c5767f")]
+#[tokio::test]
+async fn rds_create_db_parameter_group() {
+    let server = TestServer::start().await;
+    let client = server.rds_client().await;
+
+    let response = client
+        .create_db_parameter_group()
+        .db_parameter_group_name("conf-param-group")
+        .db_parameter_group_family("postgres16")
+        .description("Test parameter group")
+        .send()
+        .await
+        .unwrap();
+
+    let param_group = response.db_parameter_group().unwrap();
+    assert_eq!(
+        param_group.db_parameter_group_name(),
+        Some("conf-param-group")
+    );
+    assert_eq!(param_group.db_parameter_group_family(), Some("postgres16"));
+}
+
+#[test_action("rds", "DescribeDBParameterGroups", checksum = "4032d108")]
+#[tokio::test]
+async fn rds_describe_db_parameter_groups() {
+    let server = TestServer::start().await;
+    let client = server.rds_client().await;
+
+    client
+        .create_db_parameter_group()
+        .db_parameter_group_name("conf-param-group")
+        .db_parameter_group_family("postgres16")
+        .description("Test parameter group")
+        .send()
+        .await
+        .unwrap();
+
+    let response = client
+        .describe_db_parameter_groups()
+        .db_parameter_group_name("conf-param-group")
+        .send()
+        .await
+        .unwrap();
+
+    let param_groups = response.db_parameter_groups();
+    assert!(param_groups.len() >= 1);
+    let found = param_groups
+        .iter()
+        .find(|pg| pg.db_parameter_group_name() == Some("conf-param-group"));
+    assert!(found.is_some());
+}
+
+#[test_action("rds", "DeleteDBParameterGroup", checksum = "2fec5329")]
+#[tokio::test]
+async fn rds_delete_db_parameter_group() {
+    let server = TestServer::start().await;
+    let client = server.rds_client().await;
+
+    client
+        .create_db_parameter_group()
+        .db_parameter_group_name("conf-param-group")
+        .db_parameter_group_family("postgres16")
+        .description("Test parameter group")
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .delete_db_parameter_group()
+        .db_parameter_group_name("conf-param-group")
+        .send()
+        .await
+        .unwrap();
+
+    let error = client
+        .describe_db_parameter_groups()
+        .db_parameter_group_name("conf-param-group")
+        .send()
+        .await
+        .expect_err("parameter group should be deleted");
+    assert_eq!(
+        error.into_service_error().meta().code(),
+        Some("DBParameterGroupNotFound")
+    );
+}
