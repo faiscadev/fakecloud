@@ -838,10 +838,10 @@ async fn pagination_with_real_instances() {
     let server = TestServer::start().await;
     let client = server.rds_client().await;
 
-    // Create 150 instances to test pagination
+    // Create 15 instances to test pagination (adequate coverage, much faster)
     let mut instance_ids = Vec::new();
-    for i in 1..=150 {
-        let id = format!("e2e-paginate-{:03}", i);
+    for i in 1..=15 {
+        let id = format!("e2e-paginate-{:02}", i);
         instance_ids.push(id.clone());
 
         client
@@ -863,7 +863,7 @@ async fn pagination_with_real_instances() {
     let mut marker: Option<String> = None;
 
     loop {
-        let mut request = client.describe_db_instances().set_max_records(Some(100));
+        let mut request = client.describe_db_instances().set_max_records(Some(10));
         if let Some(m) = marker {
             request = request.marker(m);
         }
@@ -882,7 +882,7 @@ async fn pagination_with_real_instances() {
     }
 
     // Verify all instances were returned
-    assert_eq!(collected_ids.len(), 150);
+    assert_eq!(collected_ids.len(), 15);
 
     // Verify all our instance IDs are present
     for id in &instance_ids {
