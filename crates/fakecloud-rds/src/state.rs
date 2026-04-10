@@ -124,6 +124,7 @@ pub struct RdsState {
     pub instances: HashMap<String, DbInstance>,
     pub in_progress_instance_ids: HashSet<String>,
     pub snapshots: HashMap<String, DbSnapshot>,
+    pub subnet_groups: HashMap<String, DbSubnetGroup>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -147,6 +148,17 @@ pub struct OrderableDbInstanceOption {
     pub max_storage_size: i32,
 }
 
+#[derive(Debug, Clone)]
+pub struct DbSubnetGroup {
+    pub db_subnet_group_name: String,
+    pub db_subnet_group_arn: String,
+    pub db_subnet_group_description: String,
+    pub vpc_id: String,
+    pub subnet_ids: Vec<String>,
+    pub subnet_availability_zones: Vec<String>,
+    pub tags: Vec<RdsTag>,
+}
+
 impl RdsState {
     pub fn new(account_id: &str, region: &str) -> Self {
         Self {
@@ -155,6 +167,7 @@ impl RdsState {
             instances: HashMap::new(),
             in_progress_instance_ids: HashSet::new(),
             snapshots: HashMap::new(),
+            subnet_groups: HashMap::new(),
         }
     }
 
@@ -162,6 +175,7 @@ impl RdsState {
         self.instances.clear();
         self.in_progress_instance_ids.clear();
         self.snapshots.clear();
+        self.subnet_groups.clear();
     }
 
     pub fn db_instance_arn(&self, db_instance_identifier: &str) -> String {
@@ -180,6 +194,16 @@ impl RdsState {
             &self.region,
             &self.account_id,
             &format!("snapshot:{db_snapshot_identifier}"),
+        )
+        .to_string()
+    }
+
+    pub fn db_subnet_group_arn(&self, db_subnet_group_name: &str) -> String {
+        Arn::new(
+            "rds",
+            &self.region,
+            &self.account_id,
+            &format!("subgrp:{db_subnet_group_name}"),
         )
         .to_string()
     }

@@ -9,8 +9,8 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceErr
 
 use crate::runtime::{RdsRuntime, RuntimeError};
 use crate::state::{
-    default_engine_versions, default_orderable_options, DbInstance, DbSnapshot, EngineVersionInfo,
-    OrderableDbInstanceOption, RdsTag, SharedRdsState,
+    default_engine_versions, default_orderable_options, DbInstance, DbSnapshot, DbSubnetGroup,
+    EngineVersionInfo, OrderableDbInstanceOption, RdsTag, SharedRdsState,
 };
 
 const RDS_NS: &str = "http://rds.amazonaws.com/doc/2014-10-31/";
@@ -19,14 +19,18 @@ const SUPPORTED_ACTIONS: &[&str] = &[
     "CreateDBInstance",
     "CreateDBInstanceReadReplica",
     "CreateDBSnapshot",
+    "CreateDBSubnetGroup",
     "DeleteDBInstance",
     "DeleteDBSnapshot",
+    "DeleteDBSubnetGroup",
     "DescribeDBEngineVersions",
     "DescribeDBInstances",
     "DescribeDBSnapshots",
+    "DescribeDBSubnetGroups",
     "DescribeOrderableDBInstanceOptions",
     "ListTagsForResource",
     "ModifyDBInstance",
+    "ModifyDBSubnetGroup",
     "RebootDBInstance",
     "RemoveTagsFromResource",
     "RestoreDBInstanceFromDBSnapshot",
@@ -63,16 +67,20 @@ impl AwsService for RdsService {
             "CreateDBInstance" => self.create_db_instance(&request).await,
             "CreateDBInstanceReadReplica" => self.create_db_instance_read_replica(&request).await,
             "CreateDBSnapshot" => self.create_db_snapshot(&request).await,
+            "CreateDBSubnetGroup" => self.create_db_subnet_group(&request),
             "DeleteDBInstance" => self.delete_db_instance(&request).await,
             "DeleteDBSnapshot" => self.delete_db_snapshot(&request),
+            "DeleteDBSubnetGroup" => self.delete_db_subnet_group(&request),
             "DescribeDBEngineVersions" => self.describe_db_engine_versions(&request),
             "DescribeDBInstances" => self.describe_db_instances(&request),
             "DescribeDBSnapshots" => self.describe_db_snapshots(&request),
+            "DescribeDBSubnetGroups" => self.describe_db_subnet_groups(&request),
             "DescribeOrderableDBInstanceOptions" => {
                 self.describe_orderable_db_instance_options(&request)
             }
             "ListTagsForResource" => self.list_tags_for_resource(&request),
             "ModifyDBInstance" => self.modify_db_instance(&request),
+            "ModifyDBSubnetGroup" => self.modify_db_subnet_group(&request),
             "RebootDBInstance" => self.reboot_db_instance(&request).await,
             "RemoveTagsFromResource" => self.remove_tags_from_resource(&request),
             "RestoreDBInstanceFromDBSnapshot" => {
@@ -1004,6 +1012,193 @@ impl RdsService {
             ),
         ))
     }
+
+    fn create_db_subnet_group(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let db_subnet_group_name = required_param(request, "DBSubnetGroupName")?;
+        let db_subnet_group_description = required_param(request, "DBSubnetGroupDescription")?;
+        let subnet_ids = parse_subnet_ids(request)?;
+
+        if subnet_ids.is_empty() {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterValue",
+                "At least one subnet must be specified.",
+            ));
+        }
+
+        if subnet_ids.len() < 2 {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "DBSubnetGroupDoesNotCoverEnoughAZs",
+                "DB Subnet Group must contain at least 2 subnets in different Availability Zones.",
+            ));
+        }
+
+        let mut state = self.state.write();
+
+        if state.subnet_groups.contains_key(&db_subnet_group_name) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::CONFLICT,
+                "DBSubnetGroupAlreadyExists",
+                format!("DBSubnetGroup {db_subnet_group_name} already exists."),
+            ));
+        }
+
+        let vpc_id = format!("vpc-{}", uuid::Uuid::new_v4().simple());
+        let subnet_availability_zones: Vec<String> = (0..subnet_ids.len())
+            .map(|i| format!("{}{}",  &state.region, char::from(b'a' + (i % 3) as u8)))
+            .collect();
+
+        let db_subnet_group_arn = state.db_subnet_group_arn(&db_subnet_group_name);
+        let tags = parse_tags(request)?;
+
+        let subnet_group = DbSubnetGroup {
+            db_subnet_group_name: db_subnet_group_name.clone(),
+            db_subnet_group_arn,
+            db_subnet_group_description,
+            vpc_id,
+            subnet_ids,
+            subnet_availability_zones,
+            tags,
+        };
+
+        state
+            .subnet_groups
+            .insert(db_subnet_group_name, subnet_group.clone());
+
+        Ok(AwsResponse::xml(
+            StatusCode::OK,
+            xml_wrap(
+                "CreateDBSubnetGroup",
+                &format!(
+                    "<DBSubnetGroup>{}</DBSubnetGroup>",
+                    db_subnet_group_xml(&subnet_group)
+                ),
+                &request.request_id,
+            ),
+        ))
+    }
+
+    fn describe_db_subnet_groups(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let db_subnet_group_name = optional_param(request, "DBSubnetGroupName");
+
+        let state = self.state.read();
+
+        let subnet_groups: Vec<&DbSubnetGroup> = if let Some(name) = &db_subnet_group_name {
+            state
+                .subnet_groups
+                .get(name)
+                .map(|sg| vec![sg])
+                .unwrap_or_else(Vec::new)
+        } else {
+            state.subnet_groups.values().collect()
+        };
+
+        if db_subnet_group_name.is_some() && subnet_groups.is_empty() {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "DBSubnetGroupNotFoundFault",
+                format!(
+                    "DBSubnetGroup {} not found.",
+                    db_subnet_group_name.unwrap()
+                ),
+            ));
+        }
+
+        let body = subnet_groups
+            .iter()
+            .map(|sg| format!("<DBSubnetGroup>{}</DBSubnetGroup>", db_subnet_group_xml(sg)))
+            .collect::<Vec<_>>()
+            .join("");
+
+        Ok(AwsResponse::xml(
+            StatusCode::OK,
+            xml_wrap(
+                "DescribeDBSubnetGroups",
+                &format!("<DBSubnetGroups>{}</DBSubnetGroups>", body),
+                &request.request_id,
+            ),
+        ))
+    }
+
+    fn delete_db_subnet_group(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let db_subnet_group_name = required_param(request, "DBSubnetGroupName")?;
+
+        let mut state = self.state.write();
+
+        if state.subnet_groups.remove(&db_subnet_group_name).is_none() {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "DBSubnetGroupNotFoundFault",
+                format!("DBSubnetGroup {db_subnet_group_name} not found."),
+            ));
+        }
+
+        Ok(AwsResponse::xml(
+            StatusCode::OK,
+            xml_wrap("DeleteDBSubnetGroup", "", &request.request_id),
+        ))
+    }
+
+    fn modify_db_subnet_group(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let db_subnet_group_name = required_param(request, "DBSubnetGroupName")?;
+        let subnet_ids = parse_subnet_ids(request)?;
+
+        if subnet_ids.is_empty() {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterValue",
+                "At least one subnet must be specified.",
+            ));
+        }
+
+        if subnet_ids.len() < 2 {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "DBSubnetGroupDoesNotCoverEnoughAZs",
+                "DB Subnet Group must contain at least 2 subnets in different Availability Zones.",
+            ));
+        }
+
+        let mut state = self.state.write();
+
+        let region = state.region.clone();
+
+        let subnet_group = state
+            .subnet_groups
+            .get_mut(&db_subnet_group_name)
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::NOT_FOUND,
+                    "DBSubnetGroupNotFoundFault",
+                    format!("DBSubnetGroup {db_subnet_group_name} not found."),
+                )
+            })?;
+
+        let subnet_availability_zones: Vec<String> = (0..subnet_ids.len())
+            .map(|i| format!("{}{}", &region, char::from(b'a' + (i % 3) as u8)))
+            .collect();
+
+        subnet_group.subnet_ids = subnet_ids;
+        subnet_group.subnet_availability_zones = subnet_availability_zones;
+
+        let subnet_group_clone = subnet_group.clone();
+
+        Ok(AwsResponse::xml(
+            StatusCode::OK,
+            xml_wrap(
+                "ModifyDBSubnetGroup",
+                &format!(
+                    "<DBSubnetGroup>{}</DBSubnetGroup>",
+                    db_subnet_group_xml(&subnet_group_clone)
+                ),
+                &request.request_id,
+            ),
+        ))
+    }
 }
 
 fn optional_param(req: &AwsRequest, name: &str) -> Option<String> {
@@ -1083,6 +1278,19 @@ fn parse_tag_keys(req: &AwsRequest) -> Result<Vec<String>, AwsServiceError> {
     }
 
     Ok(keys)
+}
+
+fn parse_subnet_ids(req: &AwsRequest) -> Result<Vec<String>, AwsServiceError> {
+    let mut subnet_ids = Vec::new();
+    for index in 1.. {
+        let subnet_id_name = format!("SubnetIds.SubnetIdentifier.{index}");
+        match optional_param(req, &subnet_id_name) {
+            Some(subnet_id) => subnet_ids.push(subnet_id),
+            None => break,
+        }
+    }
+
+    Ok(subnet_ids)
 }
 
 fn query_param_prefix_exists(req: &AwsRequest, prefix: &str) -> bool {
@@ -1418,6 +1626,39 @@ fn db_snapshot_xml(snapshot: &DbSnapshot) -> String {
         xml_escape(&snapshot.dbi_resource_id),
         xml_escape(&snapshot.snapshot_type),
         xml_escape(&snapshot.db_snapshot_arn),
+    )
+}
+
+fn db_subnet_group_xml(subnet_group: &DbSubnetGroup) -> String {
+    let subnets_xml = subnet_group
+        .subnet_ids
+        .iter()
+        .zip(&subnet_group.subnet_availability_zones)
+        .map(|(subnet_id, az)| {
+            format!(
+                "<Subnet>\
+                 <SubnetIdentifier>{}</SubnetIdentifier>\
+                 <SubnetAvailabilityZone><Name>{}</Name></SubnetAvailabilityZone>\
+                 <SubnetStatus>Active</SubnetStatus>\
+                 </Subnet>",
+                xml_escape(subnet_id),
+                xml_escape(az)
+            )
+        })
+        .collect::<String>();
+
+    format!(
+        "<DBSubnetGroupName>{}</DBSubnetGroupName>\
+         <DBSubnetGroupDescription>{}</DBSubnetGroupDescription>\
+         <VpcId>{}</VpcId>\
+         <SubnetGroupStatus>Complete</SubnetGroupStatus>\
+         <Subnets>{}</Subnets>\
+         <DBSubnetGroupArn>{}</DBSubnetGroupArn>",
+        xml_escape(&subnet_group.db_subnet_group_name),
+        xml_escape(&subnet_group.db_subnet_group_description),
+        xml_escape(&subnet_group.vpc_id),
+        subnets_xml,
+        xml_escape(&subnet_group.db_subnet_group_arn),
     )
 }
 

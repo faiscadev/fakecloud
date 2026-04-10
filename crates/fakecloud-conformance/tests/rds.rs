@@ -515,3 +515,127 @@ async fn create_instance_with_deletion_protection(
         .await
         .unwrap()
 }
+
+#[test_action("rds", "CreateDBSubnetGroup", checksum = "1b1b06a3")]
+#[tokio::test]
+async fn rds_create_db_subnet_group() {
+    let server = TestServer::start().await;
+    let client = server.rds_client().await;
+
+    let response = client
+        .create_db_subnet_group()
+        .db_subnet_group_name("conf-subnet-group")
+        .db_subnet_group_description("Test subnet group")
+        .subnet_ids("subnet-12345")
+        .subnet_ids("subnet-67890")
+        .send()
+        .await
+        .unwrap();
+
+    let subnet_group = response.db_subnet_group().unwrap();
+    assert_eq!(
+        subnet_group.db_subnet_group_name(),
+        Some("conf-subnet-group")
+    );
+    assert_eq!(
+        subnet_group.db_subnet_group_description(),
+        Some("Test subnet group")
+    );
+    assert_eq!(subnet_group.subnets().len(), 2);
+}
+
+#[test_action("rds", "DescribeDBSubnetGroups", checksum = "97a0e63e")]
+#[tokio::test]
+async fn rds_describe_db_subnet_groups() {
+    let server = TestServer::start().await;
+    let client = server.rds_client().await;
+
+    client
+        .create_db_subnet_group()
+        .db_subnet_group_name("conf-subnet-group")
+        .db_subnet_group_description("Test subnet group")
+        .subnet_ids("subnet-12345")
+        .subnet_ids("subnet-67890")
+        .send()
+        .await
+        .unwrap();
+
+    let response = client
+        .describe_db_subnet_groups()
+        .db_subnet_group_name("conf-subnet-group")
+        .send()
+        .await
+        .unwrap();
+
+    let subnet_groups = response.db_subnet_groups();
+    assert_eq!(subnet_groups.len(), 1);
+    assert_eq!(
+        subnet_groups[0].db_subnet_group_name(),
+        Some("conf-subnet-group")
+    );
+}
+
+#[test_action("rds", "ModifyDBSubnetGroup", checksum = "390acd2d")]
+#[tokio::test]
+async fn rds_modify_db_subnet_group() {
+    let server = TestServer::start().await;
+    let client = server.rds_client().await;
+
+    client
+        .create_db_subnet_group()
+        .db_subnet_group_name("conf-subnet-group")
+        .db_subnet_group_description("Test subnet group")
+        .subnet_ids("subnet-12345")
+        .subnet_ids("subnet-67890")
+        .send()
+        .await
+        .unwrap();
+
+    let response = client
+        .modify_db_subnet_group()
+        .db_subnet_group_name("conf-subnet-group")
+        .subnet_ids("subnet-11111")
+        .subnet_ids("subnet-22222")
+        .subnet_ids("subnet-33333")
+        .send()
+        .await
+        .unwrap();
+
+    let subnet_group = response.db_subnet_group().unwrap();
+    assert_eq!(subnet_group.subnets().len(), 3);
+}
+
+#[test_action("rds", "DeleteDBSubnetGroup", checksum = "e1ea45a9")]
+#[tokio::test]
+async fn rds_delete_db_subnet_group() {
+    let server = TestServer::start().await;
+    let client = server.rds_client().await;
+
+    client
+        .create_db_subnet_group()
+        .db_subnet_group_name("conf-subnet-group")
+        .db_subnet_group_description("Test subnet group")
+        .subnet_ids("subnet-12345")
+        .subnet_ids("subnet-67890")
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .delete_db_subnet_group()
+        .db_subnet_group_name("conf-subnet-group")
+        .send()
+        .await
+        .unwrap();
+
+    let error = client
+        .describe_db_subnet_groups()
+        .db_subnet_group_name("conf-subnet-group")
+        .send()
+        .await
+        .expect_err("subnet group should be deleted");
+    assert_eq!(
+        error.into_service_error().meta().code(),
+        Some("DBSubnetGroupNotFoundFault")
+    );
+}
