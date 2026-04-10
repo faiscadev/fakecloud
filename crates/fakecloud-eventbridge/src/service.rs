@@ -1978,6 +1978,13 @@ impl EventBridgeService {
                     if let Some(ref log_state) = self.logs_state {
                         deliver_to_logs(log_state, arn, &body_str, now);
                     }
+                } else if arn.contains(":kinesis:") {
+                    tracing::info!(
+                        stream_arn = %arn,
+                        "EventBridge delivering to Kinesis stream"
+                    );
+                    // Use event ID as partition key for even distribution
+                    self.delivery.send_to_kinesis(arn, &body_str, &event_id);
                 } else if arn.contains(":states:") {
                     tracing::info!(
                         state_machine_arn = %arn,

@@ -1179,3 +1179,99 @@ async fn eb_simulation_fire_rule_to_sqs() {
     let events = history["events"].as_array().unwrap();
     assert!(events.iter().any(|e| e["source"] == "aws.events"));
 }
+
+#[tokio::test]
+async fn eb_put_events_delivers_to_kinesis_target() {
+    let server = TestServer::start().await;
+    let eb = server.eventbridge_client().await;
+    let kinesis = server.kinesis_client().await;
+
+    // Create Kinesis stream
+    kinesis
+        .create_stream()
+        .stream_name("eb-kinesis-target")
+        .shard_count(1)
+        .send()
+        .await
+        .unwrap();
+
+    // Create rule matching our source
+    eb.put_rule()
+        .name("kinesis-rule")
+        .event_pattern(r#"{"source": ["app.kinesis"]}"#)
+        .send()
+        .await
+        .unwrap();
+
+    // Add Kinesis stream as target
+    eb.put_targets()
+        .rule("kinesis-rule")
+        .targets(
+            Target::builder()
+                .id("kinesis-target")
+                .arn("arn:aws:kinesis:us-east-1:123456789012:stream/eb-kinesis-target")
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    // Get shard iterator before putting events
+    let desc = kinesis
+        .describe_stream()
+        .stream_name("eb-kinesis-target")
+        .send()
+        .await
+        .unwrap();
+    let shard_id = desc
+        .stream_description()
+        .unwrap()
+        .shards()
+        .first()
+        .unwrap()
+        .shard_id()
+        .to_string();
+
+    let iter_resp = kinesis
+        .get_shard_iterator()
+        .stream_name("eb-kinesis-target")
+        .shard_id(&shard_id)
+        .shard_iterator_type(aws_sdk_kinesis::types::ShardIteratorType::TrimHorizon)
+        .send()
+        .await
+        .unwrap();
+    let shard_iterator = iter_resp.shard_iterator().unwrap().to_string();
+
+    // Put a matching event
+    let resp = eb
+        .put_events()
+        .entries(
+            PutEventsRequestEntry::builder()
+                .source("app.kinesis")
+                .detail_type("TestEvent")
+                .detail(r#"{"key": "value"}"#)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.failed_entry_count(), 0);
+
+    // Read the Kinesis record
+    let records_resp = kinesis
+        .get_records()
+        .shard_iterator(&shard_iterator)
+        .send()
+        .await
+        .unwrap();
+
+    let records = records_resp.records();
+    assert_eq!(records.len(), 1, "expected 1 event in Kinesis stream");
+
+    // The data should be the EventBridge event JSON
+    let event: serde_json::Value = serde_json::from_slice(records[0].data().as_ref()).unwrap();
+    assert_eq!(event["source"], "app.kinesis");
+    assert_eq!(event["detail-type"], "TestEvent");
+    assert_eq!(event["detail"]["key"], "value");
+}

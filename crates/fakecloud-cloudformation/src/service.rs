@@ -128,6 +128,42 @@ impl CloudFormationService {
         result
     }
 
+    fn extract_notification_arns(params: &HashMap<String, String>) -> Vec<String> {
+        let mut arns = Vec::new();
+        for i in 1.. {
+            let key = format!("NotificationARNs.member.{i}");
+            match params.get(&key) {
+                Some(arn) => arns.push(arn.clone()),
+                None => break,
+            }
+        }
+        arns
+    }
+
+    fn send_stack_notification(
+        delivery: &DeliveryBus,
+        notification_arns: &[String],
+        stack_name: &str,
+        stack_id: &str,
+        status: &str,
+    ) {
+        if notification_arns.is_empty() {
+            return;
+        }
+        let message = format!(
+            "StackId='{}'\nTimestamp='{}'\nEventId='{}'\nLogicalResourceId='{}'\nResourceStatus='{}'\nResourceType='AWS::CloudFormation::Stack'\nStackName='{}'",
+            stack_id,
+            chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ"),
+            uuid::Uuid::new_v4(),
+            stack_name,
+            status,
+            stack_name,
+        );
+        for arn in notification_arns {
+            delivery.publish_to_sns(arn, &message, Some("AWS CloudFormation Notification"));
+        }
+    }
+
     fn create_stack(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let params = Self::get_all_params(req);
 
@@ -163,6 +199,7 @@ impl CloudFormationService {
 
         let tags = Self::extract_tags(&params);
         let parameters = Self::extract_parameters(&params);
+        let notification_arns = Self::extract_notification_arns(&params);
 
         // First pass: parse to get resource definitions (without physical ID resolution)
         let parsed = template::parse_template(template_body, &parameters).map_err(|e| {
@@ -260,12 +297,21 @@ impl CloudFormationService {
             created_at: Utc::now(),
             updated_at: None,
             description: parsed.description,
+            notification_arns: notification_arns.clone(),
         };
 
         {
             let mut state = self.state.write();
             state.stacks.insert(stack_name.clone(), stack);
         }
+
+        Self::send_stack_notification(
+            &self.delivery,
+            &notification_arns,
+            stack_name,
+            &stack_id,
+            "CREATE_COMPLETE",
+        );
 
         Ok(AwsResponse::xml(
             StatusCode::OK,
@@ -291,6 +337,8 @@ impl CloudFormationService {
 
         if let Some(stack) = stack {
             let stack_id = stack.stack_id.clone();
+            let stack_name_for_notif = stack.name.clone();
+            let notification_arns = stack.notification_arns.clone();
             let resources: Vec<_> = stack.resources.clone();
 
             // Build the provisioner while we still have the stack_id
@@ -309,6 +357,15 @@ impl CloudFormationService {
                 stack.status = "DELETE_COMPLETE".to_string();
                 stack.resources.clear();
             }
+            drop(state);
+
+            Self::send_stack_notification(
+                &self.delivery,
+                &notification_arns,
+                &stack_name_for_notif,
+                &stack_id,
+                "DELETE_COMPLETE",
+            );
         }
 
         Ok(AwsResponse::xml(
@@ -450,6 +507,7 @@ impl CloudFormationService {
 
         let new_parameters = Self::extract_parameters(&params);
         let new_tags = Self::extract_tags(&params);
+        let new_notification_arns = Self::extract_notification_arns(&params);
 
         let parsed = template::parse_template(template_body, &new_parameters).map_err(|e| {
             AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "ValidationError", e)
@@ -575,14 +633,36 @@ impl CloudFormationService {
         }
         stack.updated_at = Some(Utc::now());
         stack.description = parsed.description;
+        if !new_notification_arns.is_empty() {
+            stack.notification_arns = new_notification_arns;
+        }
+        let notification_arns = stack.notification_arns.clone();
+        let stack_name_for_notif = stack.name.clone();
 
         if update_failed {
+            drop(state);
+            Self::send_stack_notification(
+                &self.delivery,
+                &notification_arns,
+                &stack_name_for_notif,
+                &stack_id,
+                "UPDATE_FAILED",
+            );
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "ValidationError",
                 update_error_msg,
             ));
         }
+
+        drop(state);
+        Self::send_stack_notification(
+            &self.delivery,
+            &notification_arns,
+            &stack_name_for_notif,
+            &stack_id,
+            "UPDATE_COMPLETE",
+        );
 
         Ok(AwsResponse::xml(
             StatusCode::OK,

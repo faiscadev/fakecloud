@@ -25,6 +25,7 @@ pub struct Stack {
     pub created_at: DateTime<Utc>,
     pub updated_at: Option<DateTime<Utc>>,
     pub description: Option<String>,
+    pub notification_arns: Vec<String>,
 }
 
 pub struct CloudFormationState {

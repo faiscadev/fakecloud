@@ -610,3 +610,101 @@ def lambda_handler(event, context):
         "Lambda should have been invoked with the custom resource event"
     );
 }
+
+#[tokio::test]
+async fn cloudformation_stack_sends_sns_notification() {
+    let server = TestServer::start().await;
+    let cf_client = server.cloudformation_client().await;
+    let sns_client = server.sns_client().await;
+    let sqs_client = server.sqs_client().await;
+
+    // Create an SNS topic for stack notifications
+    let topic = sns_client
+        .create_topic()
+        .name("cf-notifications")
+        .send()
+        .await
+        .unwrap();
+    let topic_arn = topic.topic_arn().unwrap().to_string();
+
+    // Create an SQS queue to receive SNS messages
+    let queue = sqs_client
+        .create_queue()
+        .queue_name("cf-notif-receiver")
+        .send()
+        .await
+        .unwrap();
+    let queue_url = queue.queue_url().unwrap().to_string();
+    let queue_attrs = sqs_client
+        .get_queue_attributes()
+        .queue_url(&queue_url)
+        .attribute_names(aws_sdk_sqs::types::QueueAttributeName::QueueArn)
+        .send()
+        .await
+        .unwrap();
+    let queue_arn = queue_attrs
+        .attributes()
+        .unwrap()
+        .get(&aws_sdk_sqs::types::QueueAttributeName::QueueArn)
+        .unwrap()
+        .to_string();
+
+    // Subscribe SQS to SNS
+    sns_client
+        .subscribe()
+        .topic_arn(&topic_arn)
+        .protocol("sqs")
+        .endpoint(&queue_arn)
+        .send()
+        .await
+        .unwrap();
+
+    // Create a stack with NotificationARNs
+    let template = r#"{
+        "Resources": {
+            "MyQueue": {
+                "Type": "AWS::SQS::Queue",
+                "Properties": {
+                    "QueueName": "cf-notif-test-queue"
+                }
+            }
+        }
+    }"#;
+
+    cf_client
+        .create_stack()
+        .stack_name("notif-stack")
+        .template_body(template)
+        .notification_arns(&topic_arn)
+        .send()
+        .await
+        .unwrap();
+
+    // Check SQS for the notification
+    let msgs = sqs_client
+        .receive_message()
+        .queue_url(&queue_url)
+        .max_number_of_messages(10)
+        .send()
+        .await
+        .unwrap();
+
+    assert!(
+        !msgs.messages().is_empty(),
+        "expected at least one CloudFormation notification in SQS"
+    );
+
+    let body = msgs.messages()[0].body().unwrap();
+    // SNS wraps the message in a JSON envelope
+    let envelope: serde_json::Value = serde_json::from_str(body).unwrap();
+    let message = envelope["Message"].as_str().unwrap_or(body);
+    assert!(
+        message.contains("CREATE_COMPLETE"),
+        "notification should contain CREATE_COMPLETE, got: {}",
+        message
+    );
+    assert!(
+        message.contains("notif-stack"),
+        "notification should contain stack name"
+    );
+}

@@ -108,12 +108,24 @@ fn stack_member_xml(stack: &Stack) -> String {
         .map(|d| format!("\n        <Description>{}</Description>", xml_escape(d)))
         .unwrap_or_default();
 
+    let notification_arns_xml = if stack.notification_arns.is_empty() {
+        String::new()
+    } else {
+        let members: String = stack
+            .notification_arns
+            .iter()
+            .map(|arn| format!("          <member>{}</member>", xml_escape(arn)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!("\n        <NotificationARNs>\n{members}\n        </NotificationARNs>")
+    };
+
     format!(
         r#"      <member>
         <StackName>{name}</StackName>
         <StackId>{id}</StackId>
         <StackStatus>{status}</StackStatus>
-        <CreationTime>{created}</CreationTime>{description_xml}{tags_xml}{params_xml}
+        <CreationTime>{created}</CreationTime>{description_xml}{tags_xml}{params_xml}{notification_arns_xml}
       </member>"#,
         name = xml_escape(&stack.name),
         id = xml_escape(&stack.stack_id),

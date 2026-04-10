@@ -205,14 +205,18 @@ async fn main() {
         sns_state.clone(),
         delivery_for_sns.clone(),
     ));
+    let kinesis_delivery_for_eb =
+        fakecloud_kinesis::delivery::KinesisDeliveryImpl::new(kinesis_state.clone());
     let delivery_for_eb = Arc::new(
         DeliveryBus::new()
             .with_sqs(sqs_delivery.clone())
-            .with_sns(sns_delivery.clone()),
+            .with_sns(sns_delivery.clone())
+            .with_kinesis(kinesis_delivery_for_eb),
     );
 
     // Step 3: S3 delivery (S3 notifications can push to SQS, SNS, Lambda, and EventBridge)
     let sns_delivery_for_ses = sns_delivery.clone();
+    let sns_delivery_for_cf = sns_delivery.clone();
     let eb_delivery_for_s3 = Arc::new(
         fakecloud_eventbridge::delivery::EventBridgeDeliveryImpl::new(
             eb_state.clone(),
@@ -309,7 +313,7 @@ async fn main() {
 
     // Step 5: CloudFormation delivery (custom resources can invoke Lambda)
     let delivery_for_cf = {
-        let mut bus = DeliveryBus::new();
+        let mut bus = DeliveryBus::new().with_sns(sns_delivery_for_cf);
         if let Some(ref ld) = lambda_delivery {
             bus = bus.with_lambda(ld.clone());
         }
