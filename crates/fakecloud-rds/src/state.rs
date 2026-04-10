@@ -64,12 +64,56 @@ pub struct RdsTag {
     pub value: String,
 }
 
+#[derive(Clone)]
+pub struct DbSnapshot {
+    pub db_snapshot_identifier: String,
+    pub db_snapshot_arn: String,
+    pub db_instance_identifier: String,
+    pub snapshot_create_time: DateTime<Utc>,
+    pub engine: String,
+    pub engine_version: String,
+    pub allocated_storage: i32,
+    pub status: String,
+    pub port: i32,
+    pub master_username: String,
+    pub db_name: Option<String>,
+    pub dbi_resource_id: String,
+    pub snapshot_type: String,
+    pub master_user_password: String,
+    pub tags: Vec<RdsTag>,
+    pub dump_data: Vec<u8>,
+}
+
+impl fmt::Debug for DbSnapshot {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DbSnapshot")
+            .field("db_snapshot_identifier", &self.db_snapshot_identifier)
+            .field("db_snapshot_arn", &self.db_snapshot_arn)
+            .field("db_instance_identifier", &self.db_instance_identifier)
+            .field("snapshot_create_time", &self.snapshot_create_time)
+            .field("engine", &self.engine)
+            .field("engine_version", &self.engine_version)
+            .field("allocated_storage", &self.allocated_storage)
+            .field("status", &self.status)
+            .field("port", &self.port)
+            .field("master_username", &self.master_username)
+            .field("db_name", &self.db_name)
+            .field("dbi_resource_id", &self.dbi_resource_id)
+            .field("snapshot_type", &self.snapshot_type)
+            .field("master_user_password", &"<redacted>")
+            .field("tags", &self.tags)
+            .field("dump_data", &format!("<{} bytes>", self.dump_data.len()))
+            .finish()
+    }
+}
+
 #[derive(Debug)]
 pub struct RdsState {
     pub account_id: String,
     pub region: String,
     pub instances: HashMap<String, DbInstance>,
     pub in_progress_instance_ids: HashSet<String>,
+    pub snapshots: HashMap<String, DbSnapshot>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -100,12 +144,14 @@ impl RdsState {
             region: region.to_string(),
             instances: HashMap::new(),
             in_progress_instance_ids: HashSet::new(),
+            snapshots: HashMap::new(),
         }
     }
 
     pub fn reset(&mut self) {
         self.instances.clear();
         self.in_progress_instance_ids.clear();
+        self.snapshots.clear();
     }
 
     pub fn db_instance_arn(&self, db_instance_identifier: &str) -> String {
@@ -114,6 +160,16 @@ impl RdsState {
             &self.region,
             &self.account_id,
             &format!("db:{db_instance_identifier}"),
+        )
+        .to_string()
+    }
+
+    pub fn db_snapshot_arn(&self, db_snapshot_identifier: &str) -> String {
+        Arn::new(
+            "rds",
+            &self.region,
+            &self.account_id,
+            &format!("snapshot:{db_snapshot_identifier}"),
         )
         .to_string()
     }

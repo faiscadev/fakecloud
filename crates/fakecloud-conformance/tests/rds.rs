@@ -334,6 +334,123 @@ async fn rds_remove_tags_from_resource() {
     assert_eq!(tags[0].key(), Some("team"));
 }
 
+#[test_action("rds", "CreateDBSnapshot", checksum = "bdeba3a7")]
+#[tokio::test]
+async fn rds_create_db_snapshot() {
+    let server = TestServer::start().await;
+    let client = server.rds_client().await;
+
+    create_instance(&client).await;
+
+    let response = client
+        .create_db_snapshot()
+        .db_instance_identifier("conf-rds-db")
+        .db_snapshot_identifier("conf-snapshot")
+        .send()
+        .await
+        .unwrap();
+
+    let snapshot = response.db_snapshot().unwrap();
+    assert_eq!(snapshot.db_snapshot_identifier(), Some("conf-snapshot"));
+    assert_eq!(snapshot.db_instance_identifier(), Some("conf-rds-db"));
+    assert_eq!(snapshot.engine(), Some("postgres"));
+    assert_eq!(snapshot.status(), Some("available"));
+}
+
+#[test_action("rds", "DescribeDBSnapshots", checksum = "c67cf62b")]
+#[tokio::test]
+async fn rds_describe_db_snapshots() {
+    let server = TestServer::start().await;
+    let client = server.rds_client().await;
+
+    create_instance(&client).await;
+    client
+        .create_db_snapshot()
+        .db_instance_identifier("conf-rds-db")
+        .db_snapshot_identifier("conf-snapshot")
+        .send()
+        .await
+        .unwrap();
+
+    let response = client
+        .describe_db_snapshots()
+        .db_snapshot_identifier("conf-snapshot")
+        .send()
+        .await
+        .unwrap();
+
+    let snapshots = response.db_snapshots();
+    assert_eq!(snapshots.len(), 1);
+    assert_eq!(snapshots[0].db_snapshot_identifier(), Some("conf-snapshot"));
+}
+
+#[test_action("rds", "DeleteDBSnapshot", checksum = "cdb4726c")]
+#[tokio::test]
+async fn rds_delete_db_snapshot() {
+    let server = TestServer::start().await;
+    let client = server.rds_client().await;
+
+    create_instance(&client).await;
+    client
+        .create_db_snapshot()
+        .db_instance_identifier("conf-rds-db")
+        .db_snapshot_identifier("conf-snapshot")
+        .send()
+        .await
+        .unwrap();
+
+    let response = client
+        .delete_db_snapshot()
+        .db_snapshot_identifier("conf-snapshot")
+        .send()
+        .await
+        .unwrap();
+
+    let snapshot = response.db_snapshot().unwrap();
+    assert_eq!(snapshot.db_snapshot_identifier(), Some("conf-snapshot"));
+
+    let error = client
+        .describe_db_snapshots()
+        .db_snapshot_identifier("conf-snapshot")
+        .send()
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.into_service_error().meta().code(),
+        Some("DBSnapshotNotFound")
+    );
+}
+
+#[test_action("rds", "RestoreDBInstanceFromDBSnapshot", checksum = "368eb366")]
+#[tokio::test]
+async fn rds_restore_db_instance_from_db_snapshot() {
+    let server = TestServer::start().await;
+    let client = server.rds_client().await;
+
+    create_instance(&client).await;
+    client
+        .create_db_snapshot()
+        .db_instance_identifier("conf-rds-db")
+        .db_snapshot_identifier("conf-snapshot")
+        .send()
+        .await
+        .unwrap();
+
+    let response = client
+        .restore_db_instance_from_db_snapshot()
+        .db_instance_identifier("restored-db")
+        .db_snapshot_identifier("conf-snapshot")
+        .send()
+        .await
+        .unwrap();
+
+    let instance = response.db_instance().unwrap();
+    assert_eq!(instance.db_instance_identifier(), Some("restored-db"));
+    assert_eq!(instance.engine(), Some("postgres"));
+    assert_eq!(instance.master_username(), Some("admin"));
+    assert_eq!(instance.db_name(), Some("appdb"));
+}
+
 async fn create_instance(
     client: &aws_sdk_rds::Client,
 ) -> aws_sdk_rds::operation::create_db_instance::CreateDbInstanceOutput {

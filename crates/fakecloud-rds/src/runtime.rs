@@ -243,6 +243,100 @@ impl RdsRuntime {
             .output()
             .await;
     }
+
+    pub async fn dump_database(
+        &self,
+        db_instance_identifier: &str,
+        username: &str,
+        db_name: &str,
+    ) -> Result<Vec<u8>, RuntimeError> {
+        let container = self
+            .containers
+            .read()
+            .get(db_instance_identifier)
+            .cloned()
+            .ok_or(RuntimeError::Unavailable)?;
+
+        let output = tokio::process::Command::new(&self.cli)
+            .args([
+                "exec",
+                &container.container_id,
+                "pg_dump",
+                "-U",
+                username,
+                "-d",
+                db_name,
+                "--no-password",
+            ])
+            .output()
+            .await
+            .map_err(|e| RuntimeError::ContainerStartFailed(e.to_string()))?;
+
+        if !output.status.success() {
+            return Err(RuntimeError::ContainerStartFailed(format!(
+                "pg_dump failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+
+        Ok(output.stdout)
+    }
+
+    pub async fn restore_database(
+        &self,
+        db_instance_identifier: &str,
+        username: &str,
+        db_name: &str,
+        dump_data: &[u8],
+    ) -> Result<(), RuntimeError> {
+        let container = self
+            .containers
+            .read()
+            .get(db_instance_identifier)
+            .cloned()
+            .ok_or(RuntimeError::Unavailable)?;
+
+        let mut child = tokio::process::Command::new(&self.cli)
+            .args([
+                "exec",
+                "-i",
+                &container.container_id,
+                "psql",
+                "-U",
+                username,
+                "-d",
+                db_name,
+                "--no-password",
+            ])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| RuntimeError::ContainerStartFailed(e.to_string()))?;
+
+        if let Some(mut stdin) = child.stdin.take() {
+            use tokio::io::AsyncWriteExt;
+            stdin
+                .write_all(dump_data)
+                .await
+                .map_err(|e| RuntimeError::ContainerStartFailed(e.to_string()))?;
+            drop(stdin);
+        }
+
+        let output = child
+            .wait_with_output()
+            .await
+            .map_err(|e| RuntimeError::ContainerStartFailed(e.to_string()))?;
+
+        if !output.status.success() {
+            return Err(RuntimeError::ContainerStartFailed(format!(
+                "psql restore failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+
+        Ok(())
+    }
 }
 
 fn cli_available(cli: &str) -> bool {

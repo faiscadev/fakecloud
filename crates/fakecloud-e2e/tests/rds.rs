@@ -318,6 +318,167 @@ async fn create_instance(
     create_instance_with_deletion_protection(client, db_instance_identifier, false).await
 }
 
+#[tokio::test]
+async fn rds_create_describe_delete_snapshot() {
+    let server = TestServer::start().await;
+    let client = server.rds_client().await;
+
+    create_instance(&client, "orders-snapshot-test-db").await;
+
+    let create_response = client
+        .create_db_snapshot()
+        .db_instance_identifier("orders-snapshot-test-db")
+        .db_snapshot_identifier("test-snapshot")
+        .send()
+        .await
+        .unwrap();
+
+    let snapshot = create_response.db_snapshot().unwrap();
+    assert_eq!(snapshot.db_snapshot_identifier(), Some("test-snapshot"));
+    assert_eq!(
+        snapshot.db_instance_identifier(),
+        Some("orders-snapshot-test-db")
+    );
+    assert_eq!(snapshot.engine(), Some("postgres"));
+    assert_eq!(snapshot.status(), Some("available"));
+    assert_eq!(snapshot.master_username(), Some("admin"));
+
+    let describe_response = client
+        .describe_db_snapshots()
+        .db_snapshot_identifier("test-snapshot")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(describe_response.db_snapshots().len(), 1);
+
+    let describe_by_instance = client
+        .describe_db_snapshots()
+        .db_instance_identifier("orders-snapshot-test-db")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(describe_by_instance.db_snapshots().len(), 1);
+
+    client
+        .delete_db_snapshot()
+        .db_snapshot_identifier("test-snapshot")
+        .send()
+        .await
+        .unwrap();
+
+    let error = client
+        .describe_db_snapshots()
+        .db_snapshot_identifier("test-snapshot")
+        .send()
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.into_service_error().meta().code(),
+        Some("DBSnapshotNotFound")
+    );
+}
+
+#[tokio::test]
+async fn rds_restore_from_snapshot() {
+    let server = TestServer::start().await;
+    let client = server.rds_client().await;
+
+    create_instance(&client, "orders-source-db").await;
+
+    let create_instance_response = client
+        .describe_db_instances()
+        .db_instance_identifier("orders-source-db")
+        .send()
+        .await
+        .unwrap();
+    let source_instance = &create_instance_response.db_instances()[0];
+    let source_endpoint = source_instance.endpoint().unwrap();
+
+    let (source_client, source_connection) = connect_with_retry(
+        source_endpoint.address().unwrap(),
+        source_endpoint.port().unwrap(),
+        "admin",
+        "secret123",
+        "appdb",
+    )
+    .await
+    .unwrap();
+    tokio::spawn(async move {
+        if let Err(e) = source_connection.await {
+            eprintln!("connection error: {}", e);
+        }
+    });
+
+    source_client
+        .execute("CREATE TABLE test_table (id INT, name TEXT)", &[])
+        .await
+        .unwrap();
+    source_client
+        .execute(
+            "INSERT INTO test_table (id, name) VALUES (1, 'snapshot test data')",
+            &[],
+        )
+        .await
+        .unwrap();
+
+    client
+        .create_db_snapshot()
+        .db_instance_identifier("orders-source-db")
+        .db_snapshot_identifier("restore-test-snapshot")
+        .send()
+        .await
+        .unwrap();
+
+    let restore_response = client
+        .restore_db_instance_from_db_snapshot()
+        .db_instance_identifier("orders-restored-db")
+        .db_snapshot_identifier("restore-test-snapshot")
+        .send()
+        .await
+        .unwrap();
+
+    let restored_instance = restore_response.db_instance().unwrap();
+    assert_eq!(
+        restored_instance.db_instance_identifier(),
+        Some("orders-restored-db")
+    );
+    assert_eq!(restored_instance.engine(), Some("postgres"));
+    assert_eq!(restored_instance.master_username(), Some("admin"));
+    assert_eq!(restored_instance.db_name(), Some("appdb"));
+
+    let describe_response = client
+        .describe_db_instances()
+        .db_instance_identifier("orders-restored-db")
+        .send()
+        .await
+        .unwrap();
+    let instances = describe_response.db_instances();
+    assert_eq!(instances.len(), 1);
+    let restored_endpoint = instances[0].endpoint().unwrap();
+
+    let (restored_client, restored_connection) = connect_with_retry(
+        restored_endpoint.address().unwrap(),
+        restored_endpoint.port().unwrap(),
+        "admin",
+        "secret123",
+        "appdb",
+    )
+    .await
+    .unwrap();
+    tokio::spawn(async move {
+        if let Err(e) = restored_connection.await {
+            eprintln!("connection error: {}", e);
+        }
+    });
+
+    let row = restored_client
+        .query_one("SELECT name FROM test_table WHERE id = 1", &[])
+        .await
+        .unwrap();
+    let name: String = row.get(0);
+    assert_eq!(name, "snapshot test data");
+}
+
 async fn create_instance_with_deletion_protection(
     client: &aws_sdk_rds::Client,
     db_instance_identifier: &str,

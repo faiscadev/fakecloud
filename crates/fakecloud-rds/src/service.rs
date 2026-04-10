@@ -9,7 +9,7 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceErr
 
 use crate::runtime::{RdsRuntime, RuntimeError};
 use crate::state::{
-    default_engine_versions, default_orderable_options, DbInstance, EngineVersionInfo,
+    default_engine_versions, default_orderable_options, DbInstance, DbSnapshot, EngineVersionInfo,
     OrderableDbInstanceOption, RdsTag, SharedRdsState,
 };
 
@@ -17,14 +17,18 @@ const RDS_NS: &str = "http://rds.amazonaws.com/doc/2014-10-31/";
 const SUPPORTED_ACTIONS: &[&str] = &[
     "AddTagsToResource",
     "CreateDBInstance",
+    "CreateDBSnapshot",
     "DeleteDBInstance",
+    "DeleteDBSnapshot",
     "DescribeDBEngineVersions",
     "DescribeDBInstances",
+    "DescribeDBSnapshots",
     "DescribeOrderableDBInstanceOptions",
     "ListTagsForResource",
     "ModifyDBInstance",
     "RebootDBInstance",
     "RemoveTagsFromResource",
+    "RestoreDBInstanceFromDBSnapshot",
 ];
 
 pub struct RdsService {
@@ -56,9 +60,12 @@ impl AwsService for RdsService {
         match request.action.as_str() {
             "AddTagsToResource" => self.add_tags_to_resource(&request),
             "CreateDBInstance" => self.create_db_instance(&request).await,
+            "CreateDBSnapshot" => self.create_db_snapshot(&request).await,
             "DeleteDBInstance" => self.delete_db_instance(&request).await,
+            "DeleteDBSnapshot" => self.delete_db_snapshot(&request),
             "DescribeDBEngineVersions" => self.describe_db_engine_versions(&request),
             "DescribeDBInstances" => self.describe_db_instances(&request),
+            "DescribeDBSnapshots" => self.describe_db_snapshots(&request),
             "DescribeOrderableDBInstanceOptions" => {
                 self.describe_orderable_db_instance_options(&request)
             }
@@ -66,6 +73,9 @@ impl AwsService for RdsService {
             "ModifyDBInstance" => self.modify_db_instance(&request),
             "RebootDBInstance" => self.reboot_db_instance(&request).await,
             "RemoveTagsFromResource" => self.remove_tags_from_resource(&request),
+            "RestoreDBInstanceFromDBSnapshot" => {
+                self.restore_db_instance_from_db_snapshot(&request).await
+            }
             _ => Err(AwsServiceError::action_not_implemented(
                 self.service_name(),
                 &request.action,
@@ -550,6 +560,258 @@ impl RdsService {
             xml_wrap("RemoveTagsFromResource", "", &request.request_id),
         ))
     }
+
+    async fn create_db_snapshot(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let db_snapshot_identifier = required_param(request, "DBSnapshotIdentifier")?;
+        let db_instance_identifier = required_param(request, "DBInstanceIdentifier")?;
+
+        let runtime = self.runtime.as_ref().ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "InvalidParameterValue",
+                "Docker/Podman is required for RDS snapshots but is not available",
+            )
+        })?;
+
+        let (instance, db_name) = {
+            let state = self.state.write();
+
+            if state.snapshots.contains_key(&db_snapshot_identifier) {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::CONFLICT,
+                    "DBSnapshotAlreadyExists",
+                    format!("DBSnapshot {db_snapshot_identifier} already exists."),
+                ));
+            }
+
+            let instance = state
+                .instances
+                .get(&db_instance_identifier)
+                .cloned()
+                .ok_or_else(|| db_instance_not_found(&db_instance_identifier))?;
+
+            let db_name = instance
+                .db_name
+                .as_deref()
+                .unwrap_or("postgres")
+                .to_string();
+
+            (instance, db_name)
+        };
+
+        let dump_data = runtime
+            .dump_database(&db_instance_identifier, &instance.master_username, &db_name)
+            .await
+            .map_err(runtime_error_to_service_error)?;
+
+        let mut state = self.state.write();
+
+        let snapshot = DbSnapshot {
+            db_snapshot_identifier: db_snapshot_identifier.clone(),
+            db_snapshot_arn: state.db_snapshot_arn(&db_snapshot_identifier),
+            db_instance_identifier: instance.db_instance_identifier.clone(),
+            snapshot_create_time: Utc::now(),
+            engine: instance.engine.clone(),
+            engine_version: instance.engine_version.clone(),
+            allocated_storage: instance.allocated_storage,
+            status: "available".to_string(),
+            port: instance.port,
+            master_username: instance.master_username.clone(),
+            db_name: instance.db_name.clone(),
+            dbi_resource_id: instance.dbi_resource_id.clone(),
+            snapshot_type: "manual".to_string(),
+            master_user_password: instance.master_user_password.clone(),
+            tags: Vec::new(),
+            dump_data,
+        };
+
+        state
+            .snapshots
+            .insert(db_snapshot_identifier, snapshot.clone());
+
+        Ok(AwsResponse::xml(
+            StatusCode::OK,
+            xml_wrap(
+                "CreateDBSnapshot",
+                &format!("<DBSnapshot>{}</DBSnapshot>", db_snapshot_xml(&snapshot)),
+                &request.request_id,
+            ),
+        ))
+    }
+
+    fn describe_db_snapshots(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let db_snapshot_identifier = optional_param(request, "DBSnapshotIdentifier");
+        let db_instance_identifier = optional_param(request, "DBInstanceIdentifier");
+
+        let state = self.state.read();
+        let snapshots: Vec<DbSnapshot> = match (db_snapshot_identifier, db_instance_identifier) {
+            (Some(snapshot_id), None) => vec![state
+                .snapshots
+                .get(&snapshot_id)
+                .cloned()
+                .ok_or_else(|| db_snapshot_not_found(&snapshot_id))?],
+            (None, Some(instance_id)) => state
+                .snapshots
+                .values()
+                .filter(|s| s.db_instance_identifier == instance_id)
+                .cloned()
+                .collect(),
+            (None, None) => {
+                let mut values: Vec<DbSnapshot> = state.snapshots.values().cloned().collect();
+                values.sort_by(|a, b| a.db_snapshot_identifier.cmp(&b.db_snapshot_identifier));
+                values
+            }
+            (Some(_), Some(_)) => {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterCombination",
+                    "Cannot specify both DBSnapshotIdentifier and DBInstanceIdentifier.",
+                ));
+            }
+        };
+
+        Ok(AwsResponse::xml(
+            StatusCode::OK,
+            xml_wrap(
+                "DescribeDBSnapshots",
+                &format!(
+                    "<DBSnapshots>{}</DBSnapshots>",
+                    snapshots
+                        .iter()
+                        .map(|snapshot| format!(
+                            "<DBSnapshot>{}</DBSnapshot>",
+                            db_snapshot_xml(snapshot)
+                        ))
+                        .collect::<String>()
+                ),
+                &request.request_id,
+            ),
+        ))
+    }
+
+    fn delete_db_snapshot(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let db_snapshot_identifier = required_param(request, "DBSnapshotIdentifier")?;
+
+        let mut state = self.state.write();
+
+        let snapshot = state
+            .snapshots
+            .remove(&db_snapshot_identifier)
+            .ok_or_else(|| db_snapshot_not_found(&db_snapshot_identifier))?;
+
+        Ok(AwsResponse::xml(
+            StatusCode::OK,
+            xml_wrap(
+                "DeleteDBSnapshot",
+                &format!("<DBSnapshot>{}</DBSnapshot>", db_snapshot_xml(&snapshot)),
+                &request.request_id,
+            ),
+        ))
+    }
+
+    async fn restore_db_instance_from_db_snapshot(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let db_instance_identifier = required_param(request, "DBInstanceIdentifier")?;
+        let db_snapshot_identifier = required_param(request, "DBSnapshotIdentifier")?;
+
+        let runtime = self.runtime.as_ref().ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "InvalidParameterValue",
+                "Docker/Podman is required for RDS DB instances but is not available",
+            )
+        })?;
+
+        let (snapshot, dbi_resource_id, db_instance_arn, created_at) = {
+            let mut state = self.state.write();
+
+            if !state.begin_instance_creation(&db_instance_identifier) {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::CONFLICT,
+                    "DBInstanceAlreadyExists",
+                    format!("DBInstance {db_instance_identifier} already exists."),
+                ));
+            }
+
+            let snapshot = match state.snapshots.get(&db_snapshot_identifier).cloned() {
+                Some(s) => s,
+                None => {
+                    state.cancel_instance_creation(&db_instance_identifier);
+                    return Err(db_snapshot_not_found(&db_snapshot_identifier));
+                }
+            };
+
+            let dbi_resource_id = state.next_dbi_resource_id();
+            let db_instance_arn = state.db_instance_arn(&db_instance_identifier);
+            let created_at = Utc::now();
+
+            (snapshot, dbi_resource_id, db_instance_arn, created_at)
+        };
+
+        let db_name = snapshot.db_name.as_deref().unwrap_or("postgres");
+        let running = runtime
+            .ensure_postgres(
+                &db_instance_identifier,
+                &snapshot.master_username,
+                &snapshot.master_user_password,
+                db_name,
+            )
+            .await
+            .map_err(runtime_error_to_service_error)?;
+
+        runtime
+            .restore_database(
+                &db_instance_identifier,
+                &snapshot.master_username,
+                db_name,
+                &snapshot.dump_data,
+            )
+            .await
+            .map_err(runtime_error_to_service_error)?;
+
+        let mut state = self.state.write();
+
+        let instance = DbInstance {
+            db_instance_identifier: db_instance_identifier.clone(),
+            db_instance_arn,
+            db_instance_class: "db.t3.micro".to_string(),
+            engine: snapshot.engine.clone(),
+            engine_version: snapshot.engine_version.clone(),
+            db_instance_status: "available".to_string(),
+            master_username: snapshot.master_username.clone(),
+            db_name: snapshot.db_name.clone(),
+            endpoint_address: "127.0.0.1".to_string(),
+            port: i32::from(running.host_port),
+            allocated_storage: snapshot.allocated_storage,
+            publicly_accessible: true,
+            deletion_protection: false,
+            created_at,
+            dbi_resource_id,
+            master_user_password: snapshot.master_user_password.clone(),
+            container_id: running.container_id,
+            host_port: running.host_port,
+            tags: Vec::new(),
+        };
+
+        state.finish_instance_creation(instance.clone());
+
+        Ok(AwsResponse::xml(
+            StatusCode::OK,
+            xml_wrap(
+                "RestoreDBInstanceFromDBSnapshot",
+                &format!(
+                    "<DBInstance>{}</DBInstance>",
+                    db_instance_xml(&instance, None)
+                ),
+                &request.request_id,
+            ),
+        ))
+    }
 }
 
 fn optional_param(req: &AwsRequest, name: &str) -> Option<String> {
@@ -901,11 +1163,54 @@ fn db_instance_xml(instance: &DbInstance, status_override: Option<&str>) -> Stri
     )
 }
 
+fn db_snapshot_xml(snapshot: &DbSnapshot) -> String {
+    format!(
+        "<DBSnapshotIdentifier>{}</DBSnapshotIdentifier>\
+         <DBInstanceIdentifier>{}</DBInstanceIdentifier>\
+         <SnapshotCreateTime>{}</SnapshotCreateTime>\
+         <Engine>{}</Engine>\
+         <EngineVersion>{}</EngineVersion>\
+         <AllocatedStorage>{}</AllocatedStorage>\
+         <Status>{}</Status>\
+         <Port>{}</Port>\
+         <MasterUsername>{}</MasterUsername>\
+         {}\
+         <DbiResourceId>{}</DbiResourceId>\
+         <SnapshotType>{}</SnapshotType>\
+         <DBSnapshotArn>{}</DBSnapshotArn>",
+        xml_escape(&snapshot.db_snapshot_identifier),
+        xml_escape(&snapshot.db_instance_identifier),
+        snapshot.snapshot_create_time.to_rfc3339(),
+        xml_escape(&snapshot.engine),
+        xml_escape(&snapshot.engine_version),
+        snapshot.allocated_storage,
+        xml_escape(&snapshot.status),
+        snapshot.port,
+        xml_escape(&snapshot.master_username),
+        snapshot
+            .db_name
+            .as_ref()
+            .map(|name| format!("<DBName>{}</DBName>", xml_escape(name)))
+            .unwrap_or_default(),
+        xml_escape(&snapshot.dbi_resource_id),
+        xml_escape(&snapshot.snapshot_type),
+        xml_escape(&snapshot.db_snapshot_arn),
+    )
+}
+
 fn db_instance_not_found(identifier: &str) -> AwsServiceError {
     AwsServiceError::aws_error(
         StatusCode::NOT_FOUND,
         "DBInstanceNotFound",
         format!("DBInstance {} not found.", identifier),
+    )
+}
+
+fn db_snapshot_not_found(identifier: &str) -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::NOT_FOUND,
+        "DBSnapshotNotFound",
+        format!("DBSnapshot {} not found.", identifier),
     )
 }
 
