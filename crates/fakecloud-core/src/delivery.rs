@@ -15,6 +15,8 @@ pub struct DeliveryBus {
     eventbridge_sender: Option<Arc<dyn EventBridgeDelivery>>,
     /// Invoke a Lambda function by ARN.
     lambda_invoker: Option<Arc<dyn LambdaDelivery>>,
+    /// Put records to a Kinesis Data Stream by ARN.
+    kinesis_sender: Option<Arc<dyn KinesisDelivery>>,
 }
 
 /// Message attribute for SQS delivery from SNS.
@@ -72,6 +74,13 @@ pub trait LambdaDelivery: Send + Sync {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<u8>, String>> + Send>>;
 }
 
+/// Trait for putting records to Kinesis Data Streams.
+pub trait KinesisDelivery: Send + Sync {
+    /// Put a record to a Kinesis stream identified by ARN.
+    /// The data should be base64-encoded. partition_key is used for shard distribution.
+    fn put_record(&self, stream_arn: &str, data: &str, partition_key: &str);
+}
+
 impl DeliveryBus {
     pub fn new() -> Self {
         Self {
@@ -79,6 +88,7 @@ impl DeliveryBus {
             sns_sender: None,
             eventbridge_sender: None,
             lambda_invoker: None,
+            kinesis_sender: None,
         }
     }
 
@@ -99,6 +109,11 @@ impl DeliveryBus {
 
     pub fn with_lambda(mut self, invoker: Arc<dyn LambdaDelivery>) -> Self {
         self.lambda_invoker = Some(invoker);
+        self
+    }
+
+    pub fn with_kinesis(mut self, sender: Arc<dyn KinesisDelivery>) -> Self {
+        self.kinesis_sender = Some(sender);
         self
     }
 
@@ -164,6 +179,13 @@ impl DeliveryBus {
             Some(invoker.invoke_lambda(function_arn, payload).await)
         } else {
             None
+        }
+    }
+
+    /// Put a record to a Kinesis stream identified by ARN.
+    pub fn send_to_kinesis(&self, stream_arn: &str, data: &str, partition_key: &str) {
+        if let Some(ref sender) = self.kinesis_sender {
+            sender.put_record(stream_arn, data, partition_key);
         }
     }
 }

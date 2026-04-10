@@ -530,8 +530,47 @@ impl LogsService {
                 let compressed = encoder.finish().unwrap();
                 let encoded = base64::engine::general_purpose::STANDARD.encode(&compressed);
 
-                self.delivery_bus
-                    .send_to_sqs(destination_arn, &encoded, &HashMap::new());
+                // Route to the appropriate destination based on ARN
+                if destination_arn.contains(":sqs:") {
+                    self.delivery_bus
+                        .send_to_sqs(destination_arn, &encoded, &HashMap::new());
+                } else if destination_arn.contains(":lambda:") {
+                    // Lambda subscriptions receive the gzipped+base64 data in a special event format
+                    let lambda_event = json!({
+                        "awslogs": {
+                            "data": encoded,
+                        }
+                    });
+                    let lambda_payload = serde_json::to_string(&lambda_event).unwrap();
+                    tokio::spawn({
+                        let bus = self.delivery_bus.clone();
+                        let arn = destination_arn.clone();
+                        async move {
+                            if let Some(result) = bus.invoke_lambda(&arn, &lambda_payload).await {
+                                match result {
+                                    Ok(_) => {
+                                        tracing::debug!(
+                                            function_arn = %arn,
+                                            "CloudWatch Logs -> Lambda subscription delivered"
+                                        );
+                                    }
+                                    Err(e) => {
+                                        tracing::error!(
+                                            function_arn = %arn,
+                                            error = %e,
+                                            "CloudWatch Logs -> Lambda subscription failed"
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    });
+                } else if destination_arn.contains(":kinesis:") {
+                    // Kinesis subscriptions receive the gzipped+base64 data as the record data
+                    let partition_key = format!("{}-{}", group_name_owned, stream_name_owned);
+                    self.delivery_bus
+                        .send_to_kinesis(destination_arn, &encoded, &partition_key);
+                }
             }
         }
 

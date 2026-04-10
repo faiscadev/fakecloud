@@ -223,9 +223,18 @@ async fn main() {
         Arc::new(bus)
     };
 
-    // Step 4: Logs delivery (subscription filters can push to SQS)
+    // Step 4: Logs delivery (subscription filters can push to SQS, Lambda, and Kinesis)
     let sqs_delivery_for_ses = sqs_delivery.clone();
-    let delivery_for_logs = Arc::new(DeliveryBus::new().with_sqs(sqs_delivery));
+    let kinesis_delivery = fakecloud_kinesis::delivery::KinesisDeliveryImpl::new(
+        kinesis_state.clone(),
+    );
+    let mut delivery_for_logs = DeliveryBus::new()
+        .with_sqs(sqs_delivery)
+        .with_kinesis(kinesis_delivery);
+    if let Some(ref ld) = lambda_delivery {
+        delivery_for_logs = delivery_for_logs.with_lambda(ld.clone());
+    }
+    let delivery_for_logs = Arc::new(delivery_for_logs);
 
     // Clone state refs for internal endpoints
     let lambda_invocations_state = lambda_state.clone();
