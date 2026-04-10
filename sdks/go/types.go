@@ -19,6 +19,38 @@ type ResetServiceResponse struct {
 	Reset string `json:"reset"`
 }
 
+// ── RDS ───────────────────────────────────────────────────────────
+
+type RDSTag struct {
+	Key   string `json:"key"`
+	Value string `json:"value"`
+}
+
+type RDSInstance struct {
+	DBInstanceIdentifier string   `json:"dbInstanceIdentifier"`
+	DBInstanceARN        string   `json:"dbInstanceArn"`
+	DBInstanceClass      string   `json:"dbInstanceClass"`
+	Engine               string   `json:"engine"`
+	EngineVersion        string   `json:"engineVersion"`
+	DBInstanceStatus     string   `json:"dbInstanceStatus"`
+	MasterUsername       string   `json:"masterUsername"`
+	DBName               *string  `json:"dbName"`
+	EndpointAddress      string   `json:"endpointAddress"`
+	Port                 int32    `json:"port"`
+	AllocatedStorage     int32    `json:"allocatedStorage"`
+	PubliclyAccessible   bool     `json:"publiclyAccessible"`
+	DeletionProtection   bool     `json:"deletionProtection"`
+	CreatedAt            string   `json:"createdAt"`
+	DBIResourceID        string   `json:"dbiResourceId"`
+	ContainerID          string   `json:"containerId"`
+	HostPort             uint16   `json:"hostPort"`
+	Tags                 []RDSTag `json:"tags"`
+}
+
+type RDSInstancesResponse struct {
+	Instances []RDSInstance `json:"instances"`
+}
+
 // ── Lambda ─────────────────────────────────────────────────────────
 
 // LambdaInvocation represents a recorded Lambda invocation.

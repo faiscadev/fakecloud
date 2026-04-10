@@ -21,4 +21,9 @@ describe("CognitoClient URL encoding", () => {
     const fc = new FakeCloud("http://localhost:4566");
     expect(fc.cognito).toBeDefined();
   });
+
+  it("exposes the RDS introspection client", () => {
+    const fc = new FakeCloud("http://localhost:4566");
+    expect(fc.rds).toBeDefined();
+  });
 });

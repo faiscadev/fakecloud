@@ -233,6 +233,7 @@ async fn main() {
     let sqs_introspection_state = sqs_state.clone();
     let eb_introspection_state = eb_state.clone();
     let s3_introspection_state = s3_state.clone();
+    let rds_introspection_state = rds_state.clone();
     let dynamodb_ttl_state = dynamodb_state.clone();
     let secretsmanager_rotation_state = secretsmanager_state.clone();
 
@@ -998,6 +999,27 @@ async fn main() {
             }),
         )
         .route(
+            "/_fakecloud/rds/instances",
+            axum::routing::get({
+                let rs = rds_introspection_state;
+                move || {
+                    let rs = rs.clone();
+                    async move {
+                        let state = rs.read();
+                        let mut instances: Vec<types::RdsInstance> = state
+                            .instances
+                            .values()
+                            .map(rds_instance_response)
+                            .collect();
+                        instances.sort_by(|a, b| {
+                            a.db_instance_identifier.cmp(&b.db_instance_identifier)
+                        });
+                        axum::Json(types::RdsInstancesResponse { instances })
+                    }
+                }
+            }),
+        )
+        .route(
             "/_fakecloud/lambda/{function_name}/evict-container",
             axum::routing::post({
                 let rt = lambda_sim_evict_runtime;
@@ -1265,6 +1287,36 @@ async fn shutdown_signal() {
     tracing::info!("shutting down");
 }
 
+fn rds_instance_response(instance: &fakecloud_rds::state::DbInstance) -> types::RdsInstance {
+    types::RdsInstance {
+        db_instance_identifier: instance.db_instance_identifier.clone(),
+        db_instance_arn: instance.db_instance_arn.clone(),
+        db_instance_class: instance.db_instance_class.clone(),
+        engine: instance.engine.clone(),
+        engine_version: instance.engine_version.clone(),
+        db_instance_status: instance.db_instance_status.clone(),
+        master_username: instance.master_username.clone(),
+        db_name: instance.db_name.clone(),
+        endpoint_address: instance.endpoint_address.clone(),
+        port: instance.port,
+        allocated_storage: instance.allocated_storage,
+        publicly_accessible: instance.publicly_accessible,
+        deletion_protection: instance.deletion_protection,
+        created_at: instance.created_at.to_rfc3339(),
+        dbi_resource_id: instance.dbi_resource_id.clone(),
+        container_id: instance.container_id.clone(),
+        host_port: instance.host_port,
+        tags: instance
+            .tags
+            .iter()
+            .map(|tag| types::RdsTag {
+                key: tag.key.clone(),
+                value: tag.value.clone(),
+            })
+            .collect(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -1272,7 +1324,7 @@ mod tests {
     use chrono::Utc;
     use fakecloud_rds::state::{DbInstance, RdsState};
 
-    use super::ResetState;
+    use super::{rds_instance_response, ResetState};
 
     #[test]
     fn reset_service_clears_rds_state() {
@@ -1375,5 +1427,40 @@ mod tests {
         state.reset_service("rds").expect("reset rds");
 
         assert!(state.rds.read().instances.is_empty());
+    }
+
+    #[test]
+    fn rds_instance_response_omits_password_but_keeps_runtime_metadata() {
+        let instance = DbInstance {
+            db_instance_identifier: "db-1".to_string(),
+            db_instance_arn: "arn:aws:rds:us-east-1:123456789012:db:db-1".to_string(),
+            db_instance_class: "db.t3.micro".to_string(),
+            engine: "postgres".to_string(),
+            engine_version: "16.3".to_string(),
+            db_instance_status: "available".to_string(),
+            master_username: "admin".to_string(),
+            db_name: Some("appdb".to_string()),
+            endpoint_address: "127.0.0.1".to_string(),
+            port: 15432,
+            allocated_storage: 20,
+            publicly_accessible: true,
+            deletion_protection: false,
+            created_at: Utc::now(),
+            dbi_resource_id: "db-test".to_string(),
+            master_user_password: "secret123".to_string(),
+            container_id: "container-id".to_string(),
+            host_port: 15432,
+            tags: vec![fakecloud_rds::state::RdsTag {
+                key: "env".to_string(),
+                value: "test".to_string(),
+            }],
+        };
+
+        let response = rds_instance_response(&instance);
+
+        assert_eq!(response.db_instance_identifier, "db-1");
+        assert_eq!(response.container_id, "container-id");
+        assert_eq!(response.host_port, 15432);
+        assert_eq!(response.tags.len(), 1);
     }
 }

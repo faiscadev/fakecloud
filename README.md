@@ -239,6 +239,7 @@ fakecloud exposes `/_fakecloud/*` endpoints for testing behaviors that AWS runs 
 | `/_fakecloud/lambda/invocations` | GET | List all Lambda invocations (introspection). |
 | `/_fakecloud/lambda/warm-containers` | GET | List all warm Lambda containers. Returns `{"containers": [...]}`. |
 | `/_fakecloud/lambda/{function-name}/evict-container` | POST | Evict a warm Lambda container (forces cold start). Returns `{"evicted": true/false}`. |
+| `/_fakecloud/rds/instances` | GET | List all fakecloud-managed RDS DB instances, including runtime metadata such as container id and mapped host port. |
 | `/_fakecloud/sns/messages` | GET | List all published SNS messages. |
 | `/_fakecloud/sns/pending-confirmations` | GET | List SNS subscriptions pending confirmation. Returns `{"pendingConfirmations": [...]}`. |
 | `/_fakecloud/sns/confirm-subscription` | POST | Force-confirm an SNS subscription. Body: `{"subscriptionArn": "..."}`. Returns `{"confirmed": true}`. |

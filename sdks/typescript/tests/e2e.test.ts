@@ -41,6 +41,7 @@ import {
   EventBridgeClient,
   PutEventsCommand,
 } from "@aws-sdk/client-eventbridge";
+import { RDSClient, CreateDBInstanceCommand } from "@aws-sdk/client-rds";
 
 function getEndpoint(): string {
   const ep = process.env.FAKECLOUD_ENDPOINT;
@@ -85,6 +86,35 @@ describe("health", () => {
     expect(health.version).toBeDefined();
     expect(Array.isArray(health.services)).toBe(true);
     expect(health.services.length).toBeGreaterThan(0);
+  });
+});
+
+describe("rds", () => {
+  it("getInstances() returns fakecloud-managed DB instances", async () => {
+    const rds = new RDSClient(awsConfig());
+
+    await rds.send(
+      new CreateDBInstanceCommand({
+        DBInstanceIdentifier: "ts-rds-db",
+        AllocatedStorage: 20,
+        DBInstanceClass: "db.t3.micro",
+        Engine: "postgres",
+        EngineVersion: "16.3",
+        MasterUsername: "admin",
+        MasterUserPassword: "secret123",
+        DBName: "appdb",
+      }),
+    );
+
+    const result = await fc.rds.getInstances();
+    const instance = result.instances.find(
+      (candidate) => candidate.dbInstanceIdentifier === "ts-rds-db",
+    );
+    expect(instance).toBeDefined();
+    expect(instance!.engine).toBe("postgres");
+    expect(instance!.dbName).toBe("appdb");
+    expect(instance!.containerId.length).toBeGreaterThan(0);
+    expect(instance!.hostPort).toBeGreaterThan(0);
   });
 });
 

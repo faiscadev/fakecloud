@@ -2,6 +2,7 @@ import type {
   HealthResponse,
   ResetResponse,
   ResetServiceResponse,
+  RdsInstancesResponse,
   LambdaInvocationsResponse,
   WarmContainersResponse,
   EvictContainerResponse,
@@ -72,6 +73,15 @@ export class LambdaClient {
       `${this.baseUrl}/_fakecloud/lambda/${encodeURIComponent(functionName)}/evict-container`,
       { method: "POST" },
     );
+    return parse(resp);
+  }
+}
+
+export class RdsClient {
+  constructor(private baseUrl: string) {}
+
+  async getInstances(): Promise<RdsInstancesResponse> {
+    const resp = await fetch(`${this.baseUrl}/_fakecloud/rds/instances`);
     return parse(resp);
   }
 }
@@ -276,6 +286,7 @@ export class FakeCloud {
   private readonly baseUrl: string;
 
   private readonly _lambda: LambdaClient;
+  private readonly _rds: RdsClient;
   private readonly _ses: SesClient;
   private readonly _sns: SnsClient;
   private readonly _sqs: SqsClient;
@@ -289,6 +300,7 @@ export class FakeCloud {
     this.baseUrl = baseUrl.replace(/\/+$/, "");
 
     this._lambda = new LambdaClient(this.baseUrl);
+    this._rds = new RdsClient(this.baseUrl);
     this._ses = new SesClient(this.baseUrl);
     this._sns = new SnsClient(this.baseUrl);
     this._sqs = new SqsClient(this.baseUrl);
@@ -323,6 +335,10 @@ export class FakeCloud {
 
   get lambda(): LambdaClient {
     return this._lambda;
+  }
+
+  get rds(): RdsClient {
+    return this._rds;
   }
 
   get ses(): SesClient {

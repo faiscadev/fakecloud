@@ -116,6 +116,37 @@ async fn sdk_reset_service_kinesis() {
     assert_eq!(resp.reset, "kinesis");
 }
 
+#[tokio::test]
+async fn sdk_rds_get_instances() {
+    let server = TestServer::start().await;
+    let fc = FakeCloud::new(server.endpoint());
+    let rds = server.rds_client().await;
+
+    rds.create_db_instance()
+        .db_instance_identifier("sdk-rds-db")
+        .allocated_storage(20)
+        .db_instance_class("db.t3.micro")
+        .engine("postgres")
+        .engine_version("16.3")
+        .master_username("admin")
+        .master_user_password("secret123")
+        .db_name("appdb")
+        .send()
+        .await
+        .unwrap();
+
+    let instances = fc.rds().get_instances().await.expect("get rds instances");
+    let instance = instances
+        .instances
+        .iter()
+        .find(|instance| instance.db_instance_identifier == "sdk-rds-db")
+        .expect("sdk-rds-db instance");
+    assert_eq!(instance.engine, "postgres");
+    assert_eq!(instance.db_name.as_deref(), Some("appdb"));
+    assert!(!instance.container_id.is_empty());
+    assert!(instance.host_port > 0);
+}
+
 // ── SQS ────────────────────────────────────────────────────────────
 
 #[tokio::test]

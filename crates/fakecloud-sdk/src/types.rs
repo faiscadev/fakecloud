@@ -24,6 +24,44 @@ pub struct ResetServiceResponse {
     pub reset: String,
 }
 
+// ── RDS ─────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RdsTag {
+    pub key: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RdsInstance {
+    pub db_instance_identifier: String,
+    pub db_instance_arn: String,
+    pub db_instance_class: String,
+    pub engine: String,
+    pub engine_version: String,
+    pub db_instance_status: String,
+    pub master_username: String,
+    pub db_name: Option<String>,
+    pub endpoint_address: String,
+    pub port: i32,
+    pub allocated_storage: i32,
+    pub publicly_accessible: bool,
+    pub deletion_protection: bool,
+    pub created_at: String,
+    pub dbi_resource_id: String,
+    pub container_id: String,
+    pub host_port: u16,
+    pub tags: Vec<RdsTag>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RdsInstancesResponse {
+    pub instances: Vec<RdsInstance>,
+}
+
 // ── Lambda ──────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

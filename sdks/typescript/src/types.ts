@@ -14,6 +14,38 @@ export interface ResetServiceResponse {
   reset: string;
 }
 
+// ── RDS ────────────────────────────────────────────────────────────
+
+export interface RdsTag {
+  key: string;
+  value: string;
+}
+
+export interface RdsInstance {
+  dbInstanceIdentifier: string;
+  dbInstanceArn: string;
+  dbInstanceClass: string;
+  engine: string;
+  engineVersion: string;
+  dbInstanceStatus: string;
+  masterUsername: string;
+  dbName: string | null;
+  endpointAddress: string;
+  port: number;
+  allocatedStorage: number;
+  publiclyAccessible: boolean;
+  deletionProtection: boolean;
+  createdAt: string;
+  dbiResourceId: string;
+  containerId: string;
+  hostPort: number;
+  tags: RdsTag[];
+}
+
+export interface RdsInstancesResponse {
+  instances: RdsInstance[];
+}
+
 // ── Lambda ─────────────────────────────────────────────────────────
 
 export interface LambdaInvocation {

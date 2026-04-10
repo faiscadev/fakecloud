@@ -63,6 +63,61 @@ class ResetServiceResponse:
         return cls(**d)
 
 
+# ── RDS ─────────────────────────────────────────────────────────────
+
+
+@dataclass
+class RdsTag:
+    key: str
+    value: str
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> RdsTag:
+        d = _convert_keys(data)
+        return cls(**d)
+
+
+@dataclass
+class RdsInstance:
+    db_instance_identifier: str
+    db_instance_arn: str
+    db_instance_class: str
+    engine: str
+    engine_version: str
+    db_instance_status: str
+    master_username: str
+    db_name: Optional[str]
+    endpoint_address: str
+    port: int
+    allocated_storage: int
+    publicly_accessible: bool
+    deletion_protection: bool
+    created_at: str
+    dbi_resource_id: str
+    container_id: str
+    host_port: int
+    tags: List[RdsTag]
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> RdsInstance:
+        d = _convert_keys(data)
+        d["tags"] = [RdsTag.from_dict(tag) for tag in d.get("tags", [])]
+        return cls(**d)
+
+
+@dataclass
+class RdsInstancesResponse:
+    instances: List[RdsInstance]
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> RdsInstancesResponse:
+        return cls(
+            instances=[
+                RdsInstance.from_dict(item) for item in data.get("instances", [])
+            ],
+        )
+
+
 # ── Lambda ──────────────────────────────────────────────────────────
 
 

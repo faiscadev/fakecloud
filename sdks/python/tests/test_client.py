@@ -107,6 +107,31 @@ def test_health(fc: FakeCloudSync, fakecloud_url: str) -> None:
     assert len(h.services) > 0
 
 
+def test_rds_instances(fc: FakeCloudSync, fakecloud_url: str) -> None:
+    rds = boto3.client("rds", **_boto_kwargs(fakecloud_url))
+    rds.create_db_instance(
+        DBInstanceIdentifier="py-sdk-rds-db",
+        AllocatedStorage=20,
+        DBInstanceClass="db.t3.micro",
+        Engine="postgres",
+        EngineVersion="16.3",
+        MasterUsername="admin",
+        MasterUserPassword="secret123",
+        DBName="appdb",
+    )
+
+    result = fc.rds.get_instances()
+    instance = next(
+        item
+        for item in result.instances
+        if item.db_instance_identifier == "py-sdk-rds-db"
+    )
+    assert instance.engine == "postgres"
+    assert instance.db_name == "appdb"
+    assert instance.container_id
+    assert instance.host_port > 0
+
+
 # ── Reset ─────────────────────────────────────────────────────────────
 
 

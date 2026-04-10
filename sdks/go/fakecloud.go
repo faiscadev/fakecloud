@@ -70,6 +70,9 @@ func (fc *FakeCloud) S3() *S3Client { return &S3Client{fc: fc} }
 // Lambda returns the Lambda sub-client.
 func (fc *FakeCloud) Lambda() *LambdaClient { return &LambdaClient{fc: fc} }
 
+// RDS returns the RDS sub-client.
+func (fc *FakeCloud) RDS() *RDSClient { return &RDSClient{fc: fc} }
+
 // DynamoDB returns the DynamoDB sub-client.
 func (fc *FakeCloud) DynamoDB() *DynamoDBClient { return &DynamoDBClient{fc: fc} }
 

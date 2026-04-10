@@ -1,6 +1,7 @@
 export { FakeCloud, FakeCloudError } from "./client.js";
 export {
   LambdaClient,
+  RdsClient,
   SesClient,
   SnsClient,
   SqsClient,

@@ -25,6 +25,7 @@ from fakecloud.types import (
     LambdaInvocationsResponse,
     LifecycleTickResponse,
     PendingConfirmationsResponse,
+    RdsInstancesResponse,
     ResetResponse,
     ResetServiceResponse,
     RotationTickResponse,
@@ -74,6 +75,19 @@ class LambdaClient:
         )
         _check(resp)
         return EvictContainerResponse.from_dict(resp.json())
+
+
+class RdsClient:
+    """Async RDS introspection client."""
+
+    def __init__(self, client: httpx.AsyncClient, base_url: str) -> None:
+        self._client = client
+        self._base = base_url
+
+    async def get_instances(self) -> RdsInstancesResponse:
+        resp = await self._client.get(f"{self._base}/_fakecloud/rds/instances")
+        _check(resp)
+        return RdsInstancesResponse.from_dict(resp.json())
 
 
 class SesClient:
@@ -299,6 +313,19 @@ class _SyncLambdaClient:
         return EvictContainerResponse.from_dict(resp.json())
 
 
+class _SyncRdsClient:
+    """Sync RDS introspection client."""
+
+    def __init__(self, client: httpx.Client, base_url: str) -> None:
+        self._client = client
+        self._base = base_url
+
+    def get_instances(self) -> RdsInstancesResponse:
+        resp = self._client.get(f"{self._base}/_fakecloud/rds/instances")
+        _check(resp)
+        return RdsInstancesResponse.from_dict(resp.json())
+
+
 class _SyncSesClient:
     def __init__(self, client: httpx.Client, base_url: str) -> None:
         self._client = client
@@ -518,6 +545,10 @@ class FakeCloud:
         return LambdaClient(self._client, self._base)
 
     @property
+    def rds(self) -> RdsClient:
+        return RdsClient(self._client, self._base)
+
+    @property
     def ses(self) -> SesClient:
         return SesClient(self._client, self._base)
 
@@ -597,6 +628,10 @@ class FakeCloudSync:
     @property
     def lambda_(self) -> _SyncLambdaClient:
         return _SyncLambdaClient(self._client, self._base)
+
+    @property
+    def rds(self) -> _SyncRdsClient:
+        return _SyncRdsClient(self._client, self._base)
 
     @property
     def ses(self) -> _SyncSesClient:

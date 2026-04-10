@@ -23,6 +23,7 @@ import (
 	dbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/aws/aws-sdk-go-v2/service/eventbridge"
 	ebtypes "github.com/aws/aws-sdk-go-v2/service/eventbridge/types"
+	"github.com/aws/aws-sdk-go-v2/service/rds"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/sesv2"
 	sestypes "github.com/aws/aws-sdk-go-v2/service/sesv2/types"
@@ -133,6 +134,58 @@ func TestE2EHealth(t *testing.T) {
 	}
 	if len(resp.Services) == 0 {
 		t.Error("expected at least one service in health response")
+	}
+}
+
+func TestE2ERDS(t *testing.T) {
+	resetState(t)
+	ctx := context.Background()
+	cfg := awsConfig(t)
+
+	rdsClient := rds.NewFromConfig(cfg, func(o *rds.Options) {
+		o.BaseEndpoint = aws.String(fakecloudURL)
+	})
+
+	_, err := rdsClient.CreateDBInstance(ctx, &rds.CreateDBInstanceInput{
+		DBInstanceIdentifier: aws.String("sdk-go-rds-db"),
+		AllocatedStorage:     aws.Int32(20),
+		DBInstanceClass:      aws.String("db.t3.micro"),
+		Engine:               aws.String("postgres"),
+		EngineVersion:        aws.String("16.3"),
+		MasterUsername:       aws.String("admin"),
+		MasterUserPassword:   aws.String("secret123"),
+		DBName:               aws.String("appdb"),
+	})
+	if err != nil {
+		t.Fatalf("CreateDBInstance failed: %v", err)
+	}
+
+	fc := fakecloud.New(fakecloudURL)
+	resp, err := fc.RDS().GetInstances(ctx)
+	if err != nil {
+		t.Fatalf("RDS().GetInstances() failed: %v", err)
+	}
+
+	found := false
+	for _, instance := range resp.Instances {
+		if instance.DBInstanceIdentifier == "sdk-go-rds-db" {
+			found = true
+			if instance.Engine != "postgres" {
+				t.Fatalf("expected postgres engine, got %s", instance.Engine)
+			}
+			if instance.DBName == nil || *instance.DBName != "appdb" {
+				t.Fatalf("expected dbName appdb, got %#v", instance.DBName)
+			}
+			if instance.ContainerID == "" {
+				t.Fatal("expected container id")
+			}
+			if instance.HostPort == 0 {
+				t.Fatal("expected host port")
+			}
+		}
+	}
+	if !found {
+		t.Fatal("expected to find sdk-go-rds-db via introspection")
 	}
 }
 

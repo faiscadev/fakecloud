@@ -86,6 +86,10 @@ impl FakeCloud {
         CognitoClient { fc: self }
     }
 
+    pub fn rds(&self) -> RdsClient<'_> {
+        RdsClient { fc: self }
+    }
+
     // ── Internal helpers ────────────────────────────────────────────
 
     async fn parse<T: serde::de::DeserializeOwned>(resp: reqwest::Response) -> Result<T, Error> {
@@ -95,6 +99,25 @@ impl FakeCloud {
             return Err(Error::Api { status, body });
         }
         Ok(resp.json::<T>().await?)
+    }
+}
+
+// ── Lambda ──────────────────────────────────────────────────────────
+
+pub struct RdsClient<'a> {
+    fc: &'a FakeCloud,
+}
+
+impl RdsClient<'_> {
+    /// List fakecloud-managed RDS DB instances with runtime metadata.
+    pub async fn get_instances(&self) -> Result<RdsInstancesResponse, Error> {
+        let resp = self
+            .fc
+            .client
+            .get(format!("{}/_fakecloud/rds/instances", self.fc.base_url))
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
     }
 }
 
