@@ -1,8 +1,10 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::Utc;
 use http::StatusCode;
+use parking_lot::RwLock;
 use serde_json::{json, Value};
 
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
@@ -110,6 +112,26 @@ impl DynamoDbService {
         let lsi = parse_lsi(&body["LocalSecondaryIndexes"]);
         let tags = parse_tags(&body["Tags"]);
 
+        // Parse StreamSpecification
+        let (stream_enabled, stream_view_type) =
+            if let Some(stream_spec) = body.get("StreamSpecification") {
+                let enabled = stream_spec
+                    .get("StreamEnabled")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let view_type = if enabled {
+                    stream_spec
+                        .get("StreamViewType")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                } else {
+                    None
+                };
+                (enabled, view_type)
+            } else {
+                (false, None)
+            };
+
         let mut state = self.state.write();
 
         if state.tables.contains_key(&table_name) {
@@ -120,11 +142,22 @@ impl DynamoDbService {
             ));
         }
 
+        let now = Utc::now();
         let arn = format!(
             "arn:aws:dynamodb:{}:{}:table/{}",
             state.region, state.account_id, table_name
         );
-        let now = Utc::now();
+        let stream_arn = if stream_enabled {
+            Some(format!(
+                "arn:aws:dynamodb:{}:{}:table/{}/stream/{}",
+                state.region,
+                state.account_id,
+                table_name,
+                now.format("%Y-%m-%dT%H:%M:%S.%3f")
+            ))
+        } else {
+            None
+        };
 
         let table = DynamoTable {
             name: table_name.clone(),
@@ -148,6 +181,10 @@ impl DynamoDbService {
             kinesis_destinations: Vec::new(),
             contributor_insights_status: "DISABLED".to_string(),
             contributor_insights_counters: HashMap::new(),
+            stream_enabled,
+            stream_view_type,
+            stream_arn,
+            stream_records: Arc::new(RwLock::new(Vec::new())),
         };
 
         state.tables.insert(table_name, table);
@@ -206,19 +243,7 @@ impl DynamoDbService {
         let state = self.state.read();
         let table = get_table(&state.tables, table_name)?;
 
-        let table_desc = build_table_description_json(
-            &table.arn,
-            &table.key_schema,
-            &table.attribute_definitions,
-            &table.provisioned_throughput,
-            &table.gsi,
-            &table.lsi,
-            &table.billing_mode,
-            table.created_at,
-            table.item_count,
-            table.size_bytes,
-            &table.status,
-        );
+        let table_desc = build_table_description(table);
 
         Self::ok_json(json!({ "Table": table_desc }))
     }
@@ -336,11 +361,20 @@ impl DynamoDbService {
                 evaluate_condition(cond, existing, &expr_attr_names, &expr_attr_values)?;
             }
 
-            let old_item = if return_values == "ALL_OLD" {
+            let old_item_for_return = if return_values == "ALL_OLD" {
                 existing_idx.map(|i| table.items[i].clone())
             } else {
                 None
             };
+
+            // Capture old item for stream record if needed
+            let old_item_for_stream = if table.stream_enabled {
+                existing_idx.map(|i| table.items[i].clone())
+            } else {
+                None
+            };
+
+            let is_modify = existing_idx.is_some();
 
             if let Some(idx) = existing_idx {
                 table.items[idx] = item.clone();
@@ -351,7 +385,22 @@ impl DynamoDbService {
             table.record_item_access(&item);
             table.recalculate_stats();
 
-            old_item
+            // Generate stream record
+            if table.stream_enabled {
+                let key = extract_key(table, &item);
+                let event_name = if is_modify { "MODIFY" } else { "INSERT" };
+                if let Some(record) = crate::streams::generate_stream_record(
+                    table,
+                    event_name,
+                    key,
+                    old_item_for_stream,
+                    Some(item.clone()),
+                ) {
+                    crate::streams::add_stream_record(table, record);
+                }
+            }
+
+            old_item_for_return
         };
         // --- Write lock released, build response ---
 
@@ -454,9 +503,24 @@ impl DynamoDbService {
         let mut result = json!({});
 
         if let Some(idx) = existing_idx {
+            let old_item = table.items[idx].clone();
             if return_values == "ALL_OLD" {
-                result["Attributes"] = json!(table.items[idx]);
+                result["Attributes"] = json!(old_item);
             }
+
+            // Generate stream record before removing
+            if table.stream_enabled {
+                if let Some(record) = crate::streams::generate_stream_record(
+                    table,
+                    "REMOVE",
+                    key.clone(),
+                    Some(old_item),
+                    None,
+                ) {
+                    crate::streams::add_stream_record(table, record);
+                }
+            }
+
             table.items.remove(idx);
             table.recalculate_stats();
         }
@@ -499,6 +563,7 @@ impl DynamoDbService {
 
         let return_values = body["ReturnValues"].as_str().unwrap_or("NONE");
 
+        let is_insert = existing_idx.is_none();
         let idx = match existing_idx {
             Some(i) => i,
             None => {
@@ -509,6 +574,13 @@ impl DynamoDbService {
                 table.items.push(new_item);
                 table.items.len() - 1
             }
+        };
+
+        // Capture old item for stream (before update)
+        let old_item_for_stream = if table.stream_enabled {
+            Some(table.items[idx].clone())
+        } else {
+            None
         };
 
         let old_item = if return_values == "ALL_OLD" {
@@ -531,6 +603,21 @@ impl DynamoDbService {
         } else {
             None
         };
+
+        // Generate stream record after update
+        if table.stream_enabled {
+            let event_name = if is_insert { "INSERT" } else { "MODIFY" };
+            let new_item_for_stream = table.items[idx].clone();
+            if let Some(record) = crate::streams::generate_stream_record(
+                table,
+                event_name,
+                key.clone(),
+                old_item_for_stream,
+                Some(new_item_for_stream),
+            ) {
+                crate::streams::add_stream_record(table, record);
+            }
+        }
 
         table.recalculate_stats();
 
@@ -1806,6 +1893,10 @@ impl DynamoDbService {
             kinesis_destinations: Vec::new(),
             contributor_insights_status: "DISABLED".to_string(),
             contributor_insights_counters: HashMap::new(),
+            stream_enabled: false,
+            stream_view_type: None,
+            stream_arn: None,
+            stream_records: Arc::new(RwLock::new(Vec::new())),
         };
         table.recalculate_stats();
 
@@ -1877,6 +1968,10 @@ impl DynamoDbService {
             kinesis_destinations: Vec::new(),
             contributor_insights_status: "DISABLED".to_string(),
             contributor_insights_counters: HashMap::new(),
+            stream_enabled: false,
+            stream_view_type: None,
+            stream_arn: None,
+            stream_records: Arc::new(RwLock::new(Vec::new())),
         };
         table.recalculate_stats();
 
@@ -2798,6 +2893,10 @@ impl DynamoDbService {
             kinesis_destinations: Vec::new(),
             contributor_insights_status: "DISABLED".to_string(),
             contributor_insights_counters: HashMap::new(),
+            stream_enabled: false,
+            stream_view_type: None,
+            stream_arn: None,
+            stream_records: Arc::new(RwLock::new(Vec::new())),
         };
         table.recalculate_stats();
         state.tables.insert(table_name.to_string(), table);
@@ -4416,7 +4515,7 @@ fn build_table_description_json(
 }
 
 fn build_table_description(table: &DynamoTable) -> Value {
-    build_table_description_json(
+    let mut desc = build_table_description_json(
         &table.arn,
         &table.key_schema,
         &table.attribute_definitions,
@@ -4428,7 +4527,23 @@ fn build_table_description(table: &DynamoTable) -> Value {
         table.item_count,
         table.size_bytes,
         &table.status,
-    )
+    );
+
+    // Add stream specification if streams are enabled
+    if table.stream_enabled {
+        if let Some(ref stream_arn) = table.stream_arn {
+            desc["LatestStreamArn"] = json!(stream_arn);
+            desc["LatestStreamLabel"] = json!(stream_arn.rsplit('/').next().unwrap_or(""));
+        }
+        if let Some(ref view_type) = table.stream_view_type {
+            desc["StreamSpecification"] = json!({
+                "StreamEnabled": true,
+                "StreamViewType": view_type,
+            });
+        }
+    }
+
+    desc
 }
 
 fn execute_partiql_statement(

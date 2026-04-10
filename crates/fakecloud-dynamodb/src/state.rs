@@ -85,6 +85,34 @@ pub struct DynamoTable {
     pub contributor_insights_status: String,
     /// Contributor insights: partition key access counters (key_value_string -> count)
     pub contributor_insights_counters: HashMap<String, u64>,
+    /// DynamoDB Streams configuration
+    pub stream_enabled: bool,
+    pub stream_view_type: Option<String>, // KEYS_ONLY, NEW_IMAGE, OLD_IMAGE, NEW_AND_OLD_IMAGES
+    pub stream_arn: Option<String>,
+    /// Stream records (retained for 24 hours)
+    pub stream_records: Arc<RwLock<Vec<StreamRecord>>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct StreamRecord {
+    pub event_id: String,
+    pub event_name: String, // INSERT, MODIFY, REMOVE
+    pub event_version: String,
+    pub event_source: String,
+    pub aws_region: String,
+    pub dynamodb: DynamoDbStreamRecord,
+    pub event_source_arn: String,
+    pub timestamp: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DynamoDbStreamRecord {
+    pub keys: HashMap<String, AttributeValue>,
+    pub new_image: Option<HashMap<String, AttributeValue>>,
+    pub old_image: Option<HashMap<String, AttributeValue>>,
+    pub sequence_number: String,
+    pub size_bytes: i64,
+    pub stream_view_type: String,
 }
 
 #[derive(Debug, Clone)]

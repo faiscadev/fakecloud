@@ -11,9 +11,11 @@ use fakecloud_core::dispatch::{self, DispatchConfig};
 use fakecloud_core::registry::ServiceRegistry;
 use fakecloud_sdk::types;
 
+mod dynamodb_streams_lambda_poller;
 mod kinesis_lambda_poller;
 mod lambda_delivery;
 mod sqs_lambda_poller;
+use dynamodb_streams_lambda_poller::DynamoDbStreamsLambdaPoller;
 use kinesis_lambda_poller::KinesisLambdaPoller;
 use sqs_lambda_poller::SqsLambdaPoller;
 
@@ -332,7 +334,7 @@ async fn main() {
         SsmService::new(ssm_state).with_secretsmanager(secretsmanager_state.clone()),
     ));
     registry.register(Arc::new(
-        DynamoDbService::new(dynamodb_state).with_s3(s3_state.clone()),
+        DynamoDbService::new(dynamodb_state.clone()).with_s3(s3_state.clone()),
     ));
     let mut lambda_service = LambdaService::new(lambda_state.clone());
     if let Some(ref rt) = container_runtime {
@@ -417,6 +419,13 @@ async fn main() {
         kinesis_lambda_poller = kinesis_lambda_poller.with_lambda_delivery(ld.clone());
     }
     tokio::spawn(kinesis_lambda_poller.run());
+
+    let mut dynamodb_streams_poller =
+        DynamoDbStreamsLambdaPoller::new(dynamodb_state.clone(), lambda_invocations_state.clone());
+    if let Some(ref ld) = lambda_delivery {
+        dynamodb_streams_poller = dynamodb_streams_poller.with_lambda_delivery(ld.clone());
+    }
+    tokio::spawn(Arc::new(dynamodb_streams_poller).run());
 
     if let Some(ref rt) = container_runtime {
         let rt = rt.clone();
