@@ -111,10 +111,9 @@ class RdsInstancesResponse:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> RdsInstancesResponse:
+        d = _convert_keys(data)
         return cls(
-            instances=[
-                RdsInstance.from_dict(item) for item in data.get("instances", [])
-            ],
+            instances=[RdsInstance.from_dict(item) for item in d.get("instances", [])],
         )
 
 
@@ -146,9 +145,10 @@ class ElastiCacheClustersResponse:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> ElastiCacheClustersResponse:
+        d = _convert_keys(data)
         return cls(
             clusters=[
-                ElastiCacheCluster.from_dict(item) for item in data.get("clusters", [])
+                ElastiCacheCluster.from_dict(item) for item in d.get("clusters", [])
             ],
         )
 
@@ -180,10 +180,11 @@ class ElastiCacheReplicationGroupsResponse:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> ElastiCacheReplicationGroupsResponse:
+        d = _convert_keys(data)
         return cls(
             replication_groups=[
                 ElastiCacheReplicationGroupIntrospection.from_dict(item)
-                for item in data.get("replicationGroups", [])
+                for item in d.get("replication_groups", [])
             ],
         )
 
@@ -208,10 +209,11 @@ class ElastiCacheServerlessCachesResponse:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> ElastiCacheServerlessCachesResponse:
+        d = _convert_keys(data)
         return cls(
             serverless_caches=[
                 ElastiCacheServerlessCacheIntrospection.from_dict(item)
-                for item in data.get("serverlessCaches", [])
+                for item in d.get("serverless_caches", [])
             ],
         )
 
