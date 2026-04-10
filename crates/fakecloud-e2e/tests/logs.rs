@@ -2167,3 +2167,293 @@ async fn logs_get_log_record() {
     // Returns a (possibly empty) map of fields
     let _ = resp.log_record();
 }
+
+// ---- Cross-service integrations: CloudWatch Logs → Lambda ----
+
+#[tokio::test]
+#[ignore = "requires Docker/Podman for Lambda execution"]
+async fn logs_subscription_filter_invokes_lambda() {
+    use std::io::Write;
+    use tokio::time::{sleep, Duration};
+
+    let server = TestServer::start().await;
+    let logs_client = server.logs_client().await;
+    let lambda_client = server.lambda_client().await;
+    let sqs_client = server.sqs_client().await;
+
+    // Create Lambda that echoes to SQS
+    let queue_resp = sqs_client
+        .create_queue()
+        .queue_name("logs-lambda-echo")
+        .send()
+        .await
+        .unwrap();
+    let queue_url = queue_resp.queue_url().unwrap();
+
+    // Lambda code: logs the event to verify format
+    let lambda_code = format!(
+        r#"
+import json
+import urllib.request
+import urllib.parse
+import gzip
+import base64
+
+def lambda_handler(event, context):
+    # CloudWatch Logs sends data in event["awslogs"]["data"] as gzip+base64
+    data = event['awslogs']['data']
+    decoded = base64.b64decode(data)
+    decompressed = gzip.decompress(decoded).decode('utf-8')
+    payload = json.loads(decompressed)
+
+    # Echo subscription filter details to SQS using urllib
+    params = urllib.parse.urlencode({{
+        "Action": "SendMessage",
+        "QueueUrl": "{}",
+        "MessageBody": json.dumps({{
+            'logGroup': payload['logGroup'],
+            'logStream': payload['logStream'],
+            'logEvents': payload['logEvents']
+        }})
+    }}).encode()
+
+    req = urllib.request.Request("{}", data=params, method="POST")
+    req.add_header("Content-Type", "application/x-www-form-urlencoded")
+    req.add_header("Authorization", "AWS4-HMAC-SHA256 Credential=test/20200101/us-east-1/sqs/aws4_request, SignedHeaders=host, Signature=fake")
+    urllib.request.urlopen(req)
+
+    return {{'statusCode': 200}}
+"#,
+        queue_url,
+        server.endpoint()
+    );
+
+    // Create ZIP with Lambda code
+    let buf = Vec::new();
+    let cursor = std::io::Cursor::new(buf);
+    let mut writer = zip::ZipWriter::new(cursor);
+    let options = zip::write::SimpleFileOptions::default().unix_permissions(0o755);
+    writer.start_file("lambda_function.py", options).unwrap();
+    writer.write_all(lambda_code.as_bytes()).unwrap();
+    let cursor = writer.finish().unwrap();
+    let zip_bytes = cursor.into_inner();
+
+    // Deploy Lambda
+    lambda_client
+        .create_function()
+        .function_name("logs-subscriber")
+        .runtime(aws_sdk_lambda::types::Runtime::Python313)
+        .role("arn:aws:iam::123456789012:role/lambda-role")
+        .handler("lambda_function.lambda_handler")
+        .code(
+            aws_sdk_lambda::types::FunctionCode::builder()
+                .zip_file(aws_sdk_lambda::primitives::Blob::new(zip_bytes))
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let lambda_arn = "arn:aws:lambda:us-east-1:123456789012:function:logs-subscriber";
+
+    // Create log group and stream
+    logs_client
+        .create_log_group()
+        .log_group_name("/lambda-sub/test")
+        .send()
+        .await
+        .unwrap();
+    logs_client
+        .create_log_stream()
+        .log_group_name("/lambda-sub/test")
+        .log_stream_name("stream-1")
+        .send()
+        .await
+        .unwrap();
+
+    // Create subscription filter with Lambda destination
+    logs_client
+        .put_subscription_filter()
+        .log_group_name("/lambda-sub/test")
+        .filter_name("lambda-filter")
+        .filter_pattern("ERROR")
+        .destination_arn(lambda_arn)
+        .send()
+        .await
+        .unwrap();
+
+    // Put log events (some match, some don't)
+    let now = chrono::Utc::now().timestamp_millis();
+    logs_client
+        .put_log_events()
+        .log_group_name("/lambda-sub/test")
+        .log_stream_name("stream-1")
+        .log_events(
+            InputLogEvent::builder()
+                .timestamp(now)
+                .message("ERROR: something broke")
+                .build()
+                .unwrap(),
+        )
+        .log_events(
+            InputLogEvent::builder()
+                .timestamp(now + 1000)
+                .message("INFO: all good")
+                .build()
+                .unwrap(),
+        )
+        .log_events(
+            InputLogEvent::builder()
+                .timestamp(now + 2000)
+                .message("ERROR: disk full")
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    // Wait for async Lambda invocation via subscription filter
+    sleep(Duration::from_secs(3)).await;
+
+    // Verify Lambda was invoked with filtered log events
+    let messages = sqs_client
+        .receive_message()
+        .queue_url(queue_url)
+        .max_number_of_messages(10)
+        .send()
+        .await
+        .unwrap();
+
+    let msgs = messages.messages();
+    assert_eq!(msgs.len(), 1, "Lambda should have echoed one message");
+
+    let body: Value = serde_json::from_str(msgs[0].body().unwrap()).unwrap();
+    assert_eq!(body["logGroup"], "/lambda-sub/test");
+    assert_eq!(body["logStream"], "stream-1");
+
+    let log_events = body["logEvents"].as_array().unwrap();
+    // Filter pattern "ERROR" should match only 2 events
+    assert_eq!(log_events.len(), 2, "Should have filtered 2 ERROR events");
+    assert!(log_events[0]["message"].as_str().unwrap().contains("ERROR"));
+    assert!(log_events[1]["message"].as_str().unwrap().contains("ERROR"));
+}
+
+// ---- Cross-service integrations: CloudWatch Logs → Kinesis ----
+
+#[tokio::test]
+async fn logs_subscription_filter_streams_to_kinesis() {
+    use tokio::time::{sleep, Duration};
+
+    let server = TestServer::start().await;
+    let logs_client = server.logs_client().await;
+    let kinesis_client = server.kinesis_client().await;
+
+    // Create Kinesis stream
+    kinesis_client
+        .create_stream()
+        .stream_name("logs-kinesis-test")
+        .shard_count(1)
+        .send()
+        .await
+        .unwrap();
+
+    // Construct stream ARN (AWS format: arn:aws:kinesis:region:account:stream/StreamName)
+    let stream_arn = "arn:aws:kinesis:us-east-1:123456789012:stream/logs-kinesis-test";
+
+    // Create log group and stream
+    logs_client
+        .create_log_group()
+        .log_group_name("/kinesis-sub/test")
+        .send()
+        .await
+        .unwrap();
+    logs_client
+        .create_log_stream()
+        .log_group_name("/kinesis-sub/test")
+        .log_stream_name("stream-a")
+        .send()
+        .await
+        .unwrap();
+
+    // Create subscription filter with Kinesis destination
+    logs_client
+        .put_subscription_filter()
+        .log_group_name("/kinesis-sub/test")
+        .filter_name("kinesis-filter")
+        .filter_pattern("") // Empty pattern matches all events
+        .destination_arn(stream_arn)
+        .send()
+        .await
+        .unwrap();
+
+    // Put log events
+    let now = chrono::Utc::now().timestamp_millis();
+    logs_client
+        .put_log_events()
+        .log_group_name("/kinesis-sub/test")
+        .log_stream_name("stream-a")
+        .log_events(
+            InputLogEvent::builder()
+                .timestamp(now)
+                .message("event one")
+                .build()
+                .unwrap(),
+        )
+        .log_events(
+            InputLogEvent::builder()
+                .timestamp(now + 1000)
+                .message("event two")
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    // Wait for async delivery
+    sleep(Duration::from_millis(500)).await;
+
+    // Get records from Kinesis stream
+    let shard_iterator_resp = kinesis_client
+        .get_shard_iterator()
+        .stream_name("logs-kinesis-test")
+        .shard_id("shardId-000000000000")
+        .shard_iterator_type(aws_sdk_kinesis::types::ShardIteratorType::TrimHorizon)
+        .send()
+        .await
+        .unwrap();
+    let shard_iterator = shard_iterator_resp.shard_iterator().unwrap();
+
+    let records_resp = kinesis_client
+        .get_records()
+        .shard_iterator(shard_iterator)
+        .send()
+        .await
+        .unwrap();
+
+    let records = records_resp.records();
+    assert_eq!(
+        records.len(),
+        1,
+        "Should have one batched record in Kinesis"
+    );
+
+    // Decode the data - CloudWatch Logs sends gzipped+base64 data to Kinesis,
+    // but Kinesis stores it as raw bytes
+    let data_blob = records[0].data().as_ref();
+
+    // Data is already stored as raw bytes in Kinesis (the gzipped data)
+    // So we just need to decompress it
+    let decompressed = helpers::gunzip(data_blob);
+
+    let payload: Value = serde_json::from_slice(&decompressed).unwrap();
+
+    assert_eq!(payload["logGroup"], "/kinesis-sub/test");
+    assert_eq!(payload["logStream"], "stream-a");
+
+    let log_events = payload["logEvents"].as_array().unwrap();
+    assert_eq!(log_events.len(), 2);
+    assert_eq!(log_events[0]["message"], "event one");
+    assert_eq!(log_events[1]["message"], "event two");
+}
