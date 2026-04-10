@@ -32,6 +32,13 @@ impl TestServer {
             .map(|(_, v)| v.to_string())
             .unwrap_or_else(detect_container_cli);
 
+        let log_level = env
+            .iter()
+            .find(|(k, _)| *k == "FAKECLOUD_TEST_LOG_LEVEL")
+            .map(|(_, v)| v.to_string())
+            .or_else(|| std::env::var("FAKECLOUD_TEST_LOG_LEVEL").ok())
+            .unwrap_or_else(|| "warn".to_string());
+
         for _ in 0..3 {
             let port = find_available_port();
             let endpoint = format!("http://127.0.0.1:{port}");
@@ -41,10 +48,7 @@ impl TestServer {
                 // Bind to 0.0.0.0 so Lambda containers can reach the server via Docker bridge
                 .arg(format!("0.0.0.0:{port}"))
                 .arg("--log-level")
-                .arg(
-                    std::env::var("FAKECLOUD_TEST_LOG_LEVEL")
-                        .unwrap_or_else(|_| "warn".to_string()),
-                )
+                .arg(&log_level)
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
 
@@ -303,9 +307,12 @@ fn cli_available(cli: &str) -> bool {
 }
 
 async fn wait_for_port(child: &mut Child, port: u16) -> bool {
-    let addr = format!("127.0.0.1:{port}");
+    let loopback = format!("127.0.0.1:{port}");
+    let wildcard = format!("0.0.0.0:{port}");
     for _ in 0..300 {
-        if std::net::TcpStream::connect(&addr).is_ok() {
+        if std::net::TcpStream::connect(&loopback).is_ok()
+            || std::net::TcpStream::connect(&wildcard).is_ok()
+        {
             return true;
         }
         if child.try_wait().ok().flatten().is_some() {

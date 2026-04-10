@@ -7,6 +7,17 @@ use aws_sdk_lambda::primitives::Blob;
 use aws_sdk_lambda::types::{Environment, FunctionCode, Runtime};
 use helpers::TestServer;
 
+fn dockerized_endpoint(server: &TestServer) -> String {
+    format!("http://host.docker.internal:{}", server.port())
+}
+
+fn dockerized_queue_url(server: &TestServer, queue_name: &str) -> String {
+    format!(
+        "http://host.docker.internal:{}/123456789012/{}",
+        server.port(), queue_name
+    )
+}
+
 /// Create a ZIP file in memory containing a single file.
 fn make_zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
     let buf = Vec::new();
@@ -77,6 +88,7 @@ def lambda_handler(event, context):
 "#
 }
 
+
 /// Helper: create the result SQS queue and a Lambda function that writes to it.
 /// Returns (result_queue_url, lambda_function_name).
 async fn create_marker_lambda(
@@ -94,6 +106,8 @@ async fn create_marker_lambda(
         .await
         .unwrap();
     let queue_url = queue.queue_url().unwrap().to_string();
+    let docker_endpoint = dockerized_endpoint(server);
+    let docker_queue_url = dockerized_queue_url(server, queue_name);
 
     // Create Lambda with Python code that writes to the result queue
     let zip = make_zip(&[("lambda_function.py", python_sqs_writer_code().as_bytes())]);
@@ -106,8 +120,8 @@ async fn create_marker_lambda(
         .handler("lambda_function.lambda_handler")
         .environment(
             Environment::builder()
-                .variables("FAKECLOUD_ENDPOINT", server.endpoint())
-                .variables("RESULT_QUEUE_URL", &queue_url)
+                .variables("FAKECLOUD_ENDPOINT", &docker_endpoint)
+                .variables("RESULT_QUEUE_URL", &docker_queue_url)
                 .build(),
         )
         .code(FunctionCode::builder().zip_file(Blob::new(zip)).build())
@@ -121,32 +135,32 @@ async fn create_marker_lambda(
 /// Check the result queue for the marker message written by the Lambda.
 /// Returns true if the Lambda actually executed and wrote its marker.
 async fn check_marker(sqs: &aws_sdk_sqs::Client, queue_url: &str) -> bool {
-    // Give the Lambda time to execute (cold start + processing)
-    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    for _ in 0..10 {
+        let msgs = sqs
+            .receive_message()
+            .queue_url(queue_url)
+            .max_number_of_messages(10)
+            .wait_time_seconds(2)
+            .send()
+            .await
+            .unwrap();
 
-    let msgs = sqs
-        .receive_message()
-        .queue_url(queue_url)
-        .max_number_of_messages(10)
-        .wait_time_seconds(3)
-        .send()
-        .await
-        .unwrap();
-
-    for msg in msgs.messages() {
-        if let Some(body) = msg.body() {
-            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(body) {
-                if parsed["marker"] == "lambda-executed" {
-                    return true;
+        for msg in msgs.messages() {
+            if let Some(body) = msg.body() {
+                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(body) {
+                    if parsed["marker"] == "lambda-executed" {
+                        return true;
+                    }
                 }
             }
         }
+
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     }
     false
 }
 
 #[tokio::test]
-#[ignore] // Works locally, fails in CI - needs investigation of CI Docker networking
 async fn sns_to_lambda_executes_code() {
     let server = TestServer::start().await;
     let sns = server.sns_client().await;
@@ -192,7 +206,6 @@ async fn sns_to_lambda_executes_code() {
 }
 
 #[tokio::test]
-#[ignore] // Works locally, fails in CI - needs investigation of CI Docker networking
 async fn eventbridge_to_lambda_executes_code() {
     let server = TestServer::start().await;
     let eb = server.eventbridge_client().await;
@@ -247,7 +260,6 @@ async fn eventbridge_to_lambda_executes_code() {
 }
 
 #[tokio::test]
-#[ignore] // Works locally, fails in CI - needs investigation of CI Docker networking
 async fn sqs_to_lambda_event_source_mapping_executes_code() {
     let server = TestServer::start().await;
     let sqs = server.sqs_client().await;
@@ -294,7 +306,6 @@ async fn sqs_to_lambda_event_source_mapping_executes_code() {
 }
 
 #[tokio::test]
-#[ignore] // Works locally, fails in CI - needs investigation of CI Docker networking
 async fn s3_to_lambda_notification_executes_code() {
     let server = TestServer::start().await;
     let s3 = server.s3_client().await;
