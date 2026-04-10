@@ -145,13 +145,8 @@ async fn check_marker(sqs: &aws_sdk_sqs::Client, queue_url: &str) -> bool {
     false
 }
 
-// EXPECTED TO FAIL: Lambda cross-service execution not yet wired up
-//
-// SNS publishes to a topic subscribed by a Lambda. The Lambda should actually
-// execute and write a marker to an SQS queue. Currently SNS->Lambda only
-// records the invocation intent without invoking the Docker runtime.
 #[tokio::test]
-#[ignore] // Requires Docker with host.docker.internal networking
+#[ignore] // Works locally, fails in CI - needs investigation of CI Docker networking
 async fn sns_to_lambda_executes_code() {
     let server = TestServer::start().await;
     let sns = server.sns_client().await;
@@ -196,13 +191,8 @@ async fn sns_to_lambda_executes_code() {
     );
 }
 
-// EXPECTED TO FAIL: Lambda cross-service execution not yet wired up
-//
-// EventBridge rule targets a Lambda function. PutEvents should cause the
-// Lambda to actually execute via the Docker runtime and write a marker
-// to SQS. Currently EventBridge->Lambda only records the intent.
 #[tokio::test]
-#[ignore] // Requires Docker with host.docker.internal networking
+#[ignore] // Works locally, fails in CI - needs investigation of CI Docker networking
 async fn eventbridge_to_lambda_executes_code() {
     let server = TestServer::start().await;
     let eb = server.eventbridge_client().await;
@@ -256,14 +246,8 @@ async fn eventbridge_to_lambda_executes_code() {
     );
 }
 
-// EXPECTED TO FAIL: Lambda cross-service execution not yet wired up
-//
-// SQS event source mapping should poll a source queue and invoke the Lambda
-// with the messages. The Lambda should actually execute via Docker and write
-// a marker to a separate result queue. Currently the SQS poller records the
-// invocation but doesn't call the runtime.
 #[tokio::test]
-#[ignore] // Requires Docker with host.docker.internal networking
+#[ignore] // Works locally, fails in CI - needs investigation of CI Docker networking
 async fn sqs_to_lambda_event_source_mapping_executes_code() {
     let server = TestServer::start().await;
     let sqs = server.sqs_client().await;
@@ -309,14 +293,8 @@ async fn sqs_to_lambda_event_source_mapping_executes_code() {
     );
 }
 
-// EXPECTED TO FAIL: Lambda cross-service execution not yet wired up
-//
-// S3 bucket notification configured with LambdaFunctionConfiguration should
-// invoke the Lambda when an object is uploaded. The Lambda should actually
-// execute and write a marker to SQS. Currently S3 notifications only support
-// SQS targets, not Lambda.
 #[tokio::test]
-#[ignore] // Requires Docker with host.docker.internal networking
+#[ignore] // Works locally, fails in CI - needs investigation of CI Docker networking
 async fn s3_to_lambda_notification_executes_code() {
     let server = TestServer::start().await;
     let s3 = server.s3_client().await;

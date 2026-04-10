@@ -40,22 +40,22 @@ tests; they are an extra layer, not the whole story.
 
 ### Comparison
 
-| Feature | fakecloud | LocalStack Community |
-|---|---|---|
-| License | AGPL-3.0 | Proprietary |
-| Auth required | No | Yes (account + token) |
-| Commercial use | Free | Paid plans only |
-| Docker required | No (standalone binary) | Yes |
-| Startup time | ~500ms | ~3s |
-| Idle memory | ~10 MiB | ~150 MiB |
-| Install size | ~19 MB binary | ~1 GB Docker image |
-| AWS services | 18 | 30+ |
-| Test assertion SDKs | TypeScript, Python, Go, Rust | Python, Java |
-| Cognito User Pools | 80 operations | [Paid only](https://docs.localstack.cloud/references/licensing/) |
-| SES v2 | 97 operations | [Paid only](https://docs.localstack.cloud/references/licensing/) |
-| SES inbound email | Real receipt rule action execution | [Stored but never executed](https://docs.localstack.cloud/user-guide/aws/ses/) |
-| RDS | 22 operations, PostgreSQL/MySQL/MariaDB via Docker | [Paid only](https://docs.localstack.cloud/references/licensing/) |
-| ElastiCache | 44 operations, Redis and Valkey via Docker | [Paid only](https://docs.localstack.cloud/references/licensing/) |
+| Feature             | fakecloud                                          | LocalStack Community                                                           |
+| ------------------- | -------------------------------------------------- | ------------------------------------------------------------------------------ |
+| License             | AGPL-3.0                                           | Proprietary                                                                    |
+| Auth required       | No                                                 | Yes (account + token)                                                          |
+| Commercial use      | Free                                               | Paid plans only                                                                |
+| Docker required     | No (standalone binary)                             | Yes                                                                            |
+| Startup time        | ~500ms                                             | ~3s                                                                            |
+| Idle memory         | ~10 MiB                                            | ~150 MiB                                                                       |
+| Install size        | ~19 MB binary                                      | ~1 GB Docker image                                                             |
+| AWS services        | 18                                                 | 30+                                                                            |
+| Test assertion SDKs | TypeScript, Python, Go, Rust                       | Python, Java                                                                   |
+| Cognito User Pools  | 80 operations                                      | [Paid only](https://docs.localstack.cloud/references/licensing/)               |
+| SES v2              | 97 operations                                      | [Paid only](https://docs.localstack.cloud/references/licensing/)               |
+| SES inbound email   | Real receipt rule action execution                 | [Stored but never executed](https://docs.localstack.cloud/user-guide/aws/ses/) |
+| RDS                 | 22 operations, PostgreSQL/MySQL/MariaDB via Docker | [Paid only](https://docs.localstack.cloud/references/licensing/)               |
+| ElastiCache         | 44 operations, Redis and Valkey via Docker         | [Paid only](https://docs.localstack.cloud/references/licensing/)               |
 
 ## First-party SDKs
 
@@ -65,12 +65,12 @@ assertions and time control. They complement the main value proposition: a local
 AWS emulator you can run directly, compare against AWS behavior, and use without
 an account-gated platform in the middle.
 
-| Language | Install | Docs |
-|---|---|---|
-| TypeScript | `npm install fakecloud` | [`sdks/typescript/README.md`](sdks/typescript/README.md) |
-| Python | `pip install fakecloud` | [`sdks/python/README.md`](sdks/python/README.md) |
-| Go | `go get github.com/faiscadev/fakecloud/sdks/go` | [`sdks/go/README.md`](sdks/go/README.md) |
-| Rust | `cargo add fakecloud-sdk` | [`crates/fakecloud-sdk`](crates/fakecloud-sdk) |
+| Language   | Install                                         | Docs                                                     |
+| ---------- | ----------------------------------------------- | -------------------------------------------------------- |
+| TypeScript | `npm install fakecloud`                         | [`sdks/typescript/README.md`](sdks/typescript/README.md) |
+| Python     | `pip install fakecloud`                         | [`sdks/python/README.md`](sdks/python/README.md)         |
+| Go         | `go get github.com/faiscadev/fakecloud/sdks/go` | [`sdks/go/README.md`](sdks/go/README.md)                 |
+| Rust       | `cargo add fakecloud-sdk`                       | [`crates/fakecloud-sdk`](crates/fakecloud-sdk)           |
 
 Example test flow:
 
@@ -135,7 +135,7 @@ services:
     ports:
       - "4566:4566"
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock  # required for Lambda Invoke
+      - /var/run/docker.sock:/var/run/docker.sock # required for Lambda Invoke
     environment:
       FAKECLOUD_LOG: info
 ```
@@ -158,26 +158,26 @@ aws --endpoint-url http://localhost:4566 sqs create-queue --queue-name my-queue
 
 18 AWS services, 1002 API operations:
 
-| Service | Actions | Highlights |
-|---|---|---|
-| **S3** | 74 | Objects, multipart uploads, versioning, lifecycle, notifications, encryption, replication, website hosting |
-| **SQS** | 20 | FIFO queues, dead-letter queues, long polling, batch operations, MD5 hashing |
-| **SNS** | 34 | Fan-out to SQS/Lambda/HTTP, filter policies, platform applications |
-| **EventBridge** | 57 | Pattern matching, scheduled rules, archives, replay, connections, API destinations |
-| **IAM** | 128 | Users, roles, policies, groups, instance profiles, OIDC/SAML providers |
-| **STS** | 8 | AssumeRole, session tokens, federation |
-| **SSM** | 146 | Parameters, documents, commands, maintenance windows, associations, patch baselines |
-| **DynamoDB** | 57 | Tables, items, transactions, PartiQL, backups, global tables, exports/imports |
-| **Lambda** | 10 | Function CRUD, real code execution via Docker, event source mappings |
-| **Secrets Manager** | 23 | Versioning, soft delete, rotation with Lambda, replication |
-| **CloudWatch Logs** | 113 | Groups, streams, filtering, deliveries, transformers, query language, anomaly detection |
-| **KMS** | 53 | Encryption, key management, aliases, grants, real ECDH and key import |
-| **CloudFormation** | 8 | Template parsing, resource provisioning, custom resources via Lambda |
-| **SES** | 111 | **v2** (97 ops): identities, templates, configuration sets, contact lists, send email, suppression list, event destinations, DKIM/feedback/mail-from attributes, dedicated IP pools, account settings, import/export jobs, event fanout (SNS/EventBridge), mailbox simulator. **v1 inbound** (14 ops): receipt rule sets, receipt rules, receipt filters, inbound email pipeline with S3/SNS/Lambda actions |
-| **Cognito User Pools** | 80 | User pools, app clients, users, groups, MFA, identity providers, resource servers, domains, devices, authentication flows, password management |
-| **Kinesis** | 14 | Streams, records, shard iterators, retention changes, stream tagging |
-| **RDS** | 22 | DB instances (PostgreSQL, MySQL, MariaDB via Docker), snapshots, read replicas, parameter groups, subnet groups, engine/version discovery, tagging |
-| **ElastiCache** | 44 | Cache clusters, replication groups, global replication groups, serverless caches and snapshots, subnet groups, users/user groups, failover, tagging (Redis and Valkey via Docker) |
+| Service                | Actions | Highlights                                                                                                                                                                                                                                                                                                                                                                                                  |
+| ---------------------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **S3**                 | 74      | Objects, multipart uploads, versioning, lifecycle, notifications, encryption, replication, website hosting                                                                                                                                                                                                                                                                                                  |
+| **SQS**                | 20      | FIFO queues, dead-letter queues, long polling, batch operations, MD5 hashing                                                                                                                                                                                                                                                                                                                                |
+| **SNS**                | 34      | Fan-out to SQS/Lambda/HTTP, filter policies, platform applications                                                                                                                                                                                                                                                                                                                                          |
+| **EventBridge**        | 57      | Pattern matching, scheduled rules, archives, replay, connections, API destinations                                                                                                                                                                                                                                                                                                                          |
+| **IAM**                | 128     | Users, roles, policies, groups, instance profiles, OIDC/SAML providers                                                                                                                                                                                                                                                                                                                                      |
+| **STS**                | 8       | AssumeRole, session tokens, federation                                                                                                                                                                                                                                                                                                                                                                      |
+| **SSM**                | 146     | Parameters, documents, commands, maintenance windows, associations, patch baselines                                                                                                                                                                                                                                                                                                                         |
+| **DynamoDB**           | 57      | Tables, items, transactions, PartiQL, backups, global tables, exports/imports                                                                                                                                                                                                                                                                                                                               |
+| **Lambda**             | 10      | Function CRUD, real code execution via Docker, event source mappings                                                                                                                                                                                                                                                                                                                                        |
+| **Secrets Manager**    | 23      | Versioning, soft delete, rotation with Lambda, replication                                                                                                                                                                                                                                                                                                                                                  |
+| **CloudWatch Logs**    | 113     | Groups, streams, filtering, deliveries, transformers, query language, anomaly detection                                                                                                                                                                                                                                                                                                                     |
+| **KMS**                | 53      | Encryption, key management, aliases, grants, real ECDH and key import                                                                                                                                                                                                                                                                                                                                       |
+| **CloudFormation**     | 8       | Template parsing, resource provisioning, custom resources via Lambda                                                                                                                                                                                                                                                                                                                                        |
+| **SES**                | 111     | **v2** (97 ops): identities, templates, configuration sets, contact lists, send email, suppression list, event destinations, DKIM/feedback/mail-from attributes, dedicated IP pools, account settings, import/export jobs, event fanout (SNS/EventBridge), mailbox simulator. **v1 inbound** (14 ops): receipt rule sets, receipt rules, receipt filters, inbound email pipeline with S3/SNS/Lambda actions |
+| **Cognito User Pools** | 80      | User pools, app clients, users, groups, MFA, identity providers, resource servers, domains, devices, authentication flows, password management                                                                                                                                                                                                                                                              |
+| **Kinesis**            | 14      | Streams, records, shard iterators, retention changes, stream tagging                                                                                                                                                                                                                                                                                                                                        |
+| **RDS**                | 22      | DB instances (PostgreSQL, MySQL, MariaDB via Docker), snapshots, read replicas, parameter groups, subnet groups, engine/version discovery, tagging                                                                                                                                                                                                                                                          |
+| **ElastiCache**        | 44      | Cache clusters, replication groups, global replication groups, serverless caches and snapshots, subnet groups, users/user groups, failover, tagging (Redis and Valkey via Docker)                                                                                                                                                                                                                           |
 
 ### Cross-Service Integration
 
@@ -199,13 +199,13 @@ integration tests:
 
 fakecloud is configured via CLI flags or environment variables.
 
-| Flag | Env Var | Default | Description |
-|---|---|---|---|
-| `--addr` | `FAKECLOUD_ADDR` | `0.0.0.0:4566` | Listen address and port |
-| `--region` | `FAKECLOUD_REGION` | `us-east-1` | AWS region to advertise |
-| `--account-id` | `FAKECLOUD_ACCOUNT_ID` | `123456789012` | AWS account ID |
-| `--log-level` | `FAKECLOUD_LOG` | `info` | Log level (trace, debug, info, warn, error) |
-| | `FAKECLOUD_CONTAINER_CLI` | auto-detect | Container CLI to use (`docker` or `podman`) |
+| Flag           | Env Var                   | Default        | Description                                 |
+| -------------- | ------------------------- | -------------- | ------------------------------------------- |
+| `--addr`       | `FAKECLOUD_ADDR`          | `0.0.0.0:4566` | Listen address and port                     |
+| `--region`     | `FAKECLOUD_REGION`        | `us-east-1`    | AWS region to advertise                     |
+| `--account-id` | `FAKECLOUD_ACCOUNT_ID`    | `123456789012` | AWS account ID                              |
+| `--log-level`  | `FAKECLOUD_LOG`           | `info`         | Log level (trace, debug, info, warn, error) |
+|                | `FAKECLOUD_CONTAINER_CLI` | auto-detect    | Container CLI to use (`docker` or `podman`) |
 
 ```sh
 # Examples
@@ -223,7 +223,26 @@ curl http://localhost:4566/_fakecloud/health
 {
   "status": "ok",
   "version": "0.6.1",
-  "services": ["cloudformation", "cognito-idp", "dynamodb", "elasticache", "events", "iam", "kinesis", "kms", "lambda", "logs", "rds", "s3", "secretsmanager", "ses", "sns", "sqs", "ssm", "sts"]
+  "services": [
+    "cloudformation",
+    "cognito-idp",
+    "dynamodb",
+    "elasticache",
+    "events",
+    "iam",
+    "kinesis",
+    "kms",
+    "lambda",
+    "logs",
+    "rds",
+    "s3",
+    "secretsmanager",
+    "ses",
+    "sns",
+    "sqs",
+    "ssm",
+    "sts"
+  ]
 }
 ```
 
@@ -231,64 +250,65 @@ curl http://localhost:4566/_fakecloud/health
 
 fakecloud exposes `/_fakecloud/*` endpoints for testing behaviors that AWS runs asynchronously (TTL expiration, scheduled rotation, etc.). Call these to advance time-dependent processes on demand.
 
-| Endpoint | Method | Description |
-|---|---|---|
-| `/_fakecloud/dynamodb/ttl-processor/tick` | POST | Expire DynamoDB items whose TTL attribute is in the past. Returns `{"expiredItems": N}`. |
-| `/_fakecloud/secretsmanager/rotation-scheduler/tick` | POST | Rotate secrets whose rotation schedule is due. Returns `{"rotatedSecrets": ["name", ...]}`. |
-| `/_fakecloud/s3/lifecycle-processor/tick` | POST | Run one S3 lifecycle processing tick. Returns `{"processedBuckets": N, "expiredObjects": N, "transitionedObjects": N}`. |
-| `/_fakecloud/sqs/expiration-processor/tick` | POST | Expire SQS messages past retention period. Returns `{"expiredMessages": N}`. |
-| `/_fakecloud/sqs/{queue_name}/force-dlq` | POST | Force-move messages exceeding maxReceiveCount to DLQ. Returns `{"movedMessages": N}`. |
-| `/_fakecloud/events/fire-rule` | POST | Fire an EventBridge rule regardless of state. Body: `{"busName": "...", "ruleName": "..."}`. |
-| `/_fakecloud/lambda/invocations` | GET | List all Lambda invocations (introspection). |
-| `/_fakecloud/lambda/warm-containers` | GET | List all warm Lambda containers. Returns `{"containers": [...]}`. |
-| `/_fakecloud/lambda/{function-name}/evict-container` | POST | Evict a warm Lambda container (forces cold start). Returns `{"evicted": true/false}`. |
-| `/_fakecloud/rds/instances` | GET | List all fakecloud-managed RDS DB instances, including runtime metadata such as container id and mapped host port. |
-| `/_fakecloud/sns/messages` | GET | List all published SNS messages. |
-| `/_fakecloud/sns/pending-confirmations` | GET | List SNS subscriptions pending confirmation. Returns `{"pendingConfirmations": [...]}`. |
-| `/_fakecloud/sns/confirm-subscription` | POST | Force-confirm an SNS subscription. Body: `{"subscriptionArn": "..."}`. Returns `{"confirmed": true}`. |
-| `/_fakecloud/sqs/messages` | GET | List all SQS messages across queues. |
-| `/_fakecloud/events/history` | GET | List all EventBridge events and deliveries. |
-| `/_fakecloud/s3/notifications` | GET | List all S3 notification events. |
-| `/_fakecloud/ses/emails` | GET | List all sent SES emails. |
-| `/_fakecloud/ses/inbound` | POST | Simulate receiving an inbound email. Evaluates receipt rules and executes actions. |
-| `/_fakecloud/cognito/confirmation-codes` | GET | List all pending confirmation codes across all pools and users. |
-| `/_fakecloud/cognito/confirmation-codes/{pool_id}/{username}` | GET | Get confirmation codes for a specific user. |
-| `/_fakecloud/cognito/confirm-user` | POST | Force-confirm a user. Body: `{"userPoolId": "...", "username": "..."}`. |
-| `/_fakecloud/cognito/tokens` | GET | List all active access and refresh tokens (without exposing token strings). |
-| `/_fakecloud/cognito/expire-tokens` | POST | Expire tokens. Body: `{"userPoolId": "...", "username": "..."}` (both optional). |
-| `/_fakecloud/cognito/auth-events` | GET | List all auth events (sign-up, sign-in, failures, password changes). |
-| `/_fakecloud/reset` | POST | Reset all state across all services. |
-| `/_fakecloud/reset/{service}` | POST | Reset only the specified service's state. Returns `{"reset": "service_name"}`. |
+| Endpoint                                                      | Method | Description                                                                                                             |
+| ------------------------------------------------------------- | ------ | ----------------------------------------------------------------------------------------------------------------------- |
+| `/_fakecloud/dynamodb/ttl-processor/tick`                     | POST   | Expire DynamoDB items whose TTL attribute is in the past. Returns `{"expiredItems": N}`.                                |
+| `/_fakecloud/secretsmanager/rotation-scheduler/tick`          | POST   | Rotate secrets whose rotation schedule is due. Returns `{"rotatedSecrets": ["name", ...]}`.                             |
+| `/_fakecloud/s3/lifecycle-processor/tick`                     | POST   | Run one S3 lifecycle processing tick. Returns `{"processedBuckets": N, "expiredObjects": N, "transitionedObjects": N}`. |
+| `/_fakecloud/sqs/expiration-processor/tick`                   | POST   | Expire SQS messages past retention period. Returns `{"expiredMessages": N}`.                                            |
+| `/_fakecloud/sqs/{queue_name}/force-dlq`                      | POST   | Force-move messages exceeding maxReceiveCount to DLQ. Returns `{"movedMessages": N}`.                                   |
+| `/_fakecloud/events/fire-rule`                                | POST   | Fire an EventBridge rule regardless of state. Body: `{"busName": "...", "ruleName": "..."}`.                            |
+| `/_fakecloud/lambda/invocations`                              | GET    | List all Lambda invocations (introspection).                                                                            |
+| `/_fakecloud/lambda/warm-containers`                          | GET    | List all warm Lambda containers. Returns `{"containers": [...]}`.                                                       |
+| `/_fakecloud/lambda/{function-name}/evict-container`          | POST   | Evict a warm Lambda container (forces cold start). Returns `{"evicted": true/false}`.                                   |
+| `/_fakecloud/rds/instances`                                   | GET    | List all fakecloud-managed RDS DB instances, including runtime metadata such as container id and mapped host port.      |
+| `/_fakecloud/sns/messages`                                    | GET    | List all published SNS messages.                                                                                        |
+| `/_fakecloud/sns/pending-confirmations`                       | GET    | List SNS subscriptions pending confirmation. Returns `{"pendingConfirmations": [...]}`.                                 |
+| `/_fakecloud/sns/confirm-subscription`                        | POST   | Force-confirm an SNS subscription. Body: `{"subscriptionArn": "..."}`. Returns `{"confirmed": true}`.                   |
+| `/_fakecloud/sqs/messages`                                    | GET    | List all SQS messages across queues.                                                                                    |
+| `/_fakecloud/events/history`                                  | GET    | List all EventBridge events and deliveries.                                                                             |
+| `/_fakecloud/s3/notifications`                                | GET    | List all S3 notification events.                                                                                        |
+| `/_fakecloud/ses/emails`                                      | GET    | List all sent SES emails.                                                                                               |
+| `/_fakecloud/ses/inbound`                                     | POST   | Simulate receiving an inbound email. Evaluates receipt rules and executes actions.                                      |
+| `/_fakecloud/cognito/confirmation-codes`                      | GET    | List all pending confirmation codes across all pools and users.                                                         |
+| `/_fakecloud/cognito/confirmation-codes/{pool_id}/{username}` | GET    | Get confirmation codes for a specific user.                                                                             |
+| `/_fakecloud/cognito/confirm-user`                            | POST   | Force-confirm a user. Body: `{"userPoolId": "...", "username": "..."}`.                                                 |
+| `/_fakecloud/cognito/tokens`                                  | GET    | List all active access and refresh tokens (without exposing token strings).                                             |
+| `/_fakecloud/cognito/expire-tokens`                           | POST   | Expire tokens. Body: `{"userPoolId": "...", "username": "..."}` (both optional).                                        |
+| `/_fakecloud/cognito/auth-events`                             | GET    | List all auth events (sign-up, sign-in, failures, password changes).                                                    |
+| `/_fakecloud/reset`                                           | POST   | Reset all state across all services.                                                                                    |
+| `/_fakecloud/reset/{service}`                                 | POST   | Reset only the specified service's state. Returns `{"reset": "service_name"}`.                                          |
 
 ## Architecture
 
 fakecloud is organized as a Cargo workspace:
 
-| Crate | Purpose |
-|---|---|
-| `fakecloud` | Binary entry point (clap CLI, Axum HTTP server) |
-| `fakecloud-core` | `AwsService` trait, service registry, request dispatch, protocol parsing |
-| `fakecloud-aws` | Shared AWS types (ARNs, error builders, SigV4 parser) |
-| `fakecloud-sqs` | SQS implementation |
-| `fakecloud-sns` | SNS implementation with delivery |
-| `fakecloud-eventbridge` | EventBridge implementation with scheduler |
-| `fakecloud-iam` | IAM and STS implementation |
-| `fakecloud-ssm` | SSM Parameter Store implementation |
-| `fakecloud-dynamodb` | DynamoDB implementation |
-| `fakecloud-lambda` | Lambda implementation with Docker-based execution |
-| `fakecloud-secretsmanager` | Secrets Manager implementation |
-| `fakecloud-s3` | S3 implementation |
-| `fakecloud-logs` | CloudWatch Logs implementation |
-| `fakecloud-kms` | KMS implementation |
-| `fakecloud-cloudformation` | CloudFormation implementation |
-| `fakecloud-ses` | SES implementation (v2 REST + v1 inbound Query) |
-| `fakecloud-cognito` | Cognito User Pools implementation |
-| `fakecloud-kinesis` | Kinesis implementation |
-| `fakecloud-rds` | RDS implementation with Docker-backed database execution |
-| `fakecloud-elasticache` | ElastiCache implementation with Docker-backed Redis execution |
-| `fakecloud-e2e` | End-to-end tests using aws-sdk-rust |
+| Crate                      | Purpose                                                                  |
+| -------------------------- | ------------------------------------------------------------------------ |
+| `fakecloud`                | Binary entry point (clap CLI, Axum HTTP server)                          |
+| `fakecloud-core`           | `AwsService` trait, service registry, request dispatch, protocol parsing |
+| `fakecloud-aws`            | Shared AWS types (ARNs, error builders, SigV4 parser)                    |
+| `fakecloud-sqs`            | SQS implementation                                                       |
+| `fakecloud-sns`            | SNS implementation with delivery                                         |
+| `fakecloud-eventbridge`    | EventBridge implementation with scheduler                                |
+| `fakecloud-iam`            | IAM and STS implementation                                               |
+| `fakecloud-ssm`            | SSM Parameter Store implementation                                       |
+| `fakecloud-dynamodb`       | DynamoDB implementation                                                  |
+| `fakecloud-lambda`         | Lambda implementation with Docker-based execution                        |
+| `fakecloud-secretsmanager` | Secrets Manager implementation                                           |
+| `fakecloud-s3`             | S3 implementation                                                        |
+| `fakecloud-logs`           | CloudWatch Logs implementation                                           |
+| `fakecloud-kms`            | KMS implementation                                                       |
+| `fakecloud-cloudformation` | CloudFormation implementation                                            |
+| `fakecloud-ses`            | SES implementation (v2 REST + v1 inbound Query)                          |
+| `fakecloud-cognito`        | Cognito User Pools implementation                                        |
+| `fakecloud-kinesis`        | Kinesis implementation                                                   |
+| `fakecloud-rds`            | RDS implementation with Docker-backed database execution                 |
+| `fakecloud-elasticache`    | ElastiCache implementation with Docker-backed Redis execution            |
+| `fakecloud-e2e`            | End-to-end tests using aws-sdk-rust                                      |
 
 Protocol handling:
+
 - **Query protocol** (SQS, SNS, IAM, STS, CloudFormation, SES v1, RDS, ElastiCache): form-encoded body, `Action` parameter, XML responses
 - **JSON protocol** (SSM, EventBridge, DynamoDB, Secrets Manager, CloudWatch Logs, KMS, Cognito User Pools, Kinesis): JSON body, `X-Amz-Target` header, JSON responses
 - **REST protocol** (S3, Lambda, SES v2): HTTP method + path-based routing, XML/JSON responses
@@ -354,7 +374,9 @@ Cursor, GitHub Copilot) automatically use fakecloud for AWS integration tests.
 
 ```markdown
 ## AWS Testing
+
 For integration tests, use fakecloud as a local AWS emulator.
+
 - Install: `curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash`
 - Run: `fakecloud` (listens on http://localhost:4566)
 - Configure AWS SDK endpoint to http://localhost:4566 with dummy credentials (access_key=test, secret_key=test)
@@ -381,7 +403,9 @@ Docs: https://fakecloud.dev/llms.txt
 
 ```markdown
 ## AWS Testing
+
 Use fakecloud as a local AWS emulator for integration tests.
+
 - Run: `fakecloud` (listens on http://localhost:4566)
 - Configure endpoint_url to http://localhost:4566 with dummy credentials
 - Docs: https://fakecloud.dev/llms.txt
