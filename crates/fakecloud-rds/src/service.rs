@@ -898,14 +898,22 @@ impl RdsService {
             (source_instance, db_name)
         };
 
-        let dump_data = runtime
+        let dump_data = match runtime
             .dump_database(
                 &source_db_instance_identifier,
                 &source_instance.master_username,
                 &db_name,
             )
             .await
-            .map_err(runtime_error_to_service_error)?;
+        {
+            Ok(data) => data,
+            Err(e) => {
+                self.state
+                    .write()
+                    .cancel_instance_creation(&db_instance_identifier);
+                return Err(runtime_error_to_service_error(e));
+            }
+        };
 
         let dbi_resource_id = self.state.read().next_dbi_resource_id();
         let db_instance_arn = self.state.read().db_instance_arn(&db_instance_identifier);
@@ -970,10 +978,16 @@ impl RdsService {
             read_replica_db_instance_identifiers: Vec::new(),
         };
 
-        if let Some(source) = state.instances.get_mut(&source_db_instance_identifier) {
-            source
-                .read_replica_db_instance_identifiers
-                .push(db_instance_identifier.clone());
+        match state.instances.get_mut(&source_db_instance_identifier) {
+            Some(source) => {
+                source
+                    .read_replica_db_instance_identifiers
+                    .push(db_instance_identifier.clone());
+            }
+            None => {
+                state.cancel_instance_creation(&db_instance_identifier);
+                return Err(db_instance_not_found(&source_db_instance_identifier));
+            }
         }
 
         state.finish_instance_creation(replica.clone());
