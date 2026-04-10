@@ -4,7 +4,7 @@
 
 - Single binary, no Docker required, starts in under 100ms
 - 18 AWS services (1002 operations): S3, SQS, SNS, EventBridge, IAM/STS, SSM, DynamoDB, Lambda, Secrets Manager, CloudWatch Logs, KMS, CloudFormation, SES, Cognito User Pools, Kinesis, RDS, ElastiCache
-- Cross-service delivery: S3 notifications to SNS/SQS, SNS fan-out to SQS, EventBridge rules to SNS/SQS
+- 28 cross-service integrations: S3 notifications, SNS fanout, EventBridge rules, DynamoDB Streams, CloudWatch Logs subscriptions, Cognito triggers, and more
 - Scheduled EventBridge rules (cron and rate) that actually fire
 - Conformance tested against real AWS behavior
 - AGPL-3.0 licensed, free for commercial use
