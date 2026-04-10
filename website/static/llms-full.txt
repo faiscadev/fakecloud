@@ -70,7 +70,7 @@ fakecloud listens at `http://localhost:4566`.
 ### Health check
 ```sh
 curl http://localhost:4566/_fakecloud/health
-# Returns: {"status":"ok","version":"0.6.0","services":["cloudformation","cognito-idp","dynamodb","elasticache","events","iam","kinesis","kms","lambda","logs","rds","s3","secretsmanager","ses","sns","sqs","ssm","sts"]}
+# Returns: {"status":"ok","version":"0.6.1","services":["cloudformation","cognito-idp","dynamodb","elasticache","events","iam","kinesis","kms","lambda","logs","rds","s3","secretsmanager","ses","sns","sqs","ssm","sts"]}
 ```
 
 ## Using with AWS SDKs
