@@ -81,6 +81,7 @@ pub struct DbSnapshot {
     pub snapshot_type: String,
     pub master_user_password: String,
     pub tags: Vec<RdsTag>,
+    pub dump_data: Vec<u8>,
 }
 
 impl fmt::Debug for DbSnapshot {
@@ -101,6 +102,7 @@ impl fmt::Debug for DbSnapshot {
             .field("snapshot_type", &self.snapshot_type)
             .field("master_user_password", &"<redacted>")
             .field("tags", &self.tags)
+            .field("dump_data", &format!("<{} bytes>", self.dump_data.len()))
             .finish()
     }
 }

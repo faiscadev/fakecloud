@@ -60,7 +60,7 @@ impl AwsService for RdsService {
         match request.action.as_str() {
             "AddTagsToResource" => self.add_tags_to_resource(&request),
             "CreateDBInstance" => self.create_db_instance(&request).await,
-            "CreateDBSnapshot" => self.create_db_snapshot(&request),
+            "CreateDBSnapshot" => self.create_db_snapshot(&request).await,
             "DeleteDBInstance" => self.delete_db_instance(&request).await,
             "DeleteDBSnapshot" => self.delete_db_snapshot(&request),
             "DescribeDBEngineVersions" => self.describe_db_engine_versions(&request),
@@ -561,25 +561,53 @@ impl RdsService {
         ))
     }
 
-    fn create_db_snapshot(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+    async fn create_db_snapshot(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
         let db_snapshot_identifier = required_param(request, "DBSnapshotIdentifier")?;
         let db_instance_identifier = required_param(request, "DBInstanceIdentifier")?;
 
+        let runtime = self.runtime.as_ref().ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "InvalidParameterValue",
+                "Docker/Podman is required for RDS snapshots but is not available",
+            )
+        })?;
+
+        let (instance, db_name) = {
+            let state = self.state.write();
+
+            if state.snapshots.contains_key(&db_snapshot_identifier) {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::CONFLICT,
+                    "DBSnapshotAlreadyExists",
+                    format!("DBSnapshot {db_snapshot_identifier} already exists."),
+                ));
+            }
+
+            let instance = state
+                .instances
+                .get(&db_instance_identifier)
+                .cloned()
+                .ok_or_else(|| db_instance_not_found(&db_instance_identifier))?;
+
+            let db_name = instance
+                .db_name
+                .as_deref()
+                .unwrap_or("postgres")
+                .to_string();
+
+            (instance, db_name)
+        };
+
+        let dump_data = runtime
+            .dump_database(&db_instance_identifier, &instance.master_username, &db_name)
+            .await
+            .map_err(runtime_error_to_service_error)?;
+
         let mut state = self.state.write();
-
-        if state.snapshots.contains_key(&db_snapshot_identifier) {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::CONFLICT,
-                "DBSnapshotAlreadyExists",
-                format!("DBSnapshot {db_snapshot_identifier} already exists."),
-            ));
-        }
-
-        let instance = state
-            .instances
-            .get(&db_instance_identifier)
-            .cloned()
-            .ok_or_else(|| db_instance_not_found(&db_instance_identifier))?;
 
         let snapshot = DbSnapshot {
             db_snapshot_identifier: db_snapshot_identifier.clone(),
@@ -597,6 +625,7 @@ impl RdsService {
             snapshot_type: "manual".to_string(),
             master_user_password: instance.master_user_password.clone(),
             tags: Vec::new(),
+            dump_data,
         };
 
         state
@@ -731,6 +760,16 @@ impl RdsService {
                 &snapshot.master_username,
                 &snapshot.master_user_password,
                 db_name,
+            )
+            .await
+            .map_err(runtime_error_to_service_error)?;
+
+        runtime
+            .restore_database(
+                &db_instance_identifier,
+                &snapshot.master_username,
+                db_name,
+                &snapshot.dump_data,
             )
             .await
             .map_err(runtime_error_to_service_error)?;

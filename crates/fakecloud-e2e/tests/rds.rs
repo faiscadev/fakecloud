@@ -385,6 +385,42 @@ async fn rds_restore_from_snapshot() {
 
     create_instance(&client, "orders-source-db").await;
 
+    let create_instance_response = client
+        .describe_db_instances()
+        .db_instance_identifier("orders-source-db")
+        .send()
+        .await
+        .unwrap();
+    let source_instance = &create_instance_response.db_instances()[0];
+    let source_endpoint = source_instance.endpoint().unwrap();
+
+    let (source_client, source_connection) = connect_with_retry(
+        source_endpoint.address().unwrap(),
+        source_endpoint.port().unwrap(),
+        "admin",
+        "secret123",
+        "appdb",
+    )
+    .await
+    .unwrap();
+    tokio::spawn(async move {
+        if let Err(e) = source_connection.await {
+            eprintln!("connection error: {}", e);
+        }
+    });
+
+    source_client
+        .execute("CREATE TABLE test_table (id INT, name TEXT)", &[])
+        .await
+        .unwrap();
+    source_client
+        .execute(
+            "INSERT INTO test_table (id, name) VALUES (1, 'snapshot test data')",
+            &[],
+        )
+        .await
+        .unwrap();
+
     client
         .create_db_snapshot()
         .db_instance_identifier("orders-source-db")
@@ -418,11 +454,9 @@ async fn rds_restore_from_snapshot() {
         .unwrap();
     let instances = describe_response.db_instances();
     assert_eq!(instances.len(), 1);
-    assert_eq!(instances[0].engine(), Some("postgres"));
-    assert_eq!(instances[0].master_username(), Some("admin"));
-
     let restored_endpoint = instances[0].endpoint().unwrap();
-    let (_, restored_connection) = connect_with_retry(
+
+    let (restored_client, restored_connection) = connect_with_retry(
         restored_endpoint.address().unwrap(),
         restored_endpoint.port().unwrap(),
         "admin",
@@ -436,6 +470,13 @@ async fn rds_restore_from_snapshot() {
             eprintln!("connection error: {}", e);
         }
     });
+
+    let row = restored_client
+        .query_one("SELECT name FROM test_table WHERE id = 1", &[])
+        .await
+        .unwrap();
+    let name: String = row.get(0);
+    assert_eq!(name, "snapshot test data");
 }
 
 async fn create_instance_with_deletion_protection(
