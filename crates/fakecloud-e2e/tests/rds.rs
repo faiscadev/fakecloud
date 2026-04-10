@@ -188,6 +188,7 @@ async fn rds_delete_db_instance_respects_deletion_protection() {
 
     create_instance_with_deletion_protection(&client, "orders-protected-db", true).await;
 
+    // Test with skip_final_snapshot=true
     let error = client
         .delete_db_instance()
         .db_instance_identifier("orders-protected-db")
@@ -200,6 +201,20 @@ async fn rds_delete_db_instance_respects_deletion_protection() {
         Some("InvalidDBInstanceState")
     );
 
+    // Test with final snapshot - should fail BEFORE creating snapshot
+    let error = client
+        .delete_db_instance()
+        .db_instance_identifier("orders-protected-db")
+        .final_db_snapshot_identifier("protected-snapshot")
+        .send()
+        .await
+        .expect_err("deletion protection should block deletion before snapshot creation");
+    assert_eq!(
+        error.into_service_error().meta().code(),
+        Some("InvalidDBInstanceState")
+    );
+
+    // Verify instance still exists
     let response = client
         .describe_db_instances()
         .db_instance_identifier("orders-protected-db")
@@ -207,6 +222,17 @@ async fn rds_delete_db_instance_respects_deletion_protection() {
         .await
         .unwrap();
     assert_eq!(response.db_instances().len(), 1);
+
+    // Verify NO snapshot was created (critical: proves deletion protection checked BEFORE snapshot)
+    let snapshots_response = client.describe_db_snapshots().send().await.unwrap();
+    let protected_snapshot = snapshots_response
+        .db_snapshots()
+        .iter()
+        .find(|s| s.db_snapshot_identifier() == Some("protected-snapshot"));
+    assert!(
+        protected_snapshot.is_none(),
+        "Snapshot should NOT be created when deletion protection blocks deletion"
+    );
 }
 
 #[tokio::test]

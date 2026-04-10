@@ -296,6 +296,25 @@ impl RdsService {
             ));
         }
 
+        // Check deletion protection BEFORE creating snapshot or making any changes
+        {
+            let state = self.state.read();
+            if let Some(instance) = state.instances.get(&db_instance_identifier) {
+                if instance.deletion_protection {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "InvalidDBInstanceState",
+                        format!(
+                            "DBInstance {} cannot be deleted because deletion protection is enabled.",
+                            db_instance_identifier
+                        ),
+                    ));
+                }
+            } else {
+                return Err(db_instance_not_found(&db_instance_identifier));
+            }
+        }
+
         // Create final snapshot if requested
         if let Some(ref snapshot_id) = final_db_snapshot_identifier {
             let runtime = self.runtime.as_ref().ok_or_else(|| {
@@ -381,20 +400,6 @@ impl RdsService {
                 .instances
                 .remove(&db_instance_identifier)
                 .ok_or_else(|| db_instance_not_found(&db_instance_identifier))?;
-
-            if instance.deletion_protection {
-                state
-                    .instances
-                    .insert(db_instance_identifier.clone(), instance.clone());
-                return Err(AwsServiceError::aws_error(
-                    StatusCode::BAD_REQUEST,
-                    "InvalidDBInstanceState",
-                    format!(
-                        "DBInstance {} cannot be deleted because deletion protection is enabled.",
-                        db_instance_identifier
-                    ),
-                ));
-            }
 
             if let Some(source_id) = &instance.read_replica_source_db_instance_identifier {
                 if let Some(source) = state.instances.get_mut(source_id) {
