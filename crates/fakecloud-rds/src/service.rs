@@ -1219,13 +1219,18 @@ impl RdsService {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "InvalidParameterValue",
-                format!("DBParameterGroupFamily '{db_parameter_group_family}' is not supported yet."),
+                format!(
+                    "DBParameterGroupFamily '{db_parameter_group_family}' is not supported yet."
+                ),
             ));
         }
 
         let mut state = self.state.write();
 
-        if state.parameter_groups.contains_key(&db_parameter_group_name) {
+        if state
+            .parameter_groups
+            .contains_key(&db_parameter_group_name)
+        {
             return Err(AwsServiceError::aws_error(
                 StatusCode::CONFLICT,
                 "DBParameterGroupAlreadyExists",
@@ -1270,30 +1275,35 @@ impl RdsService {
 
         let state = self.state.read();
 
-        let parameter_groups: Vec<&DbParameterGroup> = if let Some(name) = &db_parameter_group_name {
+        let parameter_groups: Vec<&DbParameterGroup> = if let Some(name) = &db_parameter_group_name
+        {
             state
                 .parameter_groups
                 .get(name)
                 .map(|pg| vec![pg])
-                .unwrap_or_else(Vec::new)
+                .unwrap_or_default()
         } else {
             state.parameter_groups.values().collect()
         };
 
-        if db_parameter_group_name.is_some() && parameter_groups.is_empty() {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::NOT_FOUND,
-                "DBParameterGroupNotFound",
-                format!(
-                    "DBParameterGroup {} not found.",
-                    db_parameter_group_name.unwrap()
-                ),
-            ));
+        if let Some(name) = &db_parameter_group_name {
+            if parameter_groups.is_empty() {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::NOT_FOUND,
+                    "DBParameterGroupNotFound",
+                    format!("DBParameterGroup {} not found.", name),
+                ));
+            }
         }
 
         let body = parameter_groups
             .iter()
-            .map(|pg| format!("<DBParameterGroup>{}</DBParameterGroup>", db_parameter_group_xml(pg)))
+            .map(|pg| {
+                format!(
+                    "<DBParameterGroup>{}</DBParameterGroup>",
+                    db_parameter_group_xml(pg)
+                )
+            })
             .collect::<Vec<_>>()
             .join("");
 
@@ -1307,7 +1317,10 @@ impl RdsService {
         ))
     }
 
-    fn delete_db_parameter_group(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+    fn delete_db_parameter_group(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
         let db_parameter_group_name = required_param(request, "DBParameterGroupName")?;
 
         let mut state = self.state.write();
@@ -1320,7 +1333,11 @@ impl RdsService {
             ));
         }
 
-        if state.parameter_groups.remove(&db_parameter_group_name).is_none() {
+        if state
+            .parameter_groups
+            .remove(&db_parameter_group_name)
+            .is_none()
+        {
             return Err(AwsServiceError::aws_error(
                 StatusCode::NOT_FOUND,
                 "DBParameterGroupNotFound",
@@ -1334,7 +1351,10 @@ impl RdsService {
         ))
     }
 
-    fn modify_db_parameter_group(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+    fn modify_db_parameter_group(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
         let db_parameter_group_name = required_param(request, "DBParameterGroupName")?;
 
         let mut state = self.state.write();

@@ -284,14 +284,15 @@ pub fn default_orderable_options() -> Vec<OrderableDbInstanceOption> {
     }]
 }
 
-pub fn default_parameter_groups(account_id: &str, region: &str) -> HashMap<String, DbParameterGroup> {
+pub fn default_parameter_groups(
+    account_id: &str,
+    region: &str,
+) -> HashMap<String, DbParameterGroup> {
     let mut groups = HashMap::new();
 
     let default_group = DbParameterGroup {
         db_parameter_group_name: "default.postgres16".to_string(),
-        db_parameter_group_arn: format!(
-            "arn:aws:rds:{region}:{account_id}:pg:default.postgres16"
-        ),
+        db_parameter_group_arn: format!("arn:aws:rds:{region}:{account_id}:pg:default.postgres16"),
         db_parameter_group_family: "postgres16".to_string(),
         description: "Default parameter group for postgres16".to_string(),
         parameters: HashMap::new(),

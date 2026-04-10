@@ -686,7 +686,7 @@ async fn rds_describe_db_parameter_groups() {
         .unwrap();
 
     let param_groups = response.db_parameter_groups();
-    assert!(param_groups.len() >= 1);
+    assert!(!param_groups.is_empty());
     let found = param_groups
         .iter()
         .find(|pg| pg.db_parameter_group_name() == Some("conf-param-group"));
