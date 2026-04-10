@@ -4,7 +4,7 @@ fakecloud's goal is to be the best free AWS emulator for integration testing and
 
 For every service we implement, the standard is the same: full API coverage, real behavior (not stubs), conformance testing against AWS Smithy models, and cross-service integrations where applicable.
 
-## Recently shipped (v0.6.0)
+## Recently shipped (v0.6.1)
 
 ### Kinesis
 
