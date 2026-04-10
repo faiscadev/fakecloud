@@ -20,6 +20,8 @@ github.com/aws/aws-sdk-go-v2/service/cognitoidentityprovider v1.59.3 h1:iO0QRVlR
 github.com/aws/aws-sdk-go-v2/service/cognitoidentityprovider v1.59.3/go.mod h1:XPkppF4ijOR6oZvwXB2tjQDLjkTEGCFn8Onl26v4GHQ=
 github.com/aws/aws-sdk-go-v2/service/dynamodb v1.57.1 h1:Vk+a1j2pXZHkkYqHmEdpwe8eX6NDtFSBGfzuauMEWYQ=
 github.com/aws/aws-sdk-go-v2/service/dynamodb v1.57.1/go.mod h1:wHrWCwhXZrl2PuCP5t36UTacy9fCHDJ+vw1r3qxTL5M=
+github.com/aws/aws-sdk-go-v2/service/elasticache v1.52.0 h1:inluxH5ArTlQNGrFxP7RN5o5DEfP8bRbkPC/408Esgs=
+github.com/aws/aws-sdk-go-v2/service/elasticache v1.52.0/go.mod h1:DxywiXnEB21757xcql9xCqgt8vyTxSB7tVEIOdfKIY8=
 github.com/aws/aws-sdk-go-v2/service/eventbridge v1.45.23 h1:wlOL7DYRnqjyTN1GJlDT5w1t062qC7JKiszZzH4S41A=
 github.com/aws/aws-sdk-go-v2/service/eventbridge v1.45.23/go.mod h1:bm3xSJdUbbsHQZAtyfYyDXtijYduolXRWfrPUmWQfbM=
 github.com/aws/aws-sdk-go-v2/service/internal/accept-encoding v1.13.7 h1:5EniKhLZe4xzL7a+fU3C2tfUN4nWIqlLesfrjkuPFTY=

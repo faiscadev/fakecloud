@@ -12,6 +12,7 @@
   "devDependencies": {
     "@aws-sdk/client-cognito-identity-provider": "^3.750.0",
     "@aws-sdk/client-dynamodb": "^3.750.0",
+    "@aws-sdk/client-elasticache": "^3.1028.0",
     "@aws-sdk/client-eventbridge": "^3.750.0",
     "@aws-sdk/client-rds": "^3.750.0",
     "@aws-sdk/client-s3": "^3.750.0",
