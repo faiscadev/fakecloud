@@ -1092,6 +1092,7 @@ impl RdsService {
             self.state
                 .write()
                 .cancel_instance_creation(&db_instance_identifier);
+            runtime.stop_container(&db_instance_identifier).await;
             return Err(runtime_error_to_service_error(e));
         }
 
@@ -1241,6 +1242,7 @@ impl RdsService {
             self.state
                 .write()
                 .cancel_instance_creation(&db_instance_identifier);
+            runtime.stop_container(&db_instance_identifier).await;
             return Err(runtime_error_to_service_error(e));
         }
 
