@@ -3,6 +3,9 @@ import type {
   ResetResponse,
   ResetServiceResponse,
   RdsInstancesResponse,
+  ElastiCacheClustersResponse,
+  ElastiCacheReplicationGroupsResponse,
+  ElastiCacheServerlessCachesResponse,
   LambdaInvocationsResponse,
   WarmContainersResponse,
   EvictContainerResponse,
@@ -82,6 +85,29 @@ export class RdsClient {
 
   async getInstances(): Promise<RdsInstancesResponse> {
     const resp = await fetch(`${this.baseUrl}/_fakecloud/rds/instances`);
+    return parse(resp);
+  }
+}
+
+export class ElastiCacheClient {
+  constructor(private baseUrl: string) {}
+
+  async getClusters(): Promise<ElastiCacheClustersResponse> {
+    const resp = await fetch(`${this.baseUrl}/_fakecloud/elasticache/clusters`);
+    return parse(resp);
+  }
+
+  async getReplicationGroups(): Promise<ElastiCacheReplicationGroupsResponse> {
+    const resp = await fetch(
+      `${this.baseUrl}/_fakecloud/elasticache/replication-groups`,
+    );
+    return parse(resp);
+  }
+
+  async getServerlessCaches(): Promise<ElastiCacheServerlessCachesResponse> {
+    const resp = await fetch(
+      `${this.baseUrl}/_fakecloud/elasticache/serverless-caches`,
+    );
     return parse(resp);
   }
 }
@@ -287,6 +313,7 @@ export class FakeCloud {
 
   private readonly _lambda: LambdaClient;
   private readonly _rds: RdsClient;
+  private readonly _elasticache: ElastiCacheClient;
   private readonly _ses: SesClient;
   private readonly _sns: SnsClient;
   private readonly _sqs: SqsClient;
@@ -301,6 +328,7 @@ export class FakeCloud {
 
     this._lambda = new LambdaClient(this.baseUrl);
     this._rds = new RdsClient(this.baseUrl);
+    this._elasticache = new ElastiCacheClient(this.baseUrl);
     this._ses = new SesClient(this.baseUrl);
     this._sns = new SnsClient(this.baseUrl);
     this._sqs = new SqsClient(this.baseUrl);
@@ -339,6 +367,10 @@ export class FakeCloud {
 
   get rds(): RdsClient {
     return this._rds;
+  }
+
+  get elasticache(): ElastiCacheClient {
+    return this._elasticache;
   }
 
   get ses(): SesClient {

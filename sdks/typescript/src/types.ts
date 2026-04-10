@@ -46,6 +46,54 @@ export interface RdsInstancesResponse {
   instances: RdsInstance[];
 }
 
+// ── ElastiCache ────────────────────────────────────────────────────
+
+export interface ElastiCacheCluster {
+  cacheClusterId: string;
+  cacheClusterStatus: string;
+  engine: string;
+  engineVersion: string;
+  cacheNodeType: string;
+  numCacheNodes: number;
+  replicationGroupId: string | null;
+  port: number | null;
+  hostPort: number | null;
+  containerId: string | null;
+}
+
+export interface ElastiCacheClustersResponse {
+  clusters: ElastiCacheCluster[];
+}
+
+export interface ElastiCacheReplicationGroupIntrospection {
+  replicationGroupId: string;
+  status: string;
+  description: string;
+  memberClusters: string[];
+  automaticFailover: boolean;
+  multiAz: boolean;
+  engine: string;
+  engineVersion: string;
+  cacheNodeType: string;
+  numCacheClusters: number;
+}
+
+export interface ElastiCacheReplicationGroupsResponse {
+  replicationGroups: ElastiCacheReplicationGroupIntrospection[];
+}
+
+export interface ElastiCacheServerlessCacheIntrospection {
+  serverlessCacheName: string;
+  status: string;
+  engine: string;
+  engineVersion: string;
+  cacheNodeType: string | null;
+}
+
+export interface ElastiCacheServerlessCachesResponse {
+  serverlessCaches: ElastiCacheServerlessCacheIntrospection[];
+}
+
 // ── Lambda ─────────────────────────────────────────────────────────
 
 export interface LambdaInvocation {

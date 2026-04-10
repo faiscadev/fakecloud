@@ -234,6 +234,7 @@ async fn main() {
     let eb_introspection_state = eb_state.clone();
     let s3_introspection_state = s3_state.clone();
     let rds_introspection_state = rds_state.clone();
+    let elasticache_introspection_state = elasticache_state.clone();
     let dynamodb_ttl_state = dynamodb_state.clone();
     let secretsmanager_rotation_state = secretsmanager_state.clone();
 
@@ -1020,6 +1021,71 @@ async fn main() {
             }),
         )
         .route(
+            "/_fakecloud/elasticache/clusters",
+            axum::routing::get({
+                let ec = elasticache_introspection_state.clone();
+                move || {
+                    let ec = ec.clone();
+                    async move {
+                        let state = ec.read();
+                        let mut clusters: Vec<types::ElastiCacheCluster> = state
+                            .cache_clusters
+                            .values()
+                            .map(elasticache_cluster_response)
+                            .collect();
+                        clusters.sort_by(|a, b| a.cache_cluster_id.cmp(&b.cache_cluster_id));
+                        axum::Json(types::ElastiCacheClustersResponse { clusters })
+                    }
+                }
+            }),
+        )
+        .route(
+            "/_fakecloud/elasticache/replication-groups",
+            axum::routing::get({
+                let ec = elasticache_introspection_state.clone();
+                move || {
+                    let ec = ec.clone();
+                    async move {
+                        let state = ec.read();
+                        let mut replication_groups: Vec<
+                            types::ElastiCacheReplicationGroupIntrospection,
+                        > = state
+                            .replication_groups
+                            .values()
+                            .map(elasticache_replication_group_response)
+                            .collect();
+                        replication_groups
+                            .sort_by(|a, b| a.replication_group_id.cmp(&b.replication_group_id));
+                        axum::Json(types::ElastiCacheReplicationGroupsResponse {
+                            replication_groups,
+                        })
+                    }
+                }
+            }),
+        )
+        .route(
+            "/_fakecloud/elasticache/serverless-caches",
+            axum::routing::get({
+                let ec = elasticache_introspection_state;
+                move || {
+                    let ec = ec.clone();
+                    async move {
+                        let state = ec.read();
+                        let mut serverless_caches: Vec<
+                            types::ElastiCacheServerlessCacheIntrospection,
+                        > = state
+                            .serverless_caches
+                            .values()
+                            .map(elasticache_serverless_cache_response)
+                            .collect();
+                        serverless_caches
+                            .sort_by(|a, b| a.serverless_cache_name.cmp(&b.serverless_cache_name));
+                        axum::Json(types::ElastiCacheServerlessCachesResponse { serverless_caches })
+                    }
+                }
+            }),
+        )
+        .route(
             "/_fakecloud/lambda/{function_name}/evict-container",
             axum::routing::post({
                 let rt = lambda_sim_evict_runtime;
@@ -1314,6 +1380,52 @@ fn rds_instance_response(instance: &fakecloud_rds::state::DbInstance) -> types::
                 value: tag.value.clone(),
             })
             .collect(),
+    }
+}
+
+fn elasticache_cluster_response(
+    cluster: &fakecloud_elasticache::state::CacheCluster,
+) -> types::ElastiCacheCluster {
+    types::ElastiCacheCluster {
+        cache_cluster_id: cluster.cache_cluster_id.clone(),
+        cache_cluster_status: cluster.cache_cluster_status.clone(),
+        engine: cluster.engine.clone(),
+        engine_version: cluster.engine_version.clone(),
+        cache_node_type: cluster.cache_node_type.clone(),
+        num_cache_nodes: cluster.num_cache_nodes,
+        replication_group_id: cluster.replication_group_id.clone(),
+        port: Some(cluster.endpoint_port as i32),
+        host_port: Some(cluster.host_port),
+        container_id: Some(cluster.container_id.clone()),
+    }
+}
+
+fn elasticache_replication_group_response(
+    group: &fakecloud_elasticache::state::ReplicationGroup,
+) -> types::ElastiCacheReplicationGroupIntrospection {
+    types::ElastiCacheReplicationGroupIntrospection {
+        replication_group_id: group.replication_group_id.clone(),
+        status: group.status.clone(),
+        description: group.description.clone(),
+        member_clusters: group.member_clusters.clone(),
+        automatic_failover: group.automatic_failover_enabled,
+        multi_az: group.automatic_failover_enabled,
+        engine: group.engine.clone(),
+        engine_version: group.engine_version.clone(),
+        cache_node_type: group.cache_node_type.clone(),
+        num_cache_clusters: group.num_cache_clusters,
+    }
+}
+
+fn elasticache_serverless_cache_response(
+    cache: &fakecloud_elasticache::state::ServerlessCache,
+) -> types::ElastiCacheServerlessCacheIntrospection {
+    types::ElastiCacheServerlessCacheIntrospection {
+        serverless_cache_name: cache.serverless_cache_name.clone(),
+        status: cache.status.clone(),
+        engine: cache.engine.clone(),
+        engine_version: cache.full_engine_version.clone(),
+        cache_node_type: None,
     }
 }
 

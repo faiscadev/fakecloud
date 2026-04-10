@@ -51,6 +51,54 @@ type RDSInstancesResponse struct {
 	Instances []RDSInstance `json:"instances"`
 }
 
+// ── ElastiCache ────────────────────────────────────────────────────
+
+type ElastiCacheCluster struct {
+	CacheClusterID       string  `json:"cacheClusterId"`
+	CacheClusterStatus   string  `json:"cacheClusterStatus"`
+	Engine               string  `json:"engine"`
+	EngineVersion        string  `json:"engineVersion"`
+	CacheNodeType        string  `json:"cacheNodeType"`
+	NumCacheNodes        int32   `json:"numCacheNodes"`
+	ReplicationGroupID   *string `json:"replicationGroupId"`
+	Port                 *int32  `json:"port"`
+	HostPort             *uint16 `json:"hostPort"`
+	ContainerID          *string `json:"containerId"`
+}
+
+type ElastiCacheClustersResponse struct {
+	Clusters []ElastiCacheCluster `json:"clusters"`
+}
+
+type ElastiCacheReplicationGroupIntrospection struct {
+	ReplicationGroupID string   `json:"replicationGroupId"`
+	Status             string   `json:"status"`
+	Description        string   `json:"description"`
+	MemberClusters     []string `json:"memberClusters"`
+	AutomaticFailover  bool     `json:"automaticFailover"`
+	MultiAZ            bool     `json:"multiAz"`
+	Engine             string   `json:"engine"`
+	EngineVersion      string   `json:"engineVersion"`
+	CacheNodeType      string   `json:"cacheNodeType"`
+	NumCacheClusters   int32    `json:"numCacheClusters"`
+}
+
+type ElastiCacheReplicationGroupsResponse struct {
+	ReplicationGroups []ElastiCacheReplicationGroupIntrospection `json:"replicationGroups"`
+}
+
+type ElastiCacheServerlessCacheIntrospection struct {
+	ServerlessCacheName string  `json:"serverlessCacheName"`
+	Status              string  `json:"status"`
+	Engine              string  `json:"engine"`
+	EngineVersion       string  `json:"engineVersion"`
+	CacheNodeType       *string `json:"cacheNodeType"`
+}
+
+type ElastiCacheServerlessCachesResponse struct {
+	ServerlessCaches []ElastiCacheServerlessCacheIntrospection `json:"serverlessCaches"`
+}
+
 // ── Lambda ─────────────────────────────────────────────────────────
 
 // LambdaInvocation represents a recorded Lambda invocation.

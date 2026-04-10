@@ -73,6 +73,9 @@ func (fc *FakeCloud) Lambda() *LambdaClient { return &LambdaClient{fc: fc} }
 // RDS returns the RDS sub-client.
 func (fc *FakeCloud) RDS() *RDSClient { return &RDSClient{fc: fc} }
 
+// ElastiCache returns the ElastiCache sub-client.
+func (fc *FakeCloud) ElastiCache() *ElastiCacheClient { return &ElastiCacheClient{fc: fc} }
+
 // DynamoDB returns the DynamoDB sub-client.
 func (fc *FakeCloud) DynamoDB() *DynamoDBClient { return &DynamoDBClient{fc: fc} }
 

@@ -3,6 +3,7 @@
 from fakecloud.client import (
     CognitoClient,
     DynamoDbClient,
+    ElastiCacheClient,
     EventsClient,
     FakeCloud,
     FakeCloudSync,
@@ -18,6 +19,7 @@ from fakecloud.client import (
 __all__ = [
     "CognitoClient",
     "DynamoDbClient",
+    "ElastiCacheClient",
     "EventsClient",
     "FakeCloud",
     "FakeCloudSync",

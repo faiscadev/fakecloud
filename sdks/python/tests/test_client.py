@@ -132,6 +132,69 @@ def test_rds_instances(fc: FakeCloudSync, fakecloud_url: str) -> None:
     assert instance.host_port > 0
 
 
+# ── ElastiCache ───────────────────────────────────────────────────────
+
+
+def test_elasticache_get_clusters(fc: FakeCloudSync, fakecloud_url: str) -> None:
+    ec = boto3.client("elasticache", **_boto_kwargs(fakecloud_url))
+    ec.create_cache_cluster(
+        CacheClusterId="py-sdk-ec-cluster",
+        CacheNodeType="cache.t3.micro",
+        Engine="redis",
+        EngineVersion="7.1",
+        NumCacheNodes=1,
+    )
+
+    result = fc.elasticache.get_clusters()
+    cluster = next(
+        c for c in result.clusters if c.cache_cluster_id == "py-sdk-ec-cluster"
+    )
+    assert cluster.engine == "redis"
+    assert cluster.num_cache_nodes == 1
+    assert cluster.container_id is not None
+
+
+def test_elasticache_get_replication_groups(
+    fc: FakeCloudSync, fakecloud_url: str
+) -> None:
+    ec = boto3.client("elasticache", **_boto_kwargs(fakecloud_url))
+    ec.create_replication_group(
+        ReplicationGroupId="py-sdk-ec-rg",
+        ReplicationGroupDescription="Python SDK test replication group",
+        CacheNodeType="cache.t3.micro",
+        Engine="redis",
+        EngineVersion="7.1",
+        NumCacheClusters=2,
+    )
+
+    result = fc.elasticache.get_replication_groups()
+    group = next(
+        g for g in result.replication_groups if g.replication_group_id == "py-sdk-ec-rg"
+    )
+    assert group.engine == "redis"
+    assert group.num_cache_clusters == 2
+
+
+def test_elasticache_get_serverless_caches(
+    fc: FakeCloudSync, fakecloud_url: str
+) -> None:
+    ec = boto3.client("elasticache", **_boto_kwargs(fakecloud_url))
+    ec.create_serverless_cache(
+        ServerlessCacheName="py-sdk-ec-serverless",
+        Engine="redis",
+        MajorEngineVersion="7.1",
+    )
+
+    result = fc.elasticache.get_serverless_caches()
+    cache = next(
+        c
+        for c in result.serverless_caches
+        if c.serverless_cache_name == "py-sdk-ec-serverless"
+    )
+    assert cache.engine == "redis"
+    assert cache.status == "available"
+
+
 # ── Reset ─────────────────────────────────────────────────────────────
 
 

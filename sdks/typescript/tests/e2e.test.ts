@@ -42,6 +42,12 @@ import {
   PutEventsCommand,
 } from "@aws-sdk/client-eventbridge";
 import { RDSClient, CreateDBInstanceCommand } from "@aws-sdk/client-rds";
+import {
+  ElastiCacheClient,
+  CreateCacheClusterCommand,
+  CreateReplicationGroupCommand,
+  CreateServerlessCacheCommand,
+} from "@aws-sdk/client-elasticache";
 
 function getEndpoint(): string {
   const ep = process.env.FAKECLOUD_ENDPOINT;
@@ -115,6 +121,76 @@ describe("rds", () => {
     expect(instance!.dbName).toBe("appdb");
     expect(instance!.containerId.length).toBeGreaterThan(0);
     expect(instance!.hostPort).toBeGreaterThan(0);
+  });
+});
+
+// ── ElastiCache ─────────────────────────────────────────────────────
+
+describe("elasticache", () => {
+  it("getClusters() returns fakecloud-managed cache clusters", async () => {
+    const ec = new ElastiCacheClient(awsConfig());
+
+    await ec.send(
+      new CreateCacheClusterCommand({
+        CacheClusterId: "ts-ec-cluster",
+        CacheNodeType: "cache.t3.micro",
+        Engine: "redis",
+        EngineVersion: "7.1",
+        NumCacheNodes: 1,
+      }),
+    );
+
+    const result = await fc.elasticache.getClusters();
+    const cluster = result.clusters.find(
+      (c) => c.cacheClusterId === "ts-ec-cluster",
+    );
+    expect(cluster).toBeDefined();
+    expect(cluster!.engine).toBe("redis");
+    expect(cluster!.numCacheNodes).toBe(1);
+    expect(cluster!.containerId).toBeDefined();
+  });
+
+  it("getReplicationGroups() returns fakecloud-managed replication groups", async () => {
+    const ec = new ElastiCacheClient(awsConfig());
+
+    await ec.send(
+      new CreateReplicationGroupCommand({
+        ReplicationGroupId: "ts-ec-rg",
+        ReplicationGroupDescription: "TS test replication group",
+        CacheNodeType: "cache.t3.micro",
+        Engine: "redis",
+        EngineVersion: "7.1",
+        NumCacheClusters: 2,
+      }),
+    );
+
+    const result = await fc.elasticache.getReplicationGroups();
+    const group = result.replicationGroups.find(
+      (g) => g.replicationGroupId === "ts-ec-rg",
+    );
+    expect(group).toBeDefined();
+    expect(group!.engine).toBe("redis");
+    expect(group!.numCacheClusters).toBe(2);
+  });
+
+  it("getServerlessCaches() returns fakecloud-managed serverless caches", async () => {
+    const ec = new ElastiCacheClient(awsConfig());
+
+    await ec.send(
+      new CreateServerlessCacheCommand({
+        ServerlessCacheName: "ts-ec-serverless",
+        Engine: "redis",
+        MajorEngineVersion: "7.1",
+      }),
+    );
+
+    const result = await fc.elasticache.getServerlessCaches();
+    const cache = result.serverlessCaches.find(
+      (c) => c.serverlessCacheName === "ts-ec-serverless",
+    );
+    expect(cache).toBeDefined();
+    expect(cache!.engine).toBe("redis");
+    expect(cache!.status).toBe("available");
   });
 });
 

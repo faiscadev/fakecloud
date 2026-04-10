@@ -11,6 +11,9 @@ from fakecloud.types import (
     ConfirmSubscriptionResponse,
     ConfirmUserRequest,
     ConfirmUserResponse,
+    ElastiCacheClustersResponse,
+    ElastiCacheReplicationGroupsResponse,
+    ElastiCacheServerlessCachesResponse,
     EventHistoryResponse,
     EvictContainerResponse,
     ExpirationTickResponse,
@@ -88,6 +91,33 @@ class RdsClient:
         resp = await self._client.get(f"{self._base}/_fakecloud/rds/instances")
         _check(resp)
         return RdsInstancesResponse.from_dict(resp.json())
+
+
+class ElastiCacheClient:
+    """Async ElastiCache introspection client."""
+
+    def __init__(self, client: httpx.AsyncClient, base_url: str) -> None:
+        self._client = client
+        self._base = base_url
+
+    async def get_clusters(self) -> ElastiCacheClustersResponse:
+        resp = await self._client.get(f"{self._base}/_fakecloud/elasticache/clusters")
+        _check(resp)
+        return ElastiCacheClustersResponse.from_dict(resp.json())
+
+    async def get_replication_groups(self) -> ElastiCacheReplicationGroupsResponse:
+        resp = await self._client.get(
+            f"{self._base}/_fakecloud/elasticache/replication-groups"
+        )
+        _check(resp)
+        return ElastiCacheReplicationGroupsResponse.from_dict(resp.json())
+
+    async def get_serverless_caches(self) -> ElastiCacheServerlessCachesResponse:
+        resp = await self._client.get(
+            f"{self._base}/_fakecloud/elasticache/serverless-caches"
+        )
+        _check(resp)
+        return ElastiCacheServerlessCachesResponse.from_dict(resp.json())
 
 
 class SesClient:
@@ -326,6 +356,33 @@ class _SyncRdsClient:
         return RdsInstancesResponse.from_dict(resp.json())
 
 
+class _SyncElastiCacheClient:
+    """Sync ElastiCache introspection client."""
+
+    def __init__(self, client: httpx.Client, base_url: str) -> None:
+        self._client = client
+        self._base = base_url
+
+    def get_clusters(self) -> ElastiCacheClustersResponse:
+        resp = self._client.get(f"{self._base}/_fakecloud/elasticache/clusters")
+        _check(resp)
+        return ElastiCacheClustersResponse.from_dict(resp.json())
+
+    def get_replication_groups(self) -> ElastiCacheReplicationGroupsResponse:
+        resp = self._client.get(
+            f"{self._base}/_fakecloud/elasticache/replication-groups"
+        )
+        _check(resp)
+        return ElastiCacheReplicationGroupsResponse.from_dict(resp.json())
+
+    def get_serverless_caches(self) -> ElastiCacheServerlessCachesResponse:
+        resp = self._client.get(
+            f"{self._base}/_fakecloud/elasticache/serverless-caches"
+        )
+        _check(resp)
+        return ElastiCacheServerlessCachesResponse.from_dict(resp.json())
+
+
 class _SyncSesClient:
     def __init__(self, client: httpx.Client, base_url: str) -> None:
         self._client = client
@@ -549,6 +606,10 @@ class FakeCloud:
         return RdsClient(self._client, self._base)
 
     @property
+    def elasticache(self) -> ElastiCacheClient:
+        return ElastiCacheClient(self._client, self._base)
+
+    @property
     def ses(self) -> SesClient:
         return SesClient(self._client, self._base)
 
@@ -632,6 +693,10 @@ class FakeCloudSync:
     @property
     def rds(self) -> _SyncRdsClient:
         return _SyncRdsClient(self._client, self._base)
+
+    @property
+    def elasticache(self) -> _SyncElastiCacheClient:
+        return _SyncElastiCacheClient(self._client, self._base)
 
     @property
     def ses(self) -> _SyncSesClient:

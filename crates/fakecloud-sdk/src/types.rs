@@ -340,6 +340,66 @@ pub struct RotationTickResponse {
     pub rotated_secrets: Vec<String>,
 }
 
+// ── ElastiCache ─────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ElastiCacheCluster {
+    pub cache_cluster_id: String,
+    pub cache_cluster_status: String,
+    pub engine: String,
+    pub engine_version: String,
+    pub cache_node_type: String,
+    pub num_cache_nodes: i32,
+    pub replication_group_id: Option<String>,
+    pub port: Option<i32>,
+    pub host_port: Option<u16>,
+    pub container_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ElastiCacheClustersResponse {
+    pub clusters: Vec<ElastiCacheCluster>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ElastiCacheReplicationGroupIntrospection {
+    pub replication_group_id: String,
+    pub status: String,
+    pub description: String,
+    pub member_clusters: Vec<String>,
+    pub automatic_failover: bool,
+    pub multi_az: bool,
+    pub engine: String,
+    pub engine_version: String,
+    pub cache_node_type: String,
+    pub num_cache_clusters: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ElastiCacheReplicationGroupsResponse {
+    pub replication_groups: Vec<ElastiCacheReplicationGroupIntrospection>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ElastiCacheServerlessCacheIntrospection {
+    pub serverless_cache_name: String,
+    pub status: String,
+    pub engine: String,
+    pub engine_version: String,
+    pub cache_node_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ElastiCacheServerlessCachesResponse {
+    pub serverless_caches: Vec<ElastiCacheServerlessCacheIntrospection>,
+}
+
 // ── Cognito ─────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

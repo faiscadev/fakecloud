@@ -90,6 +90,10 @@ impl FakeCloud {
         RdsClient { fc: self }
     }
 
+    pub fn elasticache(&self) -> ElastiCacheClient<'_> {
+        ElastiCacheClient { fc: self }
+    }
+
     // ── Internal helpers ────────────────────────────────────────────
 
     async fn parse<T: serde::de::DeserializeOwned>(resp: reqwest::Response) -> Result<T, Error> {
@@ -102,7 +106,7 @@ impl FakeCloud {
     }
 }
 
-// ── Lambda ──────────────────────────────────────────────────────────
+// ── RDS ─────────────────────────────────────────────────────────────
 
 pub struct RdsClient<'a> {
     fc: &'a FakeCloud,
@@ -115,6 +119,60 @@ impl RdsClient<'_> {
             .fc
             .client
             .get(format!("{}/_fakecloud/rds/instances", self.fc.base_url))
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
+}
+
+// ── ElastiCache ─────────────────────────────────────────────────────
+
+pub struct ElastiCacheClient<'a> {
+    fc: &'a FakeCloud,
+}
+
+impl ElastiCacheClient<'_> {
+    /// List fakecloud-managed ElastiCache cache clusters with runtime metadata.
+    pub async fn get_clusters(&self) -> Result<ElastiCacheClustersResponse, Error> {
+        let resp = self
+            .fc
+            .client
+            .get(format!(
+                "{}/_fakecloud/elasticache/clusters",
+                self.fc.base_url
+            ))
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
+
+    /// List fakecloud-managed ElastiCache replication groups with runtime metadata.
+    pub async fn get_replication_groups(
+        &self,
+    ) -> Result<ElastiCacheReplicationGroupsResponse, Error> {
+        let resp = self
+            .fc
+            .client
+            .get(format!(
+                "{}/_fakecloud/elasticache/replication-groups",
+                self.fc.base_url
+            ))
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
+
+    /// List fakecloud-managed ElastiCache serverless caches with runtime metadata.
+    pub async fn get_serverless_caches(
+        &self,
+    ) -> Result<ElastiCacheServerlessCachesResponse, Error> {
+        let resp = self
+            .fc
+            .client
+            .get(format!(
+                "{}/_fakecloud/elasticache/serverless-caches",
+                self.fc.base_url
+            ))
             .send()
             .await?;
         FakeCloud::parse(resp).await

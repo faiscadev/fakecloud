@@ -21,6 +21,7 @@ import (
 	cognitotypes "github.com/aws/aws-sdk-go-v2/service/cognitoidentityprovider/types"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	dbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
+	"github.com/aws/aws-sdk-go-v2/service/elasticache"
 	"github.com/aws/aws-sdk-go-v2/service/eventbridge"
 	ebtypes "github.com/aws/aws-sdk-go-v2/service/eventbridge/types"
 	"github.com/aws/aws-sdk-go-v2/service/rds"
@@ -186,6 +187,139 @@ func TestE2ERDS(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("expected to find sdk-go-rds-db via introspection")
+	}
+}
+
+// ── ElastiCache ───────────────────────────────────────────────────
+
+func TestE2EElastiCacheClusters(t *testing.T) {
+	resetState(t)
+	ctx := context.Background()
+	cfg := awsConfig(t)
+
+	ecClient := elasticache.NewFromConfig(cfg, func(o *elasticache.Options) {
+		o.BaseEndpoint = aws.String(fakecloudURL)
+	})
+
+	_, err := ecClient.CreateCacheCluster(ctx, &elasticache.CreateCacheClusterInput{
+		CacheClusterId:  aws.String("sdk-go-ec-cluster"),
+		CacheNodeType:   aws.String("cache.t3.micro"),
+		Engine:          aws.String("redis"),
+		EngineVersion:   aws.String("7.1"),
+		NumCacheNodes:   aws.Int32(1),
+	})
+	if err != nil {
+		t.Fatalf("CreateCacheCluster failed: %v", err)
+	}
+
+	fc := fakecloud.New(fakecloudURL)
+	resp, err := fc.ElastiCache().GetClusters(ctx)
+	if err != nil {
+		t.Fatalf("ElastiCache().GetClusters() failed: %v", err)
+	}
+
+	found := false
+	for _, cluster := range resp.Clusters {
+		if cluster.CacheClusterID == "sdk-go-ec-cluster" {
+			found = true
+			if cluster.Engine != "redis" {
+				t.Fatalf("expected redis engine, got %s", cluster.Engine)
+			}
+			if cluster.NumCacheNodes != 1 {
+				t.Fatalf("expected 1 cache node, got %d", cluster.NumCacheNodes)
+			}
+			if cluster.ContainerID == nil || *cluster.ContainerID == "" {
+				t.Fatal("expected container id")
+			}
+		}
+	}
+	if !found {
+		t.Fatal("expected to find sdk-go-ec-cluster via introspection")
+	}
+}
+
+func TestE2EElastiCacheReplicationGroups(t *testing.T) {
+	resetState(t)
+	ctx := context.Background()
+	cfg := awsConfig(t)
+
+	ecClient := elasticache.NewFromConfig(cfg, func(o *elasticache.Options) {
+		o.BaseEndpoint = aws.String(fakecloudURL)
+	})
+
+	_, err := ecClient.CreateReplicationGroup(ctx, &elasticache.CreateReplicationGroupInput{
+		ReplicationGroupId:          aws.String("sdk-go-ec-rg"),
+		ReplicationGroupDescription: aws.String("Go SDK test replication group"),
+		CacheNodeType:               aws.String("cache.t3.micro"),
+		Engine:                      aws.String("redis"),
+		EngineVersion:               aws.String("7.1"),
+		NumCacheClusters:            aws.Int32(2),
+	})
+	if err != nil {
+		t.Fatalf("CreateReplicationGroup failed: %v", err)
+	}
+
+	fc := fakecloud.New(fakecloudURL)
+	resp, err := fc.ElastiCache().GetReplicationGroups(ctx)
+	if err != nil {
+		t.Fatalf("ElastiCache().GetReplicationGroups() failed: %v", err)
+	}
+
+	found := false
+	for _, group := range resp.ReplicationGroups {
+		if group.ReplicationGroupID == "sdk-go-ec-rg" {
+			found = true
+			if group.Engine != "redis" {
+				t.Fatalf("expected redis engine, got %s", group.Engine)
+			}
+			if group.NumCacheClusters != 2 {
+				t.Fatalf("expected 2 cache clusters, got %d", group.NumCacheClusters)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("expected to find sdk-go-ec-rg via introspection")
+	}
+}
+
+func TestE2EElastiCacheServerlessCaches(t *testing.T) {
+	resetState(t)
+	ctx := context.Background()
+	cfg := awsConfig(t)
+
+	ecClient := elasticache.NewFromConfig(cfg, func(o *elasticache.Options) {
+		o.BaseEndpoint = aws.String(fakecloudURL)
+	})
+
+	_, err := ecClient.CreateServerlessCache(ctx, &elasticache.CreateServerlessCacheInput{
+		ServerlessCacheName: aws.String("sdk-go-ec-serverless"),
+		Engine:              aws.String("redis"),
+		MajorEngineVersion:  aws.String("7.1"),
+	})
+	if err != nil {
+		t.Fatalf("CreateServerlessCache failed: %v", err)
+	}
+
+	fc := fakecloud.New(fakecloudURL)
+	resp, err := fc.ElastiCache().GetServerlessCaches(ctx)
+	if err != nil {
+		t.Fatalf("ElastiCache().GetServerlessCaches() failed: %v", err)
+	}
+
+	found := false
+	for _, cache := range resp.ServerlessCaches {
+		if cache.ServerlessCacheName == "sdk-go-ec-serverless" {
+			found = true
+			if cache.Engine != "redis" {
+				t.Fatalf("expected redis engine, got %s", cache.Engine)
+			}
+			if cache.Status != "available" {
+				t.Fatalf("expected available status, got %s", cache.Status)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("expected to find sdk-go-ec-serverless via introspection")
 	}
 }
 

@@ -147,6 +147,99 @@ async fn sdk_rds_get_instances() {
     assert!(instance.host_port > 0);
 }
 
+// ── ElastiCache ────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn sdk_elasticache_get_replication_groups() {
+    let server = TestServer::start().await;
+    let fc = FakeCloud::new(server.endpoint());
+    let ec = server.elasticache_client().await;
+
+    ec.create_replication_group()
+        .replication_group_id("sdk-ec-rg")
+        .replication_group_description("SDK test replication group")
+        .cache_node_type("cache.t3.micro")
+        .engine("redis")
+        .engine_version("7.1")
+        .num_cache_clusters(2)
+        .send()
+        .await
+        .unwrap();
+
+    let groups = fc
+        .elasticache()
+        .get_replication_groups()
+        .await
+        .expect("get replication groups");
+    let group = groups
+        .replication_groups
+        .iter()
+        .find(|g| g.replication_group_id == "sdk-ec-rg")
+        .expect("sdk-ec-rg replication group");
+    assert_eq!(group.engine, "redis");
+    assert_eq!(group.num_cache_clusters, 2);
+}
+
+#[tokio::test]
+async fn sdk_elasticache_get_clusters() {
+    let server = TestServer::start().await;
+    let fc = FakeCloud::new(server.endpoint());
+    let ec = server.elasticache_client().await;
+
+    ec.create_cache_cluster()
+        .cache_cluster_id("sdk-ec-cluster")
+        .cache_node_type("cache.t3.micro")
+        .engine("redis")
+        .engine_version("7.1")
+        .num_cache_nodes(1)
+        .send()
+        .await
+        .unwrap();
+
+    let clusters = fc
+        .elasticache()
+        .get_clusters()
+        .await
+        .expect("get clusters");
+    let cluster = clusters
+        .clusters
+        .iter()
+        .find(|c| c.cache_cluster_id == "sdk-ec-cluster")
+        .expect("sdk-ec-cluster");
+    assert_eq!(cluster.engine, "redis");
+    assert_eq!(cluster.num_cache_nodes, 1);
+    assert!(cluster.container_id.is_some());
+    assert!(cluster.host_port.is_some());
+}
+
+#[tokio::test]
+async fn sdk_elasticache_get_serverless_caches() {
+    let server = TestServer::start().await;
+    let fc = FakeCloud::new(server.endpoint());
+    let ec = server.elasticache_client().await;
+
+    ec.create_serverless_cache()
+        .serverless_cache_name("sdk-ec-serverless")
+        .engine("redis")
+        .major_engine_version("7.1")
+        .send()
+        .await
+        .unwrap();
+
+    let caches = fc
+        .elasticache()
+        .get_serverless_caches()
+        .await
+        .expect("get serverless caches");
+    let cache = caches
+        .serverless_caches
+        .iter()
+        .find(|c| c.serverless_cache_name == "sdk-ec-serverless")
+        .expect("sdk-ec-serverless");
+    assert_eq!(cache.engine, "redis");
+    assert_eq!(cache.status, "available");
+}
+
 // ── SQS ────────────────────────────────────────────────────────────
 
 #[tokio::test]

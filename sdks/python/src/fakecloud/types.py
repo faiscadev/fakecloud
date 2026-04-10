@@ -118,6 +118,106 @@ class RdsInstancesResponse:
         )
 
 
+# ── ElastiCache ─────────────────────────────────────────────────────
+
+
+@dataclass
+class ElastiCacheCluster:
+    cache_cluster_id: str
+    cache_cluster_status: str
+    engine: str
+    engine_version: str
+    cache_node_type: str
+    num_cache_nodes: int
+    replication_group_id: Optional[str]
+    port: Optional[int]
+    host_port: Optional[int]
+    container_id: Optional[str]
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> ElastiCacheCluster:
+        d = _convert_keys(data)
+        return cls(**d)
+
+
+@dataclass
+class ElastiCacheClustersResponse:
+    clusters: List[ElastiCacheCluster]
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> ElastiCacheClustersResponse:
+        return cls(
+            clusters=[
+                ElastiCacheCluster.from_dict(item) for item in data.get("clusters", [])
+            ],
+        )
+
+
+@dataclass
+class ElastiCacheReplicationGroupIntrospection:
+    replication_group_id: str
+    status: str
+    description: str
+    member_clusters: List[str]
+    automatic_failover: bool
+    multi_az: bool
+    engine: str
+    engine_version: str
+    cache_node_type: str
+    num_cache_clusters: int
+
+    @classmethod
+    def from_dict(
+        cls, data: Dict[str, Any]
+    ) -> ElastiCacheReplicationGroupIntrospection:
+        d = _convert_keys(data)
+        return cls(**d)
+
+
+@dataclass
+class ElastiCacheReplicationGroupsResponse:
+    replication_groups: List[ElastiCacheReplicationGroupIntrospection]
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> ElastiCacheReplicationGroupsResponse:
+        return cls(
+            replication_groups=[
+                ElastiCacheReplicationGroupIntrospection.from_dict(item)
+                for item in data.get("replicationGroups", [])
+            ],
+        )
+
+
+@dataclass
+class ElastiCacheServerlessCacheIntrospection:
+    serverless_cache_name: str
+    status: str
+    engine: str
+    engine_version: str
+    cache_node_type: Optional[str]
+
+    @classmethod
+    def from_dict(
+        cls, data: Dict[str, Any]
+    ) -> ElastiCacheServerlessCacheIntrospection:
+        d = _convert_keys(data)
+        return cls(**d)
+
+
+@dataclass
+class ElastiCacheServerlessCachesResponse:
+    serverless_caches: List[ElastiCacheServerlessCacheIntrospection]
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> ElastiCacheServerlessCachesResponse:
+        return cls(
+            serverless_caches=[
+                ElastiCacheServerlessCacheIntrospection.from_dict(item)
+                for item in data.get("serverlessCaches", [])
+            ],
+        )
+
+
 # ── Lambda ──────────────────────────────────────────────────────────
 
 
