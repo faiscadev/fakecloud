@@ -23,6 +23,8 @@ pub struct ContainerRuntime {
     /// Serializes container startup per function to prevent duplicate containers.
     starting: RwLock<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     instance_id: String,
+    /// IP address that containers should use to reach the host
+    host_ip: String,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -67,11 +69,21 @@ impl ContainerRuntime {
 
         let instance_id = format!("fakecloud-{}", std::process::id());
 
+        // Detect the appropriate host address for containers
+        // On Linux, use the bridge gateway IP directly (more reliable)
+        // On Mac/Windows, use host-gateway which Docker Desktop handles
+        let host_ip = if cfg!(target_os = "linux") {
+            detect_bridge_gateway(&cli).unwrap_or_else(|| "172.17.0.1".to_string())
+        } else {
+            "host-gateway".to_string()
+        };
+
         Some(Self {
             cli,
             containers: RwLock::new(HashMap::new()),
             starting: RwLock::new(HashMap::new()),
             instance_id,
+            host_ip,
         })
     }
 
@@ -186,10 +198,19 @@ impl ContainerRuntime {
             .arg("--label")
             .arg(format!("fakecloud-lambda={}", func.function_name))
             .arg("--label")
-            .arg(format!("fakecloud-instance={}", self.instance_id));
+            .arg(format!("fakecloud-instance={}", self.instance_id))
+            // Map host.docker.internal to the detected host IP (bridge gateway on Linux, or explicit IP)
+            .arg("--add-host")
+            .arg(format!("host.docker.internal:{}", self.host_ip));
 
         for (key, value) in &func.environment {
-            cmd.arg("-e").arg(format!("{}={}", key, value));
+            // Transform localhost URLs to use host.docker.internal, which we've set up via --add-host
+            let transformed_value = value
+                .replace("http://127.0.0.1:", "http://host.docker.internal:")
+                .replace("https://127.0.0.1:", "https://host.docker.internal:")
+                .replace("http://localhost:", "http://host.docker.internal:")
+                .replace("https://localhost:", "https://host.docker.internal:");
+            cmd.arg("-e").arg(format!("{}={}", key, transformed_value));
         }
 
         cmd.arg("-e")
@@ -490,6 +511,33 @@ pub fn extract_zip(zip_bytes: &[u8], dest: &Path) -> Result<(), RuntimeError> {
         }
     }
     Ok(())
+}
+
+/// Detect the Docker bridge gateway IP on Linux.
+/// Returns None if detection fails.
+fn detect_bridge_gateway(cli: &str) -> Option<String> {
+    let output = std::process::Command::new(cli)
+        .args([
+            "network",
+            "inspect",
+            "bridge",
+            "--format",
+            "{{range .IPAM.Config}}{{.Gateway}}{{end}}",
+        ])
+        .output()
+        .ok()?;
+
+    if output.status.success() {
+        let gateway = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !gateway.is_empty() && gateway.contains('.') {
+            tracing::info!(
+                gateway = %gateway,
+                "Detected Docker bridge gateway for Lambda containers"
+            );
+            return Some(gateway);
+        }
+    }
+    None
 }
 
 fn is_cli_available(name: &str) -> bool {

@@ -38,7 +38,8 @@ impl TestServer {
 
             let mut cmd = Command::new(&bin);
             cmd.arg("--addr")
-                .arg(format!("127.0.0.1:{port}"))
+                // Bind to 0.0.0.0 so Lambda containers can reach the server via Docker bridge
+                .arg(format!("0.0.0.0:{port}"))
                 .arg("--log-level")
                 .arg(
                     std::env::var("FAKECLOUD_TEST_LOG_LEVEL")
