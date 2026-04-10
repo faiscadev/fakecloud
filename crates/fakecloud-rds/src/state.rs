@@ -359,16 +359,28 @@ pub fn default_orderable_options() -> Vec<OrderableDbInstanceOption> {
         ("mariadb", "10.6.16", "general-public-license"),
     ];
 
+    let instance_classes = vec![
+        "db.t3.micro",
+        "db.t3.small",
+        "db.t3.medium",
+        "db.t3.large",
+        "db.t4g.micro",
+        "db.t4g.small",
+        "db.m5.large",
+    ];
+
     for (engine, version, license) in engines_and_versions {
-        options.push(OrderableDbInstanceOption {
-            engine: engine.to_string(),
-            engine_version: version.to_string(),
-            db_instance_class: "db.t3.micro".to_string(),
-            license_model: license.to_string(),
-            storage_type: "gp2".to_string(),
-            min_storage_size: 20,
-            max_storage_size: 16384,
-        });
+        for class in &instance_classes {
+            options.push(OrderableDbInstanceOption {
+                engine: engine.to_string(),
+                engine_version: version.to_string(),
+                db_instance_class: class.to_string(),
+                license_model: license.to_string(),
+                storage_type: "gp2".to_string(),
+                min_storage_size: 20,
+                max_storage_size: 16384,
+            });
+        }
     }
 
     options
@@ -477,8 +489,8 @@ mod tests {
         let versions = default_engine_versions();
         let options = default_orderable_options();
 
-        assert_eq!(options.len(), 9); // One per engine version
-                                      // Verify all engines and versions have orderable options
+        assert_eq!(options.len(), 63); // 9 versions * 7 instance classes
+                                       // Verify all engines and versions have orderable options
         for version in &versions {
             assert!(options.iter().any(|opt| {
                 opt.engine == version.engine && opt.engine_version == version.engine_version

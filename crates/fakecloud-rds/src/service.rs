@@ -1934,11 +1934,20 @@ fn validate_create_request(
 }
 
 fn validate_db_instance_class(db_instance_class: &str) -> Result<(), AwsServiceError> {
-    if db_instance_class != "db.t3.micro" {
+    let supported_classes = [
+        "db.t3.micro",
+        "db.t3.small",
+        "db.t3.medium",
+        "db.t3.large",
+        "db.t4g.micro",
+        "db.t4g.small",
+        "db.m5.large",
+    ];
+    if !supported_classes.contains(&db_instance_class) {
         return Err(AwsServiceError::aws_error(
             StatusCode::BAD_REQUEST,
             "InvalidParameterValue",
-            format!("DBInstanceClass '{db_instance_class}' is not supported yet."),
+            format!("DBInstanceClass '{}' is not supported.", db_instance_class),
         ));
     }
     Ok(())
