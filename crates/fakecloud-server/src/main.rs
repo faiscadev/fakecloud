@@ -225,9 +225,8 @@ async fn main() {
 
     // Step 4: Logs delivery (subscription filters can push to SQS, Lambda, and Kinesis)
     let sqs_delivery_for_ses = sqs_delivery.clone();
-    let kinesis_delivery = fakecloud_kinesis::delivery::KinesisDeliveryImpl::new(
-        kinesis_state.clone(),
-    );
+    let kinesis_delivery =
+        fakecloud_kinesis::delivery::KinesisDeliveryImpl::new(kinesis_state.clone());
     let mut delivery_for_logs = DeliveryBus::new()
         .with_sqs(sqs_delivery)
         .with_kinesis(kinesis_delivery);
