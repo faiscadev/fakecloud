@@ -291,11 +291,11 @@ Features: stream creation and deletion, shard iterators and record reads, batche
 
 Protocol: JSON (JSON body, `X-Amz-Target` header, JSON responses)
 
-### RDS (10 actions)
+### RDS (22 actions)
 
-AddTagsToResource, CreateDBInstance, DeleteDBInstance, DescribeDBEngineVersions, DescribeDBInstances, DescribeOrderableDBInstanceOptions, ListTagsForResource, ModifyDBInstance, RebootDBInstance, RemoveTagsFromResource
+AddTagsToResource, CreateDBInstance, CreateDBInstanceReadReplica, CreateDBParameterGroup, CreateDBSnapshot, CreateDBSubnetGroup, DeleteDBInstance, DeleteDBParameterGroup, DeleteDBSnapshot, DeleteDBSubnetGroup, DescribeDBEngineVersions, DescribeDBInstances, DescribeDBParameterGroups, DescribeDBSnapshots, DescribeDBSubnetGroups, DescribeOrderableDBInstanceOptions, ListTagsForResource, ModifyDBInstance, ModifyDBParameterGroup, RebootDBInstance, RemoveTagsFromResource, RestoreDBInstanceFromDBSnapshot
 
-Features: DB instance lifecycle, engine and version discovery, orderable instance options, modification and reboot flows, tagging, and Docker-backed PostgreSQL execution for created instances.
+Features: DB instance lifecycle (PostgreSQL, MySQL, MariaDB via Docker), read replicas, snapshots and restores, parameter groups, subnet groups, engine and version discovery, orderable instance options, modification and reboot flows, tagging.
 
 Protocol: Query (form-encoded body, `Action` parameter, XML responses)
 
@@ -303,7 +303,7 @@ Protocol: Query (form-encoded body, `Action` parameter, XML responses)
 
 AddTagsToResource, CreateCacheCluster, CreateGlobalReplicationGroup, CreateCacheSubnetGroup, CreateReplicationGroup, CreateServerlessCache, CreateServerlessCacheSnapshot, CreateSnapshot, CreateUser, CreateUserGroup, DecreaseReplicaCount, DeleteCacheCluster, DeleteGlobalReplicationGroup, DeleteCacheSubnetGroup, DeleteReplicationGroup, DeleteServerlessCache, DeleteServerlessCacheSnapshot, DeleteSnapshot, DeleteUser, DeleteUserGroup, DescribeCacheClusters, DescribeCacheEngineVersions, DescribeGlobalReplicationGroups, DescribeCacheParameterGroups, DescribeReservedCacheNodes, DescribeReservedCacheNodesOfferings, DescribeCacheSubnetGroups, DescribeEngineDefaultParameters, DescribeReplicationGroups, DescribeServerlessCaches, DescribeServerlessCacheSnapshots, DescribeSnapshots, DescribeUserGroups, DescribeUsers, DisassociateGlobalReplicationGroup, FailoverGlobalReplicationGroup, IncreaseReplicaCount, ListTagsForResource, ModifyCacheSubnetGroup, ModifyGlobalReplicationGroup, ModifyReplicationGroup, ModifyServerlessCache, RemoveTagsFromResource, TestFailover
 
-Features: cache clusters, replication groups, global replication groups, serverless caches and snapshots, subnet groups, users and user groups, failover and replica-count changes, tagging, and Docker-backed Redis for implemented creation flows.
+Features: cache clusters, replication groups, global replication groups, serverless caches and snapshots, subnet groups, users and user groups, failover and replica-count changes, tagging, and Docker-backed Redis and Valkey for implemented creation flows.
 
 Protocol: Query (form-encoded body, `Action` parameter, XML responses)
 

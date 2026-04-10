@@ -33,7 +33,7 @@ license = "AGPL-3.0-or-later"
 repository = "https://github.com/faiscadev/fakecloud"
 homepage = "https://fakecloud.dev"
 rust-version = "1.94"
-version = "0.6.0"
+version = "0.6.1"
 
 [workspace.dependencies]
 tokio = { version = "1", features = ["full"] }

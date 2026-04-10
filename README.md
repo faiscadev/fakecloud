@@ -153,7 +153,7 @@ aws --endpoint-url http://localhost:4566 sqs create-queue --queue-name my-queue
 
 ## Supported Services
 
-18 AWS services, 990 API operations:
+18 AWS services, 1002 API operations:
 
 | Service | Actions | Highlights |
 |---|---|---|
@@ -173,8 +173,8 @@ aws --endpoint-url http://localhost:4566 sqs create-queue --queue-name my-queue
 | **SES** | 111 | **v2** (97 ops): identities, templates, configuration sets, contact lists, send email, suppression list, event destinations, DKIM/feedback/mail-from attributes, dedicated IP pools, account settings, import/export jobs, event fanout (SNS/EventBridge), mailbox simulator. **v1 inbound** (14 ops): receipt rule sets, receipt rules, receipt filters, inbound email pipeline with S3/SNS/Lambda actions |
 | **Cognito User Pools** | 80 | User pools, app clients, users, groups, MFA, identity providers, resource servers, domains, devices, authentication flows, password management |
 | **Kinesis** | 14 | Streams, records, shard iterators, retention changes, stream tagging |
-| **RDS** | 10 | DB instances, engine/version discovery, orderable instance options, reboot, tagging |
-| **ElastiCache** | 44 | Cache clusters, replication groups, global replication groups, serverless caches and snapshots, subnet groups, users/user groups, failover, tagging |
+| **RDS** | 22 | DB instances (PostgreSQL, MySQL, MariaDB via Docker), snapshots, read replicas, parameter groups, subnet groups, engine/version discovery, tagging |
+| **ElastiCache** | 44 | Cache clusters, replication groups, global replication groups, serverless caches and snapshots, subnet groups, users/user groups, failover, tagging (Redis and Valkey via Docker) |
 
 ### Cross-Service Integration
 
