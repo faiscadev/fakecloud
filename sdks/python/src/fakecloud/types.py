@@ -113,9 +113,7 @@ class RdsInstancesResponse:
     def from_dict(cls, data: Dict[str, Any]) -> RdsInstancesResponse:
         d = _convert_keys(data)
         return cls(
-            instances=[
-                RdsInstance.from_dict(item) for item in d.get("instances", [])
-            ],
+            instances=[RdsInstance.from_dict(item) for item in d.get("instances", [])],
         )
 
 
