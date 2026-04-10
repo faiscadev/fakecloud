@@ -1,6 +1,7 @@
 mod helpers;
 
 use aws_sdk_s3::primitives::ByteStream;
+use aws_sdk_sqs::types::QueueAttributeName;
 use helpers::TestServer;
 
 #[tokio::test]
@@ -4013,4 +4014,113 @@ async fn s3_simulation_lifecycle_tick_expires_objects() {
         .await
         .unwrap();
     assert_eq!(resp.key_count().unwrap_or(0), 0);
+}
+
+#[tokio::test]
+async fn s3_eventbridge_notification() {
+    let server = TestServer::start().await;
+    let s3 = server.s3_client().await;
+    let eb = server.eventbridge_client().await;
+    let sqs = server.sqs_client().await;
+
+    // Create S3 bucket
+    s3.create_bucket()
+        .bucket("eb-notif-bucket")
+        .send()
+        .await
+        .unwrap();
+
+    // Create SQS queue to receive events via EventBridge
+    let queue = sqs
+        .create_queue()
+        .queue_name("s3-eb-target")
+        .send()
+        .await
+        .unwrap();
+    let queue_url = queue.queue_url().unwrap().to_string();
+    let attrs = sqs
+        .get_queue_attributes()
+        .queue_url(&queue_url)
+        .attribute_names(QueueAttributeName::QueueArn)
+        .send()
+        .await
+        .unwrap();
+    let queue_arn = attrs
+        .attributes()
+        .unwrap()
+        .get(&QueueAttributeName::QueueArn)
+        .unwrap()
+        .to_string();
+
+    // Create EventBridge rule matching S3 events
+    eb.put_rule()
+        .name("s3-eb-rule")
+        .event_pattern(r#"{"source": ["aws.s3"]}"#)
+        .send()
+        .await
+        .unwrap();
+
+    eb.put_targets()
+        .rule("s3-eb-rule")
+        .targets(
+            aws_sdk_eventbridge::types::Target::builder()
+                .id("sqs-target")
+                .arn(&queue_arn)
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    // Enable EventBridge notifications on the bucket via CLI
+    let notif_config = r#"{"EventBridgeConfiguration":{}}"#;
+    let output = server
+        .aws_cli(&[
+            "s3api",
+            "put-bucket-notification-configuration",
+            "--bucket",
+            "eb-notif-bucket",
+            "--notification-configuration",
+            notif_config,
+        ])
+        .await;
+    assert!(
+        output.success(),
+        "put notification config failed: {}",
+        output.stderr_text()
+    );
+
+    // Upload an object to trigger S3→EventBridge notification
+    s3.put_object()
+        .bucket("eb-notif-bucket")
+        .key("test-file.txt")
+        .body(ByteStream::from_static(b"hello eventbridge"))
+        .send()
+        .await
+        .unwrap();
+
+    // Read events from SQS (delivered via EventBridge rule)
+    let msgs = sqs
+        .receive_message()
+        .queue_url(&queue_url)
+        .max_number_of_messages(10)
+        .send()
+        .await
+        .unwrap();
+
+    assert!(
+        !msgs.messages().is_empty(),
+        "expected at least one S3→EventBridge event in SQS"
+    );
+
+    let body: serde_json::Value = serde_json::from_str(msgs.messages()[0].body().unwrap()).unwrap();
+    assert_eq!(body["source"], "aws.s3");
+    assert!(
+        body["detail-type"].as_str().unwrap().contains("Object"),
+        "detail-type should mention Object, got: {}",
+        body["detail-type"]
+    );
+    assert_eq!(body["detail"]["bucket"]["name"], "eb-notif-bucket");
+    assert_eq!(body["detail"]["object"]["key"], "test-file.txt");
 }

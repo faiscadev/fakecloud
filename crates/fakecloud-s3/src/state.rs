@@ -117,6 +117,8 @@ pub struct S3Bucket {
     pub replication_config: Option<String>,
     pub ownership_controls: Option<String>,
     pub inventory_configs: HashMap<String, String>,
+    /// Whether EventBridge notifications are enabled for this bucket.
+    pub eventbridge_enabled: bool,
 }
 
 impl S3Bucket {
@@ -152,6 +154,7 @@ impl S3Bucket {
             replication_config: None,
             ownership_controls: None,
             inventory_configs: HashMap::new(),
+            eventbridge_enabled: false,
         }
     }
 }

@@ -91,6 +91,10 @@ pub struct DynamoTable {
     pub stream_arn: Option<String>,
     /// Stream records (retained for 24 hours)
     pub stream_records: Arc<RwLock<Vec<StreamRecord>>>,
+    /// Server-side encryption type: AES256 (owned) or KMS
+    pub sse_type: Option<String>,
+    /// KMS key ARN for SSE (only when sse_type is KMS)
+    pub sse_kms_key_arn: Option<String>,
 }
 
 #[derive(Debug, Clone)]

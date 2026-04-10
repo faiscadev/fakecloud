@@ -282,6 +282,8 @@ impl S3Service {
             .buckets
             .get_mut(bucket)
             .ok_or_else(|| no_such_bucket(bucket))?;
+        // Check if EventBridgeConfiguration is present (any tag, even empty/self-closing)
+        b.eventbridge_enabled = body_str.contains("EventBridgeConfiguration");
         // Auto-generate Id for each configuration element if missing
         let normalized = normalize_notification_ids(&body_str);
         b.notification_config = Some(normalized);
@@ -297,13 +299,19 @@ impl S3Service {
             .buckets
             .get(bucket)
             .ok_or_else(|| no_such_bucket(bucket))?;
-        let body = match &b.notification_config {
+        let mut body = match &b.notification_config {
             Some(config) => config.clone(),
             None => "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
                      <NotificationConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
                      </NotificationConfiguration>"
                 .to_string(),
         };
+        // Ensure EventBridgeConfiguration is in response if enabled
+        if b.eventbridge_enabled && !body.contains("EventBridgeConfiguration") {
+            if let Some(pos) = body.find("</NotificationConfiguration>") {
+                body.insert_str(pos, "<EventBridgeConfiguration/>");
+            }
+        }
         Ok(s3_xml(StatusCode::OK, body))
     }
 

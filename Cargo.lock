@@ -1964,6 +1964,7 @@ name = "fakecloud-dynamodb"
 version = "0.6.1"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "bytes",
  "chrono",
  "fakecloud-aws",

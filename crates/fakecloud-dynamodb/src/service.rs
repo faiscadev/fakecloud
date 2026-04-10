@@ -2,11 +2,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use base64::Engine;
 use chrono::Utc;
 use http::StatusCode;
 use parking_lot::RwLock;
 use serde_json::{json, Value};
 
+use fakecloud_core::delivery::DeliveryBus;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 use fakecloud_core::validation::*;
 
@@ -22,6 +24,7 @@ use crate::state::{
 pub struct DynamoDbService {
     state: SharedDynamoDbState,
     s3_state: Option<SharedS3State>,
+    delivery: Option<Arc<DeliveryBus>>,
 }
 
 impl DynamoDbService {
@@ -29,12 +32,74 @@ impl DynamoDbService {
         Self {
             state,
             s3_state: None,
+            delivery: None,
         }
     }
 
     pub fn with_s3(mut self, s3_state: SharedS3State) -> Self {
         self.s3_state = Some(s3_state);
         self
+    }
+
+    pub fn with_delivery(mut self, delivery: Arc<DeliveryBus>) -> Self {
+        self.delivery = Some(delivery);
+        self
+    }
+
+    /// Deliver a change record to all active Kinesis streaming destinations for a table.
+    fn deliver_to_kinesis_destinations(
+        &self,
+        table: &DynamoTable,
+        event_name: &str,
+        keys: &HashMap<String, AttributeValue>,
+        old_image: Option<&HashMap<String, AttributeValue>>,
+        new_image: Option<&HashMap<String, AttributeValue>>,
+    ) {
+        let delivery = match &self.delivery {
+            Some(d) => d,
+            None => return,
+        };
+
+        let active_destinations: Vec<_> = table
+            .kinesis_destinations
+            .iter()
+            .filter(|d| d.destination_status == "ACTIVE")
+            .collect();
+
+        if active_destinations.is_empty() {
+            return;
+        }
+
+        let mut record = json!({
+            "eventID": uuid::Uuid::new_v4().to_string(),
+            "eventName": event_name,
+            "eventVersion": "1.1",
+            "eventSource": "aws:dynamodb",
+            "awsRegion": table.arn.split(':').nth(3).unwrap_or("us-east-1"),
+            "dynamodb": {
+                "Keys": keys,
+                "SequenceNumber": chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0).to_string(),
+                "SizeBytes": serde_json::to_string(keys).map(|s| s.len()).unwrap_or(0),
+                "StreamViewType": "NEW_AND_OLD_IMAGES",
+            },
+            "eventSourceARN": &table.arn,
+            "tableName": &table.name,
+        });
+
+        if let Some(old) = old_image {
+            record["dynamodb"]["OldImage"] = json!(old);
+        }
+        if let Some(new) = new_image {
+            record["dynamodb"]["NewImage"] = json!(new);
+        }
+
+        let record_str = serde_json::to_string(&record).unwrap_or_default();
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&record_str);
+        let partition_key = serde_json::to_string(keys).unwrap_or_default();
+
+        for dest in active_destinations {
+            delivery.send_to_kinesis(&dest.stream_arn, &encoded, &partition_key);
+        }
     }
 
     fn parse_body(req: &AwsRequest) -> Result<Value, AwsServiceError> {
@@ -132,6 +197,30 @@ impl DynamoDbService {
                 (false, None)
             };
 
+        // Parse SSESpecification
+        let (sse_type, sse_kms_key_arn) = if let Some(sse_spec) = body.get("SSESpecification") {
+            let enabled = sse_spec
+                .get("Enabled")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if enabled {
+                let sse_type = sse_spec
+                    .get("SSEType")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("KMS")
+                    .to_string();
+                let kms_key = sse_spec
+                    .get("KMSMasterKeyId")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                (Some(sse_type), kms_key)
+            } else {
+                (None, None)
+            }
+        } else {
+            (None, None)
+        };
+
         let mut state = self.state.write();
 
         if state.tables.contains_key(&table_name) {
@@ -185,6 +274,8 @@ impl DynamoDbService {
             stream_view_type,
             stream_arn,
             stream_records: Arc::new(RwLock::new(Vec::new())),
+            sse_type,
+            sse_kms_key_arn,
         };
 
         state.tables.insert(table_name, table);
@@ -317,6 +408,30 @@ impl DynamoDbService {
             table.billing_mode = bm.to_string();
         }
 
+        // Handle SSESpecification update
+        if let Some(sse_spec) = body.get("SSESpecification") {
+            let enabled = sse_spec
+                .get("Enabled")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if enabled {
+                table.sse_type = Some(
+                    sse_spec
+                        .get("SSEType")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("KMS")
+                        .to_string(),
+                );
+                table.sse_kms_key_arn = sse_spec
+                    .get("KMSMasterKeyId")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+            } else {
+                table.sse_type = None;
+                table.sse_kms_key_arn = None;
+            }
+        }
+
         let table_desc = build_table_description_json(
             &table.arn,
             &table.key_schema,
@@ -347,7 +462,8 @@ impl DynamoDbService {
         let return_values = body["ReturnValues"].as_str().unwrap_or("NONE").to_string();
 
         // --- Acquire write lock ONLY for validation + mutation ---
-        let old_item = {
+        // Capture kinesis delivery info alongside the return value
+        let (old_item, kinesis_info) = {
             let mut state = self.state.write();
             let table = get_table_mut(&mut state.tables, table_name)?;
 
@@ -367,8 +483,13 @@ impl DynamoDbService {
                 None
             };
 
-            // Capture old item for stream record if needed
-            let old_item_for_stream = if table.stream_enabled {
+            // Capture old item for stream/kinesis if needed
+            let needs_change_capture = table.stream_enabled
+                || table
+                    .kinesis_destinations
+                    .iter()
+                    .any(|d| d.destination_status == "ACTIVE");
+            let old_item_for_stream = if needs_change_capture {
                 existing_idx.map(|i| table.items[i].clone())
             } else {
                 None
@@ -385,24 +506,53 @@ impl DynamoDbService {
             table.record_item_access(&item);
             table.recalculate_stats();
 
+            let event_name = if is_modify { "MODIFY" } else { "INSERT" };
+            let key = extract_key(table, &item);
+
             // Generate stream record
             if table.stream_enabled {
-                let key = extract_key(table, &item);
-                let event_name = if is_modify { "MODIFY" } else { "INSERT" };
                 if let Some(record) = crate::streams::generate_stream_record(
                     table,
                     event_name,
-                    key,
-                    old_item_for_stream,
+                    key.clone(),
+                    old_item_for_stream.clone(),
                     Some(item.clone()),
                 ) {
                     crate::streams::add_stream_record(table, record);
                 }
             }
 
-            old_item_for_return
+            // Capture kinesis delivery info (delivered after lock release)
+            let kinesis_info = if table
+                .kinesis_destinations
+                .iter()
+                .any(|d| d.destination_status == "ACTIVE")
+            {
+                Some((
+                    table.clone(),
+                    event_name.to_string(),
+                    key,
+                    old_item_for_stream,
+                    Some(item.clone()),
+                ))
+            } else {
+                None
+            };
+
+            (old_item_for_return, kinesis_info)
         };
         // --- Write lock released, build response ---
+
+        // Deliver to Kinesis destinations outside the lock
+        if let Some((table, event_name, keys, old_image, new_image)) = kinesis_info {
+            self.deliver_to_kinesis_destinations(
+                &table,
+                &event_name,
+                &keys,
+                old_image.as_ref(),
+                new_image.as_ref(),
+            );
+        }
 
         let mut result = json!({});
         if let Some(old) = old_item {
@@ -479,61 +629,80 @@ impl DynamoDbService {
         let table_name = require_str(&body, "TableName")?;
         let key = require_object(&body, "Key")?;
 
-        let mut state = self.state.write();
-        let table = get_table_mut(&mut state.tables, table_name)?;
+        let (result, kinesis_info) = {
+            let mut state = self.state.write();
+            let table = get_table_mut(&mut state.tables, table_name)?;
 
-        let condition = body["ConditionExpression"].as_str();
-        let expr_attr_names = parse_expression_attribute_names(&body);
-        let expr_attr_values = parse_expression_attribute_values(&body);
+            let condition = body["ConditionExpression"].as_str();
+            let expr_attr_names = parse_expression_attribute_names(&body);
+            let expr_attr_values = parse_expression_attribute_values(&body);
 
-        let existing_idx = table.find_item_index(&key);
+            let existing_idx = table.find_item_index(&key);
 
-        if let Some(cond) = condition {
-            let existing = existing_idx.map(|i| &table.items[i]);
-            evaluate_condition(cond, existing, &expr_attr_names, &expr_attr_values)?;
-        }
-
-        let return_values = body["ReturnValues"].as_str().unwrap_or("NONE");
-
-        let return_consumed = body["ReturnConsumedCapacity"].as_str().unwrap_or("NONE");
-        let return_icm = body["ReturnItemCollectionMetrics"]
-            .as_str()
-            .unwrap_or("NONE");
-
-        let mut result = json!({});
-
-        if let Some(idx) = existing_idx {
-            let old_item = table.items[idx].clone();
-            if return_values == "ALL_OLD" {
-                result["Attributes"] = json!(old_item);
+            if let Some(cond) = condition {
+                let existing = existing_idx.map(|i| &table.items[i]);
+                evaluate_condition(cond, existing, &expr_attr_names, &expr_attr_values)?;
             }
 
-            // Generate stream record before removing
-            if table.stream_enabled {
-                if let Some(record) = crate::streams::generate_stream_record(
-                    table,
-                    "REMOVE",
-                    key.clone(),
-                    Some(old_item),
-                    None,
-                ) {
-                    crate::streams::add_stream_record(table, record);
+            let return_values = body["ReturnValues"].as_str().unwrap_or("NONE");
+
+            let mut result = json!({});
+            let mut kinesis_info = None;
+
+            if let Some(idx) = existing_idx {
+                let old_item = table.items[idx].clone();
+                if return_values == "ALL_OLD" {
+                    result["Attributes"] = json!(old_item.clone());
                 }
+
+                // Generate stream record before removing
+                if table.stream_enabled {
+                    if let Some(record) = crate::streams::generate_stream_record(
+                        table,
+                        "REMOVE",
+                        key.clone(),
+                        Some(old_item.clone()),
+                        None,
+                    ) {
+                        crate::streams::add_stream_record(table, record);
+                    }
+                }
+
+                // Capture kinesis delivery info
+                if table
+                    .kinesis_destinations
+                    .iter()
+                    .any(|d| d.destination_status == "ACTIVE")
+                {
+                    kinesis_info = Some((table.clone(), key.clone(), Some(old_item)));
+                }
+
+                table.items.remove(idx);
+                table.recalculate_stats();
             }
 
-            table.items.remove(idx);
-            table.recalculate_stats();
-        }
+            let return_consumed = body["ReturnConsumedCapacity"].as_str().unwrap_or("NONE");
+            let return_icm = body["ReturnItemCollectionMetrics"]
+                .as_str()
+                .unwrap_or("NONE");
 
-        if return_consumed == "TOTAL" || return_consumed == "INDEXES" {
-            result["ConsumedCapacity"] = json!({
-                "TableName": table_name,
-                "CapacityUnits": 1.0,
-            });
-        }
+            if return_consumed == "TOTAL" || return_consumed == "INDEXES" {
+                result["ConsumedCapacity"] = json!({
+                    "TableName": table_name,
+                    "CapacityUnits": 1.0,
+                });
+            }
 
-        if return_icm == "SIZE" {
-            result["ItemCollectionMetrics"] = json!({});
+            if return_icm == "SIZE" {
+                result["ItemCollectionMetrics"] = json!({});
+            }
+
+            (result, kinesis_info)
+        };
+
+        // Deliver to Kinesis destinations outside the lock
+        if let Some((table, keys, old_image)) = kinesis_info {
+            self.deliver_to_kinesis_destinations(&table, "REMOVE", &keys, old_image.as_ref(), None);
         }
 
         Self::ok_json(result)
@@ -576,8 +745,13 @@ impl DynamoDbService {
             }
         };
 
-        // Capture old item for stream (before update)
-        let old_item_for_stream = if table.stream_enabled {
+        // Capture old item for stream/kinesis (before update)
+        let needs_change_capture = table.stream_enabled
+            || table
+                .kinesis_destinations
+                .iter()
+                .any(|d| d.destination_status == "ACTIVE");
+        let old_item_for_stream = if needs_change_capture {
             Some(table.items[idx].clone())
         } else {
             None
@@ -604,22 +778,54 @@ impl DynamoDbService {
             None
         };
 
+        let event_name = if is_insert { "INSERT" } else { "MODIFY" };
+        let new_item_for_stream = table.items[idx].clone();
+
         // Generate stream record after update
         if table.stream_enabled {
-            let event_name = if is_insert { "INSERT" } else { "MODIFY" };
-            let new_item_for_stream = table.items[idx].clone();
             if let Some(record) = crate::streams::generate_stream_record(
                 table,
                 event_name,
                 key.clone(),
-                old_item_for_stream,
-                Some(new_item_for_stream),
+                old_item_for_stream.clone(),
+                Some(new_item_for_stream.clone()),
             ) {
                 crate::streams::add_stream_record(table, record);
             }
         }
 
+        // Capture kinesis delivery info
+        let kinesis_info = if table
+            .kinesis_destinations
+            .iter()
+            .any(|d| d.destination_status == "ACTIVE")
+        {
+            Some((
+                table.clone(),
+                event_name.to_string(),
+                key.clone(),
+                old_item_for_stream,
+                Some(new_item_for_stream),
+            ))
+        } else {
+            None
+        };
+
         table.recalculate_stats();
+
+        // Release the write lock (drop `state`)
+        drop(state);
+
+        // Deliver to Kinesis destinations outside the lock
+        if let Some((tbl, ev, keys, old_image, new_image)) = kinesis_info {
+            self.deliver_to_kinesis_destinations(
+                &tbl,
+                &ev,
+                &keys,
+                old_image.as_ref(),
+                new_image.as_ref(),
+            );
+        }
 
         let mut result = json!({});
         if let Some(old) = old_item {
@@ -1897,6 +2103,8 @@ impl DynamoDbService {
             stream_view_type: None,
             stream_arn: None,
             stream_records: Arc::new(RwLock::new(Vec::new())),
+            sse_type: None,
+            sse_kms_key_arn: None,
         };
         table.recalculate_stats();
 
@@ -1972,6 +2180,8 @@ impl DynamoDbService {
             stream_view_type: None,
             stream_arn: None,
             stream_records: Arc::new(RwLock::new(Vec::new())),
+            sse_type: None,
+            sse_kms_key_arn: None,
         };
         table.recalculate_stats();
 
@@ -2897,6 +3107,8 @@ impl DynamoDbService {
             stream_view_type: None,
             stream_arn: None,
             stream_records: Arc::new(RwLock::new(Vec::new())),
+            sse_type: None,
+            sse_kms_key_arn: None,
         };
         table.recalculate_stats();
         state.tables.insert(table_name.to_string(), table);
@@ -4541,6 +4753,24 @@ fn build_table_description(table: &DynamoTable) -> Value {
                 "StreamViewType": view_type,
             });
         }
+    }
+
+    // Add SSE description
+    if let Some(ref sse_type) = table.sse_type {
+        let mut sse_desc = json!({
+            "Status": "ENABLED",
+            "SSEType": sse_type,
+        });
+        if let Some(ref key_arn) = table.sse_kms_key_arn {
+            sse_desc["KMSMasterKeyArn"] = json!(key_arn);
+        }
+        desc["SSEDescription"] = sse_desc;
+    } else {
+        // Default: AWS owned key encryption (always enabled in real AWS)
+        desc["SSEDescription"] = json!({
+            "Status": "ENABLED",
+            "SSEType": "AES256",
+        });
     }
 
     desc

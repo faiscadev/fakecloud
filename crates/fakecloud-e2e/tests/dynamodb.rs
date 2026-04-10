@@ -4,8 +4,8 @@ use aws_sdk_dynamodb::types::{
     AttributeDefinition, AttributeValue, BillingMode, ContributorInsightsAction, Delete,
     DeleteRequest, Get, GlobalSecondaryIndex, KeySchemaElement, KeyType,
     PointInTimeRecoverySpecification, Projection, ProjectionType, ProvisionedThroughput, Put,
-    PutRequest, Replica, ScalarAttributeType, Tag, TimeToLiveSpecification, TransactGetItem,
-    TransactWriteItem, WriteRequest,
+    PutRequest, Replica, ScalarAttributeType, SseSpecification, SseType, Tag,
+    TimeToLiveSpecification, TransactGetItem, TransactWriteItem, WriteRequest,
 };
 use helpers::TestServer;
 use std::collections::HashMap;
@@ -2388,4 +2388,213 @@ async fn dynamodb_ttl_processor_tick() {
         .unwrap();
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["expiredItems"], 0, "no more items to expire");
+}
+
+#[tokio::test]
+async fn dynamodb_sse_specification_kms() {
+    let server = TestServer::start().await;
+    let client = server.dynamodb_client().await;
+
+    let kms_key_id = "arn:aws:kms:us-east-1:123456789012:key/test-key-id";
+
+    // Create table with KMS SSE
+    client
+        .create_table()
+        .table_name("SseTable")
+        .key_schema(
+            KeySchemaElement::builder()
+                .attribute_name("pk")
+                .key_type(KeyType::Hash)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            AttributeDefinition::builder()
+                .attribute_name("pk")
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .billing_mode(BillingMode::PayPerRequest)
+        .sse_specification(
+            SseSpecification::builder()
+                .enabled(true)
+                .sse_type(SseType::Kms)
+                .kms_master_key_id(kms_key_id)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    // Describe table and verify SSEDescription
+    let desc = client
+        .describe_table()
+        .table_name("SseTable")
+        .send()
+        .await
+        .unwrap();
+    let table = desc.table().unwrap();
+    let sse = table.sse_description().unwrap();
+    assert_eq!(sse.status().unwrap().as_str(), "ENABLED");
+    assert_eq!(sse.sse_type().unwrap().as_str(), "KMS");
+    assert_eq!(sse.kms_master_key_arn().unwrap(), kms_key_id);
+}
+
+#[tokio::test]
+async fn dynamodb_sse_default_aes256() {
+    let server = TestServer::start().await;
+    let client = server.dynamodb_client().await;
+
+    // Create table without SSE spec — should default to AES256
+    client
+        .create_table()
+        .table_name("DefaultSseTable")
+        .key_schema(
+            KeySchemaElement::builder()
+                .attribute_name("pk")
+                .key_type(KeyType::Hash)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            AttributeDefinition::builder()
+                .attribute_name("pk")
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .billing_mode(BillingMode::PayPerRequest)
+        .send()
+        .await
+        .unwrap();
+
+    let desc = client
+        .describe_table()
+        .table_name("DefaultSseTable")
+        .send()
+        .await
+        .unwrap();
+    let table = desc.table().unwrap();
+    let sse = table.sse_description().unwrap();
+    assert_eq!(sse.status().unwrap().as_str(), "ENABLED");
+    assert_eq!(sse.sse_type().unwrap().as_str(), "AES256");
+}
+
+#[tokio::test]
+async fn dynamodb_kinesis_streaming_delivers_records() {
+    let server = TestServer::start().await;
+    let ddb = server.dynamodb_client().await;
+    let kinesis = server.kinesis_client().await;
+
+    // Create Kinesis stream
+    kinesis
+        .create_stream()
+        .stream_name("ddb-changes")
+        .shard_count(1)
+        .send()
+        .await
+        .unwrap();
+
+    // Create DynamoDB table
+    ddb.create_table()
+        .table_name("StreamedTable")
+        .key_schema(
+            KeySchemaElement::builder()
+                .attribute_name("pk")
+                .key_type(KeyType::Hash)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            AttributeDefinition::builder()
+                .attribute_name("pk")
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .billing_mode(BillingMode::PayPerRequest)
+        .send()
+        .await
+        .unwrap();
+
+    // Enable Kinesis streaming destination
+    let stream_arn = "arn:aws:kinesis:us-east-1:123456789012:stream/ddb-changes";
+    ddb.enable_kinesis_streaming_destination()
+        .table_name("StreamedTable")
+        .stream_arn(stream_arn)
+        .send()
+        .await
+        .unwrap();
+
+    // Get a shard iterator (TRIM_HORIZON to read from beginning)
+    let desc = kinesis
+        .describe_stream()
+        .stream_name("ddb-changes")
+        .send()
+        .await
+        .unwrap();
+    let shard_id = desc
+        .stream_description()
+        .unwrap()
+        .shards()
+        .first()
+        .unwrap()
+        .shard_id()
+        .to_string();
+
+    let iter_resp = kinesis
+        .get_shard_iterator()
+        .stream_name("ddb-changes")
+        .shard_id(&shard_id)
+        .shard_iterator_type(aws_sdk_kinesis::types::ShardIteratorType::TrimHorizon)
+        .send()
+        .await
+        .unwrap();
+    let shard_iterator = iter_resp.shard_iterator().unwrap().to_string();
+
+    // Put an item into DynamoDB
+    ddb.put_item()
+        .table_name("StreamedTable")
+        .item("pk", AttributeValue::S("item1".to_string()))
+        .item("data", AttributeValue::S("hello".to_string()))
+        .send()
+        .await
+        .unwrap();
+
+    // Delete the item
+    ddb.delete_item()
+        .table_name("StreamedTable")
+        .key("pk", AttributeValue::S("item1".to_string()))
+        .send()
+        .await
+        .unwrap();
+
+    // Read records from Kinesis
+    let records_resp = kinesis
+        .get_records()
+        .shard_iterator(&shard_iterator)
+        .send()
+        .await
+        .unwrap();
+
+    let records = records_resp.records();
+    assert!(
+        records.len() >= 2,
+        "expected at least 2 Kinesis records (INSERT + REMOVE), got {}",
+        records.len()
+    );
+
+    // Parse first record (INSERT) — data is raw JSON bytes
+    let insert_event: serde_json::Value =
+        serde_json::from_slice(records[0].data().as_ref()).unwrap();
+    assert_eq!(insert_event["eventName"], "INSERT");
+    assert_eq!(insert_event["eventSource"], "aws:dynamodb");
+    assert!(insert_event["dynamodb"]["NewImage"].is_object());
+
+    // Parse second record (REMOVE)
+    let remove_event: serde_json::Value =
+        serde_json::from_slice(records[1].data().as_ref()).unwrap();
+    assert_eq!(remove_event["eventName"], "REMOVE");
+    assert!(remove_event["dynamodb"]["OldImage"].is_object());
 }

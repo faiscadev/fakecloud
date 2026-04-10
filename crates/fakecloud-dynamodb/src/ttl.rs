@@ -106,6 +106,8 @@ mod tests {
             stream_view_type: None,
             stream_arn: None,
             stream_records: Arc::new(RwLock::new(Vec::new())),
+            sse_type: None,
+            sse_kms_key_arn: None,
         }
     }
 

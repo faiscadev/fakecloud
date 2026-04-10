@@ -515,6 +515,32 @@ pub(crate) fn deliver_notifications(
     let s3_event_name = format!("s3:{event_name}");
     let message = build_s3_event_notification(event_name, bucket_name, key, size, etag, region);
 
+    // Deliver to EventBridge if enabled for this bucket
+    let eventbridge_enabled = s3_state
+        .and_then(|st| {
+            let state = st.read();
+            state
+                .buckets
+                .get(bucket_name)
+                .map(|b| b.eventbridge_enabled)
+        })
+        .unwrap_or(false);
+    if eventbridge_enabled {
+        let detail = serde_json::json!({
+            "version": "0",
+            "bucket": { "name": bucket_name },
+            "object": { "key": key, "size": size, "etag": etag },
+            "request-id": uuid::Uuid::new_v4().to_string(),
+            "requester": "123456789012",
+        });
+        delivery.put_event_to_eventbridge(
+            "aws.s3",
+            &format!("Object {event_name}"),
+            &detail.to_string(),
+            "default",
+        );
+    }
+
     let mut delivered = false;
 
     for target in &targets {

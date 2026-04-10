@@ -211,12 +211,19 @@ async fn main() {
             .with_sns(sns_delivery.clone()),
     );
 
-    // Step 3: S3 delivery (S3 notifications can push to SQS, SNS, and Lambda)
+    // Step 3: S3 delivery (S3 notifications can push to SQS, SNS, Lambda, and EventBridge)
     let sns_delivery_for_ses = sns_delivery.clone();
+    let eb_delivery_for_s3 = Arc::new(
+        fakecloud_eventbridge::delivery::EventBridgeDeliveryImpl::new(
+            eb_state.clone(),
+            Arc::new(DeliveryBus::new().with_sqs(sqs_delivery.clone())),
+        ),
+    );
     let delivery_for_s3 = {
         let mut bus = DeliveryBus::new()
             .with_sqs(sqs_delivery.clone())
-            .with_sns(sns_delivery);
+            .with_sns(sns_delivery)
+            .with_eventbridge(eb_delivery_for_s3);
         if let Some(ref ld) = lambda_delivery {
             bus = bus.with_lambda(ld.clone());
         }
@@ -227,13 +234,19 @@ async fn main() {
     let sqs_delivery_for_ses = sqs_delivery.clone();
     let kinesis_delivery =
         fakecloud_kinesis::delivery::KinesisDeliveryImpl::new(kinesis_state.clone());
+    let kinesis_delivery_for_dynamodb =
+        fakecloud_kinesis::delivery::KinesisDeliveryImpl::new(kinesis_state.clone());
     let mut delivery_for_logs = DeliveryBus::new()
-        .with_sqs(sqs_delivery)
+        .with_sqs(sqs_delivery.clone())
         .with_kinesis(kinesis_delivery);
     if let Some(ref ld) = lambda_delivery {
         delivery_for_logs = delivery_for_logs.with_lambda(ld.clone());
     }
     let delivery_for_logs = Arc::new(delivery_for_logs);
+
+    // Step 4b: DynamoDB delivery (Kinesis streaming destinations)
+    let delivery_for_dynamodb =
+        Arc::new(DeliveryBus::new().with_kinesis(kinesis_delivery_for_dynamodb));
 
     // Clone state refs for internal endpoints
     let lambda_invocations_state = lambda_state.clone();
@@ -342,7 +355,9 @@ async fn main() {
         SsmService::new(ssm_state).with_secretsmanager(secretsmanager_state.clone()),
     ));
     registry.register(Arc::new(
-        DynamoDbService::new(dynamodb_state.clone()).with_s3(s3_state.clone()),
+        DynamoDbService::new(dynamodb_state.clone())
+            .with_s3(s3_state.clone())
+            .with_delivery(delivery_for_dynamodb),
     ));
     let mut lambda_service = LambdaService::new(lambda_state.clone());
     if let Some(ref rt) = container_runtime {

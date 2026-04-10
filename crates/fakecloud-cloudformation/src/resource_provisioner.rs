@@ -662,6 +662,8 @@ impl ResourceProvisioner {
             stream_view_type: None,
             stream_arn: None,
             stream_records: Arc::new(RwLock::new(Vec::new())),
+            sse_type: None,
+            sse_kms_key_arn: None,
         };
 
         state.tables.insert(table_name.to_string(), table);
