@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine;
 use chrono::Utc;
 use http::StatusCode;
 
@@ -554,35 +556,56 @@ impl RdsService {
         let marker = optional_param(request, "Marker");
         let max_records = optional_param(request, "MaxRecords");
 
-        if marker.is_some() || max_records.is_some() {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "InvalidParameterValue",
-                "Marker and MaxRecords are not yet supported for DescribeDBInstances.",
-            ));
-        }
-
         let state = self.state.read();
-        let instances: Vec<DbInstance> = match db_instance_identifier {
-            Some(identifier) => vec![state
+
+        // If specific identifier requested, return just that one (no pagination)
+        if let Some(identifier) = db_instance_identifier {
+            let instance = state
                 .instances
                 .get(&identifier)
                 .cloned()
-                .ok_or_else(|| db_instance_not_found(&identifier))?],
-            None => {
-                let mut values: Vec<DbInstance> = state.instances.values().cloned().collect();
-                values.sort_by(|a, b| a.db_instance_identifier.cmp(&b.db_instance_identifier));
-                values
-            }
-        };
+                .ok_or_else(|| db_instance_not_found(&identifier))?;
+
+            return Ok(AwsResponse::xml(
+                StatusCode::OK,
+                xml_wrap(
+                    "DescribeDBInstances",
+                    &format!(
+                        "<DBInstances><DBInstance>{}</DBInstance></DBInstances>",
+                        db_instance_xml(&instance, None)
+                    ),
+                    &request.request_id,
+                ),
+            ));
+        }
+
+        // Get all instances sorted by created_at, then identifier
+        let mut instances: Vec<DbInstance> = state.instances.values().cloned().collect();
+        instances.sort_by(|a, b| {
+            a.created_at
+                .cmp(&b.created_at)
+                .then_with(|| a.db_instance_identifier.cmp(&b.db_instance_identifier))
+        });
+
+        // Apply pagination
+        let paginated = paginate(instances, marker, max_records, |inst| {
+            &inst.db_instance_identifier
+        })?;
+
+        let marker_xml = paginated
+            .next_marker
+            .as_ref()
+            .map(|m| format!("<Marker>{}</Marker>", xml_escape(m)))
+            .unwrap_or_default();
 
         Ok(AwsResponse::xml(
             StatusCode::OK,
             xml_wrap(
                 "DescribeDBInstances",
                 &format!(
-                    "<DBInstances>{}</DBInstances>",
-                    instances
+                    "<DBInstances>{}</DBInstances>{}",
+                    paginated
+                        .items
                         .iter()
                         .map(|instance| {
                             format!(
@@ -590,7 +613,8 @@ impl RdsService {
                                 db_instance_xml(instance, None)
                             )
                         })
-                        .collect::<String>()
+                        .collect::<String>(),
+                    marker_xml
                 ),
                 &request.request_id,
             ),
@@ -794,47 +818,85 @@ impl RdsService {
     fn describe_db_snapshots(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let db_snapshot_identifier = optional_param(request, "DBSnapshotIdentifier");
         let db_instance_identifier = optional_param(request, "DBInstanceIdentifier");
+        let marker = optional_param(request, "Marker");
+        let max_records = optional_param(request, "MaxRecords");
+
+        if db_snapshot_identifier.is_some() && db_instance_identifier.is_some() {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterCombination",
+                "Cannot specify both DBSnapshotIdentifier and DBInstanceIdentifier.",
+            ));
+        }
 
         let state = self.state.read();
-        let snapshots: Vec<DbSnapshot> = match (db_snapshot_identifier, db_instance_identifier) {
-            (Some(snapshot_id), None) => vec![state
+
+        // If specific snapshot requested, return just that one (no pagination)
+        if let Some(snapshot_id) = db_snapshot_identifier {
+            let snapshot = state
                 .snapshots
                 .get(&snapshot_id)
                 .cloned()
-                .ok_or_else(|| db_snapshot_not_found(&snapshot_id))?],
-            (None, Some(instance_id)) => state
+                .ok_or_else(|| db_snapshot_not_found(&snapshot_id))?;
+
+            return Ok(AwsResponse::xml(
+                StatusCode::OK,
+                xml_wrap(
+                    "DescribeDBSnapshots",
+                    &format!(
+                        "<DBSnapshots><DBSnapshot>{}</DBSnapshot></DBSnapshots>",
+                        db_snapshot_xml(&snapshot)
+                    ),
+                    &request.request_id,
+                ),
+            ));
+        }
+
+        // Get snapshots, filtered by instance identifier if provided
+        let mut snapshots: Vec<DbSnapshot> = if let Some(instance_id) = db_instance_identifier {
+            state
                 .snapshots
                 .values()
                 .filter(|s| s.db_instance_identifier == instance_id)
                 .cloned()
-                .collect(),
-            (None, None) => {
-                let mut values: Vec<DbSnapshot> = state.snapshots.values().cloned().collect();
-                values.sort_by(|a, b| a.db_snapshot_identifier.cmp(&b.db_snapshot_identifier));
-                values
-            }
-            (Some(_), Some(_)) => {
-                return Err(AwsServiceError::aws_error(
-                    StatusCode::BAD_REQUEST,
-                    "InvalidParameterCombination",
-                    "Cannot specify both DBSnapshotIdentifier and DBInstanceIdentifier.",
-                ));
-            }
+                .collect()
+        } else {
+            state.snapshots.values().cloned().collect()
         };
+
+        // Sort by creation time, then identifier
+        snapshots.sort_by(|a, b| {
+            a.snapshot_create_time
+                .cmp(&b.snapshot_create_time)
+                .then_with(|| a.db_snapshot_identifier.cmp(&b.db_snapshot_identifier))
+        });
+
+        // Apply pagination
+        let paginated = paginate(snapshots, marker, max_records, |snap| {
+            &snap.db_snapshot_identifier
+        })?;
+
+        let marker_xml = paginated
+            .next_marker
+            .as_ref()
+            .map(|m| format!("<Marker>{}</Marker>", xml_escape(m)))
+            .unwrap_or_default();
 
         Ok(AwsResponse::xml(
             StatusCode::OK,
             xml_wrap(
                 "DescribeDBSnapshots",
                 &format!(
-                    "<DBSnapshots>{}</DBSnapshots>",
-                    snapshots
+                    "<DBSnapshots>{}</DBSnapshots>{}",
+                    paginated
+                        .items
                         .iter()
                         .map(|snapshot| format!(
                             "<DBSnapshot>{}</DBSnapshot>",
                             db_snapshot_xml(snapshot)
                         ))
-                        .collect::<String>()
+                        .collect::<String>(),
+                    marker_xml
                 ),
                 &request.request_id,
             ),
@@ -1210,30 +1272,51 @@ impl RdsService {
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let db_subnet_group_name = optional_param(request, "DBSubnetGroupName");
+        let marker = optional_param(request, "Marker");
+        let max_records = optional_param(request, "MaxRecords");
 
         let state = self.state.read();
 
-        let subnet_groups: Vec<&DbSubnetGroup> = if let Some(name) = &db_subnet_group_name {
-            state
-                .subnet_groups
-                .get(name)
-                .map(|sg| vec![sg])
-                .unwrap_or_default()
-        } else {
-            state.subnet_groups.values().collect()
-        };
-
-        if let Some(name) = &db_subnet_group_name {
-            if subnet_groups.is_empty() {
-                return Err(AwsServiceError::aws_error(
+        // If specific subnet group requested, return just that one (no pagination)
+        if let Some(name) = db_subnet_group_name {
+            let sg = state.subnet_groups.get(&name).ok_or_else(|| {
+                AwsServiceError::aws_error(
                     StatusCode::NOT_FOUND,
                     "DBSubnetGroupNotFoundFault",
                     format!("DBSubnetGroup {} not found.", name),
-                ));
-            }
+                )
+            })?;
+
+            return Ok(AwsResponse::xml(
+                StatusCode::OK,
+                xml_wrap(
+                    "DescribeDBSubnetGroups",
+                    &format!(
+                        "<DBSubnetGroups><DBSubnetGroup>{}</DBSubnetGroup></DBSubnetGroups>",
+                        db_subnet_group_xml(sg)
+                    ),
+                    &request.request_id,
+                ),
+            ));
         }
 
-        let body = subnet_groups
+        // Get all subnet groups sorted by name
+        let mut subnet_groups: Vec<DbSubnetGroup> = state.subnet_groups.values().cloned().collect();
+        subnet_groups.sort_by(|a, b| a.db_subnet_group_name.cmp(&b.db_subnet_group_name));
+
+        // Apply pagination
+        let paginated = paginate(subnet_groups, marker, max_records, |sg| {
+            &sg.db_subnet_group_name
+        })?;
+
+        let marker_xml = paginated
+            .next_marker
+            .as_ref()
+            .map(|m| format!("<Marker>{}</Marker>", xml_escape(m)))
+            .unwrap_or_default();
+
+        let body = paginated
+            .items
             .iter()
             .map(|sg| format!("<DBSubnetGroup>{}</DBSubnetGroup>", db_subnet_group_xml(sg)))
             .collect::<Vec<_>>()
@@ -1243,7 +1326,7 @@ impl RdsService {
             StatusCode::OK,
             xml_wrap(
                 "DescribeDBSubnetGroups",
-                &format!("<DBSubnetGroups>{}</DBSubnetGroups>", body),
+                &format!("<DBSubnetGroups>{}</DBSubnetGroups>{}", body, marker_xml),
                 &request.request_id,
             ),
         ))
@@ -1390,31 +1473,52 @@ impl RdsService {
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let db_parameter_group_name = optional_param(request, "DBParameterGroupName");
+        let marker = optional_param(request, "Marker");
+        let max_records = optional_param(request, "MaxRecords");
 
         let state = self.state.read();
 
-        let parameter_groups: Vec<&DbParameterGroup> = if let Some(name) = &db_parameter_group_name
-        {
-            state
-                .parameter_groups
-                .get(name)
-                .map(|pg| vec![pg])
-                .unwrap_or_default()
-        } else {
-            state.parameter_groups.values().collect()
-        };
-
-        if let Some(name) = &db_parameter_group_name {
-            if parameter_groups.is_empty() {
-                return Err(AwsServiceError::aws_error(
+        // If specific parameter group requested, return just that one (no pagination)
+        if let Some(name) = db_parameter_group_name {
+            let pg = state.parameter_groups.get(&name).ok_or_else(|| {
+                AwsServiceError::aws_error(
                     StatusCode::NOT_FOUND,
                     "DBParameterGroupNotFound",
                     format!("DBParameterGroup {} not found.", name),
-                ));
-            }
+                )
+            })?;
+
+            return Ok(AwsResponse::xml(
+                StatusCode::OK,
+                xml_wrap(
+                    "DescribeDBParameterGroups",
+                    &format!(
+                        "<DBParameterGroups><DBParameterGroup>{}</DBParameterGroup></DBParameterGroups>",
+                        db_parameter_group_xml(pg)
+                    ),
+                    &request.request_id,
+                ),
+            ));
         }
 
-        let body = parameter_groups
+        // Get all parameter groups sorted by name
+        let mut parameter_groups: Vec<DbParameterGroup> =
+            state.parameter_groups.values().cloned().collect();
+        parameter_groups.sort_by(|a, b| a.db_parameter_group_name.cmp(&b.db_parameter_group_name));
+
+        // Apply pagination
+        let paginated = paginate(parameter_groups, marker, max_records, |pg| {
+            &pg.db_parameter_group_name
+        })?;
+
+        let marker_xml = paginated
+            .next_marker
+            .as_ref()
+            .map(|m| format!("<Marker>{}</Marker>", xml_escape(m)))
+            .unwrap_or_default();
+
+        let body = paginated
+            .items
             .iter()
             .map(|pg| {
                 format!(
@@ -1429,7 +1533,10 @@ impl RdsService {
             StatusCode::OK,
             xml_wrap(
                 "DescribeDBParameterGroups",
-                &format!("<DBParameterGroups>{}</DBParameterGroups>", body),
+                &format!(
+                    "<DBParameterGroups>{}</DBParameterGroups>{}",
+                    body, marker_xml
+                ),
                 &request.request_id,
             ),
         ))
@@ -1634,6 +1741,93 @@ fn parse_optional_bool(value: Option<&str>) -> Result<Option<bool>, AwsServiceEr
             )),
         })
         .transpose()
+}
+
+struct PaginationResult<T> {
+    items: Vec<T>,
+    next_marker: Option<String>,
+}
+
+fn paginate<T, F>(
+    mut items: Vec<T>,
+    marker: Option<String>,
+    max_records: Option<String>,
+    get_id: F,
+) -> Result<PaginationResult<T>, AwsServiceError>
+where
+    F: Fn(&T) -> &str,
+{
+    // Parse max_records with default 100, max 100
+    let max = if let Some(max_str) = max_records {
+        let parsed = max_str.parse::<i32>().map_err(|_| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterValue",
+                "MaxRecords must be a valid integer.",
+            )
+        })?;
+        if !(1..=100).contains(&parsed) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterValue",
+                "MaxRecords must be between 1 and 100.",
+            ));
+        }
+        parsed as usize
+    } else {
+        100
+    };
+
+    // Decode marker to get starting identifier
+    let start_id = if let Some(encoded_marker) = marker {
+        let decoded = BASE64.decode(encoded_marker.as_bytes()).map_err(|_| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterValue",
+                "Marker is invalid.",
+            )
+        })?;
+        let id = String::from_utf8(decoded).map_err(|_| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterValue",
+                "Marker is invalid.",
+            )
+        })?;
+        Some(id)
+    } else {
+        None
+    };
+
+    // Find starting position
+    let start_index = if let Some(ref start_id) = start_id {
+        items
+            .iter()
+            .position(|item| get_id(item) == start_id)
+            .map(|pos| pos + 1) // Start after the marker
+            .unwrap_or(items.len()) // If not found, return empty result
+    } else {
+        0
+    };
+
+    // Take items from start_index
+    let total_items = items.len();
+    let end_index = std::cmp::min(start_index + max, total_items);
+    let paginated_items: Vec<T> = items.drain(start_index..end_index).collect();
+
+    // Create next marker if there are more items
+    let next_marker = if end_index < total_items {
+        paginated_items
+            .last()
+            .map(|item| BASE64.encode(get_id(item).as_bytes()))
+    } else {
+        None
+    };
+
+    Ok(PaginationResult {
+        items: paginated_items,
+        next_marker,
+    })
 }
 
 fn validate_create_request(

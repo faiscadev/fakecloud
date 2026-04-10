@@ -809,3 +809,60 @@ async fn final_snapshot_on_delete() {
     let value: &str = row.get(0);
     assert_eq!(value, "preserved");
 }
+
+#[tokio::test]
+async fn pagination_with_real_instances() {
+    let server = TestServer::start().await;
+    let client = server.rds_client().await;
+
+    // Create 150 instances to test pagination
+    let mut instance_ids = Vec::new();
+    for i in 1..=150 {
+        let id = format!("e2e-paginate-{:03}", i);
+        instance_ids.push(id.clone());
+
+        client
+            .create_db_instance()
+            .db_instance_identifier(&id)
+            .allocated_storage(20)
+            .db_instance_class("db.t3.micro")
+            .engine("postgres")
+            .engine_version("16.3")
+            .master_username("admin")
+            .master_user_password("secret123")
+            .send()
+            .await
+            .unwrap();
+    }
+
+    // Paginate through all instances
+    let mut collected_ids = Vec::new();
+    let mut marker: Option<String> = None;
+
+    loop {
+        let mut request = client.describe_db_instances().set_max_records(Some(100));
+        if let Some(m) = marker {
+            request = request.marker(m);
+        }
+
+        let response = request.send().await.unwrap();
+        let instances = response.db_instances();
+
+        for instance in instances {
+            collected_ids.push(instance.db_instance_identifier().unwrap().to_string());
+        }
+
+        marker = response.marker().map(|s| s.to_string());
+        if marker.is_none() {
+            break;
+        }
+    }
+
+    // Verify all instances were returned
+    assert_eq!(collected_ids.len(), 150);
+
+    // Verify all our instance IDs are present
+    for id in &instance_ids {
+        assert!(collected_ids.contains(id), "Missing instance: {}", id);
+    }
+}

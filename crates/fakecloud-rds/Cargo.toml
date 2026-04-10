@@ -21,3 +21,4 @@ chrono = { workspace = true }
 uuid = { workspace = true }
 thiserror = { workspace = true }
 tokio-postgres = { workspace = true }
+base64 = { workspace = true }

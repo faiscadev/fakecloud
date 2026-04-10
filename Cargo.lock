@@ -1926,6 +1926,7 @@ name = "fakecloud-rds"
 version = "0.5.1"
 dependencies = [
  "async-trait",
+ "base64",
  "bytes",
  "chrono",
  "fakecloud-aws",

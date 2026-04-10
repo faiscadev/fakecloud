@@ -863,3 +863,197 @@ async fn rds_delete_db_instance_with_final_snapshot() {
         Some("conf-rds-final")
     );
 }
+
+#[test_action("rds", "DescribeDBInstances", checksum = "aa5486d4")]
+#[tokio::test]
+async fn rds_describe_db_instances_pagination() {
+    let server = TestServer::start().await;
+    let client = server.rds_client().await;
+
+    // Create 5 instances
+    for i in 1..=5 {
+        client
+            .create_db_instance()
+            .db_instance_identifier(format!("conf-paginate-{}", i))
+            .allocated_storage(20)
+            .db_instance_class("db.t3.micro")
+            .engine("postgres")
+            .engine_version("16.3")
+            .master_username("admin")
+            .master_user_password("secret123")
+            .send()
+            .await
+            .unwrap();
+    }
+
+    // Request with MaxRecords=2
+    let response = client
+        .describe_db_instances()
+        .set_max_records(Some(2))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.db_instances().len(), 2);
+    assert!(response.marker().is_some());
+
+    // Request next page
+    let response2 = client
+        .describe_db_instances()
+        .set_marker(response.marker().map(|s| s.to_string()))
+        .set_max_records(Some(2))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response2.db_instances().len(), 2);
+    assert!(response2.marker().is_some());
+
+    // Request final page
+    let response3 = client
+        .describe_db_instances()
+        .set_marker(response2.marker().map(|s| s.to_string()))
+        .set_max_records(Some(2))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response3.db_instances().len(), 1);
+    assert!(response3.marker().is_none());
+}
+
+#[test_action("rds", "DescribeDBSnapshots", checksum = "c67cf62b")]
+#[tokio::test]
+async fn rds_describe_db_snapshots_pagination() {
+    let server = TestServer::start().await;
+    let client = server.rds_client().await;
+
+    // Create instance
+    client
+        .create_db_instance()
+        .db_instance_identifier("conf-snap-paginate")
+        .allocated_storage(20)
+        .db_instance_class("db.t3.micro")
+        .engine("postgres")
+        .engine_version("16.3")
+        .master_username("admin")
+        .master_user_password("secret123")
+        .send()
+        .await
+        .unwrap();
+
+    // Create 3 snapshots
+    for i in 1..=3 {
+        client
+            .create_db_snapshot()
+            .db_instance_identifier("conf-snap-paginate")
+            .db_snapshot_identifier(format!("conf-snapshot-{}", i))
+            .send()
+            .await
+            .unwrap();
+    }
+
+    // Request with MaxRecords=2
+    let response = client
+        .describe_db_snapshots()
+        .set_max_records(Some(2))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.db_snapshots().len(), 2);
+    assert!(response.marker().is_some());
+
+    // Request next page
+    let response2 = client
+        .describe_db_snapshots()
+        .set_marker(response.marker().map(|s| s.to_string()))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response2.db_snapshots().len(), 1);
+    assert!(response2.marker().is_none());
+}
+
+#[test_action("rds", "DescribeDBParameterGroups", checksum = "4032d108")]
+#[tokio::test]
+async fn rds_describe_db_parameter_groups_pagination() {
+    let server = TestServer::start().await;
+    let client = server.rds_client().await;
+
+    // Create 3 parameter groups
+    for i in 1..=3 {
+        client
+            .create_db_parameter_group()
+            .db_parameter_group_name(format!("conf-pg-{}", i))
+            .db_parameter_group_family("postgres16")
+            .description(format!("Test parameter group {}", i))
+            .send()
+            .await
+            .unwrap();
+    }
+
+    // Request with MaxRecords=2 (default group + 2 custom = 3 total, but only 2 returned)
+    let response = client
+        .describe_db_parameter_groups()
+        .set_max_records(Some(2))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.db_parameter_groups().len(), 2);
+    assert!(response.marker().is_some());
+
+    // Request next page
+    let response2 = client
+        .describe_db_parameter_groups()
+        .set_marker(response.marker().map(|s| s.to_string()))
+        .send()
+        .await
+        .unwrap();
+
+    assert!(!response2.db_parameter_groups().is_empty());
+}
+
+#[test_action("rds", "DescribeDBSubnetGroups", checksum = "97a0e63e")]
+#[tokio::test]
+async fn rds_describe_db_subnet_groups_pagination() {
+    let server = TestServer::start().await;
+    let client = server.rds_client().await;
+
+    // Create 3 subnet groups (each with 2 subnets in different AZs)
+    for i in 1..=3 {
+        client
+            .create_db_subnet_group()
+            .db_subnet_group_name(format!("conf-subgrp-{}", i))
+            .db_subnet_group_description(format!("Test subnet group {}", i))
+            .subnet_ids(format!("subnet-{}a", i))
+            .subnet_ids(format!("subnet-{}b", i))
+            .send()
+            .await
+            .unwrap();
+    }
+
+    // Request with MaxRecords=2
+    let response = client
+        .describe_db_subnet_groups()
+        .set_max_records(Some(2))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.db_subnet_groups().len(), 2);
+    assert!(response.marker().is_some());
+
+    // Request next page
+    let response2 = client
+        .describe_db_subnet_groups()
+        .set_marker(response.marker().map(|s| s.to_string()))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response2.db_subnet_groups().len(), 1);
+    assert!(response2.marker().is_none());
+}
