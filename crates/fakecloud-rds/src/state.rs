@@ -30,6 +30,8 @@ pub struct DbInstance {
     pub container_id: String,
     pub host_port: u16,
     pub tags: Vec<RdsTag>,
+    pub read_replica_source_db_instance_identifier: Option<String>,
+    pub read_replica_db_instance_identifiers: Vec<String>,
 }
 
 impl fmt::Debug for DbInstance {
@@ -54,6 +56,14 @@ impl fmt::Debug for DbInstance {
             .field("container_id", &self.container_id)
             .field("host_port", &self.host_port)
             .field("tags", &self.tags)
+            .field(
+                "read_replica_source_db_instance_identifier",
+                &self.read_replica_source_db_instance_identifier,
+            )
+            .field(
+                "read_replica_db_instance_identifiers",
+                &self.read_replica_db_instance_identifiers,
+            )
             .finish()
     }
 }
@@ -268,6 +278,8 @@ mod tests {
                 container_id: "container-id".to_string(),
                 host_port: 15432,
                 tags: Vec::new(),
+                read_replica_source_db_instance_identifier: None,
+                read_replica_db_instance_identifiers: Vec::new(),
             },
         );
 

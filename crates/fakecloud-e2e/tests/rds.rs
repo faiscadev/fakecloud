@@ -479,6 +479,111 @@ async fn rds_restore_from_snapshot() {
     assert_eq!(name, "snapshot test data");
 }
 
+#[tokio::test]
+async fn rds_create_and_query_read_replica() {
+    let server = TestServer::start().await;
+    let client = server.rds_client().await;
+
+    create_instance(&client, "orders-source-db").await;
+
+    let source_describe = client
+        .describe_db_instances()
+        .db_instance_identifier("orders-source-db")
+        .send()
+        .await
+        .unwrap();
+    let source_instance = &source_describe.db_instances()[0];
+    let source_endpoint = source_instance.endpoint().unwrap();
+
+    let (source_client, source_connection) = connect_with_retry(
+        source_endpoint.address().unwrap(),
+        source_endpoint.port().unwrap(),
+        "admin",
+        "secret123",
+        "appdb",
+    )
+    .await
+    .unwrap();
+    tokio::spawn(async move {
+        if let Err(e) = source_connection.await {
+            eprintln!("connection error: {}", e);
+        }
+    });
+
+    source_client
+        .execute("CREATE TABLE test_table (id INT, name TEXT)", &[])
+        .await
+        .unwrap();
+    source_client
+        .execute(
+            "INSERT INTO test_table (id, name) VALUES (1, 'primary data')",
+            &[],
+        )
+        .await
+        .unwrap();
+
+    let replica_response = client
+        .create_db_instance_read_replica()
+        .db_instance_identifier("orders-replica-db")
+        .source_db_instance_identifier("orders-source-db")
+        .send()
+        .await
+        .unwrap();
+
+    let replica_instance = replica_response.db_instance().unwrap();
+    assert_eq!(
+        replica_instance.db_instance_identifier(),
+        Some("orders-replica-db")
+    );
+    assert_eq!(
+        replica_instance.read_replica_source_db_instance_identifier(),
+        Some("orders-source-db")
+    );
+
+    let source_describe_after = client
+        .describe_db_instances()
+        .db_instance_identifier("orders-source-db")
+        .send()
+        .await
+        .unwrap();
+    let source_after = &source_describe_after.db_instances()[0];
+    assert_eq!(source_after.read_replica_db_instance_identifiers().len(), 1);
+    assert_eq!(
+        source_after.read_replica_db_instance_identifiers()[0],
+        "orders-replica-db"
+    );
+
+    let replica_describe = client
+        .describe_db_instances()
+        .db_instance_identifier("orders-replica-db")
+        .send()
+        .await
+        .unwrap();
+    let replica_endpoint = replica_describe.db_instances()[0].endpoint().unwrap();
+
+    let (replica_client, replica_connection) = connect_with_retry(
+        replica_endpoint.address().unwrap(),
+        replica_endpoint.port().unwrap(),
+        "admin",
+        "secret123",
+        "appdb",
+    )
+    .await
+    .unwrap();
+    tokio::spawn(async move {
+        if let Err(e) = replica_connection.await {
+            eprintln!("connection error: {}", e);
+        }
+    });
+
+    let row = replica_client
+        .query_one("SELECT name FROM test_table WHERE id = 1", &[])
+        .await
+        .unwrap();
+    let name: String = row.get(0);
+    assert_eq!(name, "primary data");
+}
+
 async fn create_instance_with_deletion_protection(
     client: &aws_sdk_rds::Client,
     db_instance_identifier: &str,

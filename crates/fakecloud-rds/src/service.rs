@@ -17,6 +17,7 @@ const RDS_NS: &str = "http://rds.amazonaws.com/doc/2014-10-31/";
 const SUPPORTED_ACTIONS: &[&str] = &[
     "AddTagsToResource",
     "CreateDBInstance",
+    "CreateDBInstanceReadReplica",
     "CreateDBSnapshot",
     "DeleteDBInstance",
     "DeleteDBSnapshot",
@@ -60,6 +61,7 @@ impl AwsService for RdsService {
         match request.action.as_str() {
             "AddTagsToResource" => self.add_tags_to_resource(&request),
             "CreateDBInstance" => self.create_db_instance(&request).await,
+            "CreateDBInstanceReadReplica" => self.create_db_instance_read_replica(&request).await,
             "CreateDBSnapshot" => self.create_db_snapshot(&request).await,
             "DeleteDBInstance" => self.delete_db_instance(&request).await,
             "DeleteDBSnapshot" => self.delete_db_snapshot(&request),
@@ -175,6 +177,8 @@ impl RdsService {
             container_id: running.container_id,
             host_port: running.host_port,
             tags: Vec::new(),
+            read_replica_source_db_instance_identifier: None,
+            read_replica_db_instance_identifiers: Vec::new(),
         };
         state.finish_instance_creation(instance.clone());
 
@@ -235,6 +239,20 @@ impl RdsService {
                         db_instance_identifier
                     ),
                 ));
+            }
+
+            if let Some(source_id) = &instance.read_replica_source_db_instance_identifier {
+                if let Some(source) = state.instances.get_mut(source_id) {
+                    source
+                        .read_replica_db_instance_identifiers
+                        .retain(|id| id != &db_instance_identifier);
+                }
+            }
+
+            for replica_id in &instance.read_replica_db_instance_identifiers {
+                if let Some(replica) = state.instances.get_mut(replica_id) {
+                    replica.read_replica_source_db_instance_identifier = None;
+                }
             }
 
             instance
@@ -796,6 +814,8 @@ impl RdsService {
             container_id: running.container_id,
             host_port: running.host_port,
             tags: Vec::new(),
+            read_replica_source_db_instance_identifier: None,
+            read_replica_db_instance_identifiers: Vec::new(),
         };
 
         state.finish_instance_creation(instance.clone());
@@ -807,6 +827,130 @@ impl RdsService {
                 &format!(
                     "<DBInstance>{}</DBInstance>",
                     db_instance_xml(&instance, None)
+                ),
+                &request.request_id,
+            ),
+        ))
+    }
+
+    async fn create_db_instance_read_replica(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let db_instance_identifier = required_param(request, "DBInstanceIdentifier")?;
+        let source_db_instance_identifier = required_param(request, "SourceDBInstanceIdentifier")?;
+
+        let runtime = self.runtime.as_ref().ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "InvalidParameterValue",
+                "Docker/Podman is required for RDS read replicas but is not available",
+            )
+        })?;
+
+        let (source_instance, db_name) = {
+            let mut state = self.state.write();
+
+            if !state.begin_instance_creation(&db_instance_identifier) {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::CONFLICT,
+                    "DBInstanceAlreadyExists",
+                    format!("DBInstance {db_instance_identifier} already exists."),
+                ));
+            }
+
+            let source_instance = match state.instances.get(&source_db_instance_identifier).cloned()
+            {
+                Some(inst) => inst,
+                None => {
+                    state.cancel_instance_creation(&db_instance_identifier);
+                    return Err(db_instance_not_found(&source_db_instance_identifier));
+                }
+            };
+
+            let db_name = source_instance
+                .db_name
+                .as_deref()
+                .unwrap_or("postgres")
+                .to_string();
+
+            (source_instance, db_name)
+        };
+
+        let dump_data = runtime
+            .dump_database(
+                &source_db_instance_identifier,
+                &source_instance.master_username,
+                &db_name,
+            )
+            .await
+            .map_err(runtime_error_to_service_error)?;
+
+        let dbi_resource_id = self.state.read().next_dbi_resource_id();
+        let db_instance_arn = self.state.read().db_instance_arn(&db_instance_identifier);
+        let created_at = Utc::now();
+
+        let running = runtime
+            .ensure_postgres(
+                &db_instance_identifier,
+                &source_instance.master_username,
+                &source_instance.master_user_password,
+                &db_name,
+            )
+            .await
+            .map_err(runtime_error_to_service_error)?;
+
+        runtime
+            .restore_database(
+                &db_instance_identifier,
+                &source_instance.master_username,
+                &db_name,
+                &dump_data,
+            )
+            .await
+            .map_err(runtime_error_to_service_error)?;
+
+        let mut state = self.state.write();
+
+        let replica = DbInstance {
+            db_instance_identifier: db_instance_identifier.clone(),
+            db_instance_arn,
+            db_instance_class: source_instance.db_instance_class.clone(),
+            engine: source_instance.engine.clone(),
+            engine_version: source_instance.engine_version.clone(),
+            db_instance_status: "available".to_string(),
+            master_username: source_instance.master_username.clone(),
+            db_name: source_instance.db_name.clone(),
+            endpoint_address: "127.0.0.1".to_string(),
+            port: i32::from(running.host_port),
+            allocated_storage: source_instance.allocated_storage,
+            publicly_accessible: source_instance.publicly_accessible,
+            deletion_protection: false,
+            created_at,
+            dbi_resource_id,
+            master_user_password: source_instance.master_user_password.clone(),
+            container_id: running.container_id,
+            host_port: running.host_port,
+            tags: Vec::new(),
+            read_replica_source_db_instance_identifier: Some(source_db_instance_identifier.clone()),
+            read_replica_db_instance_identifiers: Vec::new(),
+        };
+
+        if let Some(source) = state.instances.get_mut(&source_db_instance_identifier) {
+            source
+                .read_replica_db_instance_identifiers
+                .push(db_instance_identifier.clone());
+        }
+
+        state.finish_instance_creation(replica.clone());
+
+        Ok(AwsResponse::xml(
+            StatusCode::OK,
+            xml_wrap(
+                "CreateDBInstanceReadReplica",
+                &format!(
+                    "<DBInstance>{}</DBInstance>",
+                    db_instance_xml(&replica, None)
                 ),
                 &request.request_id,
             ),
@@ -1106,6 +1250,34 @@ fn db_instance_xml(instance: &DbInstance, status_override: Option<&str>) -> Stri
         .as_ref()
         .map(|db_name| format!("<DBName>{}</DBName>", xml_escape(db_name)))
         .unwrap_or_default();
+
+    let read_replica_source_xml = instance
+        .read_replica_source_db_instance_identifier
+        .as_ref()
+        .map(|source| {
+            format!(
+                "<ReadReplicaSourceDBInstanceIdentifier>{}</ReadReplicaSourceDBInstanceIdentifier>",
+                xml_escape(source)
+            )
+        })
+        .unwrap_or_default();
+
+    let read_replica_identifiers_xml = if instance.read_replica_db_instance_identifiers.is_empty() {
+        "<ReadReplicaDBInstanceIdentifiers/>".to_string()
+    } else {
+        format!(
+            "<ReadReplicaDBInstanceIdentifiers>{}</ReadReplicaDBInstanceIdentifiers>",
+            instance
+                .read_replica_db_instance_identifiers
+                .iter()
+                .map(|id| format!(
+                    "<ReadReplicaDBInstanceIdentifier>{}</ReadReplicaDBInstanceIdentifier>",
+                    xml_escape(id)
+                ))
+                .collect::<String>()
+        )
+    };
+
     format!(
         "<DBInstanceIdentifier>{}</DBInstanceIdentifier>\
          <DBInstanceClass>{}</DBInstanceClass>\
@@ -1126,7 +1298,8 @@ fn db_instance_xml(instance: &DbInstance, status_override: Option<&str>) -> Stri
          <MultiAZ>false</MultiAZ>\
          <EngineVersion>{}</EngineVersion>\
          <AutoMinorVersionUpgrade>true</AutoMinorVersionUpgrade>\
-         <ReadReplicaDBInstanceIdentifiers/>\
+         {}\
+         {}\
          <LicenseModel>postgresql-license</LicenseModel>\
          <OptionGroupMemberships/>\
          <PubliclyAccessible>{}</PubliclyAccessible>\
@@ -1147,6 +1320,8 @@ fn db_instance_xml(instance: &DbInstance, status_override: Option<&str>) -> Stri
         instance.allocated_storage,
         instance.created_at.to_rfc3339(),
         xml_escape(&instance.engine_version),
+        read_replica_identifiers_xml,
+        read_replica_source_xml,
         if instance.publicly_accessible {
             "true"
         } else {
@@ -1359,6 +1534,8 @@ mod tests {
             container_id: "container".to_string(),
             host_port: 15432,
             tags: Vec::new(),
+            read_replica_source_db_instance_identifier: None,
+            read_replica_db_instance_identifiers: Vec::new(),
         };
 
         let xml = db_instance_xml(&instance, Some("creating"));
