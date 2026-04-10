@@ -254,6 +254,7 @@ impl RdsService {
             latest_restorable_time: created_at,
             option_group_name,
             multi_az,
+            pending_modified_values: None,
         };
         state.finish_instance_creation(instance.clone());
 
@@ -454,13 +455,6 @@ impl RdsService {
             }
         };
 
-        if apply_immediately == Some(false) {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "InvalidParameterValue",
-                "ApplyImmediately=false is not yet supported for ModifyDBInstance.",
-            ));
-        }
         if db_instance_class.is_none()
             && deletion_protection.is_none()
             && vpc_security_group_ids.is_none()
@@ -481,14 +475,33 @@ impl RdsService {
             .get_mut(&db_instance_identifier)
             .ok_or_else(|| db_instance_not_found(&db_instance_identifier))?;
 
-        if let Some(class) = db_instance_class {
-            instance.db_instance_class = class;
-        }
-        if let Some(deletion_protection) = deletion_protection {
-            instance.deletion_protection = deletion_protection;
-        }
-        if let Some(security_group_ids) = vpc_security_group_ids {
-            instance.vpc_security_group_ids = security_group_ids;
+        // If ApplyImmediately is false, stage changes as pending
+        if apply_immediately == Some(false) {
+            let pending = instance
+                .pending_modified_values
+                .get_or_insert(Default::default());
+            if let Some(class) = db_instance_class {
+                pending.db_instance_class = Some(class);
+            }
+            // Note: deletion_protection and vpc_security_group_ids are applied immediately
+            // regardless of ApplyImmediately flag (per AWS behavior)
+            if let Some(deletion_protection) = deletion_protection {
+                instance.deletion_protection = deletion_protection;
+            }
+            if let Some(security_group_ids) = vpc_security_group_ids {
+                instance.vpc_security_group_ids = security_group_ids;
+            }
+        } else {
+            // Apply immediately (default behavior)
+            if let Some(class) = db_instance_class {
+                instance.db_instance_class = class;
+            }
+            if let Some(deletion_protection) = deletion_protection {
+                instance.deletion_protection = deletion_protection;
+            }
+            if let Some(security_group_ids) = vpc_security_group_ids {
+                instance.vpc_security_group_ids = security_group_ids;
+            }
         }
 
         Ok(AwsResponse::xml(
@@ -554,6 +567,29 @@ impl RdsService {
                 .ok_or_else(|| db_instance_not_found(&db_instance_identifier))?;
             instance.host_port = running.host_port;
             instance.port = i32::from(running.host_port);
+
+            // Apply any pending modifications
+            if let Some(pending) = instance.pending_modified_values.take() {
+                if let Some(class) = pending.db_instance_class {
+                    instance.db_instance_class = class;
+                }
+                if let Some(allocated_storage) = pending.allocated_storage {
+                    instance.allocated_storage = allocated_storage;
+                }
+                if let Some(backup_retention_period) = pending.backup_retention_period {
+                    instance.backup_retention_period = backup_retention_period;
+                }
+                if let Some(multi_az) = pending.multi_az {
+                    instance.multi_az = multi_az;
+                }
+                if let Some(engine_version) = pending.engine_version {
+                    instance.engine_version = engine_version;
+                }
+                if let Some(master_user_password) = pending.master_user_password {
+                    instance.master_user_password = master_user_password;
+                }
+            }
+
             instance.clone()
         };
 
@@ -1084,6 +1120,7 @@ impl RdsService {
             latest_restorable_time: created_at,
             option_group_name: None,
             multi_az: false,
+            pending_modified_values: None,
         };
 
         state.finish_instance_creation(instance.clone());
@@ -1230,6 +1267,7 @@ impl RdsService {
             latest_restorable_time: created_at,
             option_group_name: source_instance.option_group_name.clone(),
             multi_az: source_instance.multi_az,
+            pending_modified_values: None,
         };
 
         let source_missing = {
@@ -2184,6 +2222,53 @@ fn db_instance_xml(instance: &DbInstance, status_override: Option<&str>) -> Stri
         None => "<OptionGroupMemberships/>".to_string(),
     };
 
+    let pending_modified_values_xml = if let Some(ref pending) = instance.pending_modified_values {
+        let mut fields = Vec::new();
+        if let Some(ref class) = pending.db_instance_class {
+            fields.push(format!(
+                "<DBInstanceClass>{}</DBInstanceClass>",
+                xml_escape(class)
+            ));
+        }
+        if let Some(allocated_storage) = pending.allocated_storage {
+            fields.push(format!(
+                "<AllocatedStorage>{}</AllocatedStorage>",
+                allocated_storage
+            ));
+        }
+        if let Some(backup_retention_period) = pending.backup_retention_period {
+            fields.push(format!(
+                "<BackupRetentionPeriod>{}</BackupRetentionPeriod>",
+                backup_retention_period
+            ));
+        }
+        if let Some(multi_az) = pending.multi_az {
+            fields.push(format!(
+                "<MultiAZ>{}</MultiAZ>",
+                if multi_az { "true" } else { "false" }
+            ));
+        }
+        if let Some(ref engine_version) = pending.engine_version {
+            fields.push(format!(
+                "<EngineVersion>{}</EngineVersion>",
+                xml_escape(engine_version)
+            ));
+        }
+        if pending.master_user_password.is_some() {
+            fields.push("<MasterUserPassword>****</MasterUserPassword>".to_string());
+        }
+        if !fields.is_empty() {
+            format!(
+                "<PendingModifiedValues>{}</PendingModifiedValues>",
+                fields.join("")
+            )
+        } else {
+            String::new()
+        }
+    } else {
+        String::new()
+    };
+
     format!(
         "<DBInstanceIdentifier>{}</DBInstanceIdentifier>\
          <DBInstanceClass>{}</DBInstanceClass>\
@@ -2215,6 +2300,7 @@ fn db_instance_xml(instance: &DbInstance, status_override: Option<&str>) -> Stri
          <StorageEncrypted>false</StorageEncrypted>\
          <DbiResourceId>{}</DbiResourceId>\
          <DeletionProtection>{}</DeletionProtection>\
+         {}\
          <DBInstanceArn>{}</DBInstanceArn>",
         xml_escape(&instance.db_instance_identifier),
         xml_escape(&instance.db_instance_class),
@@ -2248,6 +2334,7 @@ fn db_instance_xml(instance: &DbInstance, status_override: Option<&str>) -> Stri
         } else {
             "false"
         },
+        pending_modified_values_xml,
         xml_escape(&instance.db_instance_arn),
     )
 }
@@ -2504,6 +2591,7 @@ mod tests {
             latest_restorable_time: created_at,
             option_group_name: None,
             multi_az: false,
+            pending_modified_values: None,
         };
 
         let xml = db_instance_xml(&instance, Some("creating"));

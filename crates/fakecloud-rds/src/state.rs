@@ -39,6 +39,17 @@ pub struct DbInstance {
     pub latest_restorable_time: DateTime<Utc>,
     pub option_group_name: Option<String>,
     pub multi_az: bool,
+    pub pending_modified_values: Option<PendingModifiedValues>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct PendingModifiedValues {
+    pub db_instance_class: Option<String>,
+    pub allocated_storage: Option<i32>,
+    pub backup_retention_period: Option<i32>,
+    pub multi_az: Option<bool>,
+    pub engine_version: Option<String>,
+    pub master_user_password: Option<String>,
 }
 
 impl fmt::Debug for DbInstance {
@@ -78,6 +89,7 @@ impl fmt::Debug for DbInstance {
             .field("latest_restorable_time", &self.latest_restorable_time)
             .field("option_group_name", &self.option_group_name)
             .field("multi_az", &self.multi_az)
+            .field("pending_modified_values", &self.pending_modified_values)
             .finish()
     }
 }
@@ -480,6 +492,7 @@ mod tests {
                 latest_restorable_time: created_at,
                 option_group_name: None,
                 multi_az: false,
+                pending_modified_values: None,
             },
         );
 

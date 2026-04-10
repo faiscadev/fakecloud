@@ -183,6 +183,45 @@ async fn rds_reboot_db_instance() {
 }
 
 #[tokio::test]
+async fn rds_modify_db_instance_with_apply_immediately_false() {
+    let server = TestServer::start().await;
+    let client = server.rds_client().await;
+
+    create_instance(&client).await;
+
+    // Modify with ApplyImmediately=false should stage changes
+    let response = client
+        .modify_db_instance()
+        .db_instance_identifier("conf-rds-db")
+        .db_instance_class("db.t3.small")
+        .apply_immediately(false)
+        .send()
+        .await
+        .unwrap();
+
+    let instance = response.db_instance().expect("db instance");
+    // Instance class should still be the original
+    assert_eq!(instance.db_instance_class(), Some("db.t3.micro"));
+    // Pending changes should exist
+    let pending = instance.pending_modified_values().expect("pending values");
+    assert_eq!(pending.db_instance_class(), Some("db.t3.small"));
+
+    // Reboot should apply pending changes
+    let response = client
+        .reboot_db_instance()
+        .db_instance_identifier("conf-rds-db")
+        .send()
+        .await
+        .unwrap();
+
+    let instance = response.db_instance().expect("db instance");
+    // Instance class should now be updated
+    assert_eq!(instance.db_instance_class(), Some("db.t3.small"));
+    // Pending changes should be cleared
+    assert!(instance.pending_modified_values().is_none());
+}
+
+#[tokio::test]
 async fn rds_delete_db_instance_rejects_deletion_protection() {
     let server = TestServer::start().await;
     let client = server.rds_client().await;

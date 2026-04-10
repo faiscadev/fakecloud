@@ -1473,6 +1473,7 @@ mod tests {
                 latest_restorable_time: created_at,
                 option_group_name: None,
                 multi_az: false,
+                pending_modified_values: None,
             },
         );
 
@@ -1586,6 +1587,7 @@ mod tests {
             latest_restorable_time: created_at,
             option_group_name: None,
             multi_az: false,
+            pending_modified_values: None,
         };
 
         let response = rds_instance_response(&instance);
