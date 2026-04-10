@@ -2,33 +2,45 @@
   "variants_passed": 49039,
   "total_variants": 51399,
   "per_service": {
-    "secretsmanager": {
-      "passed": 852,
-      "total": 852
-    },
-    "cognito-idp": {
-      "passed": 3115,
-      "total": 4479
-    },
-    "elasticache": {
-      "passed": 2219,
-      "total": 2219
-    },
     "ssm": {
       "passed": 5303,
       "total": 5303
+    },
+    "sns": {
+      "passed": 1027,
+      "total": 1027
+    },
+    "iam": {
+      "passed": 5962,
+      "total": 5962
     },
     "rds": {
       "passed": 5376,
       "total": 5376
     },
-    "ses": {
-      "passed": 2858,
-      "total": 2858
+    "s3": {
+      "passed": 3620,
+      "total": 3620
     },
-    "kms": {
-      "passed": 2196,
-      "total": 2196
+    "secretsmanager": {
+      "passed": 852,
+      "total": 852
+    },
+    "logs": {
+      "passed": 3911,
+      "total": 3911
+    },
+    "lambda": {
+      "passed": 3347,
+      "total": 3347
+    },
+    "dynamodb": {
+      "passed": 2123,
+      "total": 2123
+    },
+    "kinesis": {
+      "passed": 615,
+      "total": 1611
     },
     "sqs": {
       "passed": 549,
@@ -38,41 +50,29 @@
       "passed": 438,
       "total": 438
     },
-    "iam": {
-      "passed": 5962,
-      "total": 5962
+    "cloudformation": {
+      "passed": 3420,
+      "total": 3420
     },
-    "dynamodb": {
-      "passed": 2123,
-      "total": 2123
+    "ses": {
+      "passed": 2858,
+      "total": 2858
     },
-    "sns": {
-      "passed": 1027,
-      "total": 1027
+    "elasticache": {
+      "passed": 2219,
+      "total": 2219
+    },
+    "kms": {
+      "passed": 2196,
+      "total": 2196
     },
     "events": {
       "passed": 2108,
       "total": 2108
     },
-    "cloudformation": {
-      "passed": 3420,
-      "total": 3420
-    },
-    "lambda": {
-      "passed": 3347,
-      "total": 3347
-    },
-    "s3": {
-      "passed": 3620,
-      "total": 3620
-    },
-    "kinesis": {
-      "passed": 615,
-      "total": 1611
-    },
-    "logs": {
-      "passed": 3911,
-      "total": 3911
+    "cognito-idp": {
+      "passed": 3115,
+      "total": 4479
     }
   }
 }
