@@ -1354,6 +1354,7 @@ mod tests {
                 read_replica_source_db_instance_identifier: None,
                 read_replica_db_instance_identifiers: Vec::new(),
                 vpc_security_group_ids: Vec::new(),
+                db_parameter_group_name: None,
             },
         );
 
@@ -1460,6 +1461,7 @@ mod tests {
             read_replica_source_db_instance_identifier: None,
             read_replica_db_instance_identifiers: Vec::new(),
             vpc_security_group_ids: Vec::new(),
+            db_parameter_group_name: None,
         };
 
         let response = rds_instance_response(&instance);

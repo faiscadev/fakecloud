@@ -128,6 +128,8 @@ impl RdsService {
                 .unwrap_or(false);
         let port = optional_i32_param(request, "Port")?.unwrap_or(5432);
         let vpc_security_group_ids = parse_vpc_security_group_ids(request);
+        let db_parameter_group_name = optional_param(request, "DBParameterGroupName")
+            .or_else(|| Some("default.postgres16".to_string()));
 
         validate_create_request(
             &db_instance_identifier,
@@ -197,6 +199,7 @@ impl RdsService {
             read_replica_source_db_instance_identifier: None,
             read_replica_db_instance_identifiers: Vec::new(),
             vpc_security_group_ids,
+            db_parameter_group_name,
         };
         state.finish_instance_creation(instance.clone());
 
@@ -880,6 +883,7 @@ impl RdsService {
             read_replica_source_db_instance_identifier: None,
             read_replica_db_instance_identifiers: Vec::new(),
             vpc_security_group_ids,
+            db_parameter_group_name: None,
         };
 
         state.finish_instance_creation(instance.clone());
@@ -1018,6 +1022,7 @@ impl RdsService {
             read_replica_source_db_instance_identifier: Some(source_db_instance_identifier.clone()),
             read_replica_db_instance_identifiers: Vec::new(),
             vpc_security_group_ids: source_instance.vpc_security_group_ids.clone(),
+            db_parameter_group_name: source_instance.db_parameter_group_name.clone(),
         };
 
         let source_missing = {
@@ -1794,6 +1799,19 @@ fn db_instance_xml(instance: &DbInstance, status_override: Option<&str>) -> Stri
         )
     };
 
+    let db_parameter_groups_xml = match &instance.db_parameter_group_name {
+        Some(pg_name) => format!(
+            "<DBParameterGroups>\
+             <DBParameterGroup>\
+             <DBParameterGroupName>{}</DBParameterGroupName>\
+             <ParameterApplyStatus>in-sync</ParameterApplyStatus>\
+             </DBParameterGroup>\
+             </DBParameterGroups>",
+            xml_escape(pg_name)
+        ),
+        None => "<DBParameterGroups/>".to_string(),
+    };
+
     format!(
         "<DBInstanceIdentifier>{}</DBInstanceIdentifier>\
          <DBInstanceClass>{}</DBInstanceClass>\
@@ -1808,7 +1826,7 @@ fn db_instance_xml(instance: &DbInstance, status_override: Option<&str>) -> Stri
          <BackupRetentionPeriod>1</BackupRetentionPeriod>\
          <DBSecurityGroups/>\
          {}\
-         <DBParameterGroups/>\
+         {}\
          <AvailabilityZone>us-east-1a</AvailabilityZone>\
          <PreferredMaintenanceWindow>sun:00:00-sun:00:30</PreferredMaintenanceWindow>\
          <MultiAZ>false</MultiAZ>\
@@ -1836,6 +1854,7 @@ fn db_instance_xml(instance: &DbInstance, status_override: Option<&str>) -> Stri
         instance.allocated_storage,
         instance.created_at.to_rfc3339(),
         vpc_security_groups_xml,
+        db_parameter_groups_xml,
         xml_escape(&instance.engine_version),
         read_replica_identifiers_xml,
         read_replica_source_xml,
@@ -2100,6 +2119,7 @@ mod tests {
             read_replica_source_db_instance_identifier: None,
             read_replica_db_instance_identifiers: Vec::new(),
             vpc_security_group_ids: vec!["sg-12345678".to_string()],
+            db_parameter_group_name: Some("default.postgres16".to_string()),
         };
 
         let xml = db_instance_xml(&instance, Some("creating"));

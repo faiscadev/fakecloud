@@ -33,6 +33,7 @@ pub struct DbInstance {
     pub read_replica_source_db_instance_identifier: Option<String>,
     pub read_replica_db_instance_identifiers: Vec<String>,
     pub vpc_security_group_ids: Vec<String>,
+    pub db_parameter_group_name: Option<String>,
 }
 
 impl fmt::Debug for DbInstance {
@@ -66,6 +67,7 @@ impl fmt::Debug for DbInstance {
                 &self.read_replica_db_instance_identifiers,
             )
             .field("vpc_security_group_ids", &self.vpc_security_group_ids)
+            .field("db_parameter_group_name", &self.db_parameter_group_name)
             .finish()
     }
 }
@@ -349,6 +351,7 @@ mod tests {
                 read_replica_source_db_instance_identifier: None,
                 read_replica_db_instance_identifiers: Vec::new(),
                 vpc_security_group_ids: Vec::new(),
+                db_parameter_group_name: None,
             },
         );
 
