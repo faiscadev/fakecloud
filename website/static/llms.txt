@@ -30,7 +30,7 @@
 - [IAM/STS](https://github.com/faiscadev/fakecloud#iam--sts-135-actions): 135 actions — users, roles, groups, policies, instance profiles, identity providers, MFA, STS
 - [SSM](https://github.com/faiscadev/fakecloud#ssm-46-actions): 46 actions — parameters, documents, commands, maintenance windows, patch baselines
 - [DynamoDB](https://github.com/faiscadev/fakecloud#supported-services): Table and item operations
-- [Lambda](https://github.com/faiscadev/fakecloud#lambda-10-actions-stub): 10 actions — function CRUD, stub invoke (does not execute code)
+- [Lambda](https://github.com/faiscadev/fakecloud#lambda-10-actions): 10 actions — function CRUD, real code execution via Docker (13 runtimes: Python, Node.js, Ruby, Java, .NET, Go, provided.al2/al2023)
 - [Secrets Manager](https://github.com/faiscadev/fakecloud#secrets-manager-11-actions): 11 actions — secret CRUD, versioning, soft delete, restore
 - [CloudWatch Logs](https://github.com/faiscadev/fakecloud#cloudwatch-logs-14-actions): 14 actions — log groups, streams, events, filtering, retention
 - [KMS](https://github.com/faiscadev/fakecloud#kms-16-actions): 16 actions — keys, encryption/decryption, aliases, data key generation

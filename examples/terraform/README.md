@@ -65,3 +65,16 @@ endpoints {
 
 Example S3 resources: `aws_s3_bucket`, `aws_s3_object`, `aws_s3_bucket_policy`,
 `aws_s3_bucket_versioning`, `aws_s3_bucket_lifecycle_configuration`.
+
+RDS and ElastiCache are also supported (requires Docker for database/cache execution):
+
+```hcl
+endpoints {
+  rds          = "http://localhost:4566"
+  elasticache  = "http://localhost:4566"
+}
+```
+
+Example RDS resources: `aws_db_instance`, `aws_db_subnet_group`, `aws_db_parameter_group`, `aws_db_snapshot`.
+
+Example ElastiCache resources: `aws_elasticache_cluster`, `aws_elasticache_replication_group`, `aws_elasticache_serverless_cache`, `aws_elasticache_subnet_group`, `aws_elasticache_user`, `aws_elasticache_user_group`.

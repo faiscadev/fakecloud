@@ -219,7 +219,7 @@ curl http://localhost:4566/_fakecloud/health
 ```json
 {
   "status": "ok",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "services": ["cloudformation", "cognito-idp", "dynamodb", "elasticache", "events", "iam", "kinesis", "kms", "lambda", "logs", "rds", "s3", "secretsmanager", "ses", "sns", "sqs", "ssm", "sts"]
 }
 ```

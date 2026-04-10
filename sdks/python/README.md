@@ -86,6 +86,8 @@ Access via properties on the main client:
 | `dynamodb` | DynamoDB | `tick_ttl()` |
 | `secretsmanager` | SecretsManager | `tick_rotation()` |
 | `cognito` | Cognito | `get_user_codes(pool_id, username)`, `get_confirmation_codes()`, `confirm_user(req)`, `get_tokens()`, `expire_tokens(req)`, `get_auth_events()` |
+| `rds` | RDS | `get_instances()` |
+| `elasticache` | ElastiCache | `get_clusters()`, `get_replication_groups()`, `get_serverless_caches()` |
 
 ### Error handling
 

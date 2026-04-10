@@ -134,6 +134,20 @@ func main() {
 | `ExpireTokens(ctx, req)` | Expire tokens |
 | `GetAuthEvents(ctx)` | List auth events |
 
+### RDS - `fc.RDS()`
+
+| Method | Description |
+|--------|-------------|
+| `GetInstances(ctx)` | List RDS instances with runtime metadata |
+
+### ElastiCache - `fc.ElastiCache()`
+
+| Method | Description |
+|--------|-------------|
+| `GetClusters(ctx)` | List cache clusters |
+| `GetReplicationGroups(ctx)` | List replication groups |
+| `GetServerlessCaches(ctx)` | List serverless caches |
+
 ### Error handling
 
 Non-2xx responses return `*fakecloud.APIError`:

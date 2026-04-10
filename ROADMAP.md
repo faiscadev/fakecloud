@@ -4,15 +4,21 @@ fakecloud's goal is to be the best free AWS emulator for integration testing and
 
 For every service we implement, the standard is the same: full API coverage, real behavior (not stubs), conformance testing against AWS Smithy models, and cross-service integrations where applicable.
 
-## Up next
+## Recently shipped (v0.6.0)
 
 ### Kinesis
 
-Kinesis Data Streams and Kinesis Data Firehose. This also unlocks DynamoDB Streams, which depends on a Kinesis-compatible streaming backend.
+Kinesis Data Streams with full streaming API support. Put records, consume via shard iterators, manage stream retention and scaling. This also unlocks future DynamoDB Streams support.
 
 ### RDS
 
-Full RDS API with real database engines. The approach: implement the complete AWS API surface (CreateDBInstance, ModifyDBInstance, snapshots, parameter groups, etc.) and run actual PostgreSQL and MySQL instances via Docker — the same pattern fakecloud uses for Lambda execution. Your tests talk to real databases, managed through the standard RDS API.
+Full RDS API with real database engines (PostgreSQL, MySQL, MariaDB). Complete AWS API surface including CreateDBInstance, ModifyDBInstance, snapshots, parameter groups, read replicas, and more. Runs actual database instances via Docker using the same pattern as Lambda execution. Your tests talk to real databases, managed through the standard RDS API.
+
+### ElastiCache
+
+Complete ElastiCache implementation covering cache clusters, replication groups, global replication groups, serverless caches and snapshots, subnet groups, users/user groups, failover operations, and tagging. Docker-backed Redis provides real caching behavior through the AWS API.
+
+## Up next
 
 ### ECR + ECS
 
@@ -83,8 +89,6 @@ Java.
 ## Design principles
 
 **Smart proxy pattern** — For services that wrap stateful software (RDS, ElastiCache, ECS), fakecloud implements the full AWS API and delegates execution to real software via Docker. This gives you API compatibility and real behavior in one package.
-
-**Shipped slices** — ElastiCache is no longer just planned work. The current implementation covers cache clusters, replication groups, global replication groups, serverless caches and snapshots, subnet groups, users/user groups, tagging, and Docker-backed Redis for the implemented creation flows.
 
 **No stubs** — Every operation either does what AWS does or returns an explicit error. We don't return fake success responses for things we haven't implemented.
 

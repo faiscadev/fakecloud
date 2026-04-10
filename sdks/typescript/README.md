@@ -125,6 +125,20 @@ Top-level client. Defaults to `http://localhost:4566`.
 | `expireTokens(req)`              | Expire tokens (optionally filtered)  |
 | `getAuthEvents()`                | List auth events                     |
 
+### `fc.rds`
+
+| Method           | Description                              |
+| ---------------- | ---------------------------------------- |
+| `getInstances()` | List RDS instances with runtime metadata |
+
+### `fc.elasticache`
+
+| Method                     | Description                                   |
+| -------------------------- | --------------------------------------------- |
+| `getClusters()`            | List ElastiCache cache clusters               |
+| `getReplicationGroups()`   | List ElastiCache replication groups           |
+| `getServerlessCaches()`    | List ElastiCache serverless caches            |
+
 ### Error handling
 
 All methods throw `FakeCloudError` on non-2xx responses:

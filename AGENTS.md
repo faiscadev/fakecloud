@@ -5,8 +5,8 @@ Local AWS cloud emulator. Part of the faisca project family.
 ## Product Context
 
 - FakeCloud is a local AWS emulator focused on high-fidelity behavior and AWS-compatible responses.
-- Current project state from prior work: 15 services, 922 operations, version 0.4.0, with SES, Cognito User Pools, and Docker-backed Lambda execution already shipped.
-- The broader roadmap prioritizes services that LocalStack keeps behind paid tiers, especially Kinesis, RDS, ECR, ECS, ElastiCache, ELB/ALB, CloudFront, API Gateway v2, Step Functions, CloudWatch Metrics, and EC2.
+- Current project state from prior work: 18 services, 922 operations, version 0.6.0, with SES, Cognito User Pools, Docker-backed Lambda execution, Kinesis, RDS, and ElastiCache already shipped.
+- The broader roadmap prioritizes services that LocalStack keeps behind paid tiers, especially ECR, ECS, ELB/ALB, CloudFront, API Gateway v2, Step Functions, CloudWatch Metrics, and EC2.
 - Design internal and test-only endpoints with future introspection SDKs in mind, but do not build SDKs unless explicitly requested.
 
 ## Build And Run
@@ -25,7 +25,7 @@ cargo fmt --check                        # format check
 - `fakecloud` - binary entry point (clap CLI, Axum server)
 - `fakecloud-core` - `AwsService` trait, `ServiceRegistry`, request dispatch, protocol parsing
 - `fakecloud-aws` - shared AWS types (ARNs, error builders, SigV4 parser)
-- `fakecloud-{sqs,sns,eventbridge,iam,ssm,dynamodb,lambda,secretsmanager,s3,logs,kms,cloudformation,ses,cognito}` - individual service implementations
+- `fakecloud-{sqs,sns,eventbridge,iam,ssm,dynamodb,lambda,secretsmanager,s3,logs,kms,cloudformation,ses,cognito,kinesis,rds,elasticache}` - individual service implementations
 - `fakecloud-e2e` - E2E tests using `aws-sdk-rust` and AWS CLI
 
 ## Conventions
