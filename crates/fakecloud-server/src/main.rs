@@ -1351,6 +1351,8 @@ mod tests {
                 container_id: "container-id".to_string(),
                 host_port: 15432,
                 tags: Vec::new(),
+                read_replica_source_db_instance_identifier: None,
+                read_replica_db_instance_identifiers: Vec::new(),
             },
         );
 

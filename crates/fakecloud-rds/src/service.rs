@@ -627,6 +627,14 @@ impl RdsService {
 
         let mut state = self.state.write();
 
+        if state.snapshots.contains_key(&db_snapshot_identifier) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::CONFLICT,
+                "DBSnapshotAlreadyExists",
+                format!("DBSnapshot {db_snapshot_identifier} already exists."),
+            ));
+        }
+
         let snapshot = DbSnapshot {
             db_snapshot_identifier: db_snapshot_identifier.clone(),
             db_snapshot_arn: state.db_snapshot_arn(&db_snapshot_identifier),
@@ -772,7 +780,7 @@ impl RdsService {
         };
 
         let db_name = snapshot.db_name.as_deref().unwrap_or("postgres");
-        let running = runtime
+        let running = match runtime
             .ensure_postgres(
                 &db_instance_identifier,
                 &snapshot.master_username,
@@ -780,9 +788,17 @@ impl RdsService {
                 db_name,
             )
             .await
-            .map_err(runtime_error_to_service_error)?;
+        {
+            Ok(running) => running,
+            Err(e) => {
+                self.state
+                    .write()
+                    .cancel_instance_creation(&db_instance_identifier);
+                return Err(runtime_error_to_service_error(e));
+            }
+        };
 
-        runtime
+        if let Err(e) = runtime
             .restore_database(
                 &db_instance_identifier,
                 &snapshot.master_username,
@@ -790,7 +806,12 @@ impl RdsService {
                 &snapshot.dump_data,
             )
             .await
-            .map_err(runtime_error_to_service_error)?;
+        {
+            self.state
+                .write()
+                .cancel_instance_creation(&db_instance_identifier);
+            return Err(runtime_error_to_service_error(e));
+        }
 
         let mut state = self.state.write();
 
@@ -890,7 +911,7 @@ impl RdsService {
         let db_instance_arn = self.state.read().db_instance_arn(&db_instance_identifier);
         let created_at = Utc::now();
 
-        let running = runtime
+        let running = match runtime
             .ensure_postgres(
                 &db_instance_identifier,
                 &source_instance.master_username,
@@ -898,9 +919,17 @@ impl RdsService {
                 &db_name,
             )
             .await
-            .map_err(runtime_error_to_service_error)?;
+        {
+            Ok(running) => running,
+            Err(e) => {
+                self.state
+                    .write()
+                    .cancel_instance_creation(&db_instance_identifier);
+                return Err(runtime_error_to_service_error(e));
+            }
+        };
 
-        runtime
+        if let Err(e) = runtime
             .restore_database(
                 &db_instance_identifier,
                 &source_instance.master_username,
@@ -908,7 +937,12 @@ impl RdsService {
                 &dump_data,
             )
             .await
-            .map_err(runtime_error_to_service_error)?;
+        {
+            self.state
+                .write()
+                .cancel_instance_creation(&db_instance_identifier);
+            return Err(runtime_error_to_service_error(e));
+        }
 
         let mut state = self.state.write();
 

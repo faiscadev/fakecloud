@@ -307,6 +307,8 @@ impl RdsRuntime {
                 "-d",
                 db_name,
                 "--no-password",
+                "-v",
+                "ON_ERROR_STOP=1",
             ])
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
