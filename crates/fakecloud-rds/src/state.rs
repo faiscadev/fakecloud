@@ -32,6 +32,7 @@ pub struct DbInstance {
     pub tags: Vec<RdsTag>,
     pub read_replica_source_db_instance_identifier: Option<String>,
     pub read_replica_db_instance_identifiers: Vec<String>,
+    pub vpc_security_group_ids: Vec<String>,
 }
 
 impl fmt::Debug for DbInstance {
@@ -64,6 +65,7 @@ impl fmt::Debug for DbInstance {
                 "read_replica_db_instance_identifiers",
                 &self.read_replica_db_instance_identifiers,
             )
+            .field("vpc_security_group_ids", &self.vpc_security_group_ids)
             .finish()
     }
 }
@@ -346,6 +348,7 @@ mod tests {
                 tags: Vec::new(),
                 read_replica_source_db_instance_identifier: None,
                 read_replica_db_instance_identifiers: Vec::new(),
+                vpc_security_group_ids: Vec::new(),
             },
         );
 

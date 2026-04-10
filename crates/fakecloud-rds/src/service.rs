@@ -127,6 +127,7 @@ impl RdsService {
             parse_optional_bool(optional_param(request, "DeletionProtection").as_deref())?
                 .unwrap_or(false);
         let port = optional_i32_param(request, "Port")?.unwrap_or(5432);
+        let vpc_security_group_ids = parse_vpc_security_group_ids(request);
 
         validate_create_request(
             &db_instance_identifier,
@@ -195,6 +196,7 @@ impl RdsService {
             tags: Vec::new(),
             read_replica_source_db_instance_identifier: None,
             read_replica_db_instance_identifiers: Vec::new(),
+            vpc_security_group_ids,
         };
         state.finish_instance_creation(instance.clone());
 
@@ -299,6 +301,23 @@ impl RdsService {
         let apply_immediately =
             parse_optional_bool(optional_param(request, "ApplyImmediately").as_deref())?;
 
+        // Parse VPC security group IDs - only if at least one is provided
+        let vpc_security_group_ids = {
+            let mut ids = Vec::new();
+            for index in 1.. {
+                let sg_id_name = format!("VpcSecurityGroupIds.VpcSecurityGroupId.{index}");
+                match optional_param(request, &sg_id_name) {
+                    Some(sg_id) => ids.push(sg_id),
+                    None => break,
+                }
+            }
+            if ids.is_empty() {
+                None
+            } else {
+                Some(ids)
+            }
+        };
+
         if apply_immediately == Some(false) {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
@@ -306,7 +325,10 @@ impl RdsService {
                 "ApplyImmediately=false is not yet supported for ModifyDBInstance.",
             ));
         }
-        if db_instance_class.is_none() && deletion_protection.is_none() {
+        if db_instance_class.is_none()
+            && deletion_protection.is_none()
+            && vpc_security_group_ids.is_none()
+        {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "InvalidParameterCombination",
@@ -328,6 +350,9 @@ impl RdsService {
         }
         if let Some(deletion_protection) = deletion_protection {
             instance.deletion_protection = deletion_protection;
+        }
+        if let Some(security_group_ids) = vpc_security_group_ids {
+            instance.vpc_security_group_ids = security_group_ids;
         }
 
         Ok(AwsResponse::xml(
@@ -760,6 +785,7 @@ impl RdsService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let db_instance_identifier = required_param(request, "DBInstanceIdentifier")?;
         let db_snapshot_identifier = required_param(request, "DBSnapshotIdentifier")?;
+        let vpc_security_group_ids = parse_vpc_security_group_ids(request);
 
         let runtime = self.runtime.as_ref().ok_or_else(|| {
             AwsServiceError::aws_error(
@@ -853,6 +879,7 @@ impl RdsService {
             tags: Vec::new(),
             read_replica_source_db_instance_identifier: None,
             read_replica_db_instance_identifiers: Vec::new(),
+            vpc_security_group_ids,
         };
 
         state.finish_instance_creation(instance.clone());
@@ -990,6 +1017,7 @@ impl RdsService {
             tags: Vec::new(),
             read_replica_source_db_instance_identifier: Some(source_db_instance_identifier.clone()),
             read_replica_db_instance_identifiers: Vec::new(),
+            vpc_security_group_ids: source_instance.vpc_security_group_ids.clone(),
         };
 
         let source_missing = {
@@ -1488,6 +1516,24 @@ fn parse_subnet_ids(req: &AwsRequest) -> Result<Vec<String>, AwsServiceError> {
     Ok(subnet_ids)
 }
 
+fn parse_vpc_security_group_ids(req: &AwsRequest) -> Vec<String> {
+    let mut security_group_ids = Vec::new();
+    for index in 1.. {
+        let sg_id_name = format!("VpcSecurityGroupIds.VpcSecurityGroupId.{index}");
+        match optional_param(req, &sg_id_name) {
+            Some(sg_id) => security_group_ids.push(sg_id),
+            None => break,
+        }
+    }
+
+    // If no security groups provided, return a default one
+    if security_group_ids.is_empty() {
+        security_group_ids.push("sg-default".to_string());
+    }
+
+    security_group_ids
+}
+
 fn query_param_prefix_exists(req: &AwsRequest, prefix: &str) -> bool {
     req.query_params.keys().any(|key| key.starts_with(prefix))
 }
@@ -1729,6 +1775,25 @@ fn db_instance_xml(instance: &DbInstance, status_override: Option<&str>) -> Stri
         )
     };
 
+    let vpc_security_groups_xml = if instance.vpc_security_group_ids.is_empty() {
+        "<VpcSecurityGroups/>".to_string()
+    } else {
+        format!(
+            "<VpcSecurityGroups>{}</VpcSecurityGroups>",
+            instance
+                .vpc_security_group_ids
+                .iter()
+                .map(|sg_id| format!(
+                    "<VpcSecurityGroupMembership>\
+                     <VpcSecurityGroupId>{}</VpcSecurityGroupId>\
+                     <Status>active</Status>\
+                     </VpcSecurityGroupMembership>",
+                    xml_escape(sg_id)
+                ))
+                .collect::<String>()
+        )
+    };
+
     format!(
         "<DBInstanceIdentifier>{}</DBInstanceIdentifier>\
          <DBInstanceClass>{}</DBInstanceClass>\
@@ -1742,7 +1807,7 @@ fn db_instance_xml(instance: &DbInstance, status_override: Option<&str>) -> Stri
          <PreferredBackupWindow>00:00-00:30</PreferredBackupWindow>\
          <BackupRetentionPeriod>1</BackupRetentionPeriod>\
          <DBSecurityGroups/>\
-         <VpcSecurityGroups/>\
+         {}\
          <DBParameterGroups/>\
          <AvailabilityZone>us-east-1a</AvailabilityZone>\
          <PreferredMaintenanceWindow>sun:00:00-sun:00:30</PreferredMaintenanceWindow>\
@@ -1770,6 +1835,7 @@ fn db_instance_xml(instance: &DbInstance, status_override: Option<&str>) -> Stri
         instance.port,
         instance.allocated_storage,
         instance.created_at.to_rfc3339(),
+        vpc_security_groups_xml,
         xml_escape(&instance.engine_version),
         read_replica_identifiers_xml,
         read_replica_source_xml,
@@ -2033,6 +2099,7 @@ mod tests {
             tags: Vec::new(),
             read_replica_source_db_instance_identifier: None,
             read_replica_db_instance_identifiers: Vec::new(),
+            vpc_security_group_ids: vec!["sg-12345678".to_string()],
         };
 
         let xml = db_instance_xml(&instance, Some("creating"));
