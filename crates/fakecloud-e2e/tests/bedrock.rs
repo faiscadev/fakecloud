@@ -1,6 +1,9 @@
 mod helpers;
 
-use aws_sdk_bedrock::types::Tag;
+use aws_sdk_bedrock::types::{
+    GuardrailPiiEntityConfig, GuardrailPiiEntityType, GuardrailSensitiveInformationAction,
+    GuardrailSensitiveInformationPolicyConfig, GuardrailWordConfig, GuardrailWordPolicyConfig, Tag,
+};
 use helpers::TestServer;
 
 #[tokio::test]
@@ -134,4 +137,205 @@ async fn bedrock_tag_untag_list_tags() {
     assert_eq!(tags.len(), 1);
     assert!(tags.iter().any(|t| t.key() == "env" && t.value() == "test"));
     assert!(!tags.iter().any(|t| t.key() == "team"));
+}
+
+// ---------------------------------------------------------------------------
+// Guardrails
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn bedrock_guardrail_crud() {
+    let server = TestServer::start().await;
+    let client = server.bedrock_client().await;
+
+    // Create guardrail
+    let resp = client
+        .create_guardrail()
+        .name("test-guardrail")
+        .description("A test guardrail")
+        .blocked_input_messaging("Input blocked")
+        .blocked_outputs_messaging("Output blocked")
+        .send()
+        .await
+        .unwrap();
+
+    let guardrail_id = resp.guardrail_id();
+    assert!(!guardrail_id.is_empty());
+    assert!(resp.guardrail_arn().contains("guardrail/"));
+    assert_eq!(resp.version(), "DRAFT");
+
+    // Get guardrail
+    let resp = client
+        .get_guardrail()
+        .guardrail_identifier(guardrail_id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.name(), "test-guardrail");
+    assert_eq!(resp.description(), Some("A test guardrail"));
+    assert_eq!(resp.status().as_str(), "READY");
+
+    // List guardrails
+    let resp = client.list_guardrails().send().await.unwrap();
+    assert!(resp
+        .guardrails()
+        .iter()
+        .any(|g| g.id() == guardrail_id));
+
+    // Update guardrail
+    let resp = client
+        .update_guardrail()
+        .guardrail_identifier(guardrail_id)
+        .name("updated-guardrail")
+        .blocked_input_messaging("Input blocked")
+        .blocked_outputs_messaging("Output blocked")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.guardrail_id(), guardrail_id);
+
+    // Verify update
+    let resp = client
+        .get_guardrail()
+        .guardrail_identifier(guardrail_id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.name(), "updated-guardrail");
+
+    // Delete guardrail
+    client
+        .delete_guardrail()
+        .guardrail_identifier(guardrail_id)
+        .send()
+        .await
+        .unwrap();
+
+    // Verify deleted
+    let err = client
+        .get_guardrail()
+        .guardrail_identifier(guardrail_id)
+        .send()
+        .await
+        .unwrap_err();
+    let service_err = err.into_service_error();
+    assert!(service_err.is_resource_not_found_exception());
+}
+
+#[tokio::test]
+async fn bedrock_guardrail_versioning() {
+    let server = TestServer::start().await;
+    let client = server.bedrock_client().await;
+
+    // Create guardrail
+    let resp = client
+        .create_guardrail()
+        .name("versioned-guardrail")
+        .blocked_input_messaging("blocked")
+        .blocked_outputs_messaging("blocked")
+        .send()
+        .await
+        .unwrap();
+    let guardrail_id = resp.guardrail_id().to_string();
+
+    // Create version 1
+    let v1 = client
+        .create_guardrail_version()
+        .guardrail_identifier(&guardrail_id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(v1.guardrail_id(), guardrail_id);
+    assert_eq!(v1.version(), "1");
+
+    // Create version 2
+    let v2 = client
+        .create_guardrail_version()
+        .guardrail_identifier(&guardrail_id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(v2.version(), "2");
+
+    // Get specific version
+    let resp = client
+        .get_guardrail()
+        .guardrail_identifier(&guardrail_id)
+        .guardrail_version("1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.version(), "1");
+}
+
+#[tokio::test]
+async fn bedrock_guardrail_with_word_policy() {
+    let server = TestServer::start().await;
+    let client = server.bedrock_client().await;
+
+    let word_policy = GuardrailWordPolicyConfig::builder()
+        .words_config(
+            GuardrailWordConfig::builder()
+                .text("forbidden")
+                .build()
+                .unwrap(),
+        )
+        .build();
+
+    let resp = client
+        .create_guardrail()
+        .name("word-filter-guardrail")
+        .blocked_input_messaging("blocked")
+        .blocked_outputs_messaging("blocked")
+        .word_policy_config(word_policy)
+        .send()
+        .await
+        .unwrap();
+
+    let guardrail_id = resp.guardrail_id();
+
+    // Verify word policy is stored
+    let resp = client
+        .get_guardrail()
+        .guardrail_identifier(guardrail_id)
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.word_policy().is_some());
+}
+
+#[tokio::test]
+async fn bedrock_guardrail_with_pii_detection() {
+    let server = TestServer::start().await;
+    let client = server.bedrock_client().await;
+
+    let pii_policy = GuardrailSensitiveInformationPolicyConfig::builder()
+        .pii_entities_config(
+            GuardrailPiiEntityConfig::builder()
+                .r#type(GuardrailPiiEntityType::Email)
+                .action(GuardrailSensitiveInformationAction::Block)
+                .build()
+                .unwrap(),
+        )
+        .build();
+
+    let resp = client
+        .create_guardrail()
+        .name("pii-guardrail")
+        .blocked_input_messaging("blocked")
+        .blocked_outputs_messaging("blocked")
+        .sensitive_information_policy_config(pii_policy)
+        .send()
+        .await
+        .unwrap();
+
+    let guardrail_id = resp.guardrail_id();
+
+    let resp = client
+        .get_guardrail()
+        .guardrail_identifier(guardrail_id)
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.sensitive_information_policy().is_some());
 }
