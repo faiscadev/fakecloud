@@ -190,6 +190,11 @@ impl TestServer {
         aws_sdk_sfn::Client::new(&self.aws_config().await)
     }
 
+    /// Create an API Gateway v2 client.
+    pub async fn apigatewayv2_client(&self) -> aws_sdk_apigatewayv2::Client {
+        aws_sdk_apigatewayv2::Client::new(&self.aws_config().await)
+    }
+
     /// Create an S3 client (path-style addressing for single-endpoint emulator).
     pub async fn s3_client(&self) -> aws_sdk_s3::Client {
         let config = self.aws_config().await;

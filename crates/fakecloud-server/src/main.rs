@@ -19,6 +19,7 @@ use dynamodb_streams_lambda_poller::DynamoDbStreamsLambdaPoller;
 use kinesis_lambda_poller::KinesisLambdaPoller;
 use sqs_lambda_poller::SqsLambdaPoller;
 
+use fakecloud_apigatewayv2::service::ApiGatewayV2Service;
 use fakecloud_cloudformation::service::CloudFormationService;
 use fakecloud_cognito::service::CognitoService;
 use fakecloud_dynamodb::service::DynamoDbService;
@@ -157,6 +158,10 @@ async fn main() {
 
     let stepfunctions_state = Arc::new(parking_lot::RwLock::new(
         fakecloud_stepfunctions::state::StepFunctionsState::new(&cli.account_id, &cli.region),
+    ));
+
+    let apigatewayv2_state = Arc::new(parking_lot::RwLock::new(
+        fakecloud_apigatewayv2::state::ApiGatewayV2State::new(&cli.account_id, &cli.region),
     ));
 
     let rds_runtime = fakecloud_rds::runtime::RdsRuntime::new().map(Arc::new);
@@ -312,6 +317,7 @@ async fn main() {
         rds: rds_state.clone(),
         elasticache: elasticache_state.clone(),
         stepfunctions: stepfunctions_state.clone(),
+        apigatewayv2: apigatewayv2_state.clone(),
         container_runtime: container_runtime.clone(),
         rds_runtime: rds_runtime.clone(),
         elasticache_runtime: elasticache_runtime.clone(),
@@ -476,6 +482,9 @@ async fn main() {
             .with_dynamodb(dynamodb_state.clone());
     }
     registry.register(Arc::new(sfn_service));
+
+    let apigw_service = ApiGatewayV2Service::new(apigatewayv2_state.clone());
+    registry.register(Arc::new(apigw_service));
 
     // Spawn background tasks
     let lifecycle_processor = fakecloud_s3::lifecycle::LifecycleProcessor::new(s3_state);
@@ -1310,6 +1319,7 @@ struct ResetState {
     rds: fakecloud_rds::state::SharedRdsState,
     elasticache: fakecloud_elasticache::state::SharedElastiCacheState,
     stepfunctions: fakecloud_stepfunctions::state::SharedStepFunctionsState,
+    apigatewayv2: fakecloud_apigatewayv2::state::SharedApiGatewayV2State,
     container_runtime: Option<Arc<fakecloud_lambda::runtime::ContainerRuntime>>,
     rds_runtime: Option<Arc<fakecloud_rds::runtime::RdsRuntime>>,
     elasticache_runtime: Option<Arc<fakecloud_elasticache::runtime::ElastiCacheRuntime>>,
@@ -1398,6 +1408,9 @@ impl ResetState {
             "states" | "stepfunctions" => {
                 self.stepfunctions.write().reset();
             }
+            "apigateway" | "apigatewayv2" => {
+                self.apigatewayv2.write().apis.clear();
+            }
             _ => {
                 return Err(format!("Unknown service: {service}"));
             }
@@ -1455,6 +1468,7 @@ impl ResetState {
             tokio::spawn(async move { rt.stop_all().await });
         }
         self.stepfunctions.write().reset();
+        self.apigatewayv2.write().apis.clear();
         tracing::info!("state reset via reset API");
         axum::Json(types::ResetResponse {
             status: "ok".to_string(),
@@ -1663,6 +1677,9 @@ mod tests {
                     "123456789012",
                     "us-east-1",
                 ),
+            )),
+            apigatewayv2: Arc::new(parking_lot::RwLock::new(
+                fakecloud_apigatewayv2::state::ApiGatewayV2State::new("123456789012", "us-east-1"),
             )),
             container_runtime: None,
             rds_runtime: None,

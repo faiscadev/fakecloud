@@ -34,6 +34,7 @@ fakecloud-kinesis = { workspace = true }
 fakecloud-rds = { workspace = true }
 fakecloud-elasticache = { workspace = true }
 fakecloud-stepfunctions = { workspace = true }
+fakecloud-apigatewayv2 = { workspace = true }
 fakecloud-sdk = { workspace = true }
 axum = { workspace = true }
 base64 = { workspace = true }

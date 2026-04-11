@@ -241,6 +241,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "aws-sdk-apigatewayv2"
+version = "1.101.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b9909e74fb895d0f35c5a9385c642301e8959e7407a137b1119c607e014d6a38"
+dependencies = [
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-http",
+ "aws-smithy-json",
+ "aws-smithy-observability",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-types",
+ "aws-types",
+ "bytes",
+ "fastrand",
+ "http 0.2.12",
+ "http 1.4.0",
+ "regex-lite",
+ "tracing",
+]
+
+[[package]]
 name = "aws-sdk-cloudformation"
 version = "1.110.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1830,6 +1854,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "clap",
+ "fakecloud-apigatewayv2",
  "fakecloud-aws",
  "fakecloud-cloudformation",
  "fakecloud-cognito",
@@ -1858,6 +1883,23 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "fakecloud-apigatewayv2"
+version = "0.6.1"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "fakecloud-core",
+ "http 1.4.0",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -1926,6 +1968,7 @@ version = "0.6.1"
 dependencies = [
  "aws-config",
  "aws-credential-types",
+ "aws-sdk-apigatewayv2",
  "aws-sdk-cloudformation",
  "aws-sdk-cloudwatchlogs",
  "aws-sdk-cognitoidentityprovider",
@@ -2010,6 +2053,7 @@ version = "0.6.1"
 dependencies = [
  "aws-config",
  "aws-credential-types",
+ "aws-sdk-apigatewayv2",
  "aws-sdk-cloudformation",
  "aws-sdk-cloudwatchlogs",
  "aws-sdk-cognitoidentityprovider",
