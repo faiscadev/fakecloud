@@ -8,7 +8,7 @@ For every service we implement, the standard is the same: full API coverage, rea
 
 ### Kinesis
 
-Kinesis Data Streams with full streaming API support. Put records, consume via shard iterators, manage stream retention and scaling. This also unlocks future DynamoDB Streams support.
+Kinesis Data Streams with full streaming API support. Put records, consume via shard iterators, manage stream retention and scaling. DynamoDB Streams → Lambda event source mappings and DynamoDB → Kinesis streaming are also shipped.
 
 ### RDS
 
