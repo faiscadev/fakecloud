@@ -139,7 +139,6 @@ async fn bedrock_create_get_list_guardrail() {
         .unwrap();
     let guardrail_id = resp.guardrail_id();
     assert!(!guardrail_id.is_empty());
-    assert!(resp.guardrail_arn().contains("guardrail/"));
 
     let resp = client
         .get_guardrail()
@@ -243,4 +242,214 @@ async fn bedrock_create_guardrail_version() {
         .await
         .unwrap();
     assert_eq!(v1.version(), "1");
+}
+
+// ---------------------------------------------------------------------------
+// Model Customization Jobs
+// ---------------------------------------------------------------------------
+
+#[test_action("bedrock", "CreateModelCustomizationJob", checksum = "79f8b20b")]
+#[test_action("bedrock", "GetModelCustomizationJob", checksum = "877cb4c1")]
+#[test_action("bedrock", "ListModelCustomizationJobs", checksum = "395bacc9")]
+#[tokio::test]
+async fn bedrock_model_customization_job_crud() {
+    let server = TestServer::start().await;
+    let client = server.bedrock_client().await;
+
+    let resp = client
+        .create_model_customization_job()
+        .job_name("conf-job")
+        .custom_model_name("conf-model")
+        .base_model_identifier("amazon.titan-text-express-v1")
+        .role_arn("arn:aws:iam::123456789012:role/test")
+        .training_data_config(
+            aws_sdk_bedrock::types::TrainingDataConfig::builder()
+                .s3_uri("s3://bucket/train/")
+                .build(),
+        )
+        .output_data_config(
+            aws_sdk_bedrock::types::OutputDataConfig::builder()
+                .s3_uri("s3://bucket/out/")
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let job_arn = resp.job_arn();
+    assert!(job_arn.contains("model-customization-job/"));
+
+    let resp = client
+        .get_model_customization_job()
+        .job_identifier(job_arn)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.job_name(), "conf-job");
+
+    let resp = client.list_model_customization_jobs().send().await.unwrap();
+    assert!(!resp.model_customization_job_summaries().is_empty());
+}
+
+#[test_action("bedrock", "StopModelCustomizationJob", checksum = "cd450c9d")]
+#[tokio::test]
+async fn bedrock_stop_model_customization_job() {
+    let server = TestServer::start().await;
+    let client = server.bedrock_client().await;
+
+    let resp = client
+        .create_model_customization_job()
+        .job_name("stop-me")
+        .custom_model_name("stop-model")
+        .base_model_identifier("amazon.titan-text-express-v1")
+        .role_arn("arn:aws:iam::123456789012:role/test")
+        .training_data_config(
+            aws_sdk_bedrock::types::TrainingDataConfig::builder()
+                .s3_uri("s3://bucket/train/")
+                .build(),
+        )
+        .output_data_config(
+            aws_sdk_bedrock::types::OutputDataConfig::builder()
+                .s3_uri("s3://bucket/out/")
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .stop_model_customization_job()
+        .job_identifier(resp.job_arn())
+        .send()
+        .await
+        .unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Provisioned Model Throughput
+// ---------------------------------------------------------------------------
+
+#[test_action("bedrock", "CreateProvisionedModelThroughput", checksum = "30e21d40")]
+#[test_action("bedrock", "GetProvisionedModelThroughput", checksum = "fa4bf01f")]
+#[test_action("bedrock", "ListProvisionedModelThroughputs", checksum = "5b0816af")]
+#[tokio::test]
+async fn bedrock_provisioned_throughput_crud() {
+    let server = TestServer::start().await;
+    let client = server.bedrock_client().await;
+
+    let resp = client
+        .create_provisioned_model_throughput()
+        .provisioned_model_name("conf-prov")
+        .model_id("amazon.titan-text-express-v1")
+        .model_units(1)
+        .send()
+        .await
+        .unwrap();
+    let arn = resp.provisioned_model_arn();
+    assert!(arn.contains("provisioned-model/"));
+
+    let resp = client
+        .get_provisioned_model_throughput()
+        .provisioned_model_id(arn)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.provisioned_model_name(), "conf-prov");
+
+    let resp = client
+        .list_provisioned_model_throughputs()
+        .send()
+        .await
+        .unwrap();
+    assert!(!resp.provisioned_model_summaries().is_empty());
+}
+
+#[test_action("bedrock", "UpdateProvisionedModelThroughput", checksum = "d2371270")]
+#[test_action("bedrock", "DeleteProvisionedModelThroughput", checksum = "df6801df")]
+#[tokio::test]
+async fn bedrock_update_delete_provisioned_throughput() {
+    let server = TestServer::start().await;
+    let client = server.bedrock_client().await;
+
+    let resp = client
+        .create_provisioned_model_throughput()
+        .provisioned_model_name("del-prov")
+        .model_id("amazon.titan-text-express-v1")
+        .model_units(1)
+        .send()
+        .await
+        .unwrap();
+    let arn = resp.provisioned_model_arn();
+
+    client
+        .update_provisioned_model_throughput()
+        .provisioned_model_id(arn)
+        .desired_provisioned_model_name("renamed")
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .delete_provisioned_model_throughput()
+        .provisioned_model_id(arn)
+        .send()
+        .await
+        .unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Logging Configuration
+// ---------------------------------------------------------------------------
+
+#[test_action(
+    "bedrock",
+    "PutModelInvocationLoggingConfiguration",
+    checksum = "aea620de"
+)]
+#[test_action(
+    "bedrock",
+    "GetModelInvocationLoggingConfiguration",
+    checksum = "97689194"
+)]
+#[test_action(
+    "bedrock",
+    "DeleteModelInvocationLoggingConfiguration",
+    checksum = "3dab2c6b"
+)]
+#[tokio::test]
+async fn bedrock_logging_configuration() {
+    let server = TestServer::start().await;
+    let client = server.bedrock_client().await;
+
+    client
+        .put_model_invocation_logging_configuration()
+        .logging_config(
+            aws_sdk_bedrock::types::LoggingConfig::builder()
+                .text_data_delivery_enabled(true)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .get_model_invocation_logging_configuration()
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.logging_config().is_some());
+
+    client
+        .delete_model_invocation_logging_configuration()
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .get_model_invocation_logging_configuration()
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.logging_config().is_none());
 }

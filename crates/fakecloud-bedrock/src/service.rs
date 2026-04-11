@@ -337,6 +337,60 @@ impl AwsService for BedrockService {
                     &body,
                 )
             }
+            // Model customization jobs
+            "CreateModelCustomizationJob" => {
+                let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
+                crate::customization::create_model_customization_job(&self.state, &req, &body)
+            }
+            "GetModelCustomizationJob" => crate::customization::get_model_customization_job(
+                &self.state,
+                &req,
+                &resource_id.unwrap_or_default(),
+            ),
+            "ListModelCustomizationJobs" => {
+                crate::customization::list_model_customization_jobs(&self.state)
+            }
+            "StopModelCustomizationJob" => crate::customization::stop_model_customization_job(
+                &self.state,
+                &resource_id.unwrap_or_default(),
+            ),
+            // Provisioned model throughput
+            "CreateProvisionedModelThroughput" => {
+                let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
+                crate::throughput::create_provisioned_model_throughput(&self.state, &req, &body)
+            }
+            "GetProvisionedModelThroughput" => crate::throughput::get_provisioned_model_throughput(
+                &self.state,
+                &resource_id.unwrap_or_default(),
+            ),
+            "ListProvisionedModelThroughputs" => {
+                crate::throughput::list_provisioned_model_throughputs(&self.state)
+            }
+            "UpdateProvisionedModelThroughput" => {
+                let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
+                crate::throughput::update_provisioned_model_throughput(
+                    &self.state,
+                    &resource_id.unwrap_or_default(),
+                    &body,
+                )
+            }
+            "DeleteProvisionedModelThroughput" => {
+                crate::throughput::delete_provisioned_model_throughput(
+                    &self.state,
+                    &resource_id.unwrap_or_default(),
+                )
+            }
+            // Logging configuration
+            "PutModelInvocationLoggingConfiguration" => {
+                let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
+                crate::logging::put_model_invocation_logging_configuration(&self.state, &body)
+            }
+            "GetModelInvocationLoggingConfiguration" => {
+                crate::logging::get_model_invocation_logging_configuration(&self.state)
+            }
+            "DeleteModelInvocationLoggingConfiguration" => {
+                crate::logging::delete_model_invocation_logging_configuration(&self.state)
+            }
             _ => Err(AwsServiceError::ActionNotImplemented {
                 service: "bedrock".to_string(),
                 action: action.to_string(),
@@ -357,6 +411,18 @@ impl AwsService for BedrockService {
             "UpdateGuardrail",
             "DeleteGuardrail",
             "CreateGuardrailVersion",
+            "CreateModelCustomizationJob",
+            "GetModelCustomizationJob",
+            "ListModelCustomizationJobs",
+            "StopModelCustomizationJob",
+            "CreateProvisionedModelThroughput",
+            "GetProvisionedModelThroughput",
+            "ListProvisionedModelThroughputs",
+            "UpdateProvisionedModelThroughput",
+            "DeleteProvisionedModelThroughput",
+            "PutModelInvocationLoggingConfiguration",
+            "GetModelInvocationLoggingConfiguration",
+            "DeleteModelInvocationLoggingConfiguration",
         ]
     }
 }
