@@ -5,10 +5,7 @@ use crate::state::CorsConfiguration;
 use fakecloud_core::service::{AwsRequest, AwsResponse};
 
 /// Handle CORS preflight OPTIONS request
-pub fn handle_preflight(
-    cors_config: &CorsConfiguration,
-    _req: &AwsRequest,
-) -> AwsResponse {
+pub fn handle_preflight(cors_config: &CorsConfiguration, _req: &AwsRequest) -> AwsResponse {
     let mut headers = HeaderMap::new();
 
     // Add Access-Control-Allow-Origin
@@ -18,10 +15,7 @@ pub fn handle_preflight(
         } else {
             origins.first().map(|s| s.as_str()).unwrap_or("*")
         };
-        headers.insert(
-            "access-control-allow-origin",
-            origin_value.parse().unwrap(),
-        );
+        headers.insert("access-control-allow-origin", origin_value.parse().unwrap());
     }
 
     // Add Access-Control-Allow-Methods
@@ -52,10 +46,7 @@ pub fn handle_preflight(
 
     // Add Access-Control-Allow-Credentials
     if let Some(true) = cors_config.allow_credentials {
-        headers.insert(
-            "access-control-allow-credentials",
-            "true".parse().unwrap(),
-        );
+        headers.insert("access-control-allow-credentials", "true".parse().unwrap());
     }
 
     AwsResponse {
@@ -67,10 +58,7 @@ pub fn handle_preflight(
 }
 
 /// Add CORS headers to an existing response
-pub fn add_cors_headers(
-    mut response: AwsResponse,
-    cors_config: &CorsConfiguration,
-) -> AwsResponse {
+pub fn add_cors_headers(mut response: AwsResponse, cors_config: &CorsConfiguration) -> AwsResponse {
     // Add Access-Control-Allow-Origin
     if let Some(ref origins) = cors_config.allow_origins {
         let origin_value = if origins.contains(&"*".to_string()) {
@@ -78,10 +66,9 @@ pub fn add_cors_headers(
         } else {
             origins.first().map(|s| s.as_str()).unwrap_or("*")
         };
-        response.headers.insert(
-            "access-control-allow-origin",
-            origin_value.parse().unwrap(),
-        );
+        response
+            .headers
+            .insert("access-control-allow-origin", origin_value.parse().unwrap());
     }
 
     // Add Access-Control-Expose-Headers
@@ -95,10 +82,9 @@ pub fn add_cors_headers(
 
     // Add Access-Control-Allow-Credentials
     if let Some(true) = cors_config.allow_credentials {
-        response.headers.insert(
-            "access-control-allow-credentials",
-            "true".parse().unwrap(),
-        );
+        response
+            .headers
+            .insert("access-control-allow-credentials", "true".parse().unwrap());
     }
 
     response
@@ -106,8 +92,7 @@ pub fn add_cors_headers(
 
 /// Check if the request is a CORS preflight request
 pub fn is_preflight_request(req: &AwsRequest) -> bool {
-    req.method == Method::OPTIONS
-        && req.headers.contains_key("access-control-request-method")
+    req.method == Method::OPTIONS && req.headers.contains_key("access-control-request-method")
 }
 
 #[cfg(test)]
@@ -155,7 +140,10 @@ mod tests {
     fn test_handle_preflight() {
         let cors_config = CorsConfiguration {
             allow_credentials: Some(true),
-            allow_headers: Some(vec!["Content-Type".to_string(), "Authorization".to_string()]),
+            allow_headers: Some(vec![
+                "Content-Type".to_string(),
+                "Authorization".to_string(),
+            ]),
             allow_methods: Some(vec!["GET".to_string(), "POST".to_string()]),
             allow_origins: Some(vec!["*".to_string()]),
             expose_headers: None,
@@ -167,10 +155,7 @@ mod tests {
 
         assert_eq!(response.status, StatusCode::NO_CONTENT);
         assert_eq!(
-            response
-                .headers
-                .get("access-control-allow-origin")
-                .unwrap(),
+            response.headers.get("access-control-allow-origin").unwrap(),
             "*"
         );
         assert_eq!(

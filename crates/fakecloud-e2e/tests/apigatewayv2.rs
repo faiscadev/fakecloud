@@ -1067,7 +1067,10 @@ async fn test_cors_preflight() {
     // Send CORS preflight request (OPTIONS with Access-Control-Request-Method header)
     let http_client = reqwest::Client::new();
     let response = http_client
-        .request(reqwest::Method::OPTIONS, format!("{}/prod/test", server.endpoint()))
+        .request(
+            reqwest::Method::OPTIONS,
+            format!("{}/prod/test", server.endpoint()),
+        )
         .header("Access-Control-Request-Method", "POST")
         .send()
         .await
@@ -1075,15 +1078,24 @@ async fn test_cors_preflight() {
 
     assert_eq!(response.status(), 204);
     assert_eq!(
-        response.headers().get("access-control-allow-origin").unwrap(),
+        response
+            .headers()
+            .get("access-control-allow-origin")
+            .unwrap(),
         "https://example.com"
     );
     assert_eq!(
-        response.headers().get("access-control-allow-methods").unwrap(),
+        response
+            .headers()
+            .get("access-control-allow-methods")
+            .unwrap(),
         "GET,POST"
     );
     assert_eq!(
-        response.headers().get("access-control-allow-headers").unwrap(),
+        response
+            .headers()
+            .get("access-control-allow-headers")
+            .unwrap(),
         "Content-Type,Authorization"
     );
     assert_eq!(
@@ -1091,7 +1103,10 @@ async fn test_cors_preflight() {
         "3600"
     );
     assert_eq!(
-        response.headers().get("access-control-allow-credentials").unwrap(),
+        response
+            .headers()
+            .get("access-control-allow-credentials")
+            .unwrap(),
         "true"
     );
 }
@@ -1157,11 +1172,17 @@ async fn test_cors_actual_request() {
 
     assert_eq!(response.status(), 200);
     assert_eq!(
-        response.headers().get("access-control-allow-origin").unwrap(),
+        response
+            .headers()
+            .get("access-control-allow-origin")
+            .unwrap(),
         "*"
     );
     assert_eq!(
-        response.headers().get("access-control-expose-headers").unwrap(),
+        response
+            .headers()
+            .get("access-control-expose-headers")
+            .unwrap(),
         "X-Custom-Header"
     );
 }

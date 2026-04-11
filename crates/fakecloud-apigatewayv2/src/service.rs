@@ -1419,8 +1419,7 @@ impl ApiGatewayV2Service {
                     )
                 })?;
 
-                http_proxy::forward_request(target_url, &req, integration.timeout_in_millis)
-                    .await?
+                http_proxy::forward_request(target_url, &req, integration.timeout_in_millis).await?
             }
             "MOCK" => {
                 // Mock integration
