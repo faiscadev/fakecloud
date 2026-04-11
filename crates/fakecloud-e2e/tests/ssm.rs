@@ -1373,7 +1373,6 @@ async fn ssm_patch_baseline_update() {
 // ── OpsItem Related Items ─────────────────────────────────────
 
 #[tokio::test]
-#[ignore] // SDK has timestamp deserialization issues with ListOpsItemRelatedItems — tested via raw HTTP in PR 78
 async fn ssm_ops_item_related_items() {
     let server = TestServer::start().await;
     let client = server.ssm_client().await;
