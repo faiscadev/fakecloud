@@ -2342,6 +2342,7 @@ dependencies = [
  "fakecloud-core",
  "fakecloud-dynamodb",
  "http 1.4.0",
+ "md-5 0.10.6",
  "parking_lot",
  "serde",
  "serde_json",

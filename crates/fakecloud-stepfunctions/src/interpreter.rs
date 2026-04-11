@@ -1046,7 +1046,7 @@ fn invoke_sqs_send_message(
 
     Ok(json!({
         "MessageId": uuid::Uuid::new_v4().to_string(),
-        "MD5OfMessageBody": format!("{:x}", md5_hash(&message_body)),
+        "MD5OfMessageBody": md5_hex(&message_body),
     }))
 }
 
@@ -1352,11 +1352,13 @@ fn apply_update_expression(
     attr_names: &serde_json::Map<String, Value>,
 ) {
     // Parse "SET #name1 = :val1, #name2 = :val2" or "SET field = :val"
-    let set_part = expr
-        .trim()
-        .strip_prefix("SET ")
-        .or_else(|| expr.trim().strip_prefix("set "))
-        .unwrap_or(expr);
+    // DynamoDB keywords are case-insensitive
+    let trimmed = expr.trim();
+    let set_part = if trimmed.len() >= 4 && trimmed[..4].eq_ignore_ascii_case("SET ") {
+        &trimmed[4..]
+    } else {
+        trimmed
+    };
 
     for assignment in set_part.split(',') {
         let parts: Vec<&str> = assignment.splitn(2, '=').collect();
@@ -1398,13 +1400,11 @@ fn queue_url_to_arn(url: &str) -> String {
     }
 }
 
-/// Simple hash function for MD5-like output (not cryptographic, just for response format).
-fn md5_hash(data: &str) -> u64 {
-    let mut hash: u64 = 0;
-    for byte in data.bytes() {
-        hash = hash.wrapping_mul(31).wrapping_add(byte as u64);
-    }
-    hash
+/// Compute MD5 hex digest for SQS message response format.
+fn md5_hex(data: &str) -> String {
+    use md5::Digest;
+    let result = md5::Md5::digest(data.as_bytes());
+    format!("{result:032x}")
 }
 
 /// Invoke a Lambda function directly via DeliveryBus.
