@@ -433,6 +433,27 @@ type StepFunctionsExecutionsResponse struct {
 	Executions []StepFunctionsExecution `json:"executions"`
 }
 
+// ── Bedrock ───────────────────────────────────────────────────────
+
+// BedrockInvocation represents a recorded Bedrock model invocation.
+type BedrockInvocation struct {
+	ModelID   string `json:"modelId"`
+	Input     string `json:"input"`
+	Output    string `json:"output"`
+	Timestamp string `json:"timestamp"`
+}
+
+// BedrockInvocationsResponse contains recorded Bedrock invocations.
+type BedrockInvocationsResponse struct {
+	Invocations []BedrockInvocation `json:"invocations"`
+}
+
+// BedrockModelResponseConfig is returned after setting a model response.
+type BedrockModelResponseConfig struct {
+	Status  string `json:"status"`
+	ModelID string `json:"modelId"`
+}
+
 // ── API Gateway v2 ─────────────────────────────────────────────────
 
 // ApiGatewayV2Request represents an HTTP API request that was received.

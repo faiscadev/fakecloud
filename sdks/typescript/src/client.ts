@@ -1,5 +1,7 @@
 import type {
   ApiGatewayV2RequestsResponse,
+  BedrockInvocationsResponse,
+  BedrockModelResponseConfig,
   HealthResponse,
   ResetResponse,
   ResetServiceResponse,
@@ -330,6 +332,32 @@ export class StepFunctionsClient {
   }
 }
 
+export class BedrockClient {
+  constructor(private readonly baseUrl: string) {}
+
+  async getInvocations(): Promise<BedrockInvocationsResponse> {
+    const resp = await fetch(
+      `${this.baseUrl}/_fakecloud/bedrock/invocations`,
+    );
+    return parse(resp);
+  }
+
+  async setModelResponse(
+    modelId: string,
+    response: string,
+  ): Promise<BedrockModelResponseConfig> {
+    const resp = await fetch(
+      `${this.baseUrl}/_fakecloud/bedrock/models/${encodeURIComponent(modelId)}/response`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "text/plain" },
+        body: response,
+      },
+    );
+    return parse(resp);
+  }
+}
+
 // ── Main client ────────────────────────────────────────────────────
 
 export class FakeCloud {
@@ -348,6 +376,7 @@ export class FakeCloud {
   private readonly _cognito: CognitoClient;
   private readonly _apigatewayv2: ApiGatewayV2Client;
   private readonly _stepfunctions: StepFunctionsClient;
+  private readonly _bedrock: BedrockClient;
 
   constructor(baseUrl: string = "http://localhost:4566") {
     this.baseUrl = baseUrl.replace(/\/+$/, "");
@@ -365,6 +394,7 @@ export class FakeCloud {
     this._cognito = new CognitoClient(this.baseUrl);
     this._apigatewayv2 = new ApiGatewayV2Client(this.baseUrl);
     this._stepfunctions = new StepFunctionsClient(this.baseUrl);
+    this._bedrock = new BedrockClient(this.baseUrl);
   }
 
   // ── Health & Reset ─────────────────────────────────────────────
@@ -439,5 +469,9 @@ export class FakeCloud {
 
   get stepfunctions(): StepFunctionsClient {
     return this._stepfunctions;
+  }
+
+  get bedrock(): BedrockClient {
+    return this._bedrock;
   }
 }

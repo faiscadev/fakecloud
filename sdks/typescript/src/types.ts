@@ -381,6 +381,24 @@ export interface StepFunctionsExecutionsResponse {
   executions: StepFunctionsExecution[];
 }
 
+// ── Bedrock ───────────────────────────────────────────────────────
+
+export interface BedrockInvocation {
+  modelId: string;
+  input: string;
+  output: string;
+  timestamp: string;
+}
+
+export interface BedrockInvocationsResponse {
+  invocations: BedrockInvocation[];
+}
+
+export interface BedrockModelResponseConfig {
+  status: string;
+  modelId: string;
+}
+
 // ── API Gateway v2 ──────────────────────────────────────────────────
 
 export interface ApiGatewayV2Request {

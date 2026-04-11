@@ -11,5 +11,6 @@ export {
   DynamoDbClient,
   SecretsManagerClient,
   CognitoClient,
+  BedrockClient,
 } from "./client.js";
 export type * from "./types.js";
