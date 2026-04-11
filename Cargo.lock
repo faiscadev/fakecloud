@@ -1890,6 +1890,8 @@ name = "fakecloud-apigatewayv2"
 version = "0.6.1"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
+ "bytes",
  "chrono",
  "fakecloud-core",
  "http 1.4.0",

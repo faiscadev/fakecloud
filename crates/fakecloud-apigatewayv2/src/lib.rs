@@ -1,3 +1,4 @@
+pub mod lambda_proxy;
 pub mod router;
 pub mod service;
 pub mod state;

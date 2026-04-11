@@ -1,10 +1,13 @@
 use async_trait::async_trait;
 use http::{Method, StatusCode};
 use serde_json::json;
+use std::sync::Arc;
 
+use fakecloud_core::delivery::DeliveryBus;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 use fakecloud_core::validation::*;
 
+use crate::{lambda_proxy, router::Router};
 use crate::state::{Deployment, HttpApi, Integration, Route, SharedApiGatewayV2State, Stage};
 
 const SUPPORTED: &[&str] = &[
@@ -35,11 +38,17 @@ const SUPPORTED: &[&str] = &[
 
 pub struct ApiGatewayV2Service {
     state: SharedApiGatewayV2State,
+    delivery: Option<Arc<DeliveryBus>>,
 }
 
 impl ApiGatewayV2Service {
     pub fn new(state: SharedApiGatewayV2State) -> Self {
-        Self { state }
+        Self { state, delivery: None }
+    }
+
+    pub fn with_delivery(mut self, delivery: Arc<DeliveryBus>) -> Self {
+        self.delivery = Some(delivery);
+        self
     }
 
     /// Determine the action from the HTTP method and path segments.
@@ -162,6 +171,25 @@ impl AwsService for ApiGatewayV2Service {
     }
 
     async fn handle(&self, req: AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        // Check if this is a management API request or an execute API request
+        // Management API: /v2/apis/*
+        // Execute API: /{stage}/{path}
+        if req.path_segments.first().map(|s| s.as_str()) == Some("v2") {
+            // Management API
+            return self.handle_management_api(req).await;
+        }
+
+        // Execute API
+        self.handle_execute_api(req).await
+    }
+
+    fn supported_actions(&self) -> &[&str] {
+        SUPPORTED
+    }
+}
+
+impl ApiGatewayV2Service {
+    async fn handle_management_api(&self, req: AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let (action, api_id, resource_id) = Self::resolve_action(&req).ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::NOT_FOUND,
@@ -207,12 +235,6 @@ impl AwsService for ApiGatewayV2Service {
         }
     }
 
-    fn supported_actions(&self) -> &[&str] {
-        SUPPORTED
-    }
-}
-
-impl ApiGatewayV2Service {
     // ─── API CRUD ───────────────────────────────────────────────────────
 
     fn create_api(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
@@ -1228,6 +1250,131 @@ impl ApiGatewayV2Service {
         Ok(AwsResponse::ok_json(json!({
             "items": deployments,
         })))
+    }
+
+    // ─── EXECUTE API ────────────────────────────────────────────────────
+
+    async fn handle_execute_api(&self, req: AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        // Execute API format: /{stage}/{path...}
+        if req.path_segments.is_empty() {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "NotFoundException",
+                "Stage not specified",
+            ));
+        }
+
+        let stage_name = &req.path_segments[0];
+        let resource_path = format!("/{}", req.path_segments[1..].join("/"));
+
+        // Find the API for this stage
+        let (api_id, routes) = {
+            let state = self.state.read();
+
+            // Find which API has this stage
+            let (api_id, _stage) = state
+                .stages
+                .iter()
+                .find_map(|(api_id, stages)| {
+                    stages
+                        .get(stage_name)
+                        .map(|stage| (api_id.clone(), stage.clone()))
+                })
+                .ok_or_else(|| {
+                    AwsServiceError::aws_error(
+                        StatusCode::NOT_FOUND,
+                        "NotFoundException",
+                        format!("Stage not found: {}", stage_name),
+                    )
+                })?;
+
+            // Get routes for this API
+            let routes = state
+                .routes
+                .get(&api_id)
+                .map(|r| r.values().cloned().collect())
+                .unwrap_or_default();
+
+            Ok::<_, AwsServiceError>((api_id, routes))
+        }?;
+
+        // Match the request against routes
+        let router = Router::new(routes);
+        let route_match = router
+            .match_route(req.method.as_str(), &resource_path)
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::NOT_FOUND,
+                    "NotFoundException",
+                    format!("No route matches: {} {}", req.method, resource_path),
+                )
+            })?;
+
+        // Get the integration for this route
+        let integration_id = route_match
+            .route
+            .target
+            .as_ref()
+            .and_then(|target| target.strip_prefix("integrations/"))
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "InternalError",
+                    "Route has no integration",
+                )
+            })?;
+
+        let integration = {
+            let state = self.state.read();
+            state
+                .integrations
+                .get(&api_id)
+                .and_then(|integrations| integrations.get(integration_id))
+                .ok_or_else(|| {
+                    AwsServiceError::aws_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "InternalError",
+                        format!("Integration not found: {}", integration_id),
+                    )
+                })?
+                .clone()
+        };
+
+        // Handle based on integration type
+        match integration.integration_type.as_str() {
+            "AWS_PROXY" => {
+                // Lambda proxy integration
+                let delivery = self.delivery.as_ref().ok_or_else(|| {
+                    AwsServiceError::aws_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "InternalError",
+                        "Lambda delivery not configured",
+                    )
+                })?;
+
+                let function_arn = integration.integration_uri.as_ref().ok_or_else(|| {
+                    AwsServiceError::aws_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "InternalError",
+                        "Integration has no URI",
+                    )
+                })?;
+
+                let event = lambda_proxy::construct_event(
+                    &req,
+                    &route_match.route.route_key,
+                    stage_name,
+                    route_match.path_parameters,
+                );
+
+                lambda_proxy::invoke_lambda(delivery, function_arn, event).await
+            }
+            _ => Err(AwsServiceError::aws_error(
+                StatusCode::NOT_IMPLEMENTED,
+                "NotImplemented",
+                format!("Integration type not supported: {}", integration.integration_type),
+            )),
+        }
     }
 }
 

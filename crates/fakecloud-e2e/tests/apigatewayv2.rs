@@ -892,3 +892,118 @@ async fn test_deployment_with_stage() {
 
     assert_eq!(updated_stage.deployment_id(), Some(deployment_id));
 }
+
+#[tokio::test]
+async fn test_lambda_proxy_integration() {
+    use aws_sdk_lambda::primitives::Blob;
+    use std::io::Write;
+
+    let server = TestServer::start().await;
+    let lambda_client = server.lambda_client().await;
+    let apigw_client = server.apigatewayv2_client().await;
+
+    // Create a Lambda function
+    let function_code = r#"
+exports.handler = async (event) => {
+    return {
+        statusCode: 200,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+            message: "Hello from Lambda",
+            routeKey: event.routeKey,
+            path: event.rawPath,
+            pathParams: event.pathParameters,
+            queryParams: event.queryStringParameters
+        })
+    };
+};
+    "#;
+
+    // Create zip file
+    let buf = Vec::new();
+    let cursor = std::io::Cursor::new(buf);
+    let mut writer = zip::ZipWriter::new(cursor);
+    let options = zip::write::SimpleFileOptions::default();
+    writer.start_file("index.js", options).unwrap();
+    writer.write_all(function_code.as_bytes()).unwrap();
+    let cursor = writer.finish().unwrap();
+    let zip_bytes = cursor.into_inner();
+
+    lambda_client
+        .create_function()
+        .function_name("test-apigw-function")
+        .runtime(aws_sdk_lambda::types::Runtime::Nodejs20x)
+        .role("arn:aws:iam::123456789012:role/lambda-role")
+        .handler("index.handler")
+        .code(
+            aws_sdk_lambda::types::FunctionCode::builder()
+                .zip_file(Blob::new(zip_bytes))
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    // Create API Gateway API
+    let api = apigw_client
+        .create_api()
+        .name("test-lambda-api")
+        .protocol_type(aws_sdk_apigatewayv2::types::ProtocolType::Http)
+        .send()
+        .await
+        .unwrap();
+
+    let api_id = api.api_id().unwrap();
+
+    // Create integration with Lambda
+    let integration = apigw_client
+        .create_integration()
+        .api_id(api_id)
+        .integration_type(aws_sdk_apigatewayv2::types::IntegrationType::AwsProxy)
+        .integration_uri("arn:aws:lambda:us-east-1:123456789012:function:test-apigw-function")
+        .payload_format_version("2.0")
+        .send()
+        .await
+        .unwrap();
+
+    let integration_id = integration.integration_id().unwrap();
+
+    // Create route
+    apigw_client
+        .create_route()
+        .api_id(api_id)
+        .route_key("GET /hello/{name}")
+        .target(format!("integrations/{}", integration_id))
+        .send()
+        .await
+        .unwrap();
+
+    // Create stage
+    apigw_client
+        .create_stage()
+        .api_id(api_id)
+        .stage_name("prod")
+        .send()
+        .await
+        .unwrap();
+
+    // Invoke the API via HTTP
+    let http_client = reqwest::Client::new();
+    let response = http_client
+        .get(format!(
+            "{}/prod/hello/world?greeting=hi",
+            server.endpoint()
+        ))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 200);
+
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(body["message"], "Hello from Lambda");
+    assert_eq!(body["routeKey"], "GET /hello/{name}");
+    assert_eq!(body["path"], "/prod/hello/world");
+    assert_eq!(body["pathParams"]["name"], "world");
+    assert_eq!(body["queryParams"]["greeting"], "hi");
+}

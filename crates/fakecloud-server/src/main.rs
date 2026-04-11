@@ -483,7 +483,11 @@ async fn main() {
     }
     registry.register(Arc::new(sfn_service));
 
-    let apigw_service = ApiGatewayV2Service::new(apigatewayv2_state.clone());
+    let mut apigw_service = ApiGatewayV2Service::new(apigatewayv2_state.clone());
+    if let Some(ref ld) = lambda_delivery {
+        let delivery_for_apigw = Arc::new(DeliveryBus::new().with_lambda(ld.clone()));
+        apigw_service = apigw_service.with_delivery(delivery_for_apigw);
+    }
     registry.register(Arc::new(apigw_service));
 
     // Spawn background tasks

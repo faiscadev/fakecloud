@@ -44,6 +44,16 @@ pub async fn dispatch(
                     action: String::new(),
                     protocol: AwsProtocol::Rest,
                 }
+            } else if !parts.uri.path().starts_with("/_") {
+                // Requests without AWS auth that don't match any service might be
+                // API Gateway execute API calls (plain HTTP without signatures).
+                // Route them to apigateway service which will validate if a matching
+                // API/stage exists. Skip special FakeCloud endpoints (/_*).
+                protocol::DetectedRequest {
+                    service: "apigateway".to_string(),
+                    action: String::new(),
+                    protocol: AwsProtocol::RestJson,
+                }
             } else {
                 return build_error_response(
                     StatusCode::BAD_REQUEST,
