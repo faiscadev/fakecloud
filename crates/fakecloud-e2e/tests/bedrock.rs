@@ -177,10 +177,7 @@ async fn bedrock_guardrail_crud() {
 
     // List guardrails
     let resp = client.list_guardrails().send().await.unwrap();
-    assert!(resp
-        .guardrails()
-        .iter()
-        .any(|g| g.id() == guardrail_id));
+    assert!(resp.guardrails().iter().any(|g| g.id() == guardrail_id));
 
     // Update guardrail
     let resp = client
