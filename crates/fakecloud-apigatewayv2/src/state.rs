@@ -10,6 +10,8 @@ pub struct ApiGatewayV2State {
     pub account_id: String,
     pub region: String,
     pub apis: HashMap<String, HttpApi>,
+    pub routes: HashMap<String, HashMap<String, Route>>, // api-id -> (route-id -> Route)
+    pub integrations: HashMap<String, HashMap<String, Integration>>, // api-id -> (integration-id -> Integration)
 }
 
 impl ApiGatewayV2State {
@@ -18,6 +20,8 @@ impl ApiGatewayV2State {
             account_id: account_id.to_string(),
             region: region.to_string(),
             apis: HashMap::new(),
+            routes: HashMap::new(),
+            integrations: HashMap::new(),
         }
     }
 }
@@ -57,4 +61,30 @@ impl HttpApi {
             api_endpoint,
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Route {
+    pub route_id: String,
+    pub route_key: String, // "GET /pets/{id}"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>, // "integrations/{integration-id}"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub authorization_type: Option<String>, // "NONE", "JWT", "CUSTOM"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub authorizer_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Integration {
+    pub integration_id: String,
+    pub integration_type: String, // "AWS_PROXY", "HTTP_PROXY", "MOCK"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub integration_uri: Option<String>, // Lambda ARN or HTTP endpoint
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub payload_format_version: Option<String>, // "2.0"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout_in_millis: Option<i64>,
 }
