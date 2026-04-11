@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use chrono::Utc;
@@ -5,6 +6,7 @@ use serde_json::{json, Value};
 use tracing::debug;
 
 use fakecloud_core::delivery::DeliveryBus;
+use fakecloud_dynamodb::state::SharedDynamoDbState;
 
 use crate::choice::evaluate_choice;
 use crate::error_handling::{find_catcher, should_retry};
@@ -19,6 +21,7 @@ pub async fn execute_state_machine(
     definition: String,
     input: Option<String>,
     delivery: Option<Arc<DeliveryBus>>,
+    dynamodb_state: Option<SharedDynamoDbState>,
 ) {
     let def: Value = match serde_json::from_str(&definition) {
         Ok(v) => v,
@@ -50,7 +53,16 @@ pub async fn execute_state_machine(
         }),
     );
 
-    match run_states(&def, raw_input, &delivery, &state, &execution_arn).await {
+    match run_states(
+        &def,
+        raw_input,
+        &delivery,
+        &dynamodb_state,
+        &state,
+        &execution_arn,
+    )
+    .await
+    {
         Ok(output) => {
             succeed_execution(&state, &execution_arn, &output);
         }
@@ -70,6 +82,7 @@ fn run_states<'a>(
     def: &'a Value,
     input: Value,
     delivery: &'a Option<Arc<DeliveryBus>>,
+    dynamodb_state: &'a Option<SharedDynamoDbState>,
     shared_state: &'a SharedStepFunctionsState,
     execution_arn: &'a str,
 ) -> StatesResult<'a> {
@@ -244,6 +257,7 @@ fn run_states<'a>(
                         &state_def,
                         &effective_input,
                         delivery,
+                        dynamodb_state,
                         shared_state,
                         execution_arn,
                         entered_event_id,
@@ -389,6 +403,7 @@ fn run_states<'a>(
                         &state_def,
                         &effective_input,
                         delivery,
+                        dynamodb_state,
                         shared_state,
                         execution_arn,
                     )
@@ -455,6 +470,7 @@ fn run_states<'a>(
                         &state_def,
                         &effective_input,
                         delivery,
+                        dynamodb_state,
                         shared_state,
                         execution_arn,
                     )
@@ -589,11 +605,13 @@ fn execute_pass_state(state_def: &Value, input: &Value) -> Value {
     }
 }
 
-/// Execute a Task state: invoke the resource (Lambda), apply I/O processing, handle Retry.
+/// Execute a Task state: invoke the resource (Lambda, SQS, SNS, EventBridge, DynamoDB),
+/// apply I/O processing, handle Retry.
 async fn execute_task_state(
     state_def: &Value,
     input: &Value,
     delivery: &Option<Arc<DeliveryBus>>,
+    dynamodb_state: &Option<SharedDynamoDbState>,
     shared_state: &SharedStepFunctionsState,
     execution_arn: &str,
     entered_event_id: i64,
@@ -641,8 +659,14 @@ async fn execute_task_state(
             json!({ "resource": resource }),
         );
 
-        let invoke_result =
-            invoke_resource(&resource, &task_input, delivery, timeout_seconds).await;
+        let invoke_result = invoke_resource(
+            &resource,
+            &task_input,
+            delivery,
+            dynamodb_state,
+            timeout_seconds,
+        )
+        .await;
 
         match invoke_result {
             Ok(result) => {
@@ -704,6 +728,7 @@ async fn execute_parallel_state(
     state_def: &Value,
     input: &Value,
     delivery: &Option<Arc<DeliveryBus>>,
+    dynamodb_state: &Option<SharedDynamoDbState>,
     shared_state: &SharedStepFunctionsState,
     execution_arn: &str,
 ) -> Result<Value, (String, String)> {
@@ -735,11 +760,12 @@ async fn execute_parallel_state(
         let branch = branch_def.clone();
         let branch_input = effective_input.clone();
         let delivery = delivery.clone();
+        let ddb = dynamodb_state.clone();
         let state = shared_state.clone();
         let arn = execution_arn.to_string();
 
         handles.push(tokio::spawn(async move {
-            run_states(&branch, branch_input, &delivery, &state, &arn).await
+            run_states(&branch, branch_input, &delivery, &ddb, &state, &arn).await
         }));
     }
 
@@ -786,6 +812,7 @@ async fn execute_map_state(
     state_def: &Value,
     input: &Value,
     delivery: &Option<Arc<DeliveryBus>>,
+    dynamodb_state: &Option<SharedDynamoDbState>,
     shared_state: &SharedStepFunctionsState,
     execution_arn: &str,
 ) -> Result<Value, (String, String)> {
@@ -830,6 +857,7 @@ async fn execute_map_state(
     for (index, item) in items.into_iter().enumerate() {
         let iter_def = iterator_def.clone();
         let delivery = delivery.clone();
+        let ddb = dynamodb_state.clone();
         let state = shared_state.clone();
         let arn = execution_arn.to_string();
         let sem = semaphore.clone();
@@ -857,7 +885,7 @@ async fn execute_map_state(
                 .acquire()
                 .await
                 .map_err(|_| ("States.Runtime".to_string(), "Semaphore closed".to_string()))?;
-            let result = run_states(&iter_def, item_input, &delivery, &state, &arn).await;
+            let result = run_states(&iter_def, item_input, &delivery, &ddb, &state, &arn).await;
             Ok::<(usize, Result<Value, (String, String)>), (String, String)>((index, result))
         }));
     }
@@ -929,17 +957,17 @@ async fn invoke_resource(
     resource: &str,
     input: &Value,
     delivery: &Option<Arc<DeliveryBus>>,
+    dynamodb_state: &Option<SharedDynamoDbState>,
     timeout_seconds: Option<u64>,
 ) -> Result<Value, (String, String)> {
+    // Direct Lambda ARN: arn:aws:lambda:<region>:<account>:function:<name>
     if resource.contains(":lambda:") && resource.contains(":function:") {
         return invoke_lambda_direct(resource, input, delivery, timeout_seconds).await;
     }
 
+    // SDK integration patterns: arn:aws:states:::<service>:<action>
     if resource.starts_with("arn:aws:states:::lambda:invoke") {
-        let function_name = input["FunctionName"]
-            .as_str()
-            .or_else(|| input["Payload"].as_object().and(None))
-            .unwrap_or("");
+        let function_name = input["FunctionName"].as_str().unwrap_or("");
         let payload = if let Some(p) = input.get("Payload") {
             p.clone()
         } else {
@@ -948,10 +976,435 @@ async fn invoke_resource(
         return invoke_lambda_direct(function_name, &payload, delivery, timeout_seconds).await;
     }
 
+    if resource.starts_with("arn:aws:states:::sqs:sendMessage") {
+        return invoke_sqs_send_message(input, delivery);
+    }
+
+    if resource.starts_with("arn:aws:states:::sns:publish") {
+        return invoke_sns_publish(input, delivery);
+    }
+
+    if resource.starts_with("arn:aws:states:::events:putEvents") {
+        return invoke_eventbridge_put_events(input, delivery);
+    }
+
+    if resource.starts_with("arn:aws:states:::dynamodb:getItem") {
+        return invoke_dynamodb_get_item(input, dynamodb_state);
+    }
+
+    if resource.starts_with("arn:aws:states:::dynamodb:putItem") {
+        return invoke_dynamodb_put_item(input, dynamodb_state);
+    }
+
+    if resource.starts_with("arn:aws:states:::dynamodb:deleteItem") {
+        return invoke_dynamodb_delete_item(input, dynamodb_state);
+    }
+
+    if resource.starts_with("arn:aws:states:::dynamodb:updateItem") {
+        return invoke_dynamodb_update_item(input, dynamodb_state);
+    }
+
     Err((
         "States.TaskFailed".to_string(),
         format!("Unsupported resource: {resource}"),
     ))
+}
+
+/// Send a message to an SQS queue via DeliveryBus.
+fn invoke_sqs_send_message(
+    input: &Value,
+    delivery: &Option<Arc<DeliveryBus>>,
+) -> Result<Value, (String, String)> {
+    let delivery = delivery.as_ref().ok_or_else(|| {
+        (
+            "States.TaskFailed".to_string(),
+            "No delivery bus configured for SQS".to_string(),
+        )
+    })?;
+
+    let queue_url = input["QueueUrl"].as_str().ok_or_else(|| {
+        (
+            "States.TaskFailed".to_string(),
+            "Missing QueueUrl in SQS sendMessage parameters".to_string(),
+        )
+    })?;
+
+    let message_body = input["MessageBody"]
+        .as_str()
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| {
+            // If MessageBody is not a string, serialize the value
+            serde_json::to_string(&input["MessageBody"]).unwrap_or_default()
+        });
+
+    // Convert QueueUrl to ARN format for the delivery bus
+    // QueueUrl format: http://.../<account>/<queue-name>
+    // ARN format: arn:aws:sqs:<region>:<account>:<queue-name>
+    let queue_arn = queue_url_to_arn(queue_url);
+
+    delivery.send_to_sqs(&queue_arn, &message_body, &HashMap::new());
+
+    Ok(json!({
+        "MessageId": uuid::Uuid::new_v4().to_string(),
+        "MD5OfMessageBody": format!("{:x}", md5_hash(&message_body)),
+    }))
+}
+
+/// Publish a message to an SNS topic via DeliveryBus.
+fn invoke_sns_publish(
+    input: &Value,
+    delivery: &Option<Arc<DeliveryBus>>,
+) -> Result<Value, (String, String)> {
+    let delivery = delivery.as_ref().ok_or_else(|| {
+        (
+            "States.TaskFailed".to_string(),
+            "No delivery bus configured for SNS".to_string(),
+        )
+    })?;
+
+    let topic_arn = input["TopicArn"].as_str().ok_or_else(|| {
+        (
+            "States.TaskFailed".to_string(),
+            "Missing TopicArn in SNS publish parameters".to_string(),
+        )
+    })?;
+
+    let message = input["Message"]
+        .as_str()
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| serde_json::to_string(&input["Message"]).unwrap_or_default());
+
+    let subject = input["Subject"].as_str();
+
+    delivery.publish_to_sns(topic_arn, &message, subject);
+
+    Ok(json!({
+        "MessageId": uuid::Uuid::new_v4().to_string(),
+    }))
+}
+
+/// Put events onto an EventBridge bus via DeliveryBus.
+fn invoke_eventbridge_put_events(
+    input: &Value,
+    delivery: &Option<Arc<DeliveryBus>>,
+) -> Result<Value, (String, String)> {
+    let delivery = delivery.as_ref().ok_or_else(|| {
+        (
+            "States.TaskFailed".to_string(),
+            "No delivery bus configured for EventBridge".to_string(),
+        )
+    })?;
+
+    let entries = input["Entries"]
+        .as_array()
+        .ok_or_else(|| {
+            (
+                "States.TaskFailed".to_string(),
+                "Missing Entries in EventBridge putEvents parameters".to_string(),
+            )
+        })?
+        .clone();
+
+    let mut event_ids = Vec::new();
+    for entry in &entries {
+        let source = entry["Source"].as_str().unwrap_or("aws.stepfunctions");
+        let detail_type = entry["DetailType"].as_str().unwrap_or("StepFunctionsEvent");
+        let detail = entry["Detail"]
+            .as_str()
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| serde_json::to_string(&entry["Detail"]).unwrap_or("{}".to_string()));
+        let bus_name = entry["EventBusName"].as_str().unwrap_or("default");
+
+        delivery.put_event_to_eventbridge(source, detail_type, &detail, bus_name);
+        event_ids.push(uuid::Uuid::new_v4().to_string());
+    }
+
+    Ok(json!({
+        "Entries": event_ids.iter().map(|id| json!({"EventId": id})).collect::<Vec<_>>(),
+        "FailedEntryCount": 0,
+    }))
+}
+
+/// Get an item from DynamoDB via direct state access.
+fn invoke_dynamodb_get_item(
+    input: &Value,
+    dynamodb_state: &Option<SharedDynamoDbState>,
+) -> Result<Value, (String, String)> {
+    let ddb = dynamodb_state.as_ref().ok_or_else(|| {
+        (
+            "States.TaskFailed".to_string(),
+            "No DynamoDB state configured".to_string(),
+        )
+    })?;
+
+    let table_name = input["TableName"].as_str().ok_or_else(|| {
+        (
+            "States.TaskFailed".to_string(),
+            "Missing TableName in DynamoDB getItem parameters".to_string(),
+        )
+    })?;
+
+    let key = input
+        .get("Key")
+        .and_then(|k| k.as_object())
+        .ok_or_else(|| {
+            (
+                "States.TaskFailed".to_string(),
+                "Missing Key in DynamoDB getItem parameters".to_string(),
+            )
+        })?;
+
+    let key_map: HashMap<String, Value> = key.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+
+    let state = ddb.read();
+    let table = state.tables.get(table_name).ok_or_else(|| {
+        (
+            "States.TaskFailed".to_string(),
+            format!("Table '{table_name}' not found"),
+        )
+    })?;
+
+    let item = table
+        .find_item_index(&key_map)
+        .map(|idx| table.items[idx].clone());
+
+    match item {
+        Some(item_map) => {
+            let item_value: serde_json::Map<String, Value> = item_map.into_iter().collect();
+            Ok(json!({ "Item": item_value }))
+        }
+        None => Ok(json!({})),
+    }
+}
+
+/// Put an item into DynamoDB via direct state access.
+fn invoke_dynamodb_put_item(
+    input: &Value,
+    dynamodb_state: &Option<SharedDynamoDbState>,
+) -> Result<Value, (String, String)> {
+    let ddb = dynamodb_state.as_ref().ok_or_else(|| {
+        (
+            "States.TaskFailed".to_string(),
+            "No DynamoDB state configured".to_string(),
+        )
+    })?;
+
+    let table_name = input["TableName"].as_str().ok_or_else(|| {
+        (
+            "States.TaskFailed".to_string(),
+            "Missing TableName in DynamoDB putItem parameters".to_string(),
+        )
+    })?;
+
+    let item = input
+        .get("Item")
+        .and_then(|i| i.as_object())
+        .ok_or_else(|| {
+            (
+                "States.TaskFailed".to_string(),
+                "Missing Item in DynamoDB putItem parameters".to_string(),
+            )
+        })?;
+
+    let item_map: HashMap<String, Value> =
+        item.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+
+    let mut state = ddb.write();
+    let table = state.tables.get_mut(table_name).ok_or_else(|| {
+        (
+            "States.TaskFailed".to_string(),
+            format!("Table '{table_name}' not found"),
+        )
+    })?;
+
+    // Replace existing item with same key, or insert new
+    if let Some(idx) = table.find_item_index(&item_map) {
+        table.items[idx] = item_map;
+    } else {
+        table.items.push(item_map);
+    }
+
+    Ok(json!({}))
+}
+
+/// Delete an item from DynamoDB via direct state access.
+fn invoke_dynamodb_delete_item(
+    input: &Value,
+    dynamodb_state: &Option<SharedDynamoDbState>,
+) -> Result<Value, (String, String)> {
+    let ddb = dynamodb_state.as_ref().ok_or_else(|| {
+        (
+            "States.TaskFailed".to_string(),
+            "No DynamoDB state configured".to_string(),
+        )
+    })?;
+
+    let table_name = input["TableName"].as_str().ok_or_else(|| {
+        (
+            "States.TaskFailed".to_string(),
+            "Missing TableName in DynamoDB deleteItem parameters".to_string(),
+        )
+    })?;
+
+    let key = input
+        .get("Key")
+        .and_then(|k| k.as_object())
+        .ok_or_else(|| {
+            (
+                "States.TaskFailed".to_string(),
+                "Missing Key in DynamoDB deleteItem parameters".to_string(),
+            )
+        })?;
+
+    let key_map: HashMap<String, Value> = key.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+
+    let mut state = ddb.write();
+    let table = state.tables.get_mut(table_name).ok_or_else(|| {
+        (
+            "States.TaskFailed".to_string(),
+            format!("Table '{table_name}' not found"),
+        )
+    })?;
+
+    if let Some(idx) = table.find_item_index(&key_map) {
+        table.items.remove(idx);
+    }
+
+    Ok(json!({}))
+}
+
+/// Update an item in DynamoDB via direct state access.
+/// Simplified: merges Key+ExpressionAttributeValues into the existing item.
+fn invoke_dynamodb_update_item(
+    input: &Value,
+    dynamodb_state: &Option<SharedDynamoDbState>,
+) -> Result<Value, (String, String)> {
+    let ddb = dynamodb_state.as_ref().ok_or_else(|| {
+        (
+            "States.TaskFailed".to_string(),
+            "No DynamoDB state configured".to_string(),
+        )
+    })?;
+
+    let table_name = input["TableName"].as_str().ok_or_else(|| {
+        (
+            "States.TaskFailed".to_string(),
+            "Missing TableName in DynamoDB updateItem parameters".to_string(),
+        )
+    })?;
+
+    let key = input
+        .get("Key")
+        .and_then(|k| k.as_object())
+        .ok_or_else(|| {
+            (
+                "States.TaskFailed".to_string(),
+                "Missing Key in DynamoDB updateItem parameters".to_string(),
+            )
+        })?;
+
+    let key_map: HashMap<String, Value> = key.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+
+    let mut state = ddb.write();
+    let table = state.tables.get_mut(table_name).ok_or_else(|| {
+        (
+            "States.TaskFailed".to_string(),
+            format!("Table '{table_name}' not found"),
+        )
+    })?;
+
+    // Parse UpdateExpression to apply SET operations
+    if let Some(update_expr) = input["UpdateExpression"].as_str() {
+        let attr_values = input
+            .get("ExpressionAttributeValues")
+            .and_then(|v| v.as_object())
+            .cloned()
+            .unwrap_or_default();
+        let attr_names = input
+            .get("ExpressionAttributeNames")
+            .and_then(|v| v.as_object())
+            .cloned()
+            .unwrap_or_default();
+
+        if let Some(idx) = table.find_item_index(&key_map) {
+            apply_update_expression(
+                &mut table.items[idx],
+                update_expr,
+                &attr_values,
+                &attr_names,
+            );
+        } else {
+            // Create new item with key + update expression values
+            let mut new_item = key_map;
+            apply_update_expression(&mut new_item, update_expr, &attr_values, &attr_names);
+            table.items.push(new_item);
+        }
+    }
+
+    Ok(json!({}))
+}
+
+/// Apply a simple SET UpdateExpression to an item.
+fn apply_update_expression(
+    item: &mut HashMap<String, Value>,
+    expr: &str,
+    attr_values: &serde_json::Map<String, Value>,
+    attr_names: &serde_json::Map<String, Value>,
+) {
+    // Parse "SET #name1 = :val1, #name2 = :val2" or "SET field = :val"
+    let set_part = expr
+        .trim()
+        .strip_prefix("SET ")
+        .or_else(|| expr.trim().strip_prefix("set "))
+        .unwrap_or(expr);
+
+    for assignment in set_part.split(',') {
+        let parts: Vec<&str> = assignment.splitn(2, '=').collect();
+        if parts.len() == 2 {
+            let attr_ref = parts[0].trim();
+            let val_ref = parts[1].trim();
+
+            // Resolve attribute name (could be #alias or direct name)
+            let attr_name = if attr_ref.starts_with('#') {
+                attr_names
+                    .get(attr_ref)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(attr_ref)
+                    .to_string()
+            } else {
+                attr_ref.to_string()
+            };
+
+            // Resolve value
+            if val_ref.starts_with(':') {
+                if let Some(val) = attr_values.get(val_ref) {
+                    item.insert(attr_name, val.clone());
+                }
+            }
+        }
+    }
+}
+
+/// Convert an SQS queue URL to an ARN.
+/// QueueUrl format: http://localhost:4566/123456789012/my-queue
+fn queue_url_to_arn(url: &str) -> String {
+    let parts: Vec<&str> = url.rsplitn(3, '/').collect();
+    if parts.len() >= 2 {
+        let queue_name = parts[0];
+        let account_id = parts[1];
+        format!("arn:aws:sqs:us-east-1:{account_id}:{queue_name}")
+    } else {
+        url.to_string()
+    }
+}
+
+/// Simple hash function for MD5-like output (not cryptographic, just for response format).
+fn md5_hash(data: &str) -> u64 {
+    let mut hash: u64 = 0;
+    for byte in data.bytes() {
+        hash = hash.wrapping_mul(31).wrapping_add(byte as u64);
+    }
+    hash
 }
 
 /// Invoke a Lambda function directly via DeliveryBus.
@@ -1161,6 +1614,7 @@ mod tests {
             definition,
             Some(r#"{"hello":"world"}"#.to_string()),
             None,
+            None,
         )
         .await;
 
@@ -1203,6 +1657,7 @@ mod tests {
             definition,
             Some("{}".to_string()),
             None,
+            None,
         )
         .await;
 
@@ -1236,6 +1691,7 @@ mod tests {
             definition,
             Some(r#"{"data": "value"}"#.to_string()),
             None,
+            None,
         )
         .await;
 
@@ -1262,7 +1718,7 @@ mod tests {
         })
         .to_string();
 
-        execute_state_machine(state.clone(), arn.to_string(), definition, None, None).await;
+        execute_state_machine(state.clone(), arn.to_string(), definition, None, None, None).await;
 
         let s = state.read();
         let exec = s.executions.get(arn).unwrap();
@@ -1293,6 +1749,7 @@ mod tests {
             arn.to_string(),
             definition,
             Some("{}".to_string()),
+            None,
             None,
         )
         .await;

@@ -2,6 +2,7 @@ mod helpers;
 
 use aws_sdk_sfn::types::Tag;
 use helpers::TestServer;
+use serde_json::json;
 use tokio::time::{sleep, Duration};
 
 fn simple_definition() -> String {
@@ -2890,4 +2891,608 @@ async fn sfn_parallel_then_map_workflow() {
     assert_eq!(arr[0]["value"], 10);
     assert_eq!(arr[0]["status"], "transformed");
     assert_eq!(arr[1]["value"], 20);
+}
+
+// --- Cross-service integration tests ---
+
+#[tokio::test]
+async fn sfn_task_sqs_send_message() {
+    let server = TestServer::start().await;
+    let sfn = server.sfn_client().await;
+    let sqs = server.sqs_client().await;
+
+    // Create an SQS queue
+    let queue = sqs
+        .create_queue()
+        .queue_name("sfn-test-queue")
+        .send()
+        .await
+        .unwrap();
+    let queue_url = queue.queue_url().unwrap();
+
+    // Create a state machine that sends a message to SQS
+    let definition = json!({
+        "StartAt": "SendMessage",
+        "States": {
+            "SendMessage": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::sqs:sendMessage",
+                "Parameters": {
+                    "QueueUrl": queue_url,
+                    "MessageBody": "hello from step functions"
+                },
+                "End": true
+            }
+        }
+    })
+    .to_string();
+
+    let create = sfn
+        .create_state_machine()
+        .name("sqs-send-sm")
+        .definition(definition)
+        .role_arn("arn:aws:iam::123456789012:role/test-role")
+        .send()
+        .await
+        .unwrap();
+
+    let start = sfn
+        .start_execution()
+        .state_machine_arn(create.state_machine_arn())
+        .input(r#"{}"#)
+        .send()
+        .await
+        .unwrap();
+
+    let status = wait_for_execution(&sfn, start.execution_arn()).await;
+    assert_eq!(status, "SUCCEEDED");
+
+    // Verify the message was delivered to SQS
+    let receive = sqs
+        .receive_message()
+        .queue_url(queue_url)
+        .send()
+        .await
+        .unwrap();
+
+    let messages = receive.messages();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].body().unwrap(), "hello from step functions");
+}
+
+#[tokio::test]
+async fn sfn_task_sns_publish() {
+    let server = TestServer::start().await;
+    let sfn = server.sfn_client().await;
+    let sns = server.sns_client().await;
+
+    // Create an SNS topic
+    let topic = sns
+        .create_topic()
+        .name("sfn-test-topic")
+        .send()
+        .await
+        .unwrap();
+    let topic_arn = topic.topic_arn().unwrap();
+
+    // Create a state machine that publishes to SNS
+    let definition = json!({
+        "StartAt": "Publish",
+        "States": {
+            "Publish": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::sns:publish",
+                "Parameters": {
+                    "TopicArn": topic_arn,
+                    "Message": "hello from step functions"
+                },
+                "End": true
+            }
+        }
+    })
+    .to_string();
+
+    let create = sfn
+        .create_state_machine()
+        .name("sns-publish-sm")
+        .definition(definition)
+        .role_arn("arn:aws:iam::123456789012:role/test-role")
+        .send()
+        .await
+        .unwrap();
+
+    let start = sfn
+        .start_execution()
+        .state_machine_arn(create.state_machine_arn())
+        .input(r#"{}"#)
+        .send()
+        .await
+        .unwrap();
+
+    let status = wait_for_execution(&sfn, start.execution_arn()).await;
+    assert_eq!(status, "SUCCEEDED");
+
+    // Verify the message was published via introspection endpoint
+    let url = format!("{}/_fakecloud/sns/messages", server.endpoint());
+    let resp: serde_json::Value = reqwest::get(&url).await.unwrap().json().await.unwrap();
+    let messages = resp["messages"].as_array().unwrap();
+    assert!(
+        messages
+            .iter()
+            .any(|m| m["message"].as_str() == Some("hello from step functions")),
+        "Expected SNS message not found: {messages:?}"
+    );
+}
+
+#[tokio::test]
+async fn sfn_task_dynamodb_put_and_get_item() {
+    let server = TestServer::start().await;
+    let sfn = server.sfn_client().await;
+    let ddb = server.dynamodb_client().await;
+
+    // Create a DynamoDB table
+    ddb.create_table()
+        .table_name("sfn-test-table")
+        .attribute_definitions(
+            aws_sdk_dynamodb::types::AttributeDefinition::builder()
+                .attribute_name("pk")
+                .attribute_type(aws_sdk_dynamodb::types::ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .key_schema(
+            aws_sdk_dynamodb::types::KeySchemaElement::builder()
+                .attribute_name("pk")
+                .key_type(aws_sdk_dynamodb::types::KeyType::Hash)
+                .build()
+                .unwrap(),
+        )
+        .billing_mode(aws_sdk_dynamodb::types::BillingMode::PayPerRequest)
+        .send()
+        .await
+        .unwrap();
+
+    // Create a state machine that puts an item, then gets it
+    let definition = json!({
+        "StartAt": "PutItem",
+        "States": {
+            "PutItem": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::dynamodb:putItem",
+                "Parameters": {
+                    "TableName": "sfn-test-table",
+                    "Item": {
+                        "pk": {"S": "item-1"},
+                        "data": {"S": "from-step-functions"}
+                    }
+                },
+                "ResultPath": "$.putResult",
+                "Next": "GetItem"
+            },
+            "GetItem": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::dynamodb:getItem",
+                "Parameters": {
+                    "TableName": "sfn-test-table",
+                    "Key": {
+                        "pk": {"S": "item-1"}
+                    }
+                },
+                "End": true
+            }
+        }
+    })
+    .to_string();
+
+    let create = sfn
+        .create_state_machine()
+        .name("ddb-put-get-sm")
+        .definition(definition)
+        .role_arn("arn:aws:iam::123456789012:role/test-role")
+        .send()
+        .await
+        .unwrap();
+
+    let start = sfn
+        .start_execution()
+        .state_machine_arn(create.state_machine_arn())
+        .input(r#"{}"#)
+        .send()
+        .await
+        .unwrap();
+
+    let status = wait_for_execution(&sfn, start.execution_arn()).await;
+    assert_eq!(status, "SUCCEEDED");
+
+    // Verify the output contains the item
+    let desc = sfn
+        .describe_execution()
+        .execution_arn(start.execution_arn())
+        .send()
+        .await
+        .unwrap();
+    let output: serde_json::Value = serde_json::from_str(desc.output().unwrap_or("{}")).unwrap();
+    assert_eq!(output["Item"]["pk"]["S"], "item-1");
+    assert_eq!(output["Item"]["data"]["S"], "from-step-functions");
+}
+
+#[tokio::test]
+async fn sfn_task_dynamodb_delete_item() {
+    let server = TestServer::start().await;
+    let sfn = server.sfn_client().await;
+    let ddb = server.dynamodb_client().await;
+
+    // Create a DynamoDB table and put an item
+    ddb.create_table()
+        .table_name("sfn-del-table")
+        .attribute_definitions(
+            aws_sdk_dynamodb::types::AttributeDefinition::builder()
+                .attribute_name("pk")
+                .attribute_type(aws_sdk_dynamodb::types::ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .key_schema(
+            aws_sdk_dynamodb::types::KeySchemaElement::builder()
+                .attribute_name("pk")
+                .key_type(aws_sdk_dynamodb::types::KeyType::Hash)
+                .build()
+                .unwrap(),
+        )
+        .billing_mode(aws_sdk_dynamodb::types::BillingMode::PayPerRequest)
+        .send()
+        .await
+        .unwrap();
+
+    ddb.put_item()
+        .table_name("sfn-del-table")
+        .item(
+            "pk",
+            aws_sdk_dynamodb::types::AttributeValue::S("to-delete".to_string()),
+        )
+        .item(
+            "data",
+            aws_sdk_dynamodb::types::AttributeValue::S("will be gone".to_string()),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    // Delete the item via Step Functions
+    let definition = json!({
+        "StartAt": "DeleteItem",
+        "States": {
+            "DeleteItem": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::dynamodb:deleteItem",
+                "Parameters": {
+                    "TableName": "sfn-del-table",
+                    "Key": {
+                        "pk": {"S": "to-delete"}
+                    }
+                },
+                "End": true
+            }
+        }
+    })
+    .to_string();
+
+    let create = sfn
+        .create_state_machine()
+        .name("ddb-delete-sm")
+        .definition(definition)
+        .role_arn("arn:aws:iam::123456789012:role/test-role")
+        .send()
+        .await
+        .unwrap();
+
+    let start = sfn
+        .start_execution()
+        .state_machine_arn(create.state_machine_arn())
+        .input(r#"{}"#)
+        .send()
+        .await
+        .unwrap();
+
+    let status = wait_for_execution(&sfn, start.execution_arn()).await;
+    assert_eq!(status, "SUCCEEDED");
+
+    // Verify the item was deleted
+    let get = ddb
+        .get_item()
+        .table_name("sfn-del-table")
+        .key(
+            "pk",
+            aws_sdk_dynamodb::types::AttributeValue::S("to-delete".to_string()),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert!(get.item().is_none());
+}
+
+#[tokio::test]
+async fn sfn_task_eventbridge_put_events() {
+    let server = TestServer::start().await;
+    let sfn = server.sfn_client().await;
+
+    // Create a state machine that puts events to EventBridge
+    let definition = json!({
+        "StartAt": "PutEvents",
+        "States": {
+            "PutEvents": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::events:putEvents",
+                "Parameters": {
+                    "Entries": [
+                        {
+                            "Source": "my.app",
+                            "DetailType": "OrderCreated",
+                            "Detail": "{\"orderId\": \"123\"}",
+                            "EventBusName": "default"
+                        }
+                    ]
+                },
+                "End": true
+            }
+        }
+    })
+    .to_string();
+
+    let create = sfn
+        .create_state_machine()
+        .name("eb-putevents-sm")
+        .definition(definition)
+        .role_arn("arn:aws:iam::123456789012:role/test-role")
+        .send()
+        .await
+        .unwrap();
+
+    let start = sfn
+        .start_execution()
+        .state_machine_arn(create.state_machine_arn())
+        .input(r#"{}"#)
+        .send()
+        .await
+        .unwrap();
+
+    let status = wait_for_execution(&sfn, start.execution_arn()).await;
+    assert_eq!(status, "SUCCEEDED");
+
+    // Verify the event was recorded via introspection
+    let url = format!("{}/_fakecloud/events/history", server.endpoint());
+    let resp: serde_json::Value = reqwest::get(&url).await.unwrap().json().await.unwrap();
+    let events = resp["events"].as_array().unwrap();
+    assert!(
+        events.iter().any(|e| e["source"].as_str() == Some("my.app")
+            && e["detailType"].as_str() == Some("OrderCreated")),
+        "Expected EventBridge event not found: {events:?}"
+    );
+}
+
+#[tokio::test]
+async fn sfn_task_sqs_with_dynamic_parameters() {
+    let server = TestServer::start().await;
+    let sfn = server.sfn_client().await;
+    let sqs = server.sqs_client().await;
+
+    // Create an SQS queue
+    let queue = sqs
+        .create_queue()
+        .queue_name("sfn-dynamic-queue")
+        .send()
+        .await
+        .unwrap();
+    let queue_url = queue.queue_url().unwrap();
+
+    // Create a state machine that uses Parameters.$ to extract from input
+    let definition = json!({
+        "StartAt": "SendMessage",
+        "States": {
+            "SendMessage": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::sqs:sendMessage",
+                "Parameters": {
+                    "QueueUrl": queue_url,
+                    "MessageBody.$": "$.message"
+                },
+                "End": true
+            }
+        }
+    })
+    .to_string();
+
+    let create = sfn
+        .create_state_machine()
+        .name("sqs-dynamic-sm")
+        .definition(definition)
+        .role_arn("arn:aws:iam::123456789012:role/test-role")
+        .send()
+        .await
+        .unwrap();
+
+    let start = sfn
+        .start_execution()
+        .state_machine_arn(create.state_machine_arn())
+        .input(r#"{"message": "dynamic message content"}"#)
+        .send()
+        .await
+        .unwrap();
+
+    let status = wait_for_execution(&sfn, start.execution_arn()).await;
+    assert_eq!(status, "SUCCEEDED");
+
+    // Verify the dynamic message was sent
+    let receive = sqs
+        .receive_message()
+        .queue_url(queue_url)
+        .send()
+        .await
+        .unwrap();
+
+    let messages = receive.messages();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].body().unwrap(), "dynamic message content");
+}
+
+#[tokio::test]
+async fn sfn_introspection_executions_endpoint() {
+    let server = TestServer::start().await;
+    let sfn = server.sfn_client().await;
+
+    let create = sfn
+        .create_state_machine()
+        .name("introspect-sm")
+        .definition(simple_definition())
+        .role_arn("arn:aws:iam::123456789012:role/test-role")
+        .send()
+        .await
+        .unwrap();
+
+    let start = sfn
+        .start_execution()
+        .state_machine_arn(create.state_machine_arn())
+        .name("introspect-exec")
+        .input(r#"{"test": true}"#)
+        .send()
+        .await
+        .unwrap();
+
+    wait_for_execution(&sfn, start.execution_arn()).await;
+
+    // Check the introspection endpoint
+    let url = format!("{}/_fakecloud/stepfunctions/executions", server.endpoint());
+    let resp: serde_json::Value = reqwest::get(&url).await.unwrap().json().await.unwrap();
+    let executions = resp["executions"].as_array().unwrap();
+    assert!(!executions.is_empty());
+
+    let exec = executions
+        .iter()
+        .find(|e| e["name"].as_str() == Some("introspect-exec"))
+        .expect("Expected execution not found");
+    assert_eq!(exec["status"], "SUCCEEDED");
+    assert!(exec["executionArn"]
+        .as_str()
+        .unwrap()
+        .contains("introspect"));
+    assert!(exec["stateMachineArn"]
+        .as_str()
+        .unwrap()
+        .contains("introspect-sm"));
+    assert!(exec["startDate"].as_str().is_some());
+    assert!(exec["stopDate"].as_str().is_some());
+}
+
+#[tokio::test]
+async fn sfn_cross_service_workflow_sqs_then_choice() {
+    let server = TestServer::start().await;
+    let sfn = server.sfn_client().await;
+    let sqs = server.sqs_client().await;
+
+    // Create two SQS queues for routing
+    let high_queue = sqs
+        .create_queue()
+        .queue_name("high-priority")
+        .send()
+        .await
+        .unwrap();
+    let high_url = high_queue.queue_url().unwrap();
+
+    let low_queue = sqs
+        .create_queue()
+        .queue_name("low-priority")
+        .send()
+        .await
+        .unwrap();
+    let low_url = low_queue.queue_url().unwrap();
+
+    // Workflow: Choice routes to different SQS queues based on priority
+    let definition = json!({
+        "StartAt": "Route",
+        "States": {
+            "Route": {
+                "Type": "Choice",
+                "Choices": [
+                    {
+                        "Variable": "$.priority",
+                        "StringEquals": "high",
+                        "Next": "SendHigh"
+                    }
+                ],
+                "Default": "SendLow"
+            },
+            "SendHigh": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::sqs:sendMessage",
+                "Parameters": {
+                    "QueueUrl": high_url,
+                    "MessageBody.$": "$.payload"
+                },
+                "End": true
+            },
+            "SendLow": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::sqs:sendMessage",
+                "Parameters": {
+                    "QueueUrl": low_url,
+                    "MessageBody.$": "$.payload"
+                },
+                "End": true
+            }
+        }
+    })
+    .to_string();
+
+    let create = sfn
+        .create_state_machine()
+        .name("cross-service-sm")
+        .definition(definition)
+        .role_arn("arn:aws:iam::123456789012:role/test-role")
+        .send()
+        .await
+        .unwrap();
+
+    // Send a high-priority message
+    let start = sfn
+        .start_execution()
+        .state_machine_arn(create.state_machine_arn())
+        .name("exec-high")
+        .input(r#"{"priority": "high", "payload": "urgent order"}"#)
+        .send()
+        .await
+        .unwrap();
+    let status = wait_for_execution(&sfn, start.execution_arn()).await;
+    assert_eq!(status, "SUCCEEDED");
+
+    // Send a low-priority message
+    let start = sfn
+        .start_execution()
+        .state_machine_arn(create.state_machine_arn())
+        .name("exec-low")
+        .input(r#"{"priority": "low", "payload": "regular order"}"#)
+        .send()
+        .await
+        .unwrap();
+    let status = wait_for_execution(&sfn, start.execution_arn()).await;
+    assert_eq!(status, "SUCCEEDED");
+
+    // Verify high-priority queue got the right message
+    let receive = sqs
+        .receive_message()
+        .queue_url(high_url)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(receive.messages().len(), 1);
+    assert_eq!(receive.messages()[0].body().unwrap(), "urgent order");
+
+    // Verify low-priority queue got the right message
+    let receive = sqs
+        .receive_message()
+        .queue_url(low_url)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(receive.messages().len(), 1);
+    assert_eq!(receive.messages()[0].body().unwrap(), "regular order");
 }

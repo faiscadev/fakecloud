@@ -10,6 +10,7 @@ use fakecloud_core::delivery::DeliveryBus;
 use fakecloud_core::pagination::paginate;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 use fakecloud_core::validation::*;
+use fakecloud_dynamodb::state::SharedDynamoDbState;
 
 use crate::interpreter;
 use crate::state::{
@@ -37,6 +38,7 @@ const SUPPORTED: &[&str] = &[
 pub struct StepFunctionsService {
     state: SharedStepFunctionsState,
     delivery: Option<Arc<DeliveryBus>>,
+    dynamodb_state: Option<SharedDynamoDbState>,
 }
 
 impl StepFunctionsService {
@@ -44,11 +46,17 @@ impl StepFunctionsService {
         Self {
             state,
             delivery: None,
+            dynamodb_state: None,
         }
     }
 
     pub fn with_delivery(mut self, delivery: Arc<DeliveryBus>) -> Self {
         self.delivery = Some(delivery);
+        self
+    }
+
+    pub fn with_dynamodb(mut self, dynamodb_state: SharedDynamoDbState) -> Self {
+        self.dynamodb_state = Some(dynamodb_state);
         self
     }
 }
@@ -363,6 +371,7 @@ impl StepFunctionsService {
         let exec_arn_clone = exec_arn.clone();
         let input_clone = input;
         let delivery = self.delivery.clone();
+        let dynamodb_state = self.dynamodb_state.clone();
         tokio::spawn(async move {
             interpreter::execute_state_machine(
                 shared_state,
@@ -370,6 +379,7 @@ impl StepFunctionsService {
                 definition,
                 input_clone,
                 delivery,
+                dynamodb_state,
             )
             .await;
         });

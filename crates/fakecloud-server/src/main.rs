@@ -341,6 +341,8 @@ async fn main() {
         delivery_for_cf,
     )));
     registry.register(Arc::new(SqsService::new(sqs_state.clone())));
+    let sns_state_for_sfn = sns_state.clone();
+    let delivery_for_sns_sfn = delivery_for_sns.clone();
     registry.register(Arc::new(SnsService::new(sns_state, delivery_for_sns)));
     let mut eb_service = EventBridgeService::new(eb_state.clone(), delivery_for_eb.clone())
         .with_lambda(lambda_state.clone())
@@ -352,6 +354,7 @@ async fn main() {
 
     // Spawn the EventBridge scheduler as a background task
     let eb_state_for_ses = eb_state.clone();
+    let eb_state_for_sfn = eb_state.clone();
     let mut scheduler = fakecloud_eventbridge::scheduler::Scheduler::new(eb_state, delivery_for_eb)
         .with_lambda(lambda_state.clone())
         .with_logs(logs_state.clone());
@@ -437,11 +440,26 @@ async fn main() {
     registry.register(Arc::new(elasticache_service));
     let mut sfn_service = StepFunctionsService::new(stepfunctions_state.clone());
     {
-        let mut bus = DeliveryBus::new().with_sqs(sqs_delivery.clone());
+        let eb_delivery_for_sfn = Arc::new(
+            fakecloud_eventbridge::delivery::EventBridgeDeliveryImpl::new(
+                eb_state_for_sfn,
+                Arc::new(DeliveryBus::new().with_sqs(sqs_delivery.clone())),
+            ),
+        );
+        let sns_delivery_for_sfn = Arc::new(fakecloud_sns::delivery::SnsDeliveryImpl::new(
+            sns_state_for_sfn,
+            delivery_for_sns_sfn,
+        ));
+        let mut bus = DeliveryBus::new()
+            .with_sqs(sqs_delivery.clone())
+            .with_sns(sns_delivery_for_sfn)
+            .with_eventbridge(eb_delivery_for_sfn);
         if let Some(ref ld) = lambda_delivery {
             bus = bus.with_lambda(ld.clone());
         }
-        sfn_service = sfn_service.with_delivery(Arc::new(bus));
+        sfn_service = sfn_service
+            .with_delivery(Arc::new(bus))
+            .with_dynamodb(dynamodb_state.clone());
     }
     registry.register(Arc::new(sfn_service));
 
@@ -1132,6 +1150,34 @@ async fn main() {
                         serverless_caches
                             .sort_by(|a, b| a.serverless_cache_name.cmp(&b.serverless_cache_name));
                         axum::Json(types::ElastiCacheServerlessCachesResponse { serverless_caches })
+                    }
+                }
+            }),
+        )
+        .route(
+            "/_fakecloud/stepfunctions/executions",
+            axum::routing::get({
+                let ss = stepfunctions_state.clone();
+                move || {
+                    let ss = ss.clone();
+                    async move {
+                        let state = ss.read();
+                        let mut executions: Vec<types::StepFunctionsExecution> = state
+                            .executions
+                            .values()
+                            .map(|exec| types::StepFunctionsExecution {
+                                execution_arn: exec.execution_arn.clone(),
+                                state_machine_arn: exec.state_machine_arn.clone(),
+                                name: exec.name.clone(),
+                                status: exec.status.as_str().to_string(),
+                                input: exec.input.clone(),
+                                output: exec.output.clone(),
+                                start_date: exec.start_date.to_rfc3339(),
+                                stop_date: exec.stop_date.map(|d| d.to_rfc3339()),
+                            })
+                            .collect();
+                        executions.sort_by(|a, b| b.start_date.cmp(&a.start_date));
+                        axum::Json(types::StepFunctionsExecutionsResponse { executions })
                     }
                 }
             }),

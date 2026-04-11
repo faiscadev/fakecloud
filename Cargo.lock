@@ -2340,6 +2340,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "fakecloud-core",
+ "fakecloud-dynamodb",
  "http 1.4.0",
  "parking_lot",
  "serde",

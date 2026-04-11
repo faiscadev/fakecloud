@@ -49,7 +49,7 @@ tests; they are an extra layer, not the whole story.
 | Startup time        | ~500ms                                             | ~3s                                                                            |
 | Idle memory         | ~10 MiB                                            | ~150 MiB                                                                       |
 | Install size        | ~19 MB binary                                      | ~1 GB Docker image                                                             |
-| AWS services        | 18                                                 | 30+                                                                            |
+| AWS services        | 19                                                 | 30+                                                                            |
 | Test assertion SDKs | TypeScript, Python, Go, Rust                       | Python, Java                                                                   |
 | Cognito User Pools  | 80 operations                                      | [Paid only](https://docs.localstack.cloud/references/licensing/)               |
 | SES v2              | 97 operations                                      | [Paid only](https://docs.localstack.cloud/references/licensing/)               |
@@ -156,7 +156,7 @@ aws --endpoint-url http://localhost:4566 sqs create-queue --queue-name my-queue
 
 ## Supported Services
 
-18 AWS services, 1002 API operations:
+19 AWS services, 1016 API operations:
 
 | Service                | Actions | Highlights                                                                                                                                                                                                                                                                                                                                                                                                  |
 | ---------------------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -178,6 +178,7 @@ aws --endpoint-url http://localhost:4566 sqs create-queue --queue-name my-queue
 | **Kinesis**            | 14      | Streams, records, shard iterators, retention changes, stream tagging                                                                                                                                                                                                                                                                                                                                        |
 | **RDS**                | 22      | DB instances (PostgreSQL, MySQL, MariaDB via Docker), snapshots, read replicas, parameter groups, subnet groups, engine/version discovery, tagging                                                                                                                                                                                                                                                          |
 | **ElastiCache**        | 44      | Cache clusters, replication groups, global replication groups, serverless caches and snapshots, subnet groups, users/user groups, failover, tagging (Redis and Valkey via Docker)                                                                                                                                                                                                                           |
+| **Step Functions**     | 14      | State machine CRUD, executions, ASL interpreter (Pass, Task, Choice, Wait, Parallel, Map, Succeed, Fail), Retry/Catch, Lambda/SQS/SNS/EventBridge/DynamoDB task integrations                                                                                                                                                                                                                              |
 
 ### Cross-Service Integration
 
@@ -195,6 +196,7 @@ integration tests:
 - **Cognito -> Lambda**: Pre-signup, post-confirmation, pre/post-auth, custom message, token generation, migration, and custom auth challenge triggers
 - **SES -> SNS/EventBridge**: Email event fanout (send, delivery, bounce, complaint) via configured event destinations
 - **SES Inbound -> S3/SNS/Lambda**: Receipt rules evaluate inbound email and execute S3, SNS, and Lambda actions
+- **Step Functions -> Lambda/SQS/SNS/EventBridge/DynamoDB**: Task states invoke Lambda, send SQS messages, publish to SNS topics, put EventBridge events, and read/write DynamoDB items
 - **CloudFormation -> Lambda/SNS**: Custom resources invoke via ServiceToken, stack events notify via NotificationARNs
 - **SecretsManager -> Lambda**: Rotation invokes Lambda for all 4 steps
 - **S3 Lifecycle**: Background expiration and storage class transitions
@@ -281,6 +283,7 @@ fakecloud exposes `/_fakecloud/*` endpoints for testing behaviors that AWS runs 
 | `/_fakecloud/cognito/tokens`                                  | GET    | List all active access and refresh tokens (without exposing token strings).                                             |
 | `/_fakecloud/cognito/expire-tokens`                           | POST   | Expire tokens. Body: `{"userPoolId": "...", "username": "..."}` (both optional).                                        |
 | `/_fakecloud/cognito/auth-events`                             | GET    | List all auth events (sign-up, sign-in, failures, password changes).                                                    |
+| `/_fakecloud/stepfunctions/executions`                        | GET    | List all Step Functions executions with status, input, output, and timestamps.                                          |
 | `/_fakecloud/reset`                                           | POST   | Reset all state across all services.                                                                                    |
 | `/_fakecloud/reset/{service}`                                 | POST   | Reset only the specified service's state. Returns `{"reset": "service_name"}`.                                          |
 
@@ -362,7 +365,7 @@ Contributions are welcome.
 **fakecloud is** a free, open-source local AWS emulator for integration testing and
 local development. For every service it implements, the goal is 100% behavioral
 parity with real AWS — verified by 34,000+ automated conformance test variants
-against official AWS Smithy models across all API operations. 18 services,
+against official AWS Smithy models across all API operations. 19 services,
 100% conformance.
 
 **fakecloud is not** a production-ready cloud replacement. It's not designed to

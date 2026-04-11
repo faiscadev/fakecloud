@@ -400,6 +400,30 @@ pub struct ElastiCacheServerlessCachesResponse {
     pub serverless_caches: Vec<ElastiCacheServerlessCacheIntrospection>,
 }
 
+// ── Step Functions ──────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StepFunctionsExecution {
+    pub execution_arn: String,
+    pub state_machine_arn: String,
+    pub name: String,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
+    pub start_date: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stop_date: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StepFunctionsExecutionsResponse {
+    pub executions: Vec<StepFunctionsExecution>,
+}
+
 // ── Cognito ─────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
