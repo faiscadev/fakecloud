@@ -1,10 +1,12 @@
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use chrono::Utc;
 use http::StatusCode;
 use serde_json::{json, Value};
 
-use std::collections::HashMap;
-
+use fakecloud_core::delivery::DeliveryBus;
 use fakecloud_core::pagination::paginate;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 use fakecloud_core::validation::*;
@@ -34,11 +36,20 @@ const SUPPORTED: &[&str] = &[
 
 pub struct StepFunctionsService {
     state: SharedStepFunctionsState,
+    delivery: Option<Arc<DeliveryBus>>,
 }
 
 impl StepFunctionsService {
     pub fn new(state: SharedStepFunctionsState) -> Self {
-        Self { state }
+        Self {
+            state,
+            delivery: None,
+        }
+    }
+
+    pub fn with_delivery(mut self, delivery: Arc<DeliveryBus>) -> Self {
+        self.delivery = Some(delivery);
+        self
     }
 }
 
@@ -351,12 +362,14 @@ impl StepFunctionsService {
         let shared_state = self.state.clone();
         let exec_arn_clone = exec_arn.clone();
         let input_clone = input;
+        let delivery = self.delivery.clone();
         tokio::spawn(async move {
             interpreter::execute_state_machine(
                 shared_state,
                 exec_arn_clone,
                 definition,
                 input_clone,
+                delivery,
             )
             .await;
         });

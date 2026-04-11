@@ -1,7 +1,12 @@
+use std::sync::Arc;
+
 use chrono::Utc;
 use serde_json::{json, Value};
 use tracing::debug;
 
+use fakecloud_core::delivery::DeliveryBus;
+
+use crate::error_handling::{find_catcher, should_retry};
 use crate::io_processing::{apply_input_path, apply_output_path, apply_result_path};
 use crate::state::{ExecutionStatus, HistoryEvent, SharedStepFunctionsState};
 
@@ -12,6 +17,7 @@ pub async fn execute_state_machine(
     execution_arn: String,
     definition: String,
     input: Option<String>,
+    delivery: Option<Arc<DeliveryBus>>,
 ) {
     let def: Value = match serde_json::from_str(&definition) {
         Ok(v) => v,
@@ -225,6 +231,78 @@ pub async fn execute_state_machine(
                 return;
             }
 
+            "Task" => {
+                let entered_event_id = add_event(
+                    &state,
+                    &execution_arn,
+                    "TaskStateEntered",
+                    0,
+                    json!({
+                        "name": current_state,
+                        "input": serde_json::to_string(&effective_input).unwrap_or_default(),
+                    }),
+                );
+
+                let result = execute_task_state(
+                    &state_def,
+                    &effective_input,
+                    &delivery,
+                    &state,
+                    &execution_arn,
+                    entered_event_id,
+                )
+                .await;
+
+                match result {
+                    Ok(output) => {
+                        add_event(
+                            &state,
+                            &execution_arn,
+                            "TaskStateExited",
+                            entered_event_id,
+                            json!({
+                                "name": current_state,
+                                "output": serde_json::to_string(&output).unwrap_or_default(),
+                            }),
+                        );
+
+                        effective_input = output;
+
+                        match next_state(&state_def) {
+                            NextState::Name(next) => current_state = next,
+                            NextState::End => {
+                                succeed_execution(&state, &execution_arn, &effective_input);
+                                return;
+                            }
+                            NextState::Error(msg) => {
+                                fail_execution(&state, &execution_arn, "States.Runtime", &msg);
+                                return;
+                            }
+                        }
+                    }
+                    Err((error, cause)) => {
+                        // Try Catch
+                        let catchers = state_def["Catch"].as_array().cloned().unwrap_or_default();
+
+                        if let Some((next, result_path)) = find_catcher(&catchers, &error) {
+                            let error_output = json!({
+                                "Error": error,
+                                "Cause": cause,
+                            });
+                            effective_input = apply_result_path(
+                                &effective_input,
+                                &error_output,
+                                result_path.as_deref(),
+                            );
+                            current_state = next;
+                        } else {
+                            fail_execution(&state, &execution_arn, &error, &cause);
+                            return;
+                        }
+                    }
+                }
+            }
+
             other => {
                 fail_execution(
                     &state,
@@ -270,6 +348,230 @@ fn execute_pass_state(state_def: &Value, input: &Value) -> Value {
         json!({})
     } else {
         apply_output_path(&after_result, output_path)
+    }
+}
+
+/// Execute a Task state: invoke the resource (Lambda), apply I/O processing, handle Retry.
+async fn execute_task_state(
+    state_def: &Value,
+    input: &Value,
+    delivery: &Option<Arc<DeliveryBus>>,
+    shared_state: &SharedStepFunctionsState,
+    execution_arn: &str,
+    entered_event_id: i64,
+) -> Result<Value, (String, String)> {
+    let resource = state_def["Resource"].as_str().unwrap_or("").to_string();
+
+    let input_path = state_def["InputPath"].as_str();
+    let result_path = state_def["ResultPath"].as_str();
+    let output_path = state_def["OutputPath"].as_str();
+
+    // Step 1: Apply InputPath
+    let effective_input = if input_path == Some("null") {
+        json!({})
+    } else {
+        apply_input_path(input, input_path)
+    };
+
+    // Step 2: Apply Parameters (template with .$ suffix for JsonPath extraction)
+    let task_input = if let Some(params) = state_def.get("Parameters") {
+        apply_parameters(params, &effective_input)
+    } else {
+        effective_input
+    };
+
+    // Retry configuration
+    let retriers = state_def["Retry"].as_array().cloned().unwrap_or_default();
+
+    let timeout_seconds = state_def["TimeoutSeconds"].as_u64();
+
+    let mut attempt = 0u32;
+
+    loop {
+        add_event(
+            shared_state,
+            execution_arn,
+            "TaskScheduled",
+            entered_event_id,
+            json!({
+                "resource": resource,
+                "region": "us-east-1",
+                "parameters": serde_json::to_string(&task_input).unwrap_or_default(),
+            }),
+        );
+
+        add_event(
+            shared_state,
+            execution_arn,
+            "TaskStarted",
+            entered_event_id,
+            json!({ "resource": resource }),
+        );
+
+        let invoke_result =
+            invoke_resource(&resource, &task_input, delivery, timeout_seconds).await;
+
+        match invoke_result {
+            Ok(result) => {
+                add_event(
+                    shared_state,
+                    execution_arn,
+                    "TaskSucceeded",
+                    entered_event_id,
+                    json!({
+                        "resource": resource,
+                        "output": serde_json::to_string(&result).unwrap_or_default(),
+                    }),
+                );
+
+                // Apply ResultSelector if present
+                let selected = if let Some(selector) = state_def.get("ResultSelector") {
+                    apply_parameters(selector, &result)
+                } else {
+                    result
+                };
+
+                // Apply ResultPath
+                let after_result = if result_path == Some("null") {
+                    input.clone()
+                } else {
+                    apply_result_path(input, &selected, result_path)
+                };
+
+                // Apply OutputPath
+                let output = if output_path == Some("null") {
+                    json!({})
+                } else {
+                    apply_output_path(&after_result, output_path)
+                };
+
+                return Ok(output);
+            }
+            Err((error, cause)) => {
+                add_event(
+                    shared_state,
+                    execution_arn,
+                    "TaskFailed",
+                    entered_event_id,
+                    json!({ "error": error, "cause": cause }),
+                );
+
+                // Check Retry
+                if let Some(delay_ms) = should_retry(&retriers, &error, attempt) {
+                    attempt += 1;
+                    // Cap the actual delay for testing (don't wait minutes)
+                    let actual_delay = delay_ms.min(5000);
+                    tokio::time::sleep(tokio::time::Duration::from_millis(actual_delay)).await;
+                    continue;
+                }
+
+                return Err((error, cause));
+            }
+        }
+    }
+}
+
+/// Invoke a resource (Lambda function or SDK integration).
+async fn invoke_resource(
+    resource: &str,
+    input: &Value,
+    delivery: &Option<Arc<DeliveryBus>>,
+    timeout_seconds: Option<u64>,
+) -> Result<Value, (String, String)> {
+    // Lambda direct invocation: arn:aws:lambda:...
+    if resource.contains(":lambda:") && resource.contains(":function:") {
+        return invoke_lambda_direct(resource, input, delivery, timeout_seconds).await;
+    }
+
+    // SDK integration: arn:aws:states:::lambda:invoke
+    if resource.starts_with("arn:aws:states:::lambda:invoke") {
+        let function_name = input["FunctionName"]
+            .as_str()
+            .or_else(|| input["Payload"].as_object().and(None))
+            .unwrap_or("");
+        let payload = if let Some(p) = input.get("Payload") {
+            p.clone()
+        } else {
+            input.clone()
+        };
+        return invoke_lambda_direct(function_name, &payload, delivery, timeout_seconds).await;
+    }
+
+    Err((
+        "States.TaskFailed".to_string(),
+        format!("Unsupported resource: {resource}"),
+    ))
+}
+
+/// Invoke a Lambda function directly via DeliveryBus.
+async fn invoke_lambda_direct(
+    function_arn: &str,
+    input: &Value,
+    delivery: &Option<Arc<DeliveryBus>>,
+    timeout_seconds: Option<u64>,
+) -> Result<Value, (String, String)> {
+    let delivery = delivery.as_ref().ok_or_else(|| {
+        (
+            "States.TaskFailed".to_string(),
+            "No delivery bus configured for Lambda invocation".to_string(),
+        )
+    })?;
+
+    let payload = serde_json::to_string(input).unwrap_or_default();
+
+    let invoke_future = delivery.invoke_lambda(function_arn, &payload);
+
+    let result = if let Some(timeout) = timeout_seconds {
+        match tokio::time::timeout(tokio::time::Duration::from_secs(timeout), invoke_future).await {
+            Ok(r) => r,
+            Err(_) => {
+                return Err((
+                    "States.Timeout".to_string(),
+                    format!("Task timed out after {timeout} seconds"),
+                ));
+            }
+        }
+    } else {
+        invoke_future.await
+    };
+
+    match result {
+        Some(Ok(bytes)) => {
+            let response_str = String::from_utf8_lossy(&bytes);
+            let value: Value =
+                serde_json::from_str(&response_str).unwrap_or(json!(response_str.to_string()));
+            Ok(value)
+        }
+        Some(Err(e)) => Err(("States.TaskFailed".to_string(), e)),
+        None => {
+            // No runtime available — return empty result
+            Ok(json!({}))
+        }
+    }
+}
+
+/// Apply Parameters template: keys ending with .$ are treated as JsonPath references.
+fn apply_parameters(template: &Value, input: &Value) -> Value {
+    match template {
+        Value::Object(map) => {
+            let mut result = serde_json::Map::new();
+            for (key, value) in map {
+                if let Some(stripped) = key.strip_suffix(".$") {
+                    // JsonPath reference
+                    if let Some(path) = value.as_str() {
+                        result.insert(
+                            stripped.to_string(),
+                            crate::io_processing::resolve_path(input, path),
+                        );
+                    }
+                } else {
+                    result.insert(key.clone(), apply_parameters(value, input));
+                }
+            }
+            Value::Object(result)
+        }
+        Value::Array(arr) => Value::Array(arr.iter().map(|v| apply_parameters(v, input)).collect()),
+        other => other.clone(),
     }
 }
 
@@ -408,6 +710,7 @@ mod tests {
             arn.to_string(),
             definition,
             Some(r#"{"hello":"world"}"#.to_string()),
+            None,
         )
         .await;
 
@@ -449,6 +752,7 @@ mod tests {
             arn.to_string(),
             definition,
             Some("{}".to_string()),
+            None,
         )
         .await;
 
@@ -481,6 +785,7 @@ mod tests {
             arn.to_string(),
             definition,
             Some(r#"{"data": "value"}"#.to_string()),
+            None,
         )
         .await;
 
@@ -507,7 +812,7 @@ mod tests {
         })
         .to_string();
 
-        execute_state_machine(state.clone(), arn.to_string(), definition, None).await;
+        execute_state_machine(state.clone(), arn.to_string(), definition, None, None).await;
 
         let s = state.read();
         let exec = s.executions.get(arn).unwrap();
@@ -538,6 +843,7 @@ mod tests {
             arn.to_string(),
             definition,
             Some("{}".to_string()),
+            None,
         )
         .await;
 

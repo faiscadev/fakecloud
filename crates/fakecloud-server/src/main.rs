@@ -435,9 +435,15 @@ async fn main() {
         elasticache_service = elasticache_service.with_runtime(rt.clone());
     }
     registry.register(Arc::new(elasticache_service));
-    registry.register(Arc::new(StepFunctionsService::new(
-        stepfunctions_state.clone(),
-    )));
+    let mut sfn_service = StepFunctionsService::new(stepfunctions_state.clone());
+    {
+        let mut bus = DeliveryBus::new().with_sqs(sqs_delivery.clone());
+        if let Some(ref ld) = lambda_delivery {
+            bus = bus.with_lambda(ld.clone());
+        }
+        sfn_service = sfn_service.with_delivery(Arc::new(bus));
+    }
+    registry.register(Arc::new(sfn_service));
 
     // Spawn background tasks
     let lifecycle_processor = fakecloud_s3::lifecycle::LifecycleProcessor::new(s3_state);

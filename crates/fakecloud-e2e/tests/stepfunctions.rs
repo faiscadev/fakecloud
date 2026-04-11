@@ -997,3 +997,480 @@ async fn sfn_start_execution_no_input() {
     let status = wait_for_execution(&client, start.execution_arn()).await;
     assert_eq!(status, "SUCCEEDED");
 }
+
+// --- Task state + Error handling tests ---
+
+#[tokio::test]
+async fn sfn_task_state_catch_unsupported_resource() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+
+    let definition = serde_json::json!({
+        "StartAt": "InvokeTask",
+        "States": {
+            "InvokeTask": {
+                "Type": "Task",
+                "Resource": "arn:aws:unsupported:us-east-1:123456789012:thing:stuff",
+                "Catch": [{
+                    "ErrorEquals": ["States.ALL"],
+                    "Next": "HandleError",
+                    "ResultPath": "$.error"
+                }],
+                "Next": "Done"
+            },
+            "HandleError": {
+                "Type": "Pass",
+                "Result": "error handled",
+                "ResultPath": "$.handled",
+                "End": true
+            },
+            "Done": {
+                "Type": "Succeed"
+            }
+        }
+    })
+    .to_string();
+
+    let create = client
+        .create_state_machine()
+        .name("task-catch-sm")
+        .definition(definition)
+        .role_arn("arn:aws:iam::123456789012:role/test-role")
+        .send()
+        .await
+        .unwrap();
+
+    let start = client
+        .start_execution()
+        .state_machine_arn(create.state_machine_arn())
+        .input(r#"{"key": "value"}"#)
+        .send()
+        .await
+        .unwrap();
+
+    let status = wait_for_execution(&client, start.execution_arn()).await;
+    assert_eq!(status, "SUCCEEDED");
+
+    let desc = client
+        .describe_execution()
+        .execution_arn(start.execution_arn())
+        .send()
+        .await
+        .unwrap();
+    let output: serde_json::Value = serde_json::from_str(desc.output().unwrap_or("{}")).unwrap();
+    assert_eq!(output["handled"], "error handled");
+    assert_eq!(output["error"]["Error"], "States.TaskFailed");
+}
+
+#[tokio::test]
+async fn sfn_task_state_catch_with_result_path_null() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+
+    let definition = serde_json::json!({
+        "StartAt": "InvokeTask",
+        "States": {
+            "InvokeTask": {
+                "Type": "Task",
+                "Resource": "arn:aws:unsupported:us-east-1:123456789012:thing:stuff",
+                "Catch": [{
+                    "ErrorEquals": ["States.TaskFailed"],
+                    "Next": "Fallback",
+                    "ResultPath": null
+                }],
+                "End": true
+            },
+            "Fallback": {
+                "Type": "Pass",
+                "End": true
+            }
+        }
+    })
+    .to_string();
+
+    let create = client
+        .create_state_machine()
+        .name("task-catch-null-rp-sm")
+        .definition(definition)
+        .role_arn("arn:aws:iam::123456789012:role/test-role")
+        .send()
+        .await
+        .unwrap();
+
+    let start = client
+        .start_execution()
+        .state_machine_arn(create.state_machine_arn())
+        .input(r#"{"original": "data"}"#)
+        .send()
+        .await
+        .unwrap();
+
+    let status = wait_for_execution(&client, start.execution_arn()).await;
+    assert_eq!(status, "SUCCEEDED");
+
+    let desc = client
+        .describe_execution()
+        .execution_arn(start.execution_arn())
+        .send()
+        .await
+        .unwrap();
+    let output: serde_json::Value = serde_json::from_str(desc.output().unwrap_or("{}")).unwrap();
+    assert_eq!(output["original"], "data");
+}
+
+#[tokio::test]
+async fn sfn_task_state_no_catch_fails_execution() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+
+    let definition = serde_json::json!({
+        "StartAt": "InvokeTask",
+        "States": {
+            "InvokeTask": {
+                "Type": "Task",
+                "Resource": "arn:aws:unsupported:us-east-1:123456789012:thing:stuff",
+                "End": true
+            }
+        }
+    })
+    .to_string();
+
+    let create = client
+        .create_state_machine()
+        .name("task-no-catch-sm")
+        .definition(definition)
+        .role_arn("arn:aws:iam::123456789012:role/test-role")
+        .send()
+        .await
+        .unwrap();
+
+    let start = client
+        .start_execution()
+        .state_machine_arn(create.state_machine_arn())
+        .input(r#"{}"#)
+        .send()
+        .await
+        .unwrap();
+
+    let status = wait_for_execution(&client, start.execution_arn()).await;
+    assert_eq!(status, "FAILED");
+
+    let desc = client
+        .describe_execution()
+        .execution_arn(start.execution_arn())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(desc.error().unwrap_or(""), "States.TaskFailed");
+}
+
+#[tokio::test]
+async fn sfn_task_state_catch_specific_error() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+
+    let definition = serde_json::json!({
+        "StartAt": "InvokeTask",
+        "States": {
+            "InvokeTask": {
+                "Type": "Task",
+                "Resource": "arn:aws:unsupported:us-east-1:123456789012:thing:stuff",
+                "Catch": [
+                    {
+                        "ErrorEquals": ["States.Timeout"],
+                        "Next": "TimeoutHandler"
+                    },
+                    {
+                        "ErrorEquals": ["States.TaskFailed"],
+                        "Next": "TaskFailHandler"
+                    }
+                ],
+                "End": true
+            },
+            "TimeoutHandler": {
+                "Type": "Pass",
+                "Result": "timeout",
+                "End": true
+            },
+            "TaskFailHandler": {
+                "Type": "Pass",
+                "Result": "task-failed",
+                "End": true
+            }
+        }
+    })
+    .to_string();
+
+    let create = client
+        .create_state_machine()
+        .name("task-catch-specific-sm")
+        .definition(definition)
+        .role_arn("arn:aws:iam::123456789012:role/test-role")
+        .send()
+        .await
+        .unwrap();
+
+    let start = client
+        .start_execution()
+        .state_machine_arn(create.state_machine_arn())
+        .input(r#"{}"#)
+        .send()
+        .await
+        .unwrap();
+
+    let status = wait_for_execution(&client, start.execution_arn()).await;
+    assert_eq!(status, "SUCCEEDED");
+
+    let desc = client
+        .describe_execution()
+        .execution_arn(start.execution_arn())
+        .send()
+        .await
+        .unwrap();
+    let output: serde_json::Value = serde_json::from_str(desc.output().unwrap_or("{}")).unwrap();
+    assert_eq!(output, serde_json::json!("task-failed"));
+}
+
+#[tokio::test]
+async fn sfn_task_state_history_events() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+
+    let definition = serde_json::json!({
+        "StartAt": "InvokeTask",
+        "States": {
+            "InvokeTask": {
+                "Type": "Task",
+                "Resource": "arn:aws:unsupported:us-east-1:123456789012:thing:stuff",
+                "Catch": [{
+                    "ErrorEquals": ["States.ALL"],
+                    "Next": "Done"
+                }],
+                "Next": "Done"
+            },
+            "Done": {
+                "Type": "Pass",
+                "End": true
+            }
+        }
+    })
+    .to_string();
+
+    let create = client
+        .create_state_machine()
+        .name("task-history-sm")
+        .definition(definition)
+        .role_arn("arn:aws:iam::123456789012:role/test-role")
+        .send()
+        .await
+        .unwrap();
+
+    let start = client
+        .start_execution()
+        .state_machine_arn(create.state_machine_arn())
+        .input(r#"{}"#)
+        .send()
+        .await
+        .unwrap();
+
+    let status = wait_for_execution(&client, start.execution_arn()).await;
+    assert_eq!(status, "SUCCEEDED");
+
+    let history = client
+        .get_execution_history()
+        .execution_arn(start.execution_arn())
+        .send()
+        .await
+        .unwrap();
+
+    let event_types: Vec<String> = history
+        .events()
+        .iter()
+        .map(|e| e.r#type().as_str().to_string())
+        .collect();
+
+    assert!(event_types.contains(&"TaskStateEntered".to_string()));
+    assert!(event_types.contains(&"TaskScheduled".to_string()));
+    assert!(event_types.contains(&"TaskStarted".to_string()));
+    assert!(event_types.contains(&"TaskFailed".to_string()));
+    assert!(event_types.contains(&"PassStateEntered".to_string()));
+    assert!(event_types.contains(&"ExecutionSucceeded".to_string()));
+}
+
+#[tokio::test]
+async fn sfn_task_state_lambda_with_catch() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+
+    // Lambda invoke with Catch — works whether Docker is available or not.
+    // If no runtime: Lambda returns empty result → succeeds via normal path.
+    // If runtime but function missing: error → caught → succeeds via fallback.
+    let definition = serde_json::json!({
+        "StartAt": "InvokeLambda",
+        "States": {
+            "InvokeLambda": {
+                "Type": "Task",
+                "Resource": "arn:aws:lambda:us-east-1:123456789012:function:my-function",
+                "ResultPath": "$.lambdaResult",
+                "Catch": [{
+                    "ErrorEquals": ["States.ALL"],
+                    "Next": "Fallback",
+                    "ResultPath": "$.lambdaError"
+                }],
+                "Next": "Done"
+            },
+            "Fallback": {
+                "Type": "Pass",
+                "Result": "caught",
+                "ResultPath": "$.fallback",
+                "End": true
+            },
+            "Done": {
+                "Type": "Succeed"
+            }
+        }
+    })
+    .to_string();
+
+    let create = client
+        .create_state_machine()
+        .name("task-lambda-catch-sm")
+        .definition(definition)
+        .role_arn("arn:aws:iam::123456789012:role/test-role")
+        .send()
+        .await
+        .unwrap();
+
+    let start = client
+        .start_execution()
+        .state_machine_arn(create.state_machine_arn())
+        .input(r#"{"data": "test"}"#)
+        .send()
+        .await
+        .unwrap();
+
+    let status = wait_for_execution(&client, start.execution_arn()).await;
+    assert_eq!(status, "SUCCEEDED");
+
+    let desc = client
+        .describe_execution()
+        .execution_arn(start.execution_arn())
+        .send()
+        .await
+        .unwrap();
+    let output: serde_json::Value = serde_json::from_str(desc.output().unwrap_or("{}")).unwrap();
+    // Original input preserved
+    assert_eq!(output["data"], "test");
+}
+
+#[tokio::test]
+async fn sfn_task_state_with_parameters() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+
+    let definition = serde_json::json!({
+        "StartAt": "InvokeTask",
+        "States": {
+            "InvokeTask": {
+                "Type": "Task",
+                "Resource": "arn:aws:lambda:us-east-1:123456789012:function:my-function",
+                "Parameters": {
+                    "action": "process",
+                    "payload.$": "$.data"
+                },
+                "Catch": [{
+                    "ErrorEquals": ["States.ALL"],
+                    "Next": "Done"
+                }],
+                "End": true
+            },
+            "Done": {
+                "Type": "Succeed"
+            }
+        }
+    })
+    .to_string();
+
+    let create = client
+        .create_state_machine()
+        .name("task-params-sm")
+        .definition(definition)
+        .role_arn("arn:aws:iam::123456789012:role/test-role")
+        .send()
+        .await
+        .unwrap();
+
+    let start = client
+        .start_execution()
+        .state_machine_arn(create.state_machine_arn())
+        .input(r#"{"data": {"items": [1,2,3]}}"#)
+        .send()
+        .await
+        .unwrap();
+
+    let status = wait_for_execution(&client, start.execution_arn()).await;
+    assert_eq!(status, "SUCCEEDED");
+}
+
+#[tokio::test]
+async fn sfn_task_chain_with_pass() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+
+    // Task → Pass chain with Catch for Docker-agnostic testing.
+    // If Lambda succeeds (no runtime → empty result), goes to Enrich.
+    // If Lambda fails (Docker present but function missing), Catch → Enrich.
+    let definition = serde_json::json!({
+        "StartAt": "InvokeLambda",
+        "States": {
+            "InvokeLambda": {
+                "Type": "Task",
+                "Resource": "arn:aws:lambda:us-east-1:123456789012:function:my-function",
+                "ResultPath": "$.taskResult",
+                "Catch": [{
+                    "ErrorEquals": ["States.ALL"],
+                    "Next": "Enrich",
+                    "ResultPath": "$.taskError"
+                }],
+                "Next": "Enrich"
+            },
+            "Enrich": {
+                "Type": "Pass",
+                "Result": "enriched",
+                "ResultPath": "$.enrichment",
+                "End": true
+            }
+        }
+    })
+    .to_string();
+
+    let create = client
+        .create_state_machine()
+        .name("task-chain-sm")
+        .definition(definition)
+        .role_arn("arn:aws:iam::123456789012:role/test-role")
+        .send()
+        .await
+        .unwrap();
+
+    let start = client
+        .start_execution()
+        .state_machine_arn(create.state_machine_arn())
+        .input(r#"{"original": true}"#)
+        .send()
+        .await
+        .unwrap();
+
+    let status = wait_for_execution(&client, start.execution_arn()).await;
+    assert_eq!(status, "SUCCEEDED");
+
+    let desc = client
+        .describe_execution()
+        .execution_arn(start.execution_arn())
+        .send()
+        .await
+        .unwrap();
+    let output: serde_json::Value = serde_json::from_str(desc.output().unwrap_or("{}")).unwrap();
+    assert_eq!(output["original"], true);
+    assert_eq!(output["enrichment"], "enriched");
+}
