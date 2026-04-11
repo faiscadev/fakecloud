@@ -7,8 +7,8 @@ use fakecloud_core::delivery::DeliveryBus;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 use fakecloud_core::validation::*;
 
-use crate::{lambda_proxy, router::Router};
 use crate::state::{Deployment, HttpApi, Integration, Route, SharedApiGatewayV2State, Stage};
+use crate::{lambda_proxy, router::Router};
 
 const SUPPORTED: &[&str] = &[
     "CreateApi",
@@ -43,7 +43,10 @@ pub struct ApiGatewayV2Service {
 
 impl ApiGatewayV2Service {
     pub fn new(state: SharedApiGatewayV2State) -> Self {
-        Self { state, delivery: None }
+        Self {
+            state,
+            delivery: None,
+        }
     }
 
     pub fn with_delivery(mut self, delivery: Arc<DeliveryBus>) -> Self {
@@ -1372,7 +1375,10 @@ impl ApiGatewayV2Service {
             _ => Err(AwsServiceError::aws_error(
                 StatusCode::NOT_IMPLEMENTED,
                 "NotImplemented",
-                format!("Integration type not supported: {}", integration.integration_type),
+                format!(
+                    "Integration type not supported: {}",
+                    integration.integration_type
+                ),
             )),
         }
     }

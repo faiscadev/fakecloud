@@ -134,13 +134,14 @@ pub async fn invoke_lambda(
     })?;
 
     // Parse Lambda response
-    let response_json: serde_json::Value = serde_json::from_slice(&response_bytes).map_err(|e| {
-        AwsServiceError::aws_error(
-            StatusCode::BAD_GATEWAY,
-            "BadGatewayException",
-            format!("Failed to parse Lambda response: {}", e),
-        )
-    })?;
+    let response_json: serde_json::Value =
+        serde_json::from_slice(&response_bytes).map_err(|e| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_GATEWAY,
+                "BadGatewayException",
+                format!("Failed to parse Lambda response: {}", e),
+            )
+        })?;
 
     parse_lambda_response(response_json)
 }
@@ -258,7 +259,10 @@ mod tests {
 
         assert_eq!(result.status, StatusCode::OK);
         assert_eq!(result.content_type, "application/json");
-        assert_eq!(result.body, Bytes::from(br#"{"message":"success"}"#.to_vec()));
+        assert_eq!(
+            result.body,
+            Bytes::from(br#"{"message":"success"}"#.to_vec())
+        );
     }
 
     #[test]
