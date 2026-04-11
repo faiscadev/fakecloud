@@ -440,9 +440,13 @@ async fn main() {
     registry.register(Arc::new(elasticache_service));
     let mut sfn_service = StepFunctionsService::new(stepfunctions_state.clone());
     {
+        let mut sns_eb_bus = DeliveryBus::new().with_sqs(sqs_delivery.clone());
+        if let Some(ref ld) = lambda_delivery {
+            sns_eb_bus = sns_eb_bus.with_lambda(ld.clone());
+        }
         let sns_delivery_for_sfn_eb = Arc::new(fakecloud_sns::delivery::SnsDeliveryImpl::new(
             sns_state_for_sfn.clone(),
-            Arc::new(DeliveryBus::new().with_sqs(sqs_delivery.clone())),
+            Arc::new(sns_eb_bus),
         ));
         let mut eb_target_bus = DeliveryBus::new()
             .with_sqs(sqs_delivery.clone())
