@@ -1474,3 +1474,802 @@ async fn sfn_task_chain_with_pass() {
     assert_eq!(output["original"], true);
     assert_eq!(output["enrichment"], "enriched");
 }
+
+// --- Choice state tests ---
+
+#[tokio::test]
+async fn sfn_choice_state_string_equals() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+
+    let definition = serde_json::json!({
+        "StartAt": "Route",
+        "States": {
+            "Route": {
+                "Type": "Choice",
+                "Choices": [
+                    {
+                        "Variable": "$.status",
+                        "StringEquals": "active",
+                        "Next": "ActivePath"
+                    },
+                    {
+                        "Variable": "$.status",
+                        "StringEquals": "inactive",
+                        "Next": "InactivePath"
+                    }
+                ],
+                "Default": "DefaultPath"
+            },
+            "ActivePath": {
+                "Type": "Pass",
+                "Result": "went-active",
+                "End": true
+            },
+            "InactivePath": {
+                "Type": "Pass",
+                "Result": "went-inactive",
+                "End": true
+            },
+            "DefaultPath": {
+                "Type": "Pass",
+                "Result": "went-default",
+                "End": true
+            }
+        }
+    })
+    .to_string();
+
+    let create = client
+        .create_state_machine()
+        .name("choice-string-sm")
+        .definition(definition)
+        .role_arn("arn:aws:iam::123456789012:role/test-role")
+        .send()
+        .await
+        .unwrap();
+
+    // Test active path
+    let start = client
+        .start_execution()
+        .state_machine_arn(create.state_machine_arn())
+        .name("exec-active")
+        .input(r#"{"status": "active"}"#)
+        .send()
+        .await
+        .unwrap();
+
+    let status = wait_for_execution(&client, start.execution_arn()).await;
+    assert_eq!(status, "SUCCEEDED");
+    let desc = client
+        .describe_execution()
+        .execution_arn(start.execution_arn())
+        .send()
+        .await
+        .unwrap();
+    let output: serde_json::Value = serde_json::from_str(desc.output().unwrap_or("{}")).unwrap();
+    assert_eq!(output, "went-active");
+
+    // Test inactive path
+    let start = client
+        .start_execution()
+        .state_machine_arn(create.state_machine_arn())
+        .name("exec-inactive")
+        .input(r#"{"status": "inactive"}"#)
+        .send()
+        .await
+        .unwrap();
+
+    let status = wait_for_execution(&client, start.execution_arn()).await;
+    assert_eq!(status, "SUCCEEDED");
+    let desc = client
+        .describe_execution()
+        .execution_arn(start.execution_arn())
+        .send()
+        .await
+        .unwrap();
+    let output: serde_json::Value = serde_json::from_str(desc.output().unwrap_or("{}")).unwrap();
+    assert_eq!(output, "went-inactive");
+
+    // Test default path
+    let start = client
+        .start_execution()
+        .state_machine_arn(create.state_machine_arn())
+        .name("exec-default")
+        .input(r#"{"status": "unknown"}"#)
+        .send()
+        .await
+        .unwrap();
+
+    let status = wait_for_execution(&client, start.execution_arn()).await;
+    assert_eq!(status, "SUCCEEDED");
+    let desc = client
+        .describe_execution()
+        .execution_arn(start.execution_arn())
+        .send()
+        .await
+        .unwrap();
+    let output: serde_json::Value = serde_json::from_str(desc.output().unwrap_or("{}")).unwrap();
+    assert_eq!(output, "went-default");
+}
+
+#[tokio::test]
+async fn sfn_choice_state_numeric_comparison() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+
+    let definition = serde_json::json!({
+        "StartAt": "CheckScore",
+        "States": {
+            "CheckScore": {
+                "Type": "Choice",
+                "Choices": [
+                    {
+                        "Variable": "$.score",
+                        "NumericGreaterThanEquals": 90,
+                        "Next": "Grade_A"
+                    },
+                    {
+                        "Variable": "$.score",
+                        "NumericGreaterThanEquals": 80,
+                        "Next": "Grade_B"
+                    }
+                ],
+                "Default": "Grade_C"
+            },
+            "Grade_A": {
+                "Type": "Pass",
+                "Result": "A",
+                "End": true
+            },
+            "Grade_B": {
+                "Type": "Pass",
+                "Result": "B",
+                "End": true
+            },
+            "Grade_C": {
+                "Type": "Pass",
+                "Result": "C",
+                "End": true
+            }
+        }
+    })
+    .to_string();
+
+    let create = client
+        .create_state_machine()
+        .name("choice-numeric-sm")
+        .definition(definition)
+        .role_arn("arn:aws:iam::123456789012:role/test-role")
+        .send()
+        .await
+        .unwrap();
+
+    let start = client
+        .start_execution()
+        .state_machine_arn(create.state_machine_arn())
+        .name("score-95")
+        .input(r#"{"score": 95}"#)
+        .send()
+        .await
+        .unwrap();
+    let status = wait_for_execution(&client, start.execution_arn()).await;
+    assert_eq!(status, "SUCCEEDED");
+    let desc = client
+        .describe_execution()
+        .execution_arn(start.execution_arn())
+        .send()
+        .await
+        .unwrap();
+    let output: serde_json::Value = serde_json::from_str(desc.output().unwrap_or("{}")).unwrap();
+    assert_eq!(output, "A");
+
+    let start = client
+        .start_execution()
+        .state_machine_arn(create.state_machine_arn())
+        .name("score-85")
+        .input(r#"{"score": 85}"#)
+        .send()
+        .await
+        .unwrap();
+    let status = wait_for_execution(&client, start.execution_arn()).await;
+    assert_eq!(status, "SUCCEEDED");
+    let desc = client
+        .describe_execution()
+        .execution_arn(start.execution_arn())
+        .send()
+        .await
+        .unwrap();
+    let output: serde_json::Value = serde_json::from_str(desc.output().unwrap_or("{}")).unwrap();
+    assert_eq!(output, "B");
+
+    let start = client
+        .start_execution()
+        .state_machine_arn(create.state_machine_arn())
+        .name("score-50")
+        .input(r#"{"score": 50}"#)
+        .send()
+        .await
+        .unwrap();
+    let status = wait_for_execution(&client, start.execution_arn()).await;
+    assert_eq!(status, "SUCCEEDED");
+    let desc = client
+        .describe_execution()
+        .execution_arn(start.execution_arn())
+        .send()
+        .await
+        .unwrap();
+    let output: serde_json::Value = serde_json::from_str(desc.output().unwrap_or("{}")).unwrap();
+    assert_eq!(output, "C");
+}
+
+#[tokio::test]
+async fn sfn_choice_state_boolean_and_compound() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+
+    let definition = serde_json::json!({
+        "StartAt": "Check",
+        "States": {
+            "Check": {
+                "Type": "Choice",
+                "Choices": [
+                    {
+                        "And": [
+                            {"Variable": "$.enabled", "BooleanEquals": true},
+                            {"Variable": "$.count", "NumericGreaterThan": 0}
+                        ],
+                        "Next": "Process"
+                    }
+                ],
+                "Default": "Skip"
+            },
+            "Process": {
+                "Type": "Pass",
+                "Result": "processed",
+                "End": true
+            },
+            "Skip": {
+                "Type": "Pass",
+                "Result": "skipped",
+                "End": true
+            }
+        }
+    })
+    .to_string();
+
+    let create = client
+        .create_state_machine()
+        .name("choice-compound-sm")
+        .definition(definition)
+        .role_arn("arn:aws:iam::123456789012:role/test-role")
+        .send()
+        .await
+        .unwrap();
+
+    // Both conditions true
+    let start = client
+        .start_execution()
+        .state_machine_arn(create.state_machine_arn())
+        .name("exec-both-true")
+        .input(r#"{"enabled": true, "count": 5}"#)
+        .send()
+        .await
+        .unwrap();
+    let status = wait_for_execution(&client, start.execution_arn()).await;
+    assert_eq!(status, "SUCCEEDED");
+    let desc = client
+        .describe_execution()
+        .execution_arn(start.execution_arn())
+        .send()
+        .await
+        .unwrap();
+    let output: serde_json::Value = serde_json::from_str(desc.output().unwrap_or("{}")).unwrap();
+    assert_eq!(output, "processed");
+
+    // One condition false — should go to Skip
+    let start = client
+        .start_execution()
+        .state_machine_arn(create.state_machine_arn())
+        .name("exec-disabled")
+        .input(r#"{"enabled": false, "count": 5}"#)
+        .send()
+        .await
+        .unwrap();
+    let status = wait_for_execution(&client, start.execution_arn()).await;
+    assert_eq!(status, "SUCCEEDED");
+    let desc = client
+        .describe_execution()
+        .execution_arn(start.execution_arn())
+        .send()
+        .await
+        .unwrap();
+    let output: serde_json::Value = serde_json::from_str(desc.output().unwrap_or("{}")).unwrap();
+    assert_eq!(output, "skipped");
+}
+
+#[tokio::test]
+async fn sfn_choice_state_not_operator() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+
+    let definition = serde_json::json!({
+        "StartAt": "Check",
+        "States": {
+            "Check": {
+                "Type": "Choice",
+                "Choices": [
+                    {
+                        "Not": {
+                            "Variable": "$.type",
+                            "StringEquals": "admin"
+                        },
+                        "Next": "RegularUser"
+                    }
+                ],
+                "Default": "AdminUser"
+            },
+            "RegularUser": {
+                "Type": "Pass",
+                "Result": "regular",
+                "End": true
+            },
+            "AdminUser": {
+                "Type": "Pass",
+                "Result": "admin",
+                "End": true
+            }
+        }
+    })
+    .to_string();
+
+    let create = client
+        .create_state_machine()
+        .name("choice-not-sm")
+        .definition(definition)
+        .role_arn("arn:aws:iam::123456789012:role/test-role")
+        .send()
+        .await
+        .unwrap();
+
+    let start = client
+        .start_execution()
+        .state_machine_arn(create.state_machine_arn())
+        .name("exec-user")
+        .input(r#"{"type": "user"}"#)
+        .send()
+        .await
+        .unwrap();
+    let status = wait_for_execution(&client, start.execution_arn()).await;
+    assert_eq!(status, "SUCCEEDED");
+    let desc = client
+        .describe_execution()
+        .execution_arn(start.execution_arn())
+        .send()
+        .await
+        .unwrap();
+    let output: serde_json::Value = serde_json::from_str(desc.output().unwrap_or("{}")).unwrap();
+    assert_eq!(output, "regular");
+
+    let start = client
+        .start_execution()
+        .state_machine_arn(create.state_machine_arn())
+        .name("exec-admin")
+        .input(r#"{"type": "admin"}"#)
+        .send()
+        .await
+        .unwrap();
+    let status = wait_for_execution(&client, start.execution_arn()).await;
+    assert_eq!(status, "SUCCEEDED");
+    let desc = client
+        .describe_execution()
+        .execution_arn(start.execution_arn())
+        .send()
+        .await
+        .unwrap();
+    let output: serde_json::Value = serde_json::from_str(desc.output().unwrap_or("{}")).unwrap();
+    assert_eq!(output, "admin");
+}
+
+#[tokio::test]
+async fn sfn_choice_state_no_match_no_default() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+
+    let definition = serde_json::json!({
+        "StartAt": "Route",
+        "States": {
+            "Route": {
+                "Type": "Choice",
+                "Choices": [
+                    {
+                        "Variable": "$.status",
+                        "StringEquals": "active",
+                        "Next": "Active"
+                    }
+                ]
+            },
+            "Active": {
+                "Type": "Succeed"
+            }
+        }
+    })
+    .to_string();
+
+    let create = client
+        .create_state_machine()
+        .name("choice-no-default-sm")
+        .definition(definition)
+        .role_arn("arn:aws:iam::123456789012:role/test-role")
+        .send()
+        .await
+        .unwrap();
+
+    let start = client
+        .start_execution()
+        .state_machine_arn(create.state_machine_arn())
+        .input(r#"{"status": "unknown"}"#)
+        .send()
+        .await
+        .unwrap();
+
+    let status = wait_for_execution(&client, start.execution_arn()).await;
+    assert_eq!(status, "FAILED");
+
+    let desc = client
+        .describe_execution()
+        .execution_arn(start.execution_arn())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(desc.error().unwrap_or(""), "States.NoChoiceMatched");
+}
+
+#[tokio::test]
+async fn sfn_choice_state_is_present() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+
+    let definition = serde_json::json!({
+        "StartAt": "Check",
+        "States": {
+            "Check": {
+                "Type": "Choice",
+                "Choices": [
+                    {
+                        "Variable": "$.optional",
+                        "IsPresent": true,
+                        "Next": "HasField"
+                    }
+                ],
+                "Default": "NoField"
+            },
+            "HasField": {
+                "Type": "Pass",
+                "Result": "present",
+                "End": true
+            },
+            "NoField": {
+                "Type": "Pass",
+                "Result": "absent",
+                "End": true
+            }
+        }
+    })
+    .to_string();
+
+    let create = client
+        .create_state_machine()
+        .name("choice-ispresent-sm")
+        .definition(definition)
+        .role_arn("arn:aws:iam::123456789012:role/test-role")
+        .send()
+        .await
+        .unwrap();
+
+    let start = client
+        .start_execution()
+        .state_machine_arn(create.state_machine_arn())
+        .name("exec-with-field")
+        .input(r#"{"optional": "value"}"#)
+        .send()
+        .await
+        .unwrap();
+    let status = wait_for_execution(&client, start.execution_arn()).await;
+    assert_eq!(status, "SUCCEEDED");
+    let desc = client
+        .describe_execution()
+        .execution_arn(start.execution_arn())
+        .send()
+        .await
+        .unwrap();
+    let output: serde_json::Value = serde_json::from_str(desc.output().unwrap_or("{}")).unwrap();
+    assert_eq!(output, "present");
+
+    let start = client
+        .start_execution()
+        .state_machine_arn(create.state_machine_arn())
+        .name("exec-without-field")
+        .input(r#"{"other": "value"}"#)
+        .send()
+        .await
+        .unwrap();
+    let status = wait_for_execution(&client, start.execution_arn()).await;
+    assert_eq!(status, "SUCCEEDED");
+    let desc = client
+        .describe_execution()
+        .execution_arn(start.execution_arn())
+        .send()
+        .await
+        .unwrap();
+    let output: serde_json::Value = serde_json::from_str(desc.output().unwrap_or("{}")).unwrap();
+    assert_eq!(output, "absent");
+}
+
+// --- Wait state tests ---
+
+#[tokio::test]
+async fn sfn_wait_state_seconds() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+
+    let definition = serde_json::json!({
+        "StartAt": "WaitBriefly",
+        "States": {
+            "WaitBriefly": {
+                "Type": "Wait",
+                "Seconds": 1,
+                "Next": "Done"
+            },
+            "Done": {
+                "Type": "Pass",
+                "Result": "waited",
+                "End": true
+            }
+        }
+    })
+    .to_string();
+
+    let create = client
+        .create_state_machine()
+        .name("wait-seconds-sm")
+        .definition(definition)
+        .role_arn("arn:aws:iam::123456789012:role/test-role")
+        .send()
+        .await
+        .unwrap();
+
+    let start = client
+        .start_execution()
+        .state_machine_arn(create.state_machine_arn())
+        .input(r#"{}"#)
+        .send()
+        .await
+        .unwrap();
+
+    // Execution should be running during wait
+    sleep(Duration::from_millis(200)).await;
+    let desc = client
+        .describe_execution()
+        .execution_arn(start.execution_arn())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(desc.status().as_str(), "RUNNING");
+
+    // Wait for completion
+    let status = wait_for_execution(&client, start.execution_arn()).await;
+    assert_eq!(status, "SUCCEEDED");
+
+    let desc = client
+        .describe_execution()
+        .execution_arn(start.execution_arn())
+        .send()
+        .await
+        .unwrap();
+    let output: serde_json::Value = serde_json::from_str(desc.output().unwrap_or("{}")).unwrap();
+    assert_eq!(output, "waited");
+}
+
+#[tokio::test]
+async fn sfn_wait_state_seconds_path() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+
+    let definition = serde_json::json!({
+        "StartAt": "WaitDynamic",
+        "States": {
+            "WaitDynamic": {
+                "Type": "Wait",
+                "SecondsPath": "$.delay",
+                "Next": "Done"
+            },
+            "Done": {
+                "Type": "Pass",
+                "Result": "dynamic-wait-done",
+                "End": true
+            }
+        }
+    })
+    .to_string();
+
+    let create = client
+        .create_state_machine()
+        .name("wait-seconds-path-sm")
+        .definition(definition)
+        .role_arn("arn:aws:iam::123456789012:role/test-role")
+        .send()
+        .await
+        .unwrap();
+
+    let start = client
+        .start_execution()
+        .state_machine_arn(create.state_machine_arn())
+        .input(r#"{"delay": 1}"#)
+        .send()
+        .await
+        .unwrap();
+
+    let status = wait_for_execution(&client, start.execution_arn()).await;
+    assert_eq!(status, "SUCCEEDED");
+
+    let desc = client
+        .describe_execution()
+        .execution_arn(start.execution_arn())
+        .send()
+        .await
+        .unwrap();
+    let output: serde_json::Value = serde_json::from_str(desc.output().unwrap_or("{}")).unwrap();
+    assert_eq!(output, "dynamic-wait-done");
+}
+
+#[tokio::test]
+async fn sfn_choice_then_wait_workflow() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+
+    // Combined workflow: Choice routes to either a fast or slow path with Wait
+    let definition = serde_json::json!({
+        "StartAt": "Route",
+        "States": {
+            "Route": {
+                "Type": "Choice",
+                "Choices": [
+                    {
+                        "Variable": "$.priority",
+                        "StringEquals": "high",
+                        "Next": "FastTrack"
+                    }
+                ],
+                "Default": "SlowTrack"
+            },
+            "FastTrack": {
+                "Type": "Pass",
+                "Result": "fast",
+                "End": true
+            },
+            "SlowTrack": {
+                "Type": "Wait",
+                "Seconds": 1,
+                "Next": "Done"
+            },
+            "Done": {
+                "Type": "Pass",
+                "Result": "slow",
+                "End": true
+            }
+        }
+    })
+    .to_string();
+
+    let create = client
+        .create_state_machine()
+        .name("choice-wait-sm")
+        .definition(definition)
+        .role_arn("arn:aws:iam::123456789012:role/test-role")
+        .send()
+        .await
+        .unwrap();
+
+    let start = client
+        .start_execution()
+        .state_machine_arn(create.state_machine_arn())
+        .name("exec-high")
+        .input(r#"{"priority": "high"}"#)
+        .send()
+        .await
+        .unwrap();
+    let status = wait_for_execution(&client, start.execution_arn()).await;
+    assert_eq!(status, "SUCCEEDED");
+    let desc = client
+        .describe_execution()
+        .execution_arn(start.execution_arn())
+        .send()
+        .await
+        .unwrap();
+    let output: serde_json::Value = serde_json::from_str(desc.output().unwrap_or("{}")).unwrap();
+    assert_eq!(output, "fast");
+
+    let start = client
+        .start_execution()
+        .state_machine_arn(create.state_machine_arn())
+        .name("exec-low")
+        .input(r#"{"priority": "low"}"#)
+        .send()
+        .await
+        .unwrap();
+    let status = wait_for_execution(&client, start.execution_arn()).await;
+    assert_eq!(status, "SUCCEEDED");
+    let desc = client
+        .describe_execution()
+        .execution_arn(start.execution_arn())
+        .send()
+        .await
+        .unwrap();
+    let output: serde_json::Value = serde_json::from_str(desc.output().unwrap_or("{}")).unwrap();
+    assert_eq!(output, "slow");
+}
+
+#[tokio::test]
+async fn sfn_choice_state_history_events() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+
+    let definition = serde_json::json!({
+        "StartAt": "Route",
+        "States": {
+            "Route": {
+                "Type": "Choice",
+                "Choices": [
+                    {
+                        "Variable": "$.go",
+                        "BooleanEquals": true,
+                        "Next": "Done"
+                    }
+                ],
+                "Default": "Done"
+            },
+            "Done": {
+                "Type": "Succeed"
+            }
+        }
+    })
+    .to_string();
+
+    let create = client
+        .create_state_machine()
+        .name("choice-history-sm")
+        .definition(definition)
+        .role_arn("arn:aws:iam::123456789012:role/test-role")
+        .send()
+        .await
+        .unwrap();
+
+    let start = client
+        .start_execution()
+        .state_machine_arn(create.state_machine_arn())
+        .input(r#"{"go": true}"#)
+        .send()
+        .await
+        .unwrap();
+
+    let status = wait_for_execution(&client, start.execution_arn()).await;
+    assert_eq!(status, "SUCCEEDED");
+
+    let history = client
+        .get_execution_history()
+        .execution_arn(start.execution_arn())
+        .send()
+        .await
+        .unwrap();
+
+    let event_types: Vec<String> = history
+        .events()
+        .iter()
+        .map(|e| e.r#type().as_str().to_string())
+        .collect();
+
+    assert!(event_types.contains(&"ChoiceStateEntered".to_string()));
+    assert!(event_types.contains(&"ChoiceStateExited".to_string()));
+    assert!(event_types.contains(&"ExecutionSucceeded".to_string()));
+}

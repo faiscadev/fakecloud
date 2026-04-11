@@ -1,3 +1,4 @@
+pub mod choice;
 pub mod error_handling;
 pub mod interpreter;
 pub mod io_processing;

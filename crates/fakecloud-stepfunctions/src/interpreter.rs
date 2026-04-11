@@ -6,6 +6,7 @@ use tracing::debug;
 
 use fakecloud_core::delivery::DeliveryBus;
 
+use crate::choice::evaluate_choice;
 use crate::error_handling::{find_catcher, should_retry};
 use crate::io_processing::{apply_input_path, apply_output_path, apply_result_path};
 use crate::state::{ExecutionStatus, HistoryEvent, SharedStepFunctionsState};
@@ -303,6 +304,92 @@ pub async fn execute_state_machine(
                 }
             }
 
+            "Choice" => {
+                let entered_event_id = add_event(
+                    &state,
+                    &execution_arn,
+                    "ChoiceStateEntered",
+                    0,
+                    json!({
+                        "name": current_state,
+                        "input": serde_json::to_string(&effective_input).unwrap_or_default(),
+                    }),
+                );
+
+                // Apply InputPath
+                let input_path = state_def["InputPath"].as_str();
+                let processed_input = if input_path == Some("null") {
+                    json!({})
+                } else {
+                    apply_input_path(&effective_input, input_path)
+                };
+
+                match evaluate_choice(&state_def, &processed_input) {
+                    Some(next) => {
+                        add_event(
+                            &state,
+                            &execution_arn,
+                            "ChoiceStateExited",
+                            entered_event_id,
+                            json!({
+                                "name": current_state,
+                                "output": serde_json::to_string(&effective_input).unwrap_or_default(),
+                            }),
+                        );
+                        current_state = next;
+                    }
+                    None => {
+                        fail_execution(
+                            &state,
+                            &execution_arn,
+                            "States.NoChoiceMatched",
+                            &format!(
+                                "No choice rule matched and no Default in state '{current_state}'"
+                            ),
+                        );
+                        return;
+                    }
+                }
+            }
+
+            "Wait" => {
+                let entered_event_id = add_event(
+                    &state,
+                    &execution_arn,
+                    "WaitStateEntered",
+                    0,
+                    json!({
+                        "name": current_state,
+                        "input": serde_json::to_string(&effective_input).unwrap_or_default(),
+                    }),
+                );
+
+                execute_wait_state(&state_def, &effective_input).await;
+
+                add_event(
+                    &state,
+                    &execution_arn,
+                    "WaitStateExited",
+                    entered_event_id,
+                    json!({
+                        "name": current_state,
+                        "output": serde_json::to_string(&effective_input).unwrap_or_default(),
+                    }),
+                );
+
+                match next_state(&state_def) {
+                    NextState::Name(next) => current_state = next,
+                    NextState::End => {
+                        succeed_execution(&state, &execution_arn, &effective_input);
+                        return;
+                    }
+                    NextState::Error(msg) => {
+                        fail_execution(&state, &execution_arn, "States.Runtime", &msg);
+                        return;
+                    }
+                }
+            }
+
             other => {
                 fail_execution(
                     &state,
@@ -311,6 +398,52 @@ pub async fn execute_state_machine(
                     &format!("Unsupported state type: '{other}'"),
                 );
                 return;
+            }
+        }
+    }
+}
+
+/// Execute a Wait state: pause execution for a specified duration or until a timestamp.
+async fn execute_wait_state(state_def: &Value, input: &Value) {
+    // Seconds: fixed number of seconds
+    if let Some(seconds) = state_def["Seconds"].as_u64() {
+        tokio::time::sleep(tokio::time::Duration::from_secs(seconds)).await;
+        return;
+    }
+
+    // SecondsPath: JsonPath to a number of seconds in the input
+    if let Some(path) = state_def["SecondsPath"].as_str() {
+        let val = crate::io_processing::resolve_path(input, path);
+        if let Some(seconds) = val.as_u64() {
+            tokio::time::sleep(tokio::time::Duration::from_secs(seconds)).await;
+        }
+        return;
+    }
+
+    // Timestamp: wait until a specific RFC3339 timestamp
+    if let Some(ts_str) = state_def["Timestamp"].as_str() {
+        if let Ok(target) = chrono::DateTime::parse_from_rfc3339(ts_str) {
+            let now = Utc::now();
+            let target_utc = target.with_timezone(&chrono::Utc);
+            if target_utc > now {
+                let duration = (target_utc - now).to_std().unwrap_or_default();
+                tokio::time::sleep(duration).await;
+            }
+        }
+        return;
+    }
+
+    // TimestampPath: JsonPath to an RFC3339 timestamp in the input
+    if let Some(path) = state_def["TimestampPath"].as_str() {
+        let val = crate::io_processing::resolve_path(input, path);
+        if let Some(ts_str) = val.as_str() {
+            if let Ok(target) = chrono::DateTime::parse_from_rfc3339(ts_str) {
+                let now = Utc::now();
+                let target_utc = target.with_timezone(&chrono::Utc);
+                if target_utc > now {
+                    let duration = (target_utc - now).to_std().unwrap_or_default();
+                    tokio::time::sleep(duration).await;
+                }
             }
         }
     }
