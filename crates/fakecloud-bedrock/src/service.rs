@@ -308,6 +308,35 @@ impl AwsService for BedrockService {
                 let arn = body["resourceARN"].as_str().unwrap_or_default();
                 self.list_tags_for_resource(&req, arn)
             }
+            "CreateGuardrail" => {
+                let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
+                crate::guardrails::create_guardrail(&self.state, &req, &body)
+            }
+            "GetGuardrail" => crate::guardrails::get_guardrail(
+                &self.state,
+                &req,
+                &resource_id.unwrap_or_default(),
+            ),
+            "ListGuardrails" => crate::guardrails::list_guardrails(&self.state),
+            "UpdateGuardrail" => {
+                let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
+                crate::guardrails::update_guardrail(
+                    &self.state,
+                    &resource_id.unwrap_or_default(),
+                    &body,
+                )
+            }
+            "DeleteGuardrail" => {
+                crate::guardrails::delete_guardrail(&self.state, &resource_id.unwrap_or_default())
+            }
+            "CreateGuardrailVersion" => {
+                let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
+                crate::guardrails::create_guardrail_version(
+                    &self.state,
+                    &resource_id.unwrap_or_default(),
+                    &body,
+                )
+            }
             _ => Err(AwsServiceError::ActionNotImplemented {
                 service: "bedrock".to_string(),
                 action: action.to_string(),
@@ -322,6 +351,12 @@ impl AwsService for BedrockService {
             "TagResource",
             "UntagResource",
             "ListTagsForResource",
+            "CreateGuardrail",
+            "GetGuardrail",
+            "ListGuardrails",
+            "UpdateGuardrail",
+            "DeleteGuardrail",
+            "CreateGuardrailVersion",
         ]
     }
 }
