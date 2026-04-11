@@ -22,6 +22,7 @@ members = [
     "crates/fakecloud-elasticache",
     "crates/fakecloud-stepfunctions",
     "crates/fakecloud-apigatewayv2",
+    "crates/fakecloud-bedrock",
     "crates/fakecloud-sdk",
     "crates/fakecloud-e2e",
     "crates/fakecloud-conformance",
@@ -93,4 +94,5 @@ fakecloud-rds = { path = "crates/fakecloud-rds", version = "0.7.1" }
 fakecloud-elasticache = { path = "crates/fakecloud-elasticache", version = "0.7.1" }
 fakecloud-stepfunctions = { path = "crates/fakecloud-stepfunctions", version = "0.7.1" }
 fakecloud-apigatewayv2 = { path = "crates/fakecloud-apigatewayv2", version = "0.7.1" }
+fakecloud-bedrock = { path = "crates/fakecloud-bedrock", version = "0.7.1" }
 fakecloud-sdk = { path = "crates/fakecloud-sdk", version = "0.7.1" }

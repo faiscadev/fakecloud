@@ -74,5 +74,13 @@
   "sfn": {
     "repo_dir": "sfn",
     "service_name": "states"
+  },
+  "bedrock": {
+    "repo_dir": "bedrock",
+    "service_name": "bedrock"
+  },
+  "bedrock-runtime": {
+    "repo_dir": "bedrock-runtime",
+    "service_name": "bedrock-runtime"
   }
 }

@@ -20,6 +20,7 @@ use kinesis_lambda_poller::KinesisLambdaPoller;
 use sqs_lambda_poller::SqsLambdaPoller;
 
 use fakecloud_apigatewayv2::service::ApiGatewayV2Service;
+use fakecloud_bedrock::service::BedrockService;
 use fakecloud_cloudformation::service::CloudFormationService;
 use fakecloud_cognito::service::CognitoService;
 use fakecloud_dynamodb::service::DynamoDbService;
@@ -162,6 +163,10 @@ async fn main() {
 
     let apigatewayv2_state = Arc::new(parking_lot::RwLock::new(
         fakecloud_apigatewayv2::state::ApiGatewayV2State::new(&cli.account_id, &cli.region),
+    ));
+
+    let bedrock_state = Arc::new(parking_lot::RwLock::new(
+        fakecloud_bedrock::state::BedrockState::new(&cli.account_id, &cli.region),
     ));
 
     let rds_runtime = fakecloud_rds::runtime::RdsRuntime::new().map(Arc::new);
@@ -318,6 +323,7 @@ async fn main() {
         elasticache: elasticache_state.clone(),
         stepfunctions: stepfunctions_state.clone(),
         apigatewayv2: apigatewayv2_state.clone(),
+        bedrock: bedrock_state.clone(),
         container_runtime: container_runtime.clone(),
         rds_runtime: rds_runtime.clone(),
         elasticache_runtime: elasticache_runtime.clone(),
@@ -489,6 +495,7 @@ async fn main() {
         apigw_service = apigw_service.with_delivery(delivery_for_apigw);
     }
     registry.register(Arc::new(apigw_service));
+    registry.register(Arc::new(BedrockService::new(bedrock_state.clone())));
 
     // Spawn background tasks
     let lifecycle_processor = fakecloud_s3::lifecycle::LifecycleProcessor::new(s3_state);
@@ -1339,6 +1346,7 @@ struct ResetState {
     elasticache: fakecloud_elasticache::state::SharedElastiCacheState,
     stepfunctions: fakecloud_stepfunctions::state::SharedStepFunctionsState,
     apigatewayv2: fakecloud_apigatewayv2::state::SharedApiGatewayV2State,
+    bedrock: fakecloud_bedrock::state::SharedBedrockState,
     container_runtime: Option<Arc<fakecloud_lambda::runtime::ContainerRuntime>>,
     rds_runtime: Option<Arc<fakecloud_rds::runtime::RdsRuntime>>,
     elasticache_runtime: Option<Arc<fakecloud_elasticache::runtime::ElastiCacheRuntime>>,
@@ -1430,6 +1438,9 @@ impl ResetState {
             "apigateway" | "apigatewayv2" => {
                 self.apigatewayv2.write().apis.clear();
             }
+            "bedrock" | "bedrock-runtime" => {
+                self.bedrock.write().reset();
+            }
             _ => {
                 return Err(format!("Unknown service: {service}"));
             }
@@ -1488,6 +1499,7 @@ impl ResetState {
         }
         self.stepfunctions.write().reset();
         self.apigatewayv2.write().apis.clear();
+        self.bedrock.write().reset();
         tracing::info!("state reset via reset API");
         axum::Json(types::ResetResponse {
             status: "ok".to_string(),
@@ -1699,6 +1711,9 @@ mod tests {
             )),
             apigatewayv2: Arc::new(parking_lot::RwLock::new(
                 fakecloud_apigatewayv2::state::ApiGatewayV2State::new("123456789012", "us-east-1"),
+            )),
+            bedrock: Arc::new(parking_lot::RwLock::new(
+                fakecloud_bedrock::state::BedrockState::new("123456789012", "us-east-1"),
             )),
             container_runtime: None,
             rds_runtime: None,

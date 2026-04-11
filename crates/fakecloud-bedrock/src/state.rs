@@ -1,0 +1,138 @@
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use chrono::{DateTime, Utc};
+use parking_lot::RwLock;
+
+pub type SharedBedrockState = Arc<RwLock<BedrockState>>;
+
+pub struct BedrockState {
+    pub account_id: String,
+    pub region: String,
+    /// Tags keyed by resource ARN.
+    pub tags: HashMap<String, HashMap<String, String>>,
+    /// Guardrails keyed by guardrail ID.
+    pub guardrails: HashMap<String, Guardrail>,
+    /// Guardrail versions keyed by (guardrail_id, version).
+    pub guardrail_versions: HashMap<(String, String), GuardrailVersion>,
+    /// Model customization jobs keyed by job ARN.
+    pub customization_jobs: HashMap<String, CustomizationJob>,
+    /// Provisioned model throughputs keyed by provisioned model ID.
+    pub provisioned_throughputs: HashMap<String, ProvisionedThroughput>,
+    /// Model invocation logging configuration.
+    pub logging_config: Option<LoggingConfig>,
+    /// All model invocations recorded for introspection.
+    pub invocations: Vec<ModelInvocation>,
+    /// Custom responses configured per model ID via simulation endpoint.
+    pub custom_responses: HashMap<String, String>,
+}
+
+impl BedrockState {
+    pub fn new(account_id: &str, region: &str) -> Self {
+        Self {
+            account_id: account_id.to_string(),
+            region: region.to_string(),
+            tags: HashMap::new(),
+            guardrails: HashMap::new(),
+            guardrail_versions: HashMap::new(),
+            customization_jobs: HashMap::new(),
+            provisioned_throughputs: HashMap::new(),
+            logging_config: None,
+            invocations: Vec::new(),
+            custom_responses: HashMap::new(),
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.tags.clear();
+        self.guardrails.clear();
+        self.guardrail_versions.clear();
+        self.customization_jobs.clear();
+        self.provisioned_throughputs.clear();
+        self.logging_config = None;
+        self.invocations.clear();
+        self.custom_responses.clear();
+    }
+}
+
+#[derive(Clone)]
+pub struct Guardrail {
+    pub guardrail_id: String,
+    pub guardrail_arn: String,
+    pub name: String,
+    pub description: String,
+    pub status: String,
+    pub version: String,
+    pub next_version_number: u32,
+    pub blocked_input_messaging: String,
+    pub blocked_outputs_messaging: String,
+    pub content_policy: Option<serde_json::Value>,
+    pub word_policy: Option<serde_json::Value>,
+    pub sensitive_information_policy: Option<serde_json::Value>,
+    pub topic_policy: Option<serde_json::Value>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Clone)]
+pub struct GuardrailVersion {
+    pub guardrail_id: String,
+    pub guardrail_arn: String,
+    pub version: String,
+    pub name: String,
+    pub description: String,
+    pub status: String,
+    pub blocked_input_messaging: String,
+    pub blocked_outputs_messaging: String,
+    pub content_policy: Option<serde_json::Value>,
+    pub word_policy: Option<serde_json::Value>,
+    pub sensitive_information_policy: Option<serde_json::Value>,
+    pub topic_policy: Option<serde_json::Value>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Clone)]
+pub struct CustomizationJob {
+    pub job_arn: String,
+    pub job_name: String,
+    pub base_model_identifier: String,
+    pub custom_model_name: String,
+    pub role_arn: String,
+    pub training_data_config: serde_json::Value,
+    pub output_data_config: serde_json::Value,
+    pub hyper_parameters: HashMap<String, String>,
+    pub status: String,
+    pub created_at: DateTime<Utc>,
+    pub last_modified_at: DateTime<Utc>,
+}
+
+#[derive(Clone)]
+pub struct ProvisionedThroughput {
+    pub provisioned_model_id: String,
+    pub provisioned_model_arn: String,
+    pub provisioned_model_name: String,
+    pub model_arn: String,
+    pub model_units: i32,
+    pub desired_model_units: i32,
+    pub status: String,
+    pub commitment_duration: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub last_modified_at: DateTime<Utc>,
+}
+
+#[derive(Clone)]
+pub struct LoggingConfig {
+    pub cloud_watch_config: Option<serde_json::Value>,
+    pub s3_config: Option<serde_json::Value>,
+    pub text_data_delivery_enabled: bool,
+    pub image_data_delivery_enabled: bool,
+    pub embedding_data_delivery_enabled: bool,
+}
+
+#[derive(Clone)]
+pub struct ModelInvocation {
+    pub model_id: String,
+    pub input: String,
+    pub output: String,
+    pub timestamp: DateTime<Utc>,
+}

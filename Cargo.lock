@@ -265,6 +265,57 @@ dependencies = [
 ]
 
 [[package]]
+name = "aws-sdk-bedrock"
+version = "1.140.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "930086d6a615f77948c9244edff57d5ea4d7827302152652c24a16bf1430aff2"
+dependencies = [
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-http",
+ "aws-smithy-json",
+ "aws-smithy-observability",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-types",
+ "aws-types",
+ "bytes",
+ "fastrand",
+ "http 0.2.12",
+ "http 1.4.0",
+ "regex-lite",
+ "tracing",
+]
+
+[[package]]
+name = "aws-sdk-bedrockruntime"
+version = "1.129.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c710f0b7dbd906047724ec892afc0de0b92c7484ba25f499a91563e0417a96d6"
+dependencies = [
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-sigv4",
+ "aws-smithy-async",
+ "aws-smithy-eventstream",
+ "aws-smithy-http",
+ "aws-smithy-json",
+ "aws-smithy-observability",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-types",
+ "aws-types",
+ "bytes",
+ "fastrand",
+ "http 0.2.12",
+ "http 1.4.0",
+ "http-body-util",
+ "regex-lite",
+ "tracing",
+]
+
+[[package]]
 name = "aws-sdk-cloudformation"
 version = "1.110.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1856,6 +1907,7 @@ dependencies = [
  "clap",
  "fakecloud-apigatewayv2",
  "fakecloud-aws",
+ "fakecloud-bedrock",
  "fakecloud-cloudformation",
  "fakecloud-cognito",
  "fakecloud-core",
@@ -1918,6 +1970,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "fakecloud-bedrock"
+version = "0.7.1"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "fakecloud-aws",
+ "fakecloud-core",
+ "http 1.4.0",
+ "parking_lot",
+ "percent-encoding",
+ "regex",
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
 name = "fakecloud-cloudformation"
 version = "0.7.1"
 dependencies = [
@@ -1972,6 +2041,8 @@ dependencies = [
  "aws-config",
  "aws-credential-types",
  "aws-sdk-apigatewayv2",
+ "aws-sdk-bedrock",
+ "aws-sdk-bedrockruntime",
  "aws-sdk-cloudformation",
  "aws-sdk-cloudwatchlogs",
  "aws-sdk-cognitoidentityprovider",
@@ -2057,6 +2128,8 @@ dependencies = [
  "aws-config",
  "aws-credential-types",
  "aws-sdk-apigatewayv2",
+ "aws-sdk-bedrock",
+ "aws-sdk-bedrockruntime",
  "aws-sdk-cloudformation",
  "aws-sdk-cloudwatchlogs",
  "aws-sdk-cognitoidentityprovider",
