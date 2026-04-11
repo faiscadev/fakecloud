@@ -4,12 +4,12 @@
 
 ## Overview
 
-fakecloud emulates 18 AWS services locally for integration testing and development. It is a single Rust binary — no Docker required, no signup, starts in under 100ms. Point any AWS SDK or the AWS CLI at `http://localhost:4566` with dummy credentials.
+fakecloud emulates 20 AWS services locally for integration testing and development. It is a single Rust binary — no Docker required, no signup, starts in under 100ms. Point any AWS SDK or the AWS CLI at `http://localhost:4566` with dummy credentials.
 
 Key design principles:
 - **Correctness over coverage**: Every implemented service targets 100% behavioral parity with real AWS, verified by automated conformance tests against AWS Smithy models
 - **Zero friction**: No auth tokens, no accounts, no config files needed
-- **Cross-service integration**: 28 service-to-service integrations — S3 notifications, SNS fanout, EventBridge rules, DynamoDB Streams, CloudWatch Logs subscriptions, Cognito triggers, and more
+- **Cross-service integration**: 30+ service-to-service integrations — S3 notifications, SNS fanout, EventBridge rules, DynamoDB Streams, CloudWatch Logs subscriptions, Cognito triggers, API Gateway → Lambda, Step Functions task integrations, and more
 
 fakecloud is NOT a production-ready cloud replacement. It is for integration testing and local development.
 
@@ -70,7 +70,7 @@ fakecloud listens at `http://localhost:4566`.
 ### Health check
 ```sh
 curl http://localhost:4566/_fakecloud/health
-# Returns: {"status":"ok","version":"0.6.1","services":["cloudformation","cognito-idp","dynamodb","elasticache","events","iam","kinesis","kms","lambda","logs","rds","s3","secretsmanager","ses","sns","sqs","ssm","sts"]}
+# Returns: {"status":"ok","version":"0.6.1","services":["apigateway","cloudformation","cognito-idp","dynamodb","elasticache","events","iam","kinesis","kms","lambda","logs","rds","s3","secretsmanager","ses","sfn","sns","sqs","ssm","sts"]}
 ```
 
 ## Using with AWS SDKs
@@ -307,6 +307,27 @@ Features: cache clusters, replication groups, global replication groups, serverl
 
 Protocol: Query (form-encoded body, `Action` parameter, XML responses)
 
+### Step Functions (14 actions)
+
+CreateStateMachine, DeleteStateMachine, DescribeStateMachine, DescribeStateMachineForExecution, ListStateMachines, UpdateStateMachine, TagResource, UntagResource, ListTagsForResource, StartExecution, DescribeExecution, GetExecutionHistory, ListExecutions, StopExecution
+
+Features: Complete Amazon States Language (ASL) interpreter with all state types (Pass, Task, Choice, Wait, Parallel, Map, Succeed, Fail), error handling with Retry and Catch, cross-service task integrations (Lambda, SQS, SNS, EventBridge, DynamoDB), execution history tracking, and introspection endpoint for test assertions.
+
+Protocol: JSON (JSON body, `X-Amz-Target` header, JSON responses)
+
+### API Gateway v2 (28 actions)
+
+**APIs:** CreateApi, DeleteApi, GetApi, GetApis, UpdateApi
+**Routes:** CreateRoute, DeleteRoute, GetRoute, GetRoutes, UpdateRoute
+**Integrations:** CreateIntegration, DeleteIntegration, GetIntegration, GetIntegrations, UpdateIntegration
+**Stages:** CreateStage, DeleteStage, GetStage, GetStages, UpdateStage
+**Deployments:** CreateDeployment, GetDeployment, GetDeployments
+**Authorizers:** CreateAuthorizer, DeleteAuthorizer, GetAuthorizer, GetAuthorizers, UpdateAuthorizer
+
+Features: HTTP APIs with route-based request handling, path parameters and wildcards (`/users/{userId}`, `/api/*`), Lambda proxy integration v2.0 format, HTTP proxy integration for external endpoints, Mock integration for static responses, CORS configuration, JWT and Lambda authorizers, request history introspection endpoint.
+
+Protocol: REST (HTTP method + path-based routing, JSON responses)
+
 ## Cross-Service Integration
 
 fakecloud implements real cross-service message delivery:
@@ -322,6 +343,8 @@ fakecloud implements real cross-service message delivery:
 - **Cognito -> Lambda**: Pre-signup, post-confirmation, pre/post-auth, custom message, token generation, migration, and custom auth challenge triggers
 - **SES -> SNS/EventBridge**: Email event fanout (send, delivery, bounce, complaint) via configured event destinations
 - **SES Inbound -> S3/SNS/Lambda**: Receipt rules evaluate inbound email and execute S3, SNS, and Lambda actions
+- **Step Functions -> Lambda/SQS/SNS/EventBridge/DynamoDB**: Task states invoke Lambda, send SQS messages, publish to SNS topics, put EventBridge events, and read/write DynamoDB items
+- **API Gateway v2 -> Lambda**: HTTP API routes invoke Lambda functions with proxy integration v2.0 format
 - **CloudFormation -> Lambda/SNS**: Custom resources invoke via ServiceToken, stack events notify via NotificationARNs
 - **SecretsManager -> Lambda**: Rotation invokes Lambda for all 4 steps
 - **S3 Lifecycle**: Background expiration and storage class transitions
@@ -332,8 +355,8 @@ fakecloud implements real cross-service message delivery:
 fakecloud handles three AWS protocol families:
 
 - **Query protocol** (SQS, SNS, IAM, STS, CloudFormation, SES v1, RDS, ElastiCache): form-encoded body with `Action` parameter, XML responses
-- **JSON protocol** (SSM, EventBridge, DynamoDB, Secrets Manager, CloudWatch Logs, KMS, Cognito User Pools, Kinesis): JSON body, `X-Amz-Target` header, JSON responses
-- **REST protocol** (S3, Lambda, SES v2): HTTP method + path-based routing, XML or JSON responses
+- **JSON protocol** (SSM, EventBridge, DynamoDB, Secrets Manager, CloudWatch Logs, KMS, Cognito User Pools, Kinesis, Step Functions): JSON body, `X-Amz-Target` header, JSON responses
+- **REST protocol** (S3, Lambda, SES v2, API Gateway v2): HTTP method + path-based routing, XML or JSON responses
 
 SigV4 signatures are parsed for service routing but never validated. Use any dummy credentials.
 

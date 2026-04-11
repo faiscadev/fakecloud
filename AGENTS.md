@@ -5,9 +5,9 @@ Local AWS cloud emulator. Part of the faisca project family.
 ## Product Context
 
 - FakeCloud is a local AWS emulator focused on high-fidelity behavior and AWS-compatible responses.
-- Current project state from prior work: 18 services, 1002 operations, version 0.6.1, with SES, Cognito User Pools, Docker-backed Lambda execution, Kinesis, RDS, and ElastiCache already shipped.
-- The broader roadmap prioritizes services that LocalStack keeps behind paid tiers, especially ECR, ECS, ELB/ALB, CloudFront, API Gateway v2, Step Functions, CloudWatch Metrics, and EC2.
-- Design internal and test-only endpoints with future introspection SDKs in mind, but do not build SDKs unless explicitly requested.
+- Current project state from prior work: 20 services, 1044 operations, version 0.6.1, with SES, Cognito User Pools, Docker-backed Lambda execution, Kinesis, RDS, ElastiCache, Step Functions, and API Gateway v2 already shipped.
+- The broader roadmap prioritizes services that LocalStack keeps behind paid tiers, especially ECR, ECS, ELB/ALB, CloudFront, CloudWatch Metrics, Bedrock, and EC2.
+- Introspection SDKs (Rust, Python, TypeScript, Go) are already built and maintained for the `/_fakecloud/*` endpoints.
 
 ## Build And Run
 
@@ -25,7 +25,8 @@ cargo fmt --check                        # format check
 - `fakecloud` - binary entry point (clap CLI, Axum server)
 - `fakecloud-core` - `AwsService` trait, `ServiceRegistry`, request dispatch, protocol parsing
 - `fakecloud-aws` - shared AWS types (ARNs, error builders, SigV4 parser)
-- `fakecloud-{sqs,sns,eventbridge,iam,ssm,dynamodb,lambda,secretsmanager,s3,logs,kms,cloudformation,ses,cognito,kinesis,rds,elasticache}` - individual service implementations
+- `fakecloud-{sqs,sns,eventbridge,iam,ssm,dynamodb,lambda,secretsmanager,s3,logs,kms,cloudformation,ses,cognito,kinesis,rds,elasticache,stepfunctions,apigatewayv2}` - individual service implementations
+- `fakecloud-sdk` - Rust SDK for `/_fakecloud/*` introspection endpoints
 - `fakecloud-e2e` - E2E tests using `aws-sdk-rust` and AWS CLI
 
 ## Conventions
@@ -78,4 +79,6 @@ cargo fmt --check                        # format check
 - SES is fully shipped, including v2 operations, v1 inbound operations, cross-service event fanout, mailbox simulator, and inbound email pipeline.
 - Cognito User Pools is fully shipped, including auth flows, JWT token issuance, and introspection endpoints.
 - Lambda execution runs real code in Docker containers, supports multiple runtimes, and reuses warm containers.
+- Step Functions is fully shipped with complete ASL interpreter (all state types), error handling (Retry/Catch), and cross-service task integrations (Lambda, SQS, SNS, EventBridge, DynamoDB).
+- API Gateway v2 (HTTP APIs) is fully shipped with Lambda proxy integration v2.0, HTTP proxy, Mock integrations, route matching with path parameters and wildcards, CORS, and JWT/Lambda authorizers.
 - When adding new service behavior, prefer complete, realistic implementations over placeholder API coverage.
