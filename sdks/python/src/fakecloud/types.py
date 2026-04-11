@@ -851,6 +851,46 @@ class StepFunctionsExecutionsResponse:
         )
 
 
+# ── Bedrock ────────────────────────────────────────────────────────────
+
+
+@dataclass
+class BedrockInvocation:
+    model_id: str
+    input: str
+    output: str
+    timestamp: str
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> BedrockInvocation:
+        d = _convert_keys(data)
+        return cls(**d)
+
+
+@dataclass
+class BedrockInvocationsResponse:
+    invocations: List[BedrockInvocation]
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> BedrockInvocationsResponse:
+        return cls(
+            invocations=[
+                BedrockInvocation.from_dict(i) for i in data.get("invocations", [])
+            ],
+        )
+
+
+@dataclass
+class BedrockModelResponseConfig:
+    status: str
+    model_id: str
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> BedrockModelResponseConfig:
+        d = _convert_keys(data)
+        return cls(**d)
+
+
 # ── API Gateway v2 ──────────────────────────────────────────────────────
 
 

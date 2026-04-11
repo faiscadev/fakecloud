@@ -7,6 +7,8 @@ import httpx
 from fakecloud.types import (
     ApiGatewayV2RequestsResponse,
     AuthEventsResponse,
+    BedrockInvocationsResponse,
+    BedrockModelResponseConfig,
     ConfirmationCodesResponse,
     ConfirmSubscriptionRequest,
     ConfirmSubscriptionResponse,
@@ -347,6 +349,30 @@ class StepFunctionsClient:
         return StepFunctionsExecutionsResponse.from_dict(resp.json())
 
 
+class BedrockClient:
+    """Async Bedrock introspection client."""
+
+    def __init__(self, client: httpx.AsyncClient, base_url: str) -> None:
+        self._client = client
+        self._base = base_url
+
+    async def get_invocations(self) -> BedrockInvocationsResponse:
+        resp = await self._client.get(f"{self._base}/_fakecloud/bedrock/invocations")
+        _check(resp)
+        return BedrockInvocationsResponse.from_dict(resp.json())
+
+    async def set_model_response(
+        self, model_id: str, response: str
+    ) -> BedrockModelResponseConfig:
+        resp = await self._client.post(
+            f"{self._base}/_fakecloud/bedrock/models/{model_id}/response",
+            content=response,
+            headers={"Content-Type": "text/plain"},
+        )
+        _check(resp)
+        return BedrockModelResponseConfig.from_dict(resp.json())
+
+
 # ── Sync sub-clients ────────────────────────────────────────────────
 
 
@@ -604,6 +630,28 @@ class _SyncStepFunctionsClient:
         return StepFunctionsExecutionsResponse.from_dict(resp.json())
 
 
+class _SyncBedrockClient:
+    def __init__(self, client: httpx.Client, base_url: str) -> None:
+        self._client = client
+        self._base = base_url
+
+    def get_invocations(self) -> BedrockInvocationsResponse:
+        resp = self._client.get(f"{self._base}/_fakecloud/bedrock/invocations")
+        _check(resp)
+        return BedrockInvocationsResponse.from_dict(resp.json())
+
+    def set_model_response(
+        self, model_id: str, response: str
+    ) -> BedrockModelResponseConfig:
+        resp = self._client.post(
+            f"{self._base}/_fakecloud/bedrock/models/{model_id}/response",
+            content=response,
+            headers={"Content-Type": "text/plain"},
+        )
+        _check(resp)
+        return BedrockModelResponseConfig.from_dict(resp.json())
+
+
 # ── Main clients ────────────────────────────────────────────────────
 
 
@@ -701,6 +749,10 @@ class FakeCloud:
     def stepfunctions(self) -> StepFunctionsClient:
         return StepFunctionsClient(self._client, self._base)
 
+    @property
+    def bedrock(self) -> BedrockClient:
+        return BedrockClient(self._client, self._base)
+
     # ── Lifecycle ───────────────────────────────────────────────────
 
     async def aclose(self) -> None:
@@ -797,6 +849,10 @@ class FakeCloudSync:
     @property
     def stepfunctions(self) -> _SyncStepFunctionsClient:
         return _SyncStepFunctionsClient(self._client, self._base)
+
+    @property
+    def bedrock(self) -> _SyncBedrockClient:
+        return _SyncBedrockClient(self._client, self._base)
 
     # ── Lifecycle ───────────────────────────────────────────────────
 

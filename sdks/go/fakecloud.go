@@ -91,6 +91,9 @@ func (fc *FakeCloud) ApiGatewayV2() *ApiGatewayV2Client { return &ApiGatewayV2Cl
 // StepFunctions returns the Step Functions sub-client.
 func (fc *FakeCloud) StepFunctions() *StepFunctionsClient { return &StepFunctionsClient{fc: fc} }
 
+// Bedrock returns the Bedrock sub-client.
+func (fc *FakeCloud) Bedrock() *BedrockClient { return &BedrockClient{fc: fc} }
+
 // ── Error type ─────────────────────────────────────────────────────
 
 // APIError is returned when the server responds with a non-2xx status.
@@ -110,6 +113,15 @@ func (fc *FakeCloud) doGet(ctx context.Context, path string, out interface{}) er
 	if err != nil {
 		return err
 	}
+	return fc.do(req, out)
+}
+
+func (fc *FakeCloud) doPostText(ctx context.Context, path string, text string, out interface{}) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, fc.BaseURL+path, strings.NewReader(text))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "text/plain")
 	return fc.do(req, out)
 }
 
