@@ -920,26 +920,28 @@ async fn s3_multipart_upload_basic() {
         .unwrap();
     let upload_id = create.upload_id().unwrap().to_string();
 
-    // Upload two parts
+    // Upload two parts. Non-last parts must be at least 5 MiB.
+    let part1_data = vec![b'a'; 5 * 1024 * 1024];
     let part1 = client
         .upload_part()
         .bucket("mp-bucket")
         .key("big-file.bin")
         .upload_id(&upload_id)
         .part_number(1)
-        .body(ByteStream::from_static(b"part-one-data-"))
+        .body(ByteStream::from(part1_data.clone()))
         .send()
         .await
         .unwrap();
     let etag1 = part1.e_tag().unwrap().to_string();
 
+    let part2_data = b"part-two-data".to_vec();
     let part2 = client
         .upload_part()
         .bucket("mp-bucket")
         .key("big-file.bin")
         .upload_id(&upload_id)
         .part_number(2)
-        .body(ByteStream::from_static(b"part-two-data"))
+        .body(ByteStream::from(part2_data.clone()))
         .send()
         .await
         .unwrap();
@@ -981,7 +983,9 @@ async fn s3_multipart_upload_basic() {
         .await
         .unwrap();
     let body = get.body.collect().await.unwrap().into_bytes();
-    assert_eq!(body.as_ref(), b"part-one-data-part-two-data");
+    let mut expected = part1_data;
+    expected.extend_from_slice(&part2_data);
+    assert_eq!(body.as_ref(), expected.as_slice());
 }
 
 #[tokio::test]
