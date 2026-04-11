@@ -141,8 +141,8 @@ Top-level client. Defaults to `http://localhost:4566`.
 
 ### `fc.stepfunctions`
 
-| Method            | Description                             |
-| ----------------- | --------------------------------------- |
+| Method            | Description                              |
+| ----------------- | ---------------------------------------- |
 | `getExecutions()` | List all state machine execution history |
 
 ### `fc.apigatewayv2`

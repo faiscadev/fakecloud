@@ -845,7 +845,10 @@ class StepFunctionsExecutionsResponse:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> StepFunctionsExecutionsResponse:
         return cls(
-            executions=[StepFunctionsExecution.from_dict(e) for e in data.get("executions", [])],
+            executions=[
+                StepFunctionsExecution.from_dict(e)
+                for e in data.get("executions", [])
+            ],
         )
 
 
@@ -878,5 +881,7 @@ class ApiGatewayV2RequestsResponse:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> ApiGatewayV2RequestsResponse:
         return cls(
-            requests=[ApiGatewayV2Request.from_dict(r) for r in data.get("requests", [])],
+            requests=[
+                ApiGatewayV2Request.from_dict(r) for r in data.get("requests", [])
+            ],
         )

@@ -312,7 +312,9 @@ export class ApiGatewayV2Client {
   constructor(private readonly baseUrl: string) {}
 
   async getRequests(): Promise<ApiGatewayV2RequestsResponse> {
-    const resp = await fetch(`${this.baseUrl}/_fakecloud/apigatewayv2/requests`);
+    const resp = await fetch(
+      `${this.baseUrl}/_fakecloud/apigatewayv2/requests`,
+    );
     return parse(resp);
   }
 }
@@ -321,7 +323,9 @@ export class StepFunctionsClient {
   constructor(private readonly baseUrl: string) {}
 
   async getExecutions(): Promise<StepFunctionsExecutionsResponse> {
-    const resp = await fetch(`${this.baseUrl}/_fakecloud/stepfunctions/executions`);
+    const resp = await fetch(
+      `${this.baseUrl}/_fakecloud/stepfunctions/executions`,
+    );
     return parse(resp);
   }
 }
