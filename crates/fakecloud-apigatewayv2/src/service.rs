@@ -8,8 +8,7 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceErr
 use fakecloud_core::validation::*;
 
 use crate::state::{
-    ApiRequest, Authorizer, Deployment, HttpApi, Integration, Route, SharedApiGatewayV2State,
-    Stage,
+    ApiRequest, Authorizer, Deployment, HttpApi, Integration, Route, SharedApiGatewayV2State, Stage,
 };
 use crate::{cors, http_proxy, lambda_proxy, mock, router::Router};
 
@@ -266,9 +265,7 @@ impl ApiGatewayV2Service {
             "GetDeployment" => self.get_deployment(&req, api_id.as_deref(), resource_id.as_deref()),
             "GetDeployments" => self.get_deployments(&req, api_id.as_deref()),
             "CreateAuthorizer" => self.create_authorizer(&req, api_id.as_deref()),
-            "GetAuthorizer" => {
-                self.get_authorizer(&req, api_id.as_deref(), resource_id.as_deref())
-            }
+            "GetAuthorizer" => self.get_authorizer(&req, api_id.as_deref(), resource_id.as_deref()),
             "GetAuthorizers" => self.get_authorizers(&req, api_id.as_deref()),
             "UpdateAuthorizer" => {
                 self.update_authorizer(&req, api_id.as_deref(), resource_id.as_deref())
@@ -1366,13 +1363,11 @@ impl ApiGatewayV2Service {
             .to_string();
 
         let authorizer_uri = body["authorizerUri"].as_str().map(|s| s.to_string());
-        let identity_source = body["identitySource"]
-            .as_array()
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                    .collect()
-            });
+        let identity_source = body["identitySource"].as_array().map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        });
 
         let jwt_configuration = if let Some(jwt) = body.get("jwtConfiguration") {
             Some(serde_json::from_value(jwt.clone()).map_err(|e| {
@@ -1564,15 +1559,14 @@ impl ApiGatewayV2Service {
         }
 
         if let Some(jwt) = body.get("jwtConfiguration") {
-            authorizer.jwt_configuration = Some(serde_json::from_value(jwt.clone()).map_err(
-                |e| {
+            authorizer.jwt_configuration =
+                Some(serde_json::from_value(jwt.clone()).map_err(|e| {
                     AwsServiceError::aws_error(
                         StatusCode::BAD_REQUEST,
                         "ValidationException",
                         format!("Invalid jwtConfiguration: {}", e),
                     )
-                },
-            )?);
+                })?);
         }
 
         Ok(AwsResponse::ok_json(json!(authorizer)))
