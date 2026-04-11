@@ -3895,7 +3895,13 @@ fn evaluate_condition(
     expr_attr_names: &HashMap<String, String>,
     expr_attr_values: &HashMap<String, Value>,
 ) -> Result<(), AwsServiceError> {
-    if evaluate_condition_expression(condition, existing, expr_attr_names, expr_attr_values) {
+    // ConditionExpression and FilterExpression share the same DynamoDB grammar,
+    // so we delegate to evaluate_filter_expression. An empty map models "item
+    // doesn't exist" correctly: attribute_exists → false, attribute_not_exists
+    // → true, comparisons against missing attributes → None vs Some(val).
+    let empty = HashMap::new();
+    let item = existing.unwrap_or(&empty);
+    if evaluate_filter_expression(condition, item, expr_attr_names, expr_attr_values) {
         Ok(())
     } else {
         Err(AwsServiceError::aws_error(
@@ -3906,95 +3912,11 @@ fn evaluate_condition(
     }
 }
 
-/// Recursively evaluate a ConditionExpression, handling OR (lowest precedence),
-/// AND, and parenthesised sub-expressions. Mirrors the shape of
-/// evaluate_filter_expression, but takes an `Option<&item>` so conditions on
-/// PutItem (where the item may not yet exist) work.
-fn evaluate_condition_expression(
-    expr: &str,
-    existing: Option<&HashMap<String, AttributeValue>>,
-    expr_attr_names: &HashMap<String, String>,
-    expr_attr_values: &HashMap<String, Value>,
-) -> bool {
-    let trimmed = expr.trim();
-
-    // Split on OR first (lower precedence), respecting parentheses.
-    let or_parts = split_on_or(trimmed);
-    if or_parts.len() > 1 {
-        return or_parts.iter().any(|part| {
-            evaluate_condition_expression(part.trim(), existing, expr_attr_names, expr_attr_values)
-        });
-    }
-
-    // Then split on AND (higher precedence), respecting parentheses.
-    let and_parts = split_on_and(trimmed);
-    if and_parts.len() > 1 {
-        return and_parts.iter().all(|part| {
-            evaluate_condition_expression(part.trim(), existing, expr_attr_names, expr_attr_values)
-        });
-    }
-
-    // Strip outer parentheses and recurse.
-    let stripped = strip_outer_parens(trimmed);
-    if stripped != trimmed {
-        return evaluate_condition_expression(
-            stripped,
-            existing,
-            expr_attr_names,
-            expr_attr_values,
-        );
-    }
-
-    evaluate_single_condition(trimmed, existing, expr_attr_names, expr_attr_values)
-}
-
-fn evaluate_single_condition(
-    part: &str,
-    existing: Option<&HashMap<String, AttributeValue>>,
-    expr_attr_names: &HashMap<String, String>,
-    expr_attr_values: &HashMap<String, Value>,
-) -> bool {
-    if let Some(inner) = extract_function_arg(part, "attribute_not_exists") {
-        let attr = resolve_attr_name(inner, expr_attr_names);
-        return !existing.is_some_and(|item| item.contains_key(&attr));
-    }
-
-    if let Some(inner) = extract_function_arg(part, "attribute_exists") {
-        let attr = resolve_attr_name(inner, expr_attr_names);
-        return existing.is_some_and(|item| item.contains_key(&attr));
-    }
-
-    if let Some((left, op, right)) = parse_simple_comparison(part) {
-        let attr_name = resolve_attr_name(left.trim(), expr_attr_names);
-        let expected = expr_attr_values.get(right.trim());
-        let actual = existing.and_then(|item| item.get(&attr_name));
-
-        return match op {
-            "=" => actual == expected,
-            "<>" => actual != expected,
-            _ => true,
-        };
-    }
-
-    true
-}
-
 fn extract_function_arg<'a>(expr: &'a str, func_name: &str) -> Option<&'a str> {
     let prefix = format!("{func_name}(");
     if let Some(rest) = expr.strip_prefix(&prefix) {
         if let Some(inner) = rest.strip_suffix(')') {
             return Some(inner.trim());
-        }
-    }
-    None
-}
-
-fn parse_simple_comparison(expr: &str) -> Option<(&str, &str, &str)> {
-    for op in &["<>", "=", "<", ">", "<=", ">="] {
-        if let Some(pos) = expr.find(op) {
-            let left = &expr[..pos];
-            let right = &expr[pos + op.len()..];
-            return Some((left, op, right));
         }
     }
     None
@@ -4228,6 +4150,11 @@ fn evaluate_filter_expression(
     let stripped = strip_outer_parens(trimmed);
     if stripped != trimmed {
         return evaluate_filter_expression(stripped, item, expr_attr_names, expr_attr_values);
+    }
+
+    // Handle NOT prefix (case-insensitive)
+    if trimmed.len() > 4 && trimmed[..4].eq_ignore_ascii_case("NOT ") {
+        return !evaluate_filter_expression(&trimmed[4..], item, expr_attr_names, expr_attr_values);
     }
 
     evaluate_single_filter_condition(trimmed, item, expr_attr_names, expr_attr_values)
@@ -6781,141 +6708,178 @@ mod tests {
         );
     }
 
+    fn cond_item(pairs: &[(&str, &str)]) -> HashMap<String, AttributeValue> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), json!({"S": v})))
+            .collect()
+    }
+
+    fn cond_names(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    fn cond_values(pairs: &[(&str, &str)]) -> HashMap<String, Value> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), json!({"S": v})))
+            .collect()
+    }
+
     #[test]
     fn test_evaluate_condition_bare_not_equal() {
-        // Baseline: bare "#s <> :c" without parens already worked; guard
-        // against regressing it as evaluate_condition gains AND/OR/paren handling.
-        let mut item = HashMap::new();
-        item.insert("state".to_string(), json!({"S": "active"}));
+        let item = cond_item(&[("state", "active")]);
+        let names = cond_names(&[("#s", "state")]);
+        let values = cond_values(&[(":c", "complete")]);
 
-        let mut names = HashMap::new();
-        names.insert("#s".to_string(), "state".to_string());
+        assert!(evaluate_condition("#s <> :c", Some(&item), &names, &values).is_ok());
 
-        let mut values = HashMap::new();
-        values.insert(":c".to_string(), json!({"S": "complete"}));
-
-        // active <> complete => true
-        assert!(
-            evaluate_condition("#s <> :c", Some(&item), &names, &values).is_ok(),
-            "bare <> should succeed when values differ"
-        );
-
-        // complete <> complete => false
-        let mut item2 = HashMap::new();
-        item2.insert("state".to_string(), json!({"S": "complete"}));
-        assert!(
-            evaluate_condition("#s <> :c", Some(&item2), &names, &values).is_err(),
-            "bare <> should fail when values match"
-        );
+        let item2 = cond_item(&[("state", "complete")]);
+        assert!(evaluate_condition("#s <> :c", Some(&item2), &names, &values).is_err());
     }
 
     #[test]
     fn test_evaluate_condition_parenthesized_not_equal() {
-        // Before fix: evaluate_condition had no paren handling, so
-        // parse_simple_comparison saw "(#s " as the attribute reference,
-        // resolved it to None, and returned None != None = false — wrongly
-        // reporting the condition as failed on a clearly-different value.
-        let mut item = HashMap::new();
-        item.insert("state".to_string(), json!({"S": "active"}));
+        let item = cond_item(&[("state", "active")]);
+        let names = cond_names(&[("#s", "state")]);
+        let values = cond_values(&[(":c", "complete")]);
 
-        let mut names = HashMap::new();
-        names.insert("#s".to_string(), "state".to_string());
-
-        let mut values = HashMap::new();
-        values.insert(":c".to_string(), json!({"S": "complete"}));
-
-        // active <> complete => true
-        assert!(
-            evaluate_condition("(#s <> :c)", Some(&item), &names, &values).is_ok(),
-            "(<>) should succeed when values differ"
-        );
+        assert!(evaluate_condition("(#s <> :c)", Some(&item), &names, &values).is_ok());
     }
 
     #[test]
     fn test_evaluate_condition_parenthesized_equal_mismatch() {
-        // Before fix: the same malformed parse silently collapsed to
-        // None == None = true, so "(#s = :c)" against a non-matching item
-        // was wrongly reported as succeeded.
-        let mut item = HashMap::new();
-        item.insert("state".to_string(), json!({"S": "active"}));
+        let item = cond_item(&[("state", "active")]);
+        let names = cond_names(&[("#s", "state")]);
+        let values = cond_values(&[(":c", "complete")]);
 
-        let mut names = HashMap::new();
-        names.insert("#s".to_string(), "state".to_string());
+        assert!(evaluate_condition("(#s = :c)", Some(&item), &names, &values).is_err());
+    }
 
-        let mut values = HashMap::new();
-        values.insert(":c".to_string(), json!({"S": "complete"}));
+    #[test]
+    fn test_evaluate_condition_compound_and() {
+        let item = cond_item(&[("state", "active")]);
+        let names = cond_names(&[("#s", "state")]);
+        let values = cond_values(&[(":c", "complete"), (":f", "failed")]);
 
-        // active = complete => false
+        // active <> complete AND active <> failed => true
         assert!(
-            evaluate_condition("(#s = :c)", Some(&item), &names, &values).is_err(),
-            "(=) should fail when values differ"
+            evaluate_condition("(#s <> :c) AND (#s <> :f)", Some(&item), &names, &values).is_ok()
         );
     }
 
     #[test]
-    fn test_evaluate_condition_compound_not_equal_with_parens() {
-        // This is the exact shape aws-sdk-go's expression.NewBuilder emits for
-        //     Name("state").NotEqual(Value("complete")).And(Name("state").NotEqual(Value("failed")))
-        // → "(#0 <> :0) AND (#0 <> :1)"
-        // Before fix: evaluate_condition had no AND handling, so it passed
-        // the whole string to parse_simple_comparison which split on the first
-        // "<>" and produced garbage attribute/value references.
-        let mut item = HashMap::new();
-        item.insert("state".to_string(), json!({"S": "active"}));
+    fn test_evaluate_condition_compound_and_mismatch() {
+        let item = cond_item(&[("state", "inactive")]);
+        let names = cond_names(&[("#s", "state")]);
+        let values = cond_values(&[(":a", "active"), (":b", "active")]);
 
-        let mut names = HashMap::new();
-        names.insert("#s".to_string(), "state".to_string());
-
-        let mut values = HashMap::new();
-        values.insert(":c".to_string(), json!({"S": "complete"}));
-        values.insert(":f".to_string(), json!({"S": "failed"}));
-
-        // active <> complete AND active <> failed => true AND true => true
+        // inactive = active AND inactive = active => false
         assert!(
-            evaluate_condition("(#s <> :c) AND (#s <> :f)", Some(&item), &names, &values).is_ok(),
-            "(<>) AND (<>) should succeed when state differs from both"
+            evaluate_condition("(#s = :a) AND (#s = :b)", Some(&item), &names, &values).is_err()
         );
     }
 
     #[test]
-    fn test_evaluate_condition_compound_equal_mismatch() {
-        // Before fix: broken code collapsed "(#s = :a) AND (#s = :b)" to
-        // "succeeds" regardless of item state because both sides of the
-        // first-found "=" resolved to None.
-        let mut item = HashMap::new();
-        item.insert("state".to_string(), json!({"S": "inactive"}));
+    fn test_evaluate_condition_compound_or() {
+        let item = cond_item(&[("state", "running")]);
+        let names = cond_names(&[("#s", "state")]);
+        let values = cond_values(&[(":a", "active"), (":b", "idle")]);
 
-        let mut names = HashMap::new();
-        names.insert("#s".to_string(), "state".to_string());
-
-        let mut values = HashMap::new();
-        values.insert(":a".to_string(), json!({"S": "active"}));
-        values.insert(":b".to_string(), json!({"S": "active"}));
-
-        // inactive = active AND inactive = active => false AND false => false
+        // running = active OR running = idle => false
         assert!(
-            evaluate_condition("(#s = :a) AND (#s = :b)", Some(&item), &names, &values).is_err(),
-            "(=) AND (=) should fail when state matches neither"
+            evaluate_condition("(#s = :a) OR (#s = :b)", Some(&item), &names, &values).is_err()
+        );
+
+        // running = active OR running = running => true
+        let values2 = cond_values(&[(":a", "active"), (":b", "running")]);
+        assert!(
+            evaluate_condition("(#s = :a) OR (#s = :b)", Some(&item), &names, &values2).is_ok()
         );
     }
 
     #[test]
-    fn test_evaluate_condition_compound_or_with_parens() {
-        // Before fix: evaluate_condition had no OR handling at all.
-        let mut item = HashMap::new();
-        item.insert("state".to_string(), json!({"S": "running"}));
+    fn test_evaluate_condition_not_operator() {
+        let item = cond_item(&[("state", "active")]);
+        let names = cond_names(&[("#s", "state")]);
+        let values = cond_values(&[(":c", "complete")]);
 
-        let mut names = HashMap::new();
-        names.insert("#s".to_string(), "state".to_string());
+        // NOT (active = complete) => NOT false => true
+        assert!(evaluate_condition("NOT (#s = :c)", Some(&item), &names, &values).is_ok());
 
-        let mut values = HashMap::new();
-        values.insert(":a".to_string(), json!({"S": "active"}));
-        values.insert(":b".to_string(), json!({"S": "idle"}));
+        // NOT (active <> complete) => NOT true => false
+        assert!(evaluate_condition("NOT (#s <> :c)", Some(&item), &names, &values).is_err());
 
-        // running = active OR running = idle => false OR false => false
+        // NOT attribute_exists(#s) on existing item => NOT true => false
         assert!(
-            evaluate_condition("(#s = :a) OR (#s = :b)", Some(&item), &names, &values).is_err(),
-            "(=) OR (=) should fail when state matches neither"
+            evaluate_condition("NOT attribute_exists(#s)", Some(&item), &names, &values).is_err()
         );
+
+        // NOT attribute_exists(#s) on missing item => NOT false => true
+        assert!(evaluate_condition("NOT attribute_exists(#s)", None, &names, &values).is_ok());
+    }
+
+    #[test]
+    fn test_evaluate_condition_begins_with() {
+        // After unification, conditions support begins_with via
+        // evaluate_single_filter_condition (previously only filters had it).
+        let item = cond_item(&[("name", "fakecloud-dynamodb")]);
+        let names = cond_names(&[("#n", "name")]);
+        let values = cond_values(&[(":p", "fakecloud")]);
+
+        assert!(evaluate_condition("begins_with(#n, :p)", Some(&item), &names, &values).is_ok());
+
+        let values2 = cond_values(&[(":p", "realcloud")]);
+        assert!(evaluate_condition("begins_with(#n, :p)", Some(&item), &names, &values2).is_err());
+    }
+
+    #[test]
+    fn test_evaluate_condition_contains() {
+        let item = cond_item(&[("tags", "alpha,beta,gamma")]);
+        let names = cond_names(&[("#t", "tags")]);
+        let values = cond_values(&[(":v", "beta")]);
+
+        assert!(evaluate_condition("contains(#t, :v)", Some(&item), &names, &values).is_ok());
+
+        let values2 = cond_values(&[(":v", "delta")]);
+        assert!(evaluate_condition("contains(#t, :v)", Some(&item), &names, &values2).is_err());
+    }
+
+    #[test]
+    fn test_evaluate_condition_no_existing_item() {
+        // When no item exists (PutItem with condition), attribute_not_exists
+        // should succeed and attribute_exists should fail.
+        let names = cond_names(&[("#s", "state")]);
+        let values = cond_values(&[(":v", "active")]);
+
+        assert!(evaluate_condition("attribute_not_exists(#s)", None, &names, &values).is_ok());
+        assert!(evaluate_condition("attribute_exists(#s)", None, &names, &values).is_err());
+        // Comparison against missing item: None != Some(val) => true for <>
+        assert!(evaluate_condition("#s <> :v", None, &names, &values).is_ok());
+        // None == Some(val) => false for =
+        assert!(evaluate_condition("#s = :v", None, &names, &values).is_err());
+    }
+
+    #[test]
+    fn test_evaluate_filter_not_operator() {
+        let item = cond_item(&[("status", "pending")]);
+        let names = cond_names(&[("#s", "status")]);
+        let values = cond_values(&[(":v", "pending")]);
+
+        assert!(!evaluate_filter_expression(
+            "NOT (#s = :v)",
+            &item,
+            &names,
+            &values
+        ));
+        assert!(evaluate_filter_expression(
+            "NOT (#s <> :v)",
+            &item,
+            &names,
+            &values
+        ));
     }
 }
