@@ -4,6 +4,7 @@ use aws_sdk_bedrock::types::{
     GuardrailPiiEntityConfig, GuardrailPiiEntityType, GuardrailSensitiveInformationAction,
     GuardrailSensitiveInformationPolicyConfig, GuardrailWordConfig, GuardrailWordPolicyConfig, Tag,
 };
+use aws_sdk_bedrockruntime::primitives::Blob;
 use helpers::TestServer;
 
 #[tokio::test]
@@ -526,4 +527,196 @@ async fn bedrock_logging_configuration() {
         .await
         .unwrap();
     assert!(resp.logging_config().is_none());
+}
+
+// ---------------------------------------------------------------------------
+// InvokeModel (Runtime)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn bedrock_invoke_model_anthropic() {
+    let server = TestServer::start().await;
+    let client = server.bedrock_runtime_client().await;
+
+    let body = serde_json::to_vec(&serde_json::json!({
+        "anthropic_version": "bedrock-2023-05-31",
+        "max_tokens": 100,
+        "messages": [{"role": "user", "content": "Hello"}]
+    }))
+    .unwrap();
+
+    let resp = client
+        .invoke_model()
+        .model_id("anthropic.claude-3-5-sonnet-20241022-v2:0")
+        .content_type("application/json")
+        .accept("application/json")
+        .body(Blob::new(body))
+        .send()
+        .await
+        .unwrap();
+
+    let response_body: serde_json::Value = serde_json::from_slice(resp.body().as_ref()).unwrap();
+    assert_eq!(response_body["type"], "message");
+    assert_eq!(response_body["stop_reason"], "end_turn");
+    assert!(response_body["content"][0]["text"].as_str().is_some());
+    assert!(response_body["usage"]["input_tokens"].as_i64().is_some());
+}
+
+#[tokio::test]
+async fn bedrock_invoke_model_titan() {
+    let server = TestServer::start().await;
+    let client = server.bedrock_runtime_client().await;
+
+    let body = serde_json::to_vec(&serde_json::json!({
+        "inputText": "Hello, how are you?",
+        "textGenerationConfig": {
+            "maxTokenCount": 100,
+            "temperature": 0.7
+        }
+    }))
+    .unwrap();
+
+    let resp = client
+        .invoke_model()
+        .model_id("amazon.titan-text-express-v1")
+        .content_type("application/json")
+        .accept("application/json")
+        .body(Blob::new(body))
+        .send()
+        .await
+        .unwrap();
+
+    let response_body: serde_json::Value = serde_json::from_slice(resp.body().as_ref()).unwrap();
+    assert!(response_body["results"][0]["outputText"].as_str().is_some());
+    assert_eq!(response_body["results"][0]["completionReason"], "FINISH");
+}
+
+// ---------------------------------------------------------------------------
+// Converse (Runtime)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn bedrock_converse() {
+    let server = TestServer::start().await;
+    let client = server.bedrock_runtime_client().await;
+
+    let resp = client
+        .converse()
+        .model_id("anthropic.claude-3-5-sonnet-20241022-v2:0")
+        .messages(
+            aws_sdk_bedrockruntime::types::Message::builder()
+                .role(aws_sdk_bedrockruntime::types::ConversationRole::User)
+                .content(aws_sdk_bedrockruntime::types::ContentBlock::Text(
+                    "Hello!".to_string(),
+                ))
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.stop_reason().as_str(), "end_turn");
+    let output = resp.output().expect("should have output");
+    if let aws_sdk_bedrockruntime::types::ConverseOutput::Message(msg) = output {
+        assert!(!msg.content().is_empty());
+    } else {
+        panic!("expected message output");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Introspection & Simulation
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn bedrock_introspection_invocations() {
+    let server = TestServer::start().await;
+    let runtime_client = server.bedrock_runtime_client().await;
+
+    // Invoke a model first
+    let body = serde_json::to_vec(&serde_json::json!({
+        "anthropic_version": "bedrock-2023-05-31",
+        "max_tokens": 10,
+        "messages": [{"role": "user", "content": "Test"}]
+    }))
+    .unwrap();
+
+    runtime_client
+        .invoke_model()
+        .model_id("anthropic.claude-3-5-sonnet-20241022-v2:0")
+        .content_type("application/json")
+        .accept("application/json")
+        .body(Blob::new(body))
+        .send()
+        .await
+        .unwrap();
+
+    // Check introspection endpoint
+    let resp: serde_json::Value = reqwest::get(format!(
+        "{}/_fakecloud/bedrock/invocations",
+        server.endpoint()
+    ))
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+
+    let invocations = resp["invocations"].as_array().unwrap();
+    assert!(!invocations.is_empty());
+    assert_eq!(
+        invocations[0]["modelId"],
+        "anthropic.claude-3-5-sonnet-20241022-v2:0"
+    );
+    assert!(invocations[0]["timestamp"].as_str().is_some());
+}
+
+#[tokio::test]
+async fn bedrock_simulation_custom_response() {
+    let server = TestServer::start().await;
+    let runtime_client = server.bedrock_runtime_client().await;
+    let http_client = reqwest::Client::new();
+
+    // Configure custom response
+    let custom_response = serde_json::json!({
+        "id": "msg_custom",
+        "type": "message",
+        "role": "assistant",
+        "content": [{"type": "text", "text": "Custom test response!"}],
+        "model": "anthropic.claude-3-5-sonnet-20241022-v2:0",
+        "stop_reason": "end_turn",
+        "usage": {"input_tokens": 5, "output_tokens": 10}
+    });
+
+    http_client
+        .post(format!(
+            "{}/_fakecloud/bedrock/models/anthropic.claude-3-5-sonnet-20241022-v2:0/response",
+            server.endpoint()
+        ))
+        .body(serde_json::to_string(&custom_response).unwrap())
+        .send()
+        .await
+        .unwrap();
+
+    // Invoke model — should get custom response
+    let body = serde_json::to_vec(&serde_json::json!({
+        "anthropic_version": "bedrock-2023-05-31",
+        "max_tokens": 10,
+        "messages": [{"role": "user", "content": "Hi"}]
+    }))
+    .unwrap();
+
+    let resp = runtime_client
+        .invoke_model()
+        .model_id("anthropic.claude-3-5-sonnet-20241022-v2:0")
+        .content_type("application/json")
+        .accept("application/json")
+        .body(Blob::new(body))
+        .send()
+        .await
+        .unwrap();
+
+    let response_body: serde_json::Value = serde_json::from_slice(resp.body().as_ref()).unwrap();
+    assert_eq!(response_body["content"][0]["text"], "Custom test response!");
 }

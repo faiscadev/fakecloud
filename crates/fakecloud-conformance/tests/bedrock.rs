@@ -453,3 +453,61 @@ async fn bedrock_logging_configuration() {
         .unwrap();
     assert!(resp.logging_config().is_none());
 }
+
+// ---------------------------------------------------------------------------
+// Bedrock Runtime — InvokeModel & Converse
+// ---------------------------------------------------------------------------
+
+#[test_action("bedrock-runtime", "InvokeModel", checksum = "a289714a")]
+#[tokio::test]
+async fn bedrock_invoke_model() {
+    let server = TestServer::start().await;
+    let client = server.bedrock_runtime_client().await;
+
+    let body = serde_json::to_vec(&serde_json::json!({
+        "anthropic_version": "bedrock-2023-05-31",
+        "max_tokens": 100,
+        "messages": [{"role": "user", "content": "Hello"}]
+    }))
+    .unwrap();
+
+    let resp = client
+        .invoke_model()
+        .model_id("anthropic.claude-3-5-sonnet-20241022-v2:0")
+        .content_type("application/json")
+        .accept("application/json")
+        .body(aws_sdk_bedrockruntime::primitives::Blob::new(body))
+        .send()
+        .await
+        .unwrap();
+
+    let response_body: serde_json::Value = serde_json::from_slice(resp.body().as_ref()).unwrap();
+    assert_eq!(response_body["type"], "message");
+    assert!(response_body["content"][0]["text"].as_str().is_some());
+}
+
+#[test_action("bedrock-runtime", "Converse", checksum = "813a7054")]
+#[tokio::test]
+async fn bedrock_converse_conformance() {
+    let server = TestServer::start().await;
+    let client = server.bedrock_runtime_client().await;
+
+    let resp = client
+        .converse()
+        .model_id("anthropic.claude-3-5-sonnet-20241022-v2:0")
+        .messages(
+            aws_sdk_bedrockruntime::types::Message::builder()
+                .role(aws_sdk_bedrockruntime::types::ConversationRole::User)
+                .content(aws_sdk_bedrockruntime::types::ContentBlock::Text(
+                    "Hello!".to_string(),
+                ))
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.stop_reason().as_str(), "end_turn");
+    assert!(resp.output().is_some());
+}

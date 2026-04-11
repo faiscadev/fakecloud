@@ -1300,6 +1300,44 @@ async fn main() {
                 }
             }),
         )
+        // Bedrock introspection: list all model invocations
+        .route(
+            "/_fakecloud/bedrock/invocations",
+            axum::routing::get({
+                let bs = bedrock_state.clone();
+                move || async move {
+                    let state = bs.read();
+                    let invocations: Vec<serde_json::Value> = state
+                        .invocations
+                        .iter()
+                        .map(|inv| {
+                            serde_json::json!({
+                                "modelId": inv.model_id,
+                                "input": inv.input,
+                                "output": inv.output,
+                                "timestamp": inv.timestamp.to_rfc3339(),
+                            })
+                        })
+                        .collect();
+                    axum::Json(serde_json::json!({ "invocations": invocations }))
+                }
+            }),
+        )
+        // Bedrock simulation: configure model response
+        .route(
+            "/_fakecloud/bedrock/models/{model_id}/response",
+            axum::routing::post({
+                let bs = bedrock_state.clone();
+                move |axum::extract::Path(model_id): axum::extract::Path<String>,
+                      body: String| async move {
+                    let mut state = bs.write();
+                    state.custom_responses.insert(model_id.clone(), body);
+                    axum::Json(
+                        serde_json::json!({ "status": "ok", "modelId": model_id }),
+                    )
+                }
+            }),
+        )
         .fallback(dispatch::dispatch)
         .layer(Extension(Arc::new(registry)))
         .layer(Extension(Arc::new(config)))

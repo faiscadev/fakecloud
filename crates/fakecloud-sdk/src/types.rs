@@ -538,3 +538,27 @@ pub struct ApiGatewayV2Request {
 pub struct ApiGatewayV2RequestsResponse {
     pub requests: Vec<ApiGatewayV2Request>,
 }
+
+// ── Bedrock ────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BedrockInvocation {
+    pub model_id: String,
+    pub input: String,
+    pub output: String,
+    pub timestamp: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BedrockInvocationsResponse {
+    pub invocations: Vec<BedrockInvocation>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BedrockModelResponseConfig {
+    pub status: String,
+    pub model_id: String,
+}

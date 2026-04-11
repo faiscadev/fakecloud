@@ -120,6 +120,20 @@ impl BedrockService {
                 Some(("DeleteModelInvocationLoggingConfiguration", None))
             }
 
+            // Runtime operations (same SigV4 service name "bedrock")
+            (Method::POST, 3) if segs[0] == "model" && segs[2] == "invoke" => {
+                Some(("InvokeModel", Some(decode(&segs[1]))))
+            }
+            (Method::POST, 3) if segs[0] == "model" && segs[2] == "invoke-with-response-stream" => {
+                Some(("InvokeModelWithResponseStream", Some(decode(&segs[1]))))
+            }
+            (Method::POST, 3) if segs[0] == "model" && segs[2] == "converse" => {
+                Some(("Converse", Some(decode(&segs[1]))))
+            }
+            (Method::POST, 3) if segs[0] == "model" && segs[2] == "converse-stream" => {
+                Some(("ConverseStream", Some(decode(&segs[1]))))
+            }
+
             // Tags — all POST with ARN in body
             (Method::POST, 1) if segs[0] == "tagResource" => Some(("TagResource", None)),
             (Method::POST, 1) if segs[0] == "untagResource" => Some(("UntagResource", None)),
@@ -391,6 +405,15 @@ impl AwsService for BedrockService {
             "DeleteModelInvocationLoggingConfiguration" => {
                 crate::logging::delete_model_invocation_logging_configuration(&self.state)
             }
+            // Runtime operations
+            "InvokeModel" => crate::invoke::invoke_model(
+                &self.state,
+                &resource_id.unwrap_or_default(),
+                &req.body,
+            ),
+            "Converse" => {
+                crate::converse::converse(&self.state, &resource_id.unwrap_or_default(), &req.body)
+            }
             _ => Err(AwsServiceError::ActionNotImplemented {
                 service: "bedrock".to_string(),
                 action: action.to_string(),
@@ -423,6 +446,8 @@ impl AwsService for BedrockService {
             "PutModelInvocationLoggingConfiguration",
             "GetModelInvocationLoggingConfiguration",
             "DeleteModelInvocationLoggingConfiguration",
+            "InvokeModel",
+            "Converse",
         ]
     }
 }
