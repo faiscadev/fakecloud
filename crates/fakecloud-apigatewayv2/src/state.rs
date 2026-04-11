@@ -14,6 +14,8 @@ pub struct ApiGatewayV2State {
     pub integrations: HashMap<String, HashMap<String, Integration>>, // api-id -> (integration-id -> Integration)
     pub stages: HashMap<String, HashMap<String, Stage>>, // api-id -> (stage-name -> Stage)
     pub deployments: HashMap<String, HashMap<String, Deployment>>, // api-id -> (deployment-id -> Deployment)
+    pub authorizers: HashMap<String, HashMap<String, Authorizer>>, // api-id -> (authorizer-id -> Authorizer)
+    pub request_history: Vec<ApiRequest>, // For /_fakecloud/apigatewayv2/requests
 }
 
 impl ApiGatewayV2State {
@@ -26,6 +28,8 @@ impl ApiGatewayV2State {
             integrations: HashMap::new(),
             stages: HashMap::new(),
             deployments: HashMap::new(),
+            authorizers: HashMap::new(),
+            request_history: Vec::new(),
         }
     }
 }
@@ -135,4 +139,43 @@ pub struct Deployment {
     pub description: Option<String>,
     pub created_date: DateTime<Utc>,
     pub auto_deployed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Authorizer {
+    pub authorizer_id: String,
+    pub name: String,
+    pub authorizer_type: String, // "JWT" or "REQUEST"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub authorizer_uri: Option<String>, // Lambda ARN for REQUEST type
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub identity_source: Option<Vec<String>>, // e.g., ["$request.header.Authorization"]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jwt_configuration: Option<JwtConfiguration>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JwtConfiguration {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audience: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub issuer: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiRequest {
+    pub request_id: String,
+    pub api_id: String,
+    pub stage: String,
+    pub method: String,
+    pub path: String,
+    pub headers: HashMap<String, String>,
+    pub query_params: HashMap<String, String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+    pub timestamp: DateTime<Utc>,
+    pub status_code: u16,
 }

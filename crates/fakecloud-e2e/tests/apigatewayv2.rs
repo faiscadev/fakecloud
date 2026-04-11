@@ -1141,3 +1141,203 @@ async fn test_mock_integration() {
     let body: serde_json::Value = response.json().await.unwrap();
     assert_eq!(body["message"], "This is a mock response");
 }
+
+#[tokio::test]
+async fn test_authorizer_crud() {
+    let server = TestServer::start().await;
+    let client = server.apigatewayv2_client().await;
+
+    // Create API
+    let api = client
+        .create_api()
+        .name("test-api-authorizers")
+        .protocol_type(aws_sdk_apigatewayv2::types::ProtocolType::Http)
+        .send()
+        .await
+        .unwrap();
+    let api_id = api.api_id.as_ref().unwrap();
+
+    // Create JWT authorizer
+    let jwt_auth = client
+        .create_authorizer()
+        .api_id(api_id)
+        .authorizer_type(aws_sdk_apigatewayv2::types::AuthorizerType::Jwt)
+        .name("jwt-authorizer")
+        .identity_source("$request.header.Authorization")
+        .jwt_configuration(
+            aws_sdk_apigatewayv2::types::JwtConfiguration::builder()
+                .audience("https://api.example.com")
+                .issuer("https://auth.example.com")
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let jwt_auth_id = jwt_auth.authorizer_id.as_ref().unwrap();
+
+    assert_eq!(jwt_auth.name.as_ref().unwrap(), "jwt-authorizer");
+    assert_eq!(
+        jwt_auth.authorizer_type.as_ref().unwrap(),
+        &aws_sdk_apigatewayv2::types::AuthorizerType::Jwt
+    );
+
+    // Create REQUEST authorizer
+    let request_auth = client
+        .create_authorizer()
+        .api_id(api_id)
+        .authorizer_type(aws_sdk_apigatewayv2::types::AuthorizerType::Request)
+        .name("lambda-authorizer")
+        .authorizer_uri("arn:aws:lambda:us-east-1:000000000000:function:my-authorizer")
+        .identity_source("$request.header.Authorization")
+        .send()
+        .await
+        .unwrap();
+    let request_auth_id = request_auth.authorizer_id.as_ref().unwrap();
+
+    assert_eq!(request_auth.name.as_ref().unwrap(), "lambda-authorizer");
+    assert_eq!(
+        request_auth.authorizer_type.as_ref().unwrap(),
+        &aws_sdk_apigatewayv2::types::AuthorizerType::Request
+    );
+
+    // Get authorizer
+    let get_result = client
+        .get_authorizer()
+        .api_id(api_id)
+        .authorizer_id(jwt_auth_id)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(get_result.name.as_ref().unwrap(), "jwt-authorizer");
+
+    // List authorizers
+    let list_result = client
+        .get_authorizers()
+        .api_id(api_id)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(list_result.items.as_ref().unwrap().len(), 2);
+
+    // Update authorizer
+    let update_result = client
+        .update_authorizer()
+        .api_id(api_id)
+        .authorizer_id(jwt_auth_id)
+        .name("updated-jwt-authorizer")
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        update_result.name.as_ref().unwrap(),
+        "updated-jwt-authorizer"
+    );
+
+    // Delete authorizer
+    client
+        .delete_authorizer()
+        .api_id(api_id)
+        .authorizer_id(request_auth_id)
+        .send()
+        .await
+        .unwrap();
+
+    // Verify deletion
+    let list_after_delete = client
+        .get_authorizers()
+        .api_id(api_id)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(list_after_delete.items.as_ref().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn test_simulation_endpoint() {
+    let server = TestServer::start().await;
+    let client = server.apigatewayv2_client().await;
+
+    // Create API with Lambda integration
+    let api = client
+        .create_api()
+        .name("test-api-simulation")
+        .protocol_type(aws_sdk_apigatewayv2::types::ProtocolType::Http)
+        .send()
+        .await
+        .unwrap();
+    let api_id = api.api_id.as_ref().unwrap();
+
+    // Create mock integration
+    let integration = client
+        .create_integration()
+        .api_id(api_id)
+        .integration_type(aws_sdk_apigatewayv2::types::IntegrationType::Mock)
+        .send()
+        .await
+        .unwrap();
+    let integration_id = integration.integration_id.as_ref().unwrap();
+
+    // Create route
+    client
+        .create_route()
+        .api_id(api_id)
+        .route_key("GET /test")
+        .target(format!("integrations/{}", integration_id))
+        .send()
+        .await
+        .unwrap();
+
+    // Create stage
+    client
+        .create_stage()
+        .api_id(api_id)
+        .stage_name("prod")
+        .auto_deploy(true)
+        .send()
+        .await
+        .unwrap();
+
+    // Make a request to the API
+    let http_client = reqwest::Client::new();
+    let response = http_client
+        .get(format!("{}/prod/test?param1=value1", server.endpoint()))
+        .header("X-Custom-Header", "test-value")
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 200);
+
+    // Check simulation endpoint
+    let history_response = http_client
+        .get(format!(
+            "{}/_fakecloud/apigatewayv2/requests",
+            server.endpoint()
+        ))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(history_response.status(), 200);
+    let history: serde_json::Value = history_response.json().await.unwrap();
+    let requests = history["requests"].as_array().unwrap();
+
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0]["method"].as_str().unwrap(), "GET");
+    assert_eq!(requests[0]["path"].as_str().unwrap(), "/test");
+    assert_eq!(requests[0]["stage"].as_str().unwrap(), "prod");
+    assert_eq!(requests[0]["apiId"].as_str().unwrap(), api_id);
+    assert_eq!(
+        requests[0]["headers"]["x-custom-header"].as_str().unwrap(),
+        "test-value"
+    );
+    assert_eq!(
+        requests[0]["queryParams"]["param1"].as_str().unwrap(),
+        "value1"
+    );
+    assert_eq!(requests[0]["statusCode"].as_u64().unwrap(), 200);
+}

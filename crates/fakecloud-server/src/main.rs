@@ -1210,6 +1210,21 @@ async fn main() {
             }),
         )
         .route(
+            "/_fakecloud/apigatewayv2/requests",
+            axum::routing::get({
+                let apigw_state = apigatewayv2_state.clone();
+                move || {
+                    let apigw_state = apigw_state.clone();
+                    async move {
+                        let state = apigw_state.read();
+                        axum::Json(serde_json::json!({
+                            "requests": state.request_history
+                        }))
+                    }
+                }
+            }),
+        )
+        .route(
             "/_fakecloud/lambda/{function_name}/evict-container",
             axum::routing::post({
                 let rt = lambda_sim_evict_runtime;
