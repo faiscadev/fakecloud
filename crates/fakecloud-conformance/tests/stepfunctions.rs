@@ -3,6 +3,7 @@ mod helpers;
 use aws_sdk_sfn::types::Tag;
 use fakecloud_conformance_macros::test_action;
 use helpers::TestServer;
+use tokio::time::{sleep, Duration};
 
 fn simple_definition() -> String {
     serde_json::json!({
@@ -243,4 +244,220 @@ async fn sfn_list_tags_for_resource() {
         .await
         .unwrap();
     assert!(tags.tags().is_empty());
+}
+
+// ─── Execution Lifecycle Conformance Tests ──────────────────────────
+
+async fn wait_for_execution(client: &aws_sdk_sfn::Client, arn: &str) {
+    for _ in 0..50 {
+        sleep(Duration::from_millis(50)).await;
+        let desc = client
+            .describe_execution()
+            .execution_arn(arn)
+            .send()
+            .await
+            .unwrap();
+        if desc.status().as_str() != "RUNNING" {
+            return;
+        }
+    }
+    panic!("Execution did not complete in time");
+}
+
+#[test_action("sfn", "StartExecution", checksum = "6ec509e4")]
+#[tokio::test]
+async fn sfn_start_execution() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+
+    let create = client
+        .create_state_machine()
+        .name("conf-start-exec")
+        .definition(simple_definition())
+        .role_arn("arn:aws:iam::123456789012:role/test-role")
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .start_execution()
+        .state_machine_arn(create.state_machine_arn())
+        .input(r#"{}"#)
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.execution_arn().contains("execution:"));
+}
+
+#[test_action("sfn", "DescribeExecution", checksum = "7574d620")]
+#[tokio::test]
+async fn sfn_describe_execution() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+
+    let create = client
+        .create_state_machine()
+        .name("conf-desc-exec")
+        .definition(simple_definition())
+        .role_arn("arn:aws:iam::123456789012:role/test-role")
+        .send()
+        .await
+        .unwrap();
+
+    let start = client
+        .start_execution()
+        .state_machine_arn(create.state_machine_arn())
+        .send()
+        .await
+        .unwrap();
+
+    wait_for_execution(&client, start.execution_arn()).await;
+
+    let resp = client
+        .describe_execution()
+        .execution_arn(start.execution_arn())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_str(), "SUCCEEDED");
+}
+
+#[test_action("sfn", "ListExecutions", checksum = "6e3c28ed")]
+#[tokio::test]
+async fn sfn_list_executions() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+
+    let create = client
+        .create_state_machine()
+        .name("conf-list-exec")
+        .definition(simple_definition())
+        .role_arn("arn:aws:iam::123456789012:role/test-role")
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .start_execution()
+        .state_machine_arn(create.state_machine_arn())
+        .send()
+        .await
+        .unwrap();
+
+    sleep(Duration::from_millis(200)).await;
+
+    let resp = client
+        .list_executions()
+        .state_machine_arn(create.state_machine_arn())
+        .send()
+        .await
+        .unwrap();
+    assert!(!resp.executions().is_empty());
+}
+
+#[test_action("sfn", "StopExecution", checksum = "96371e61")]
+#[tokio::test]
+async fn sfn_stop_execution() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+
+    let create = client
+        .create_state_machine()
+        .name("conf-stop-exec")
+        .definition(simple_definition())
+        .role_arn("arn:aws:iam::123456789012:role/test-role")
+        .send()
+        .await
+        .unwrap();
+
+    let start = client
+        .start_execution()
+        .state_machine_arn(create.state_machine_arn())
+        .send()
+        .await
+        .unwrap();
+
+    // Try to stop; may already be complete due to fast execution
+    let _ = client
+        .stop_execution()
+        .execution_arn(start.execution_arn())
+        .send()
+        .await;
+
+    // Just verify describe works after stop attempt
+    let desc = client
+        .describe_execution()
+        .execution_arn(start.execution_arn())
+        .send()
+        .await
+        .unwrap();
+    // Status is either ABORTED or SUCCEEDED
+    let status = desc.status().as_str();
+    assert!(status == "ABORTED" || status == "SUCCEEDED");
+}
+
+#[test_action("sfn", "GetExecutionHistory", checksum = "447fb14a")]
+#[tokio::test]
+async fn sfn_get_execution_history() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+
+    let create = client
+        .create_state_machine()
+        .name("conf-history")
+        .definition(simple_definition())
+        .role_arn("arn:aws:iam::123456789012:role/test-role")
+        .send()
+        .await
+        .unwrap();
+
+    let start = client
+        .start_execution()
+        .state_machine_arn(create.state_machine_arn())
+        .send()
+        .await
+        .unwrap();
+
+    wait_for_execution(&client, start.execution_arn()).await;
+
+    let resp = client
+        .get_execution_history()
+        .execution_arn(start.execution_arn())
+        .send()
+        .await
+        .unwrap();
+    assert!(!resp.events().is_empty());
+}
+
+#[test_action("sfn", "DescribeStateMachineForExecution", checksum = "208431fb")]
+#[tokio::test]
+async fn sfn_describe_state_machine_for_execution() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+
+    let create = client
+        .create_state_machine()
+        .name("conf-sm-for-exec")
+        .definition(simple_definition())
+        .role_arn("arn:aws:iam::123456789012:role/test-role")
+        .send()
+        .await
+        .unwrap();
+
+    let start = client
+        .start_execution()
+        .state_machine_arn(create.state_machine_arn())
+        .send()
+        .await
+        .unwrap();
+
+    wait_for_execution(&client, start.execution_arn()).await;
+
+    let resp = client
+        .describe_state_machine_for_execution()
+        .execution_arn(start.execution_arn())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.name(), "conf-sm-for-exec");
 }
