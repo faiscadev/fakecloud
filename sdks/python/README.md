@@ -88,6 +88,7 @@ Access via properties on the main client:
 | `cognito` | Cognito | `get_user_codes(pool_id, username)`, `get_confirmation_codes()`, `confirm_user(req)`, `get_tokens()`, `expire_tokens(req)`, `get_auth_events()` |
 | `rds` | RDS | `get_instances()` |
 | `elasticache` | ElastiCache | `get_clusters()`, `get_replication_groups()`, `get_serverless_caches()` |
+| `stepfunctions` | Step Functions | `get_executions()` |
 | `apigatewayv2` | API Gateway v2 | `get_requests()` |
 
 ### Error handling

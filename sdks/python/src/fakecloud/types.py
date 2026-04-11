@@ -818,6 +818,37 @@ class AuthEventsResponse:
         )
 
 
+# ── Step Functions ──────────────────────────────────────────────────
+
+
+@dataclass
+class StepFunctionsExecution:
+    execution_arn: str
+    state_machine_arn: str
+    name: str
+    status: str
+    start_date: str
+    input: Optional[str] = None
+    output: Optional[str] = None
+    stop_date: Optional[str] = None
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> StepFunctionsExecution:
+        d = _convert_keys(data)
+        return cls(**d)
+
+
+@dataclass
+class StepFunctionsExecutionsResponse:
+    executions: List[StepFunctionsExecution]
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> StepFunctionsExecutionsResponse:
+        return cls(
+            executions=[StepFunctionsExecution.from_dict(e) for e in data.get("executions", [])],
+        )
+
+
 # ── API Gateway v2 ──────────────────────────────────────────────────────
 
 

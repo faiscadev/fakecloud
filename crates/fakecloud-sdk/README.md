@@ -43,6 +43,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 - Cognito confirmation codes, token inspection, and auth event access
 - RDS instance inspection with runtime metadata
 - ElastiCache cluster, replication group, and serverless cache inspection
+- Step Functions execution history
 - API Gateway v2 HTTP API request history
 
 ## Repository

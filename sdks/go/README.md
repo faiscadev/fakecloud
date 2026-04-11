@@ -148,6 +148,12 @@ func main() {
 | `GetReplicationGroups(ctx)` | List replication groups |
 | `GetServerlessCaches(ctx)` | List serverless caches |
 
+### Step Functions - `fc.StepFunctions()`
+
+| Method | Description |
+|--------|-------------|
+| `GetExecutions(ctx)` | List all state machine execution history |
+
 ### API Gateway v2 - `fc.ApiGatewayV2()`
 
 | Method | Description |

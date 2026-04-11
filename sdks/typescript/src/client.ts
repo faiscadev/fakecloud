@@ -35,6 +35,7 @@ import type {
   ExpireTokensRequest,
   ExpireTokensResponse,
   AuthEventsResponse,
+  StepFunctionsExecutionsResponse,
 } from "./types.js";
 
 export class FakeCloudError extends Error {
@@ -316,6 +317,15 @@ export class ApiGatewayV2Client {
   }
 }
 
+export class StepFunctionsClient {
+  constructor(private readonly baseUrl: string) {}
+
+  async getExecutions(): Promise<StepFunctionsExecutionsResponse> {
+    const resp = await fetch(`${this.baseUrl}/_fakecloud/stepfunctions/executions`);
+    return parse(resp);
+  }
+}
+
 // ── Main client ────────────────────────────────────────────────────
 
 export class FakeCloud {
@@ -333,6 +343,7 @@ export class FakeCloud {
   private readonly _secretsmanager: SecretsManagerClient;
   private readonly _cognito: CognitoClient;
   private readonly _apigatewayv2: ApiGatewayV2Client;
+  private readonly _stepfunctions: StepFunctionsClient;
 
   constructor(baseUrl: string = "http://localhost:4566") {
     this.baseUrl = baseUrl.replace(/\/+$/, "");
@@ -349,6 +360,7 @@ export class FakeCloud {
     this._secretsmanager = new SecretsManagerClient(this.baseUrl);
     this._cognito = new CognitoClient(this.baseUrl);
     this._apigatewayv2 = new ApiGatewayV2Client(this.baseUrl);
+    this._stepfunctions = new StepFunctionsClient(this.baseUrl);
   }
 
   // ── Health & Reset ─────────────────────────────────────────────
@@ -419,5 +431,9 @@ export class FakeCloud {
 
   get apigatewayv2(): ApiGatewayV2Client {
     return this._apigatewayv2;
+  }
+
+  get stepfunctions(): StepFunctionsClient {
+    return this._stepfunctions;
   }
 }

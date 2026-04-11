@@ -37,6 +37,7 @@ from fakecloud.types import (
     SesEmailsResponse,
     SnsMessagesResponse,
     SqsMessagesResponse,
+    StepFunctionsExecutionsResponse,
     TokensResponse,
     TtlTickResponse,
     UserConfirmationCodes,
@@ -331,6 +332,19 @@ class ApiGatewayV2Client:
         return ApiGatewayV2RequestsResponse.from_dict(resp.json())
 
 
+class StepFunctionsClient:
+    """Async Step Functions introspection client."""
+
+    def __init__(self, client: httpx.AsyncClient, base_url: str) -> None:
+        self._client = client
+        self._base = base_url
+
+    async def get_executions(self) -> StepFunctionsExecutionsResponse:
+        resp = await self._client.get(f"{self._base}/_fakecloud/stepfunctions/executions")
+        _check(resp)
+        return StepFunctionsExecutionsResponse.from_dict(resp.json())
+
+
 # ── Sync sub-clients ────────────────────────────────────────────────
 
 
@@ -577,6 +591,17 @@ class _SyncApiGatewayV2Client:
         return ApiGatewayV2RequestsResponse.from_dict(resp.json())
 
 
+class _SyncStepFunctionsClient:
+    def __init__(self, client: httpx.Client, base_url: str) -> None:
+        self._client = client
+        self._base = base_url
+
+    def get_executions(self) -> StepFunctionsExecutionsResponse:
+        resp = self._client.get(f"{self._base}/_fakecloud/stepfunctions/executions")
+        _check(resp)
+        return StepFunctionsExecutionsResponse.from_dict(resp.json())
+
+
 # ── Main clients ────────────────────────────────────────────────────
 
 
@@ -670,6 +695,10 @@ class FakeCloud:
     def apigatewayv2(self) -> ApiGatewayV2Client:
         return ApiGatewayV2Client(self._client, self._base)
 
+    @property
+    def stepfunctions(self) -> StepFunctionsClient:
+        return StepFunctionsClient(self._client, self._base)
+
     # ── Lifecycle ───────────────────────────────────────────────────
 
     async def aclose(self) -> None:
@@ -762,6 +791,10 @@ class FakeCloudSync:
     @property
     def apigatewayv2(self) -> _SyncApiGatewayV2Client:
         return _SyncApiGatewayV2Client(self._client, self._base)
+
+    @property
+    def stepfunctions(self) -> _SyncStepFunctionsClient:
+        return _SyncStepFunctionsClient(self._client, self._base)
 
     # ── Lifecycle ───────────────────────────────────────────────────
 

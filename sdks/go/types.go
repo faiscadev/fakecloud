@@ -414,6 +414,25 @@ type AuthEventsResponse struct {
 	Events []AuthEvent `json:"events"`
 }
 
+// ── Step Functions ─────────────────────────────────────────────────
+
+// StepFunctionsExecution represents a state machine execution.
+type StepFunctionsExecution struct {
+	ExecutionARN    string  `json:"executionArn"`
+	StateMachineARN string  `json:"stateMachineArn"`
+	Name            string  `json:"name"`
+	Status          string  `json:"status"`
+	StartDate       string  `json:"startDate"`
+	Input           *string `json:"input,omitempty"`
+	Output          *string `json:"output,omitempty"`
+	StopDate        *string `json:"stopDate,omitempty"`
+}
+
+// StepFunctionsExecutionsResponse contains all recorded executions.
+type StepFunctionsExecutionsResponse struct {
+	Executions []StepFunctionsExecution `json:"executions"`
+}
+
 // ── API Gateway v2 ─────────────────────────────────────────────────
 
 // ApiGatewayV2Request represents an HTTP API request that was received.

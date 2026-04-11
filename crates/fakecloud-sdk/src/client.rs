@@ -98,6 +98,10 @@ impl FakeCloud {
         ApiGatewayV2Client { fc: self }
     }
 
+    pub fn stepfunctions(&self) -> StepFunctionsClient<'_> {
+        StepFunctionsClient { fc: self }
+    }
+
     // ── Internal helpers ────────────────────────────────────────────
 
     async fn parse<T: serde::de::DeserializeOwned>(resp: reqwest::Response) -> Result<T, Error> {
@@ -600,6 +604,28 @@ impl ApiGatewayV2Client<'_> {
             .client
             .get(format!(
                 "{}/_fakecloud/apigatewayv2/requests",
+                self.fc.base_url
+            ))
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
+}
+
+// ── Step Functions ──────────────────────────────────────────────────
+
+pub struct StepFunctionsClient<'a> {
+    fc: &'a FakeCloud,
+}
+
+impl StepFunctionsClient<'_> {
+    /// List all Step Functions executions with status, input, output, and timestamps.
+    pub async fn get_executions(&self) -> Result<StepFunctionsExecutionsResponse, Error> {
+        let resp = self
+            .fc
+            .client
+            .get(format!(
+                "{}/_fakecloud/stepfunctions/executions",
                 self.fc.base_url
             ))
             .send()

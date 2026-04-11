@@ -364,6 +364,23 @@ export interface AuthEventsResponse {
   events: AuthEvent[];
 }
 
+// ── Step Functions ────────────────────────────────────────────────
+
+export interface StepFunctionsExecution {
+  executionArn: string;
+  stateMachineArn: string;
+  name: string;
+  status: string;
+  startDate: string;
+  input?: string | null;
+  output?: string | null;
+  stopDate?: string | null;
+}
+
+export interface StepFunctionsExecutionsResponse {
+  executions: StepFunctionsExecution[];
+}
+
 // ── API Gateway v2 ──────────────────────────────────────────────────
 
 export interface ApiGatewayV2Request {
