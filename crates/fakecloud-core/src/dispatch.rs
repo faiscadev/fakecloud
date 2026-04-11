@@ -36,28 +36,18 @@ pub async fn dispatch(
     let detected = match protocol::detect_service(&parts.headers, &query_params, &body_bytes) {
         Some(d) => d,
         None => {
-            let path = parts.uri.path();
-
             // OPTIONS requests (CORS preflight) don't carry Authorization headers.
-            // Route to apigateway if the path looks like an execute API path (/{stage}/...),
-            // otherwise route to S3.
+            // Route them to S3 since S3 is the only REST service that handles CORS.
+            // Note: API Gateway CORS preflight is not fully supported in this emulator
+            // because we can't distinguish between S3 and API Gateway OPTIONS requests
+            // without additional context (in real AWS, they have different domains).
             if parts.method == http::Method::OPTIONS {
-                // Check if path matches API Gateway execute API pattern (has at least 2 segments)
-                let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
-                if segments.len() >= 2 && !path.starts_with("/_") {
-                    protocol::DetectedRequest {
-                        service: "apigateway".to_string(),
-                        action: String::new(),
-                        protocol: AwsProtocol::RestJson,
-                    }
-                } else {
-                    protocol::DetectedRequest {
-                        service: "s3".to_string(),
-                        action: String::new(),
-                        protocol: AwsProtocol::Rest,
-                    }
+                protocol::DetectedRequest {
+                    service: "s3".to_string(),
+                    action: String::new(),
+                    protocol: AwsProtocol::Rest,
                 }
-            } else if !path.starts_with("/_") {
+            } else if !parts.uri.path().starts_with("/_") {
                 // Requests without AWS auth that don't match any service might be
                 // API Gateway execute API calls (plain HTTP without signatures).
                 // Route them to apigateway service which will validate if a matching
