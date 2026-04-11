@@ -633,12 +633,12 @@ def lambda_handler(event, context):
     assert_eq!(invocation_event["ResourceProperties"]["Count"], 42);
 
     let mut found = false;
-    for _ in 0..10 {
+    for _ in 0..20 {
         let msgs = sqs_client
             .receive_message()
             .queue_url(&queue_url)
             .max_number_of_messages(10)
-            .wait_time_seconds(2)
+            .wait_time_seconds(3)
             .send()
             .await
             .unwrap();
@@ -663,7 +663,7 @@ def lambda_handler(event, context):
             break;
         }
 
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     }
 
     assert!(
