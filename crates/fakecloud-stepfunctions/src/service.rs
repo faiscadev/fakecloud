@@ -9,7 +9,11 @@ use fakecloud_core::pagination::paginate;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 use fakecloud_core::validation::*;
 
-use crate::state::{SharedStepFunctionsState, StateMachine, StateMachineStatus, StateMachineType};
+use crate::interpreter;
+use crate::state::{
+    Execution, ExecutionStatus, SharedStepFunctionsState, StateMachine, StateMachineStatus,
+    StateMachineType,
+};
 
 const SUPPORTED: &[&str] = &[
     "CreateStateMachine",
@@ -20,6 +24,12 @@ const SUPPORTED: &[&str] = &[
     "TagResource",
     "UntagResource",
     "ListTagsForResource",
+    "StartExecution",
+    "StopExecution",
+    "DescribeExecution",
+    "ListExecutions",
+    "GetExecutionHistory",
+    "DescribeStateMachineForExecution",
 ];
 
 pub struct StepFunctionsService {
@@ -48,6 +58,12 @@ impl AwsService for StepFunctionsService {
             "TagResource" => self.tag_resource(&req),
             "UntagResource" => self.untag_resource(&req),
             "ListTagsForResource" => self.list_tags_for_resource(&req),
+            "StartExecution" => self.start_execution(&req),
+            "StopExecution" => self.stop_execution(&req),
+            "DescribeExecution" => self.describe_execution(&req),
+            "ListExecutions" => self.list_executions(&req),
+            "GetExecutionHistory" => self.get_execution_history(&req),
+            "DescribeStateMachineForExecution" => self.describe_state_machine_for_execution(&req),
             _ => Err(AwsServiceError::action_not_implemented(
                 "states",
                 &req.action,
@@ -261,6 +277,276 @@ impl StepFunctionsService {
         })))
     }
 
+    // ─── Execution Lifecycle ──────────────────────────────────────────
+
+    fn start_execution(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        validate_required("stateMachineArn", &body["stateMachineArn"])?;
+        let sm_arn = body["stateMachineArn"]
+            .as_str()
+            .ok_or_else(|| missing("stateMachineArn"))?;
+        validate_arn(sm_arn)?;
+
+        let input = body["input"].as_str().map(|s| s.to_string());
+
+        // Validate input is valid JSON if provided
+        if let Some(ref input_str) = input {
+            let _: serde_json::Value = serde_json::from_str(input_str).map_err(|_| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidExecutionInput",
+                    "Invalid execution input: must be valid JSON".to_string(),
+                )
+            })?;
+        }
+
+        let execution_name = body["name"]
+            .as_str()
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
+        if let Some(name) = body["name"].as_str() {
+            validate_name(name)?;
+        }
+
+        let mut state = self.state.write();
+        let sm = state
+            .state_machines
+            .get(sm_arn)
+            .ok_or_else(|| state_machine_not_found(sm_arn))?;
+
+        let sm_name = sm.name.clone();
+        let definition = sm.definition.clone();
+        let exec_arn = state.execution_arn(&sm_name, &execution_name);
+
+        // Check for duplicate execution name
+        if state.executions.contains_key(&exec_arn) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::CONFLICT,
+                "ExecutionAlreadyExists",
+                format!("Execution Already Exists: '{exec_arn}'"),
+            ));
+        }
+
+        let now = Utc::now();
+        let execution = Execution {
+            execution_arn: exec_arn.clone(),
+            state_machine_arn: sm_arn.to_string(),
+            state_machine_name: sm_name,
+            name: execution_name,
+            status: ExecutionStatus::Running,
+            input: input.clone(),
+            output: None,
+            start_date: now,
+            stop_date: None,
+            error: None,
+            cause: None,
+            history_events: vec![],
+        };
+
+        state.executions.insert(exec_arn.clone(), execution);
+        drop(state);
+
+        // Spawn async execution
+        let shared_state = self.state.clone();
+        let exec_arn_clone = exec_arn.clone();
+        let input_clone = input;
+        tokio::spawn(async move {
+            interpreter::execute_state_machine(
+                shared_state,
+                exec_arn_clone,
+                definition,
+                input_clone,
+            )
+            .await;
+        });
+
+        Ok(AwsResponse::ok_json(json!({
+            "executionArn": exec_arn,
+            "startDate": now.timestamp() as f64,
+        })))
+    }
+
+    fn stop_execution(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        validate_required("executionArn", &body["executionArn"])?;
+        let exec_arn = body["executionArn"]
+            .as_str()
+            .ok_or_else(|| missing("executionArn"))?;
+
+        let error = body["error"].as_str().map(|s| s.to_string());
+        let cause = body["cause"].as_str().map(|s| s.to_string());
+
+        let mut state = self.state.write();
+        let exec = state
+            .executions
+            .get_mut(exec_arn)
+            .ok_or_else(|| execution_not_found(exec_arn))?;
+
+        if exec.status != ExecutionStatus::Running {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ExecutionNotRunning",
+                format!("Execution is not running: '{exec_arn}'"),
+            ));
+        }
+
+        let now = Utc::now();
+        exec.status = ExecutionStatus::Aborted;
+        exec.stop_date = Some(now);
+        exec.error = error;
+        exec.cause = cause;
+
+        Ok(AwsResponse::ok_json(json!({
+            "stopDate": now.timestamp() as f64,
+        })))
+    }
+
+    fn describe_execution(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        validate_required("executionArn", &body["executionArn"])?;
+        let exec_arn = body["executionArn"]
+            .as_str()
+            .ok_or_else(|| missing("executionArn"))?;
+
+        let state = self.state.read();
+        let exec = state
+            .executions
+            .get(exec_arn)
+            .ok_or_else(|| execution_not_found(exec_arn))?;
+
+        Ok(AwsResponse::ok_json(execution_to_json(exec)))
+    }
+
+    fn list_executions(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        validate_required("stateMachineArn", &body["stateMachineArn"])?;
+        let sm_arn = body["stateMachineArn"]
+            .as_str()
+            .ok_or_else(|| missing("stateMachineArn"))?;
+        validate_arn(sm_arn)?;
+
+        let max_results = body["maxResults"].as_i64().unwrap_or(100) as usize;
+        validate_range_i64("maxResults", max_results as i64, 1, 1000)?;
+        let next_token = body["nextToken"].as_str();
+        let status_filter = body["statusFilter"].as_str();
+
+        let state = self.state.read();
+
+        // Verify state machine exists
+        if !state.state_machines.contains_key(sm_arn) {
+            return Err(state_machine_not_found(sm_arn));
+        }
+
+        let mut executions: Vec<&Execution> = state
+            .executions
+            .values()
+            .filter(|e| e.state_machine_arn == sm_arn)
+            .filter(|e| {
+                status_filter
+                    .map(|sf| e.status.as_str() == sf)
+                    .unwrap_or(true)
+            })
+            .collect();
+
+        // Sort by start date descending (most recent first)
+        executions.sort_by(|a, b| b.start_date.cmp(&a.start_date));
+
+        let items: Vec<Value> = executions
+            .iter()
+            .map(|e| {
+                let mut item = json!({
+                    "executionArn": e.execution_arn,
+                    "stateMachineArn": e.state_machine_arn,
+                    "name": e.name,
+                    "status": e.status.as_str(),
+                    "startDate": e.start_date.timestamp() as f64,
+                });
+                if let Some(stop) = e.stop_date {
+                    item["stopDate"] = json!(stop.timestamp() as f64);
+                }
+                item
+            })
+            .collect();
+
+        let (page, token) = paginate(&items, next_token, max_results);
+
+        let mut resp = json!({ "executions": page });
+        if let Some(t) = token {
+            resp["nextToken"] = json!(t);
+        }
+        Ok(AwsResponse::ok_json(resp))
+    }
+
+    fn get_execution_history(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        validate_required("executionArn", &body["executionArn"])?;
+        let exec_arn = body["executionArn"]
+            .as_str()
+            .ok_or_else(|| missing("executionArn"))?;
+
+        let max_results = body["maxResults"].as_i64().unwrap_or(100) as usize;
+        validate_range_i64("maxResults", max_results as i64, 1, 1000)?;
+        let next_token = body["nextToken"].as_str();
+        let reverse_order = body["reverseOrder"].as_bool().unwrap_or(false);
+
+        let state = self.state.read();
+        let exec = state
+            .executions
+            .get(exec_arn)
+            .ok_or_else(|| execution_not_found(exec_arn))?;
+
+        let mut events: Vec<Value> = exec
+            .history_events
+            .iter()
+            .map(|e| {
+                json!({
+                    "id": e.id,
+                    "type": e.event_type,
+                    "timestamp": e.timestamp.timestamp() as f64,
+                    "previousEventId": e.previous_event_id,
+                    format!("{}EventDetails", camel_to_details_key(&e.event_type)): e.details,
+                })
+            })
+            .collect();
+
+        if reverse_order {
+            events.reverse();
+        }
+
+        let (page, token) = paginate(&events, next_token, max_results);
+
+        let mut resp = json!({ "events": page });
+        if let Some(t) = token {
+            resp["nextToken"] = json!(t);
+        }
+        Ok(AwsResponse::ok_json(resp))
+    }
+
+    fn describe_state_machine_for_execution(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        validate_required("executionArn", &body["executionArn"])?;
+        let exec_arn = body["executionArn"]
+            .as_str()
+            .ok_or_else(|| missing("executionArn"))?;
+
+        let state = self.state.read();
+        let exec = state
+            .executions
+            .get(exec_arn)
+            .ok_or_else(|| execution_not_found(exec_arn))?;
+
+        let sm = state
+            .state_machines
+            .get(&exec.state_machine_arn)
+            .ok_or_else(|| state_machine_not_found(&exec.state_machine_arn))?;
+
+        Ok(AwsResponse::ok_json(state_machine_to_json(sm)))
+    }
+
     // ─── Tagging ────────────────────────────────────────────────────────
 
     fn tag_resource(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
@@ -468,6 +754,51 @@ fn validate_definition(definition: &str) -> Result<(), AwsServiceError> {
     }
 
     Ok(())
+}
+
+fn execution_not_found(arn: &str) -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::BAD_REQUEST,
+        "ExecutionDoesNotExist",
+        format!("Execution Does Not Exist: '{arn}'"),
+    )
+}
+
+fn execution_to_json(exec: &Execution) -> Value {
+    let mut resp = json!({
+        "executionArn": exec.execution_arn,
+        "stateMachineArn": exec.state_machine_arn,
+        "name": exec.name,
+        "status": exec.status.as_str(),
+        "startDate": exec.start_date.timestamp() as f64,
+    });
+
+    if let Some(ref input) = exec.input {
+        resp["input"] = json!(input);
+    }
+    if let Some(ref output) = exec.output {
+        resp["output"] = json!(output);
+    }
+    if let Some(stop) = exec.stop_date {
+        resp["stopDate"] = json!(stop.timestamp() as f64);
+    }
+    if let Some(ref error) = exec.error {
+        resp["error"] = json!(error);
+    }
+    if let Some(ref cause) = exec.cause {
+        resp["cause"] = json!(cause);
+    }
+
+    resp
+}
+
+/// Convert event type like "PassStateEntered" to the details key format "passStateEntered".
+fn camel_to_details_key(event_type: &str) -> String {
+    let mut chars = event_type.chars();
+    match chars.next() {
+        None => String::new(),
+        Some(c) => c.to_lowercase().to_string() + chars.as_str(),
+    }
 }
 
 fn validate_arn(arn: &str) -> Result<(), AwsServiceError> {
