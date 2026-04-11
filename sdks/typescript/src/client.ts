@@ -336,9 +336,7 @@ export class BedrockClient {
   constructor(private readonly baseUrl: string) {}
 
   async getInvocations(): Promise<BedrockInvocationsResponse> {
-    const resp = await fetch(
-      `${this.baseUrl}/_fakecloud/bedrock/invocations`,
-    );
+    const resp = await fetch(`${this.baseUrl}/_fakecloud/bedrock/invocations`);
     return parse(resp);
   }
 
