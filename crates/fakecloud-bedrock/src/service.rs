@@ -414,6 +414,53 @@ impl AwsService for BedrockService {
             "Converse" => {
                 crate::converse::converse(&self.state, &resource_id.unwrap_or_default(), &req.body)
             }
+            "InvokeModelWithResponseStream" => {
+                let model_id = resource_id.unwrap_or_default();
+                let response_text = crate::streaming::get_response_text(&self.state, &model_id);
+                let body =
+                    crate::streaming::build_invoke_stream_response(&model_id, &response_text);
+
+                // Record invocation
+                {
+                    let mut s = self.state.write();
+                    s.invocations.push(crate::state::ModelInvocation {
+                        model_id: model_id.clone(),
+                        input: String::from_utf8_lossy(&req.body).to_string(),
+                        output: response_text,
+                        timestamp: chrono::Utc::now(),
+                    });
+                }
+
+                Ok(AwsResponse {
+                    status: http::StatusCode::OK,
+                    content_type: "application/vnd.amazon.eventstream".to_string(),
+                    body: bytes::Bytes::from(body),
+                    headers: http::HeaderMap::new(),
+                })
+            }
+            "ConverseStream" => {
+                let model_id = resource_id.unwrap_or_default();
+                let response_text = crate::streaming::get_response_text(&self.state, &model_id);
+                let body = crate::streaming::build_converse_stream_response(&response_text);
+
+                // Record invocation
+                {
+                    let mut s = self.state.write();
+                    s.invocations.push(crate::state::ModelInvocation {
+                        model_id: model_id.clone(),
+                        input: String::from_utf8_lossy(&req.body).to_string(),
+                        output: response_text,
+                        timestamp: chrono::Utc::now(),
+                    });
+                }
+
+                Ok(AwsResponse {
+                    status: http::StatusCode::OK,
+                    content_type: "application/vnd.amazon.eventstream".to_string(),
+                    body: bytes::Bytes::from(body),
+                    headers: http::HeaderMap::new(),
+                })
+            }
             _ => Err(AwsServiceError::ActionNotImplemented {
                 service: "bedrock".to_string(),
                 action: action.to_string(),
@@ -447,7 +494,9 @@ impl AwsService for BedrockService {
             "GetModelInvocationLoggingConfiguration",
             "DeleteModelInvocationLoggingConfiguration",
             "InvokeModel",
+            "InvokeModelWithResponseStream",
             "Converse",
+            "ConverseStream",
         ]
     }
 }

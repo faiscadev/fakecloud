@@ -511,3 +511,74 @@ async fn bedrock_converse_conformance() {
     assert_eq!(resp.stop_reason().as_str(), "end_turn");
     assert!(resp.output().is_some());
 }
+
+// ---------------------------------------------------------------------------
+// Streaming (raw HTTP since SDK event stream parsing is complex)
+// ---------------------------------------------------------------------------
+
+#[test_action(
+    "bedrock-runtime",
+    "InvokeModelWithResponseStream",
+    checksum = "b594a2e9"
+)]
+#[tokio::test]
+async fn bedrock_invoke_model_with_response_stream() {
+    let server = TestServer::start().await;
+    let http_client = reqwest::Client::new();
+
+    let body = serde_json::json!({
+        "anthropic_version": "bedrock-2023-05-31",
+        "max_tokens": 100,
+        "messages": [{"role": "user", "content": "Hello"}]
+    });
+
+    let resp = http_client
+        .post(format!(
+            "{}/model/anthropic.claude-3-5-sonnet-20241022-v2:0/invoke-with-response-stream",
+            server.endpoint()
+        ))
+        .header("content-type", "application/json")
+        .header(
+            "authorization",
+            "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20260411/us-east-1/bedrock/aws4_request, SignedHeaders=host, Signature=fake",
+        )
+        .body(serde_json::to_string(&body).unwrap())
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+    let body_bytes = resp.bytes().await.unwrap();
+    assert!(body_bytes.len() > 16);
+}
+
+#[test_action("bedrock-runtime", "ConverseStream", checksum = "94a08bea")]
+#[tokio::test]
+async fn bedrock_converse_stream() {
+    let server = TestServer::start().await;
+    let http_client = reqwest::Client::new();
+
+    let body = serde_json::json!({
+        "modelId": "anthropic.claude-3-5-sonnet-20241022-v2:0",
+        "messages": [{"role": "user", "content": [{"text": "Hello"}]}]
+    });
+
+    let resp = http_client
+        .post(format!(
+            "{}/model/anthropic.claude-3-5-sonnet-20241022-v2:0/converse-stream",
+            server.endpoint()
+        ))
+        .header("content-type", "application/json")
+        .header(
+            "authorization",
+            "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20260411/us-east-1/bedrock/aws4_request, SignedHeaders=host, Signature=fake",
+        )
+        .body(serde_json::to_string(&body).unwrap())
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+    let body_bytes = resp.bytes().await.unwrap();
+    assert!(body_bytes.len() > 100);
+}
