@@ -1382,6 +1382,7 @@ async fn ssm_ops_item_related_items() {
     let create = client
         .create_ops_item()
         .title("Related test")
+        .description("Related item test description")
         .source("test")
         .send()
         .await
