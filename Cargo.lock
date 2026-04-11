@@ -1974,6 +1974,7 @@ name = "fakecloud-bedrock"
 version = "0.7.1"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "bytes",
  "chrono",
  "fakecloud-aws",

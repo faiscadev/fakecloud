@@ -720,3 +720,94 @@ async fn bedrock_simulation_custom_response() {
     let response_body: serde_json::Value = serde_json::from_slice(resp.body().as_ref()).unwrap();
     assert_eq!(response_body["content"][0]["text"], "Custom test response!");
 }
+
+// ---------------------------------------------------------------------------
+// Streaming (via raw HTTP — AWS SDK event stream parsing is complex)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn bedrock_invoke_model_with_response_stream_raw() {
+    let server = TestServer::start().await;
+    let http_client = reqwest::Client::new();
+
+    let body = serde_json::json!({
+        "anthropic_version": "bedrock-2023-05-31",
+        "max_tokens": 100,
+        "messages": [{"role": "user", "content": "Hello"}]
+    });
+
+    let resp = http_client
+        .post(format!(
+            "{}/model/anthropic.claude-3-5-sonnet-20241022-v2:0/invoke-with-response-stream",
+            server.endpoint()
+        ))
+        .header("content-type", "application/json")
+        .header(
+            "authorization",
+            "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20260411/us-east-1/bedrock/aws4_request, SignedHeaders=host, Signature=fake",
+        )
+        .body(serde_json::to_string(&body).unwrap())
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert_eq!(content_type, "application/vnd.amazon.eventstream");
+
+    let body_bytes = resp.bytes().await.unwrap();
+    // Event stream should have some data (at minimum one event frame)
+    assert!(
+        body_bytes.len() > 16,
+        "event stream body should not be empty"
+    );
+}
+
+#[tokio::test]
+async fn bedrock_converse_stream_raw() {
+    let server = TestServer::start().await;
+    let http_client = reqwest::Client::new();
+
+    let body = serde_json::json!({
+        "modelId": "anthropic.claude-3-5-sonnet-20241022-v2:0",
+        "messages": [
+            {"role": "user", "content": [{"text": "Hello"}]}
+        ]
+    });
+
+    let resp = http_client
+        .post(format!(
+            "{}/model/anthropic.claude-3-5-sonnet-20241022-v2:0/converse-stream",
+            server.endpoint()
+        ))
+        .header("content-type", "application/json")
+        .header(
+            "authorization",
+            "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20260411/us-east-1/bedrock/aws4_request, SignedHeaders=host, Signature=fake",
+        )
+        .body(serde_json::to_string(&body).unwrap())
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert_eq!(content_type, "application/vnd.amazon.eventstream");
+
+    let body_bytes = resp.bytes().await.unwrap();
+    // Should have multiple events (messageStart, contentBlockStart, delta, stop, metadata)
+    assert!(
+        body_bytes.len() > 100,
+        "converse stream should have multiple events"
+    );
+}
