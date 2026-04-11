@@ -5,7 +5,7 @@ use serde_json::json;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 use fakecloud_core::validation::*;
 
-use crate::state::{HttpApi, Integration, Route, SharedApiGatewayV2State};
+use crate::state::{Deployment, HttpApi, Integration, Route, SharedApiGatewayV2State, Stage};
 
 const SUPPORTED: &[&str] = &[
     "CreateApi",
@@ -23,6 +23,14 @@ const SUPPORTED: &[&str] = &[
     "GetIntegrations",
     "UpdateIntegration",
     "DeleteIntegration",
+    "CreateStage",
+    "GetStage",
+    "GetStages",
+    "UpdateStage",
+    "DeleteStage",
+    "CreateDeployment",
+    "GetDeployment",
+    "GetDeployments",
 ];
 
 pub struct ApiGatewayV2Service {
@@ -51,6 +59,14 @@ impl ApiGatewayV2Service {
     ///   GET    /v2/apis/{api-id}/integrations/{int-id} -> GetIntegration
     ///   PATCH  /v2/apis/{api-id}/integrations/{int-id} -> UpdateIntegration
     ///   DELETE /v2/apis/{api-id}/integrations/{int-id} -> DeleteIntegration
+    ///   POST   /v2/apis/{api-id}/stages -> CreateStage
+    ///   GET    /v2/apis/{api-id}/stages -> GetStages
+    ///   GET    /v2/apis/{api-id}/stages/{stage-name} -> GetStage
+    ///   PATCH  /v2/apis/{api-id}/stages/{stage-name} -> UpdateStage
+    ///   DELETE /v2/apis/{api-id}/stages/{stage-name} -> DeleteStage
+    ///   POST   /v2/apis/{api-id}/deployments -> CreateDeployment
+    ///   GET    /v2/apis/{api-id}/deployments -> GetDeployments
+    ///   GET    /v2/apis/{api-id}/deployments/{deployment-id} -> GetDeployment
     fn resolve_action(req: &AwsRequest) -> Option<(&str, Option<String>, Option<String>)> {
         let segs = &req.path_segments;
         if segs.len() < 2 {
@@ -83,6 +99,18 @@ impl ApiGatewayV2Service {
             (Method::GET, 4) if segs[3] == "integrations" => {
                 Some(("GetIntegrations", Some(segs[2].clone()), None))
             }
+            (Method::POST, 4) if segs[3] == "stages" => {
+                Some(("CreateStage", Some(segs[2].clone()), None))
+            }
+            (Method::GET, 4) if segs[3] == "stages" => {
+                Some(("GetStages", Some(segs[2].clone()), None))
+            }
+            (Method::POST, 4) if segs[3] == "deployments" => {
+                Some(("CreateDeployment", Some(segs[2].clone()), None))
+            }
+            (Method::GET, 4) if segs[3] == "deployments" => {
+                Some(("GetDeployments", Some(segs[2].clone()), None))
+            }
             // /v2/apis/{api-id}/routes/{route-id} or /v2/apis/{api-id}/integrations/{int-id}
             (Method::GET, 5) if segs[3] == "routes" => {
                 Some(("GetRoute", Some(segs[2].clone()), Some(segs[4].clone())))
@@ -105,6 +133,20 @@ impl ApiGatewayV2Service {
             )),
             (Method::DELETE, 5) if segs[3] == "integrations" => Some((
                 "DeleteIntegration",
+                Some(segs[2].clone()),
+                Some(segs[4].clone()),
+            )),
+            (Method::GET, 5) if segs[3] == "stages" => {
+                Some(("GetStage", Some(segs[2].clone()), Some(segs[4].clone())))
+            }
+            (Method::PATCH, 5) if segs[3] == "stages" => {
+                Some(("UpdateStage", Some(segs[2].clone()), Some(segs[4].clone())))
+            }
+            (Method::DELETE, 5) if segs[3] == "stages" => {
+                Some(("DeleteStage", Some(segs[2].clone()), Some(segs[4].clone())))
+            }
+            (Method::GET, 5) if segs[3] == "deployments" => Some((
+                "GetDeployment",
                 Some(segs[2].clone()),
                 Some(segs[4].clone()),
             )),
@@ -150,6 +192,14 @@ impl AwsService for ApiGatewayV2Service {
             "DeleteIntegration" => {
                 self.delete_integration(&req, api_id.as_deref(), resource_id.as_deref())
             }
+            "CreateStage" => self.create_stage(&req, api_id.as_deref()),
+            "GetStage" => self.get_stage(&req, api_id.as_deref(), resource_id.as_deref()),
+            "GetStages" => self.get_stages(&req, api_id.as_deref()),
+            "UpdateStage" => self.update_stage(&req, api_id.as_deref(), resource_id.as_deref()),
+            "DeleteStage" => self.delete_stage(&req, api_id.as_deref(), resource_id.as_deref()),
+            "CreateDeployment" => self.create_deployment(&req, api_id.as_deref()),
+            "GetDeployment" => self.get_deployment(&req, api_id.as_deref(), resource_id.as_deref()),
+            "GetDeployments" => self.get_deployments(&req, api_id.as_deref()),
             _ => Err(AwsServiceError::action_not_implemented(
                 "apigateway",
                 action,
@@ -798,6 +848,386 @@ impl ApiGatewayV2Service {
         })?;
 
         Ok(AwsResponse::json(StatusCode::NO_CONTENT, vec![]))
+    }
+
+    // ─── STAGE CRUD ─────────────────────────────────────────────────────
+
+    fn create_stage(
+        &self,
+        req: &AwsRequest,
+        api_id: Option<&str>,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let api_id = api_id.ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "BadRequestException",
+                "API ID is required",
+            )
+        })?;
+
+        let body = req.json_body();
+
+        validate_required("stageName", &body["stageName"])?;
+        let stage_name = body["stageName"]
+            .as_str()
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationException",
+                    "stageName is required",
+                )
+            })?
+            .to_string();
+
+        let description = body["description"].as_str().map(|s| s.to_string());
+        let auto_deploy = body["autoDeploy"].as_bool().unwrap_or(false);
+        let deployment_id = body["deploymentId"].as_str().map(|s| s.to_string());
+
+        let created_date = chrono::Utc::now();
+
+        let stage = Stage {
+            stage_name: stage_name.clone(),
+            description,
+            deployment_id,
+            auto_deploy,
+            created_date,
+            last_updated_date: None,
+        };
+
+        let mut state = self.state.write();
+
+        // Verify API exists
+        if !state.apis.contains_key(api_id) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "NotFoundException",
+                format!("API not found: {}", api_id),
+            ));
+        }
+
+        state
+            .stages
+            .entry(api_id.to_string())
+            .or_default()
+            .insert(stage_name, stage.clone());
+
+        Ok(AwsResponse::ok_json(json!(stage)))
+    }
+
+    fn get_stage(
+        &self,
+        _req: &AwsRequest,
+        api_id: Option<&str>,
+        stage_name: Option<&str>,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let api_id = api_id.ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "BadRequestException",
+                "API ID is required",
+            )
+        })?;
+
+        let stage_name = stage_name.ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "BadRequestException",
+                "Stage name is required",
+            )
+        })?;
+
+        let state = self.state.read();
+
+        let stages = state.stages.get(api_id).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "NotFoundException",
+                format!("API not found: {}", api_id),
+            )
+        })?;
+
+        let stage = stages.get(stage_name).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "NotFoundException",
+                format!("Stage not found: {}", stage_name),
+            )
+        })?;
+
+        Ok(AwsResponse::ok_json(json!(stage)))
+    }
+
+    fn get_stages(
+        &self,
+        _req: &AwsRequest,
+        api_id: Option<&str>,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let api_id = api_id.ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "BadRequestException",
+                "API ID is required",
+            )
+        })?;
+
+        let state = self.state.read();
+
+        // Verify API exists
+        if !state.apis.contains_key(api_id) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "NotFoundException",
+                format!("API not found: {}", api_id),
+            ));
+        }
+
+        let stages: Vec<&Stage> = state
+            .stages
+            .get(api_id)
+            .map(|s| s.values().collect())
+            .unwrap_or_default();
+
+        Ok(AwsResponse::ok_json(json!({
+            "items": stages,
+        })))
+    }
+
+    fn update_stage(
+        &self,
+        req: &AwsRequest,
+        api_id: Option<&str>,
+        stage_name: Option<&str>,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let api_id = api_id.ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "BadRequestException",
+                "API ID is required",
+            )
+        })?;
+
+        let stage_name = stage_name.ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "BadRequestException",
+                "Stage name is required",
+            )
+        })?;
+
+        let body = req.json_body();
+        let mut state = self.state.write();
+
+        let stages = state.stages.get_mut(api_id).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "NotFoundException",
+                format!("API not found: {}", api_id),
+            )
+        })?;
+
+        let stage = stages.get_mut(stage_name).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "NotFoundException",
+                format!("Stage not found: {}", stage_name),
+            )
+        })?;
+
+        if let Some(description) = body["description"].as_str() {
+            stage.description = Some(description.to_string());
+        }
+
+        if let Some(auto_deploy) = body["autoDeploy"].as_bool() {
+            stage.auto_deploy = auto_deploy;
+        }
+
+        if let Some(deployment_id) = body["deploymentId"].as_str() {
+            stage.deployment_id = Some(deployment_id.to_string());
+        }
+
+        stage.last_updated_date = Some(chrono::Utc::now());
+
+        Ok(AwsResponse::ok_json(json!(stage)))
+    }
+
+    fn delete_stage(
+        &self,
+        _req: &AwsRequest,
+        api_id: Option<&str>,
+        stage_name: Option<&str>,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let api_id = api_id.ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "BadRequestException",
+                "API ID is required",
+            )
+        })?;
+
+        let stage_name = stage_name.ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "BadRequestException",
+                "Stage name is required",
+            )
+        })?;
+
+        let mut state = self.state.write();
+
+        let stages = state.stages.get_mut(api_id).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "NotFoundException",
+                format!("API not found: {}", api_id),
+            )
+        })?;
+
+        stages.remove(stage_name).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "NotFoundException",
+                format!("Stage not found: {}", stage_name),
+            )
+        })?;
+
+        Ok(AwsResponse::json(StatusCode::NO_CONTENT, vec![]))
+    }
+
+    // ─── DEPLOYMENT CRUD ────────────────────────────────────────────────
+
+    fn create_deployment(
+        &self,
+        req: &AwsRequest,
+        api_id: Option<&str>,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let api_id = api_id.ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "BadRequestException",
+                "API ID is required",
+            )
+        })?;
+
+        let body = req.json_body();
+        let description = body["description"].as_str().map(|s| s.to_string());
+        let stage_name = body["stageName"].as_str();
+
+        let deployment_id = generate_id("deployment");
+        let created_date = chrono::Utc::now();
+
+        let deployment = Deployment {
+            deployment_id: deployment_id.clone(),
+            description,
+            created_date,
+            auto_deployed: false,
+        };
+
+        let mut state = self.state.write();
+
+        // Verify API exists
+        if !state.apis.contains_key(api_id) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "NotFoundException",
+                format!("API not found: {}", api_id),
+            ));
+        }
+
+        state
+            .deployments
+            .entry(api_id.to_string())
+            .or_default()
+            .insert(deployment_id.clone(), deployment.clone());
+
+        // If stage_name is provided, update the stage's deployment_id
+        if let Some(stage_name) = stage_name {
+            if let Some(stages) = state.stages.get_mut(api_id) {
+                if let Some(stage) = stages.get_mut(stage_name) {
+                    stage.deployment_id = Some(deployment_id);
+                    stage.last_updated_date = Some(chrono::Utc::now());
+                }
+            }
+        }
+
+        Ok(AwsResponse::ok_json(json!(deployment)))
+    }
+
+    fn get_deployment(
+        &self,
+        _req: &AwsRequest,
+        api_id: Option<&str>,
+        deployment_id: Option<&str>,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let api_id = api_id.ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "BadRequestException",
+                "API ID is required",
+            )
+        })?;
+
+        let deployment_id = deployment_id.ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "BadRequestException",
+                "Deployment ID is required",
+            )
+        })?;
+
+        let state = self.state.read();
+
+        let deployments = state.deployments.get(api_id).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "NotFoundException",
+                format!("API not found: {}", api_id),
+            )
+        })?;
+
+        let deployment = deployments.get(deployment_id).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "NotFoundException",
+                format!("Deployment not found: {}", deployment_id),
+            )
+        })?;
+
+        Ok(AwsResponse::ok_json(json!(deployment)))
+    }
+
+    fn get_deployments(
+        &self,
+        _req: &AwsRequest,
+        api_id: Option<&str>,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let api_id = api_id.ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "BadRequestException",
+                "API ID is required",
+            )
+        })?;
+
+        let state = self.state.read();
+
+        // Verify API exists
+        if !state.apis.contains_key(api_id) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "NotFoundException",
+                format!("API not found: {}", api_id),
+            ));
+        }
+
+        let deployments: Vec<&Deployment> = state
+            .deployments
+            .get(api_id)
+            .map(|d| d.values().collect())
+            .unwrap_or_default();
+
+        Ok(AwsResponse::ok_json(json!({
+            "items": deployments,
+        })))
     }
 }
 

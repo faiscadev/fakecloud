@@ -12,6 +12,8 @@ pub struct ApiGatewayV2State {
     pub apis: HashMap<String, HttpApi>,
     pub routes: HashMap<String, HashMap<String, Route>>, // api-id -> (route-id -> Route)
     pub integrations: HashMap<String, HashMap<String, Integration>>, // api-id -> (integration-id -> Integration)
+    pub stages: HashMap<String, HashMap<String, Stage>>, // api-id -> (stage-name -> Stage)
+    pub deployments: HashMap<String, HashMap<String, Deployment>>, // api-id -> (deployment-id -> Deployment)
 }
 
 impl ApiGatewayV2State {
@@ -22,6 +24,8 @@ impl ApiGatewayV2State {
             apis: HashMap::new(),
             routes: HashMap::new(),
             integrations: HashMap::new(),
+            stages: HashMap::new(),
+            deployments: HashMap::new(),
         }
     }
 }
@@ -87,4 +91,28 @@ pub struct Integration {
     pub payload_format_version: Option<String>, // "2.0"
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout_in_millis: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Stage {
+    pub stage_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deployment_id: Option<String>,
+    pub auto_deploy: bool,
+    pub created_date: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_updated_date: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Deployment {
+    pub deployment_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub created_date: DateTime<Utc>,
+    pub auto_deployed: bool,
 }

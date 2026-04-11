@@ -568,3 +568,327 @@ async fn test_route_with_target_integration() {
         Some(format!("integrations/{}", integration_id).as_str())
     );
 }
+
+#[tokio::test]
+async fn test_create_stage() {
+    let server = TestServer::start().await;
+    let client = server.apigatewayv2_client().await;
+
+    let api = client
+        .create_api()
+        .name("test-api")
+        .protocol_type(aws_sdk_apigatewayv2::types::ProtocolType::Http)
+        .send()
+        .await
+        .unwrap();
+
+    let api_id = api.api_id().unwrap();
+
+    let stage = client
+        .create_stage()
+        .api_id(api_id)
+        .stage_name("prod")
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(stage.stage_name(), Some("prod"));
+    assert!(stage.created_date().is_some());
+}
+
+#[tokio::test]
+async fn test_get_stage() {
+    let server = TestServer::start().await;
+    let client = server.apigatewayv2_client().await;
+
+    let api = client
+        .create_api()
+        .name("test-api")
+        .protocol_type(aws_sdk_apigatewayv2::types::ProtocolType::Http)
+        .send()
+        .await
+        .unwrap();
+
+    let api_id = api.api_id().unwrap();
+
+    client
+        .create_stage()
+        .api_id(api_id)
+        .stage_name("prod")
+        .send()
+        .await
+        .unwrap();
+
+    let result = client
+        .get_stage()
+        .api_id(api_id)
+        .stage_name("prod")
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(result.stage_name(), Some("prod"));
+}
+
+#[tokio::test]
+async fn test_get_stages() {
+    let server = TestServer::start().await;
+    let client = server.apigatewayv2_client().await;
+
+    let api = client
+        .create_api()
+        .name("test-api")
+        .protocol_type(aws_sdk_apigatewayv2::types::ProtocolType::Http)
+        .send()
+        .await
+        .unwrap();
+
+    let api_id = api.api_id().unwrap();
+
+    client
+        .create_stage()
+        .api_id(api_id)
+        .stage_name("prod")
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .create_stage()
+        .api_id(api_id)
+        .stage_name("dev")
+        .send()
+        .await
+        .unwrap();
+
+    let result = client.get_stages().api_id(api_id).send().await.unwrap();
+
+    let items = result.items();
+    assert_eq!(items.len(), 2);
+}
+
+#[tokio::test]
+async fn test_update_stage() {
+    let server = TestServer::start().await;
+    let client = server.apigatewayv2_client().await;
+
+    let api = client
+        .create_api()
+        .name("test-api")
+        .protocol_type(aws_sdk_apigatewayv2::types::ProtocolType::Http)
+        .send()
+        .await
+        .unwrap();
+
+    let api_id = api.api_id().unwrap();
+
+    client
+        .create_stage()
+        .api_id(api_id)
+        .stage_name("prod")
+        .send()
+        .await
+        .unwrap();
+
+    let result = client
+        .update_stage()
+        .api_id(api_id)
+        .stage_name("prod")
+        .description("Production stage")
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(result.description(), Some("Production stage"));
+}
+
+#[tokio::test]
+async fn test_delete_stage() {
+    let server = TestServer::start().await;
+    let client = server.apigatewayv2_client().await;
+
+    let api = client
+        .create_api()
+        .name("test-api")
+        .protocol_type(aws_sdk_apigatewayv2::types::ProtocolType::Http)
+        .send()
+        .await
+        .unwrap();
+
+    let api_id = api.api_id().unwrap();
+
+    client
+        .create_stage()
+        .api_id(api_id)
+        .stage_name("prod")
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .delete_stage()
+        .api_id(api_id)
+        .stage_name("prod")
+        .send()
+        .await
+        .unwrap();
+
+    let result = client
+        .get_stage()
+        .api_id(api_id)
+        .stage_name("prod")
+        .send()
+        .await;
+    assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn test_create_deployment() {
+    let server = TestServer::start().await;
+    let client = server.apigatewayv2_client().await;
+
+    let api = client
+        .create_api()
+        .name("test-api")
+        .protocol_type(aws_sdk_apigatewayv2::types::ProtocolType::Http)
+        .send()
+        .await
+        .unwrap();
+
+    let api_id = api.api_id().unwrap();
+
+    let deployment = client
+        .create_deployment()
+        .api_id(api_id)
+        .description("Initial deployment")
+        .send()
+        .await
+        .unwrap();
+
+    assert!(deployment.deployment_id().is_some());
+    assert_eq!(deployment.description(), Some("Initial deployment"));
+}
+
+#[tokio::test]
+async fn test_get_deployment() {
+    let server = TestServer::start().await;
+    let client = server.apigatewayv2_client().await;
+
+    let api = client
+        .create_api()
+        .name("test-api")
+        .protocol_type(aws_sdk_apigatewayv2::types::ProtocolType::Http)
+        .send()
+        .await
+        .unwrap();
+
+    let api_id = api.api_id().unwrap();
+
+    let created = client
+        .create_deployment()
+        .api_id(api_id)
+        .send()
+        .await
+        .unwrap();
+
+    let deployment_id = created.deployment_id().unwrap();
+
+    let result = client
+        .get_deployment()
+        .api_id(api_id)
+        .deployment_id(deployment_id)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(result.deployment_id(), Some(deployment_id));
+}
+
+#[tokio::test]
+async fn test_get_deployments() {
+    let server = TestServer::start().await;
+    let client = server.apigatewayv2_client().await;
+
+    let api = client
+        .create_api()
+        .name("test-api")
+        .protocol_type(aws_sdk_apigatewayv2::types::ProtocolType::Http)
+        .send()
+        .await
+        .unwrap();
+
+    let api_id = api.api_id().unwrap();
+
+    client
+        .create_deployment()
+        .api_id(api_id)
+        .description("Deployment 1")
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .create_deployment()
+        .api_id(api_id)
+        .description("Deployment 2")
+        .send()
+        .await
+        .unwrap();
+
+    let result = client
+        .get_deployments()
+        .api_id(api_id)
+        .send()
+        .await
+        .unwrap();
+
+    let items = result.items();
+    assert_eq!(items.len(), 2);
+}
+
+#[tokio::test]
+async fn test_deployment_with_stage() {
+    let server = TestServer::start().await;
+    let client = server.apigatewayv2_client().await;
+
+    let api = client
+        .create_api()
+        .name("test-api")
+        .protocol_type(aws_sdk_apigatewayv2::types::ProtocolType::Http)
+        .send()
+        .await
+        .unwrap();
+
+    let api_id = api.api_id().unwrap();
+
+    let stage = client
+        .create_stage()
+        .api_id(api_id)
+        .stage_name("prod")
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(stage.stage_name(), Some("prod"));
+    assert_eq!(stage.deployment_id(), None);
+
+    let deployment = client
+        .create_deployment()
+        .api_id(api_id)
+        .stage_name("prod")
+        .send()
+        .await
+        .unwrap();
+
+    let deployment_id = deployment.deployment_id().unwrap();
+
+    let updated_stage = client
+        .get_stage()
+        .api_id(api_id)
+        .stage_name("prod")
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(updated_stage.deployment_id(), Some(deployment_id));
+}
