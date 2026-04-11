@@ -156,7 +156,7 @@ aws --endpoint-url http://localhost:4566 sqs create-queue --queue-name my-queue
 
 ## Supported Services
 
-19 AWS services, 1016 API operations:
+20 AWS services, 1044 API operations:
 
 | Service                | Actions | Highlights                                                                                                                                                                                                                                                                                                                                                                                                  |
 | ---------------------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -179,6 +179,7 @@ aws --endpoint-url http://localhost:4566 sqs create-queue --queue-name my-queue
 | **RDS**                | 22      | DB instances (PostgreSQL, MySQL, MariaDB via Docker), snapshots, read replicas, parameter groups, subnet groups, engine/version discovery, tagging                                                                                                                                                                                                                                                          |
 | **ElastiCache**        | 44      | Cache clusters, replication groups, global replication groups, serverless caches and snapshots, subnet groups, users/user groups, failover, tagging (Redis and Valkey via Docker)                                                                                                                                                                                                                           |
 | **Step Functions**     | 14      | State machine CRUD, executions, ASL interpreter (Pass, Task, Choice, Wait, Parallel, Map, Succeed, Fail), Retry/Catch, Lambda/SQS/SNS/EventBridge/DynamoDB task integrations                                                                                                                                                                                                                              |
+| **API Gateway v2**     | 28      | HTTP APIs, routes with path parameters and wildcards, Lambda proxy integration, HTTP proxy integration, Mock integration, stages, deployments, authorizers (JWT and Lambda), CORS configuration, request history                                                                                                                                                                                          |
 
 ### Cross-Service Integration
 
@@ -197,6 +198,7 @@ integration tests:
 - **SES -> SNS/EventBridge**: Email event fanout (send, delivery, bounce, complaint) via configured event destinations
 - **SES Inbound -> S3/SNS/Lambda**: Receipt rules evaluate inbound email and execute S3, SNS, and Lambda actions
 - **Step Functions -> Lambda/SQS/SNS/EventBridge/DynamoDB**: Task states invoke Lambda, send SQS messages, publish to SNS topics, put EventBridge events, and read/write DynamoDB items
+- **API Gateway v2 -> Lambda**: HTTP API routes invoke Lambda functions with proxy integration v2.0 format
 - **CloudFormation -> Lambda/SNS**: Custom resources invoke via ServiceToken, stack events notify via NotificationARNs
 - **SecretsManager -> Lambda**: Rotation invokes Lambda for all 4 steps
 - **S3 Lifecycle**: Background expiration and storage class transitions
@@ -345,7 +347,7 @@ server per test.
 
 ## Roadmap
 
-See [ROADMAP.md](ROADMAP.md) for what's coming next: ECS, Elastic Load Balancing, CloudFront, API Gateway v2, and more.
+See [ROADMAP.md](ROADMAP.md) for what's coming next: ECS, Elastic Load Balancing, CloudFront, and more.
 
 ## Contributing
 

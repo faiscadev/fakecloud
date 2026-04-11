@@ -7,7 +7,10 @@ use fakecloud_core::delivery::DeliveryBus;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 use fakecloud_core::validation::*;
 
-use crate::state::{Deployment, HttpApi, Integration, Route, SharedApiGatewayV2State, Stage};
+use crate::state::{
+    ApiRequest, Authorizer, Deployment, HttpApi, Integration, Route, SharedApiGatewayV2State,
+    Stage,
+};
 use crate::{cors, http_proxy, lambda_proxy, mock, router::Router};
 
 const SUPPORTED: &[&str] = &[
@@ -34,6 +37,11 @@ const SUPPORTED: &[&str] = &[
     "CreateDeployment",
     "GetDeployment",
     "GetDeployments",
+    "CreateAuthorizer",
+    "GetAuthorizer",
+    "GetAuthorizers",
+    "UpdateAuthorizer",
+    "DeleteAuthorizer",
 ];
 
 pub struct ApiGatewayV2Service {
@@ -79,6 +87,11 @@ impl ApiGatewayV2Service {
     ///   POST   /v2/apis/{api-id}/deployments -> CreateDeployment
     ///   GET    /v2/apis/{api-id}/deployments -> GetDeployments
     ///   GET    /v2/apis/{api-id}/deployments/{deployment-id} -> GetDeployment
+    ///   POST   /v2/apis/{api-id}/authorizers -> CreateAuthorizer
+    ///   GET    /v2/apis/{api-id}/authorizers -> GetAuthorizers
+    ///   GET    /v2/apis/{api-id}/authorizers/{auth-id} -> GetAuthorizer
+    ///   PATCH  /v2/apis/{api-id}/authorizers/{auth-id} -> UpdateAuthorizer
+    ///   DELETE /v2/apis/{api-id}/authorizers/{auth-id} -> DeleteAuthorizer
     fn resolve_action(req: &AwsRequest) -> Option<(&str, Option<String>, Option<String>)> {
         let segs = &req.path_segments;
         if segs.len() < 2 {
@@ -123,6 +136,12 @@ impl ApiGatewayV2Service {
             (Method::GET, 4) if segs[3] == "deployments" => {
                 Some(("GetDeployments", Some(segs[2].clone()), None))
             }
+            (Method::POST, 4) if segs[3] == "authorizers" => {
+                Some(("CreateAuthorizer", Some(segs[2].clone()), None))
+            }
+            (Method::GET, 4) if segs[3] == "authorizers" => {
+                Some(("GetAuthorizers", Some(segs[2].clone()), None))
+            }
             // /v2/apis/{api-id}/routes/{route-id} or /v2/apis/{api-id}/integrations/{int-id}
             (Method::GET, 5) if segs[3] == "routes" => {
                 Some(("GetRoute", Some(segs[2].clone()), Some(segs[4].clone())))
@@ -159,6 +178,21 @@ impl ApiGatewayV2Service {
             }
             (Method::GET, 5) if segs[3] == "deployments" => Some((
                 "GetDeployment",
+                Some(segs[2].clone()),
+                Some(segs[4].clone()),
+            )),
+            (Method::GET, 5) if segs[3] == "authorizers" => Some((
+                "GetAuthorizer",
+                Some(segs[2].clone()),
+                Some(segs[4].clone()),
+            )),
+            (Method::PATCH, 5) if segs[3] == "authorizers" => Some((
+                "UpdateAuthorizer",
+                Some(segs[2].clone()),
+                Some(segs[4].clone()),
+            )),
+            (Method::DELETE, 5) if segs[3] == "authorizers" => Some((
+                "DeleteAuthorizer",
                 Some(segs[2].clone()),
                 Some(segs[4].clone()),
             )),
@@ -231,6 +265,17 @@ impl ApiGatewayV2Service {
             "CreateDeployment" => self.create_deployment(&req, api_id.as_deref()),
             "GetDeployment" => self.get_deployment(&req, api_id.as_deref(), resource_id.as_deref()),
             "GetDeployments" => self.get_deployments(&req, api_id.as_deref()),
+            "CreateAuthorizer" => self.create_authorizer(&req, api_id.as_deref()),
+            "GetAuthorizer" => {
+                self.get_authorizer(&req, api_id.as_deref(), resource_id.as_deref())
+            }
+            "GetAuthorizers" => self.get_authorizers(&req, api_id.as_deref()),
+            "UpdateAuthorizer" => {
+                self.update_authorizer(&req, api_id.as_deref(), resource_id.as_deref())
+            }
+            "DeleteAuthorizer" => {
+                self.delete_authorizer(&req, api_id.as_deref(), resource_id.as_deref())
+            }
             _ => Err(AwsServiceError::action_not_implemented(
                 "apigateway",
                 action,
@@ -1279,6 +1324,308 @@ impl ApiGatewayV2Service {
         })))
     }
 
+    // ─── AUTHORIZER CRUD ────────────────────────────────────────────────
+
+    fn create_authorizer(
+        &self,
+        req: &AwsRequest,
+        api_id: Option<&str>,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let api_id = api_id.ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "BadRequestException",
+                "API ID is required",
+            )
+        })?;
+
+        let body = req.json_body();
+
+        validate_required("name", &body["name"])?;
+        let name = body["name"]
+            .as_str()
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationException",
+                    "name is required",
+                )
+            })?
+            .to_string();
+
+        validate_required("authorizerType", &body["authorizerType"])?;
+        let authorizer_type = body["authorizerType"]
+            .as_str()
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationException",
+                    "authorizerType is required",
+                )
+            })?
+            .to_string();
+
+        let authorizer_uri = body["authorizerUri"].as_str().map(|s| s.to_string());
+        let identity_source = body["identitySource"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            });
+
+        let jwt_configuration = if let Some(jwt) = body.get("jwtConfiguration") {
+            Some(serde_json::from_value(jwt.clone()).map_err(|e| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationException",
+                    format!("Invalid jwtConfiguration: {}", e),
+                )
+            })?)
+        } else {
+            None
+        };
+
+        let authorizer_id = generate_id("auth");
+
+        let authorizer = Authorizer {
+            authorizer_id: authorizer_id.clone(),
+            name,
+            authorizer_type,
+            authorizer_uri,
+            identity_source,
+            jwt_configuration,
+        };
+
+        let mut state = self.state.write();
+
+        // Verify API exists
+        if !state.apis.contains_key(api_id) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "NotFoundException",
+                format!("API not found: {}", api_id),
+            ));
+        }
+
+        state
+            .authorizers
+            .entry(api_id.to_string())
+            .or_default()
+            .insert(authorizer_id, authorizer.clone());
+
+        Ok(AwsResponse::ok_json(json!(authorizer)))
+    }
+
+    fn get_authorizer(
+        &self,
+        _req: &AwsRequest,
+        api_id: Option<&str>,
+        authorizer_id: Option<&str>,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let api_id = api_id.ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "BadRequestException",
+                "API ID is required",
+            )
+        })?;
+
+        let authorizer_id = authorizer_id.ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "BadRequestException",
+                "Authorizer ID is required",
+            )
+        })?;
+
+        let state = self.state.read();
+
+        // Verify API exists
+        if !state.apis.contains_key(api_id) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "NotFoundException",
+                format!("API not found: {}", api_id),
+            ));
+        }
+
+        let authorizer = state
+            .authorizers
+            .get(api_id)
+            .and_then(|auths| auths.get(authorizer_id))
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::NOT_FOUND,
+                    "NotFoundException",
+                    format!("Authorizer not found: {}", authorizer_id),
+                )
+            })?;
+
+        Ok(AwsResponse::ok_json(json!(authorizer)))
+    }
+
+    fn get_authorizers(
+        &self,
+        _req: &AwsRequest,
+        api_id: Option<&str>,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let api_id = api_id.ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "BadRequestException",
+                "API ID is required",
+            )
+        })?;
+
+        let state = self.state.read();
+
+        // Verify API exists
+        if !state.apis.contains_key(api_id) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "NotFoundException",
+                format!("API not found: {}", api_id),
+            ));
+        }
+
+        let authorizers: Vec<&Authorizer> = state
+            .authorizers
+            .get(api_id)
+            .map(|auths| auths.values().collect())
+            .unwrap_or_default();
+
+        Ok(AwsResponse::ok_json(json!({
+            "items": authorizers,
+        })))
+    }
+
+    fn update_authorizer(
+        &self,
+        req: &AwsRequest,
+        api_id: Option<&str>,
+        authorizer_id: Option<&str>,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let api_id = api_id.ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "BadRequestException",
+                "API ID is required",
+            )
+        })?;
+
+        let authorizer_id = authorizer_id.ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "BadRequestException",
+                "Authorizer ID is required",
+            )
+        })?;
+
+        let body = req.json_body();
+        let mut state = self.state.write();
+
+        // Verify API exists
+        if !state.apis.contains_key(api_id) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "NotFoundException",
+                format!("API not found: {}", api_id),
+            ));
+        }
+
+        let authorizer = state
+            .authorizers
+            .get_mut(api_id)
+            .and_then(|auths| auths.get_mut(authorizer_id))
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::NOT_FOUND,
+                    "NotFoundException",
+                    format!("Authorizer not found: {}", authorizer_id),
+                )
+            })?;
+
+        if let Some(name) = body["name"].as_str() {
+            authorizer.name = name.to_string();
+        }
+
+        if let Some(authorizer_uri) = body["authorizerUri"].as_str() {
+            authorizer.authorizer_uri = Some(authorizer_uri.to_string());
+        }
+
+        if let Some(identity_source) = body["identitySource"].as_array() {
+            authorizer.identity_source = Some(
+                identity_source
+                    .iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect(),
+            );
+        }
+
+        if let Some(jwt) = body.get("jwtConfiguration") {
+            authorizer.jwt_configuration = Some(serde_json::from_value(jwt.clone()).map_err(
+                |e| {
+                    AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "ValidationException",
+                        format!("Invalid jwtConfiguration: {}", e),
+                    )
+                },
+            )?);
+        }
+
+        Ok(AwsResponse::ok_json(json!(authorizer)))
+    }
+
+    fn delete_authorizer(
+        &self,
+        _req: &AwsRequest,
+        api_id: Option<&str>,
+        authorizer_id: Option<&str>,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let api_id = api_id.ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "BadRequestException",
+                "API ID is required",
+            )
+        })?;
+
+        let authorizer_id = authorizer_id.ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "BadRequestException",
+                "Authorizer ID is required",
+            )
+        })?;
+
+        let mut state = self.state.write();
+
+        // Verify API exists
+        if !state.apis.contains_key(api_id) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "NotFoundException",
+                format!("API not found: {}", api_id),
+            ));
+        }
+
+        state
+            .authorizers
+            .get_mut(api_id)
+            .and_then(|auths| auths.remove(authorizer_id))
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::NOT_FOUND,
+                    "NotFoundException",
+                    format!("Authorizer not found: {}", authorizer_id),
+                )
+            })?;
+
+        Ok(AwsResponse::json(StatusCode::NO_CONTENT, vec![]))
+    }
+
     // ─── EXECUTE API ────────────────────────────────────────────────────
 
     async fn handle_execute_api(&self, req: AwsRequest) -> Result<AwsResponse, AwsServiceError> {
@@ -1440,6 +1787,41 @@ impl ApiGatewayV2Service {
         // Add CORS headers if CORS is configured
         if let Some(ref cors_cfg) = cors_config {
             response = cors::add_cors_headers(response, cors_cfg);
+        }
+
+        // Record this request to history
+        let headers_map: std::collections::HashMap<String, String> = req
+            .headers
+            .iter()
+            .filter_map(|(k, v)| {
+                v.to_str()
+                    .ok()
+                    .map(|v_str| (k.as_str().to_string(), v_str.to_string()))
+            })
+            .collect();
+
+        let body_string = if req.body.is_empty() {
+            None
+        } else {
+            String::from_utf8(req.body.to_vec()).ok()
+        };
+
+        let request_record = ApiRequest {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            api_id: api_id.clone(),
+            stage: stage_name.to_string(),
+            method: req.method.to_string(),
+            path: resource_path,
+            headers: headers_map,
+            query_params: req.query_params.clone(),
+            body: body_string,
+            timestamp: chrono::Utc::now(),
+            status_code: response.status.as_u16(),
+        };
+
+        {
+            let mut state = self.state.write();
+            state.request_history.push(request_record);
         }
 
         Ok(response)
