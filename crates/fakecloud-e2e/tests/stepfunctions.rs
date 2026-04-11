@@ -2273,3 +2273,621 @@ async fn sfn_choice_state_history_events() {
     assert!(event_types.contains(&"ChoiceStateExited".to_string()));
     assert!(event_types.contains(&"ExecutionSucceeded".to_string()));
 }
+
+// --- Parallel state tests ---
+
+#[tokio::test]
+async fn sfn_parallel_state_basic() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+
+    // Three parallel branches, each doing a Pass with different results
+    let definition = serde_json::json!({
+        "StartAt": "ParallelWork",
+        "States": {
+            "ParallelWork": {
+                "Type": "Parallel",
+                "Branches": [
+                    {
+                        "StartAt": "Branch1",
+                        "States": {
+                            "Branch1": {
+                                "Type": "Pass",
+                                "Result": "result-1",
+                                "End": true
+                            }
+                        }
+                    },
+                    {
+                        "StartAt": "Branch2",
+                        "States": {
+                            "Branch2": {
+                                "Type": "Pass",
+                                "Result": "result-2",
+                                "End": true
+                            }
+                        }
+                    },
+                    {
+                        "StartAt": "Branch3",
+                        "States": {
+                            "Branch3": {
+                                "Type": "Pass",
+                                "Result": "result-3",
+                                "End": true
+                            }
+                        }
+                    }
+                ],
+                "End": true
+            }
+        }
+    })
+    .to_string();
+
+    let create = client
+        .create_state_machine()
+        .name("parallel-basic-sm")
+        .definition(definition)
+        .role_arn("arn:aws:iam::123456789012:role/test-role")
+        .send()
+        .await
+        .unwrap();
+
+    let start = client
+        .start_execution()
+        .state_machine_arn(create.state_machine_arn())
+        .input(r#"{}"#)
+        .send()
+        .await
+        .unwrap();
+
+    let status = wait_for_execution(&client, start.execution_arn()).await;
+    assert_eq!(status, "SUCCEEDED");
+
+    let desc = client
+        .describe_execution()
+        .execution_arn(start.execution_arn())
+        .send()
+        .await
+        .unwrap();
+    let output: serde_json::Value = serde_json::from_str(desc.output().unwrap_or("{}")).unwrap();
+    // Output should be an array of branch results in order
+    assert_eq!(
+        output,
+        serde_json::json!(["result-1", "result-2", "result-3"])
+    );
+}
+
+#[tokio::test]
+async fn sfn_parallel_state_with_result_path() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+
+    let definition = serde_json::json!({
+        "StartAt": "ParallelWork",
+        "States": {
+            "ParallelWork": {
+                "Type": "Parallel",
+                "ResultPath": "$.results",
+                "Branches": [
+                    {
+                        "StartAt": "A",
+                        "States": {
+                            "A": {
+                                "Type": "Pass",
+                                "Result": {"branch": "a"},
+                                "End": true
+                            }
+                        }
+                    },
+                    {
+                        "StartAt": "B",
+                        "States": {
+                            "B": {
+                                "Type": "Pass",
+                                "Result": {"branch": "b"},
+                                "End": true
+                            }
+                        }
+                    }
+                ],
+                "End": true
+            }
+        }
+    })
+    .to_string();
+
+    let create = client
+        .create_state_machine()
+        .name("parallel-resultpath-sm")
+        .definition(definition)
+        .role_arn("arn:aws:iam::123456789012:role/test-role")
+        .send()
+        .await
+        .unwrap();
+
+    let start = client
+        .start_execution()
+        .state_machine_arn(create.state_machine_arn())
+        .input(r#"{"original": true}"#)
+        .send()
+        .await
+        .unwrap();
+
+    let status = wait_for_execution(&client, start.execution_arn()).await;
+    assert_eq!(status, "SUCCEEDED");
+
+    let desc = client
+        .describe_execution()
+        .execution_arn(start.execution_arn())
+        .send()
+        .await
+        .unwrap();
+    let output: serde_json::Value = serde_json::from_str(desc.output().unwrap_or("{}")).unwrap();
+    assert_eq!(output["original"], true);
+    assert_eq!(
+        output["results"],
+        serde_json::json!([{"branch": "a"}, {"branch": "b"}])
+    );
+}
+
+#[tokio::test]
+async fn sfn_parallel_state_branch_failure_with_catch() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+
+    // One branch fails, Catch routes to error handler
+    let definition = serde_json::json!({
+        "StartAt": "ParallelWork",
+        "States": {
+            "ParallelWork": {
+                "Type": "Parallel",
+                "Branches": [
+                    {
+                        "StartAt": "Good",
+                        "States": {
+                            "Good": {
+                                "Type": "Pass",
+                                "Result": "ok",
+                                "End": true
+                            }
+                        }
+                    },
+                    {
+                        "StartAt": "Bad",
+                        "States": {
+                            "Bad": {
+                                "Type": "Fail",
+                                "Error": "BranchError",
+                                "Cause": "Branch 2 failed"
+                            }
+                        }
+                    }
+                ],
+                "Catch": [{
+                    "ErrorEquals": ["States.ALL"],
+                    "Next": "HandleError",
+                    "ResultPath": "$.error"
+                }],
+                "End": true
+            },
+            "HandleError": {
+                "Type": "Pass",
+                "Result": "handled",
+                "End": true
+            }
+        }
+    })
+    .to_string();
+
+    let create = client
+        .create_state_machine()
+        .name("parallel-catch-sm")
+        .definition(definition)
+        .role_arn("arn:aws:iam::123456789012:role/test-role")
+        .send()
+        .await
+        .unwrap();
+
+    let start = client
+        .start_execution()
+        .state_machine_arn(create.state_machine_arn())
+        .input(r#"{}"#)
+        .send()
+        .await
+        .unwrap();
+
+    let status = wait_for_execution(&client, start.execution_arn()).await;
+    assert_eq!(status, "SUCCEEDED");
+
+    let desc = client
+        .describe_execution()
+        .execution_arn(start.execution_arn())
+        .send()
+        .await
+        .unwrap();
+    let output: serde_json::Value = serde_json::from_str(desc.output().unwrap_or("{}")).unwrap();
+    assert_eq!(output, "handled");
+}
+
+#[tokio::test]
+async fn sfn_parallel_state_history_events() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+
+    let definition = serde_json::json!({
+        "StartAt": "ParallelWork",
+        "States": {
+            "ParallelWork": {
+                "Type": "Parallel",
+                "Branches": [
+                    {
+                        "StartAt": "A",
+                        "States": {
+                            "A": { "Type": "Pass", "Result": "a", "End": true }
+                        }
+                    }
+                ],
+                "End": true
+            }
+        }
+    })
+    .to_string();
+
+    let create = client
+        .create_state_machine()
+        .name("parallel-history-sm")
+        .definition(definition)
+        .role_arn("arn:aws:iam::123456789012:role/test-role")
+        .send()
+        .await
+        .unwrap();
+
+    let start = client
+        .start_execution()
+        .state_machine_arn(create.state_machine_arn())
+        .input(r#"{}"#)
+        .send()
+        .await
+        .unwrap();
+
+    let status = wait_for_execution(&client, start.execution_arn()).await;
+    assert_eq!(status, "SUCCEEDED");
+
+    let history = client
+        .get_execution_history()
+        .execution_arn(start.execution_arn())
+        .send()
+        .await
+        .unwrap();
+
+    let event_types: Vec<String> = history
+        .events()
+        .iter()
+        .map(|e| e.r#type().as_str().to_string())
+        .collect();
+
+    assert!(event_types.contains(&"ParallelStateEntered".to_string()));
+    assert!(event_types.contains(&"ParallelStateExited".to_string()));
+}
+
+// --- Map state tests ---
+
+#[tokio::test]
+async fn sfn_map_state_basic() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+
+    // Map over an array, each item gets a Pass that adds "processed" field
+    let definition = serde_json::json!({
+        "StartAt": "ProcessItems",
+        "States": {
+            "ProcessItems": {
+                "Type": "Map",
+                "ItemsPath": "$.items",
+                "ItemProcessor": {
+                    "StartAt": "Process",
+                    "States": {
+                        "Process": {
+                            "Type": "Pass",
+                            "Result": "done",
+                            "ResultPath": "$.status",
+                            "End": true
+                        }
+                    }
+                },
+                "End": true
+            }
+        }
+    })
+    .to_string();
+
+    let create = client
+        .create_state_machine()
+        .name("map-basic-sm")
+        .definition(definition)
+        .role_arn("arn:aws:iam::123456789012:role/test-role")
+        .send()
+        .await
+        .unwrap();
+
+    let start = client
+        .start_execution()
+        .state_machine_arn(create.state_machine_arn())
+        .input(r#"{"items": [{"id": 1}, {"id": 2}, {"id": 3}]}"#)
+        .send()
+        .await
+        .unwrap();
+
+    let status = wait_for_execution(&client, start.execution_arn()).await;
+    assert_eq!(status, "SUCCEEDED");
+
+    let desc = client
+        .describe_execution()
+        .execution_arn(start.execution_arn())
+        .send()
+        .await
+        .unwrap();
+    let output: serde_json::Value = serde_json::from_str(desc.output().unwrap_or("{}")).unwrap();
+    let arr = output.as_array().unwrap();
+    assert_eq!(arr.len(), 3);
+    assert_eq!(arr[0]["id"], 1);
+    assert_eq!(arr[0]["status"], "done");
+    assert_eq!(arr[2]["id"], 3);
+}
+
+#[tokio::test]
+async fn sfn_map_state_with_result_path() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+
+    let definition = serde_json::json!({
+        "StartAt": "ProcessItems",
+        "States": {
+            "ProcessItems": {
+                "Type": "Map",
+                "ItemsPath": "$.items",
+                "ResultPath": "$.processed",
+                "ItemProcessor": {
+                    "StartAt": "Transform",
+                    "States": {
+                        "Transform": {
+                            "Type": "Pass",
+                            "End": true
+                        }
+                    }
+                },
+                "End": true
+            }
+        }
+    })
+    .to_string();
+
+    let create = client
+        .create_state_machine()
+        .name("map-resultpath-sm")
+        .definition(definition)
+        .role_arn("arn:aws:iam::123456789012:role/test-role")
+        .send()
+        .await
+        .unwrap();
+
+    let start = client
+        .start_execution()
+        .state_machine_arn(create.state_machine_arn())
+        .input(r#"{"items": ["a", "b"], "keep": true}"#)
+        .send()
+        .await
+        .unwrap();
+
+    let status = wait_for_execution(&client, start.execution_arn()).await;
+    assert_eq!(status, "SUCCEEDED");
+
+    let desc = client
+        .describe_execution()
+        .execution_arn(start.execution_arn())
+        .send()
+        .await
+        .unwrap();
+    let output: serde_json::Value = serde_json::from_str(desc.output().unwrap_or("{}")).unwrap();
+    assert_eq!(output["keep"], true);
+    assert_eq!(output["processed"], serde_json::json!(["a", "b"]));
+}
+
+#[tokio::test]
+async fn sfn_map_state_empty_array() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+
+    let definition = serde_json::json!({
+        "StartAt": "ProcessItems",
+        "States": {
+            "ProcessItems": {
+                "Type": "Map",
+                "ItemsPath": "$.items",
+                "ItemProcessor": {
+                    "StartAt": "Process",
+                    "States": {
+                        "Process": { "Type": "Pass", "End": true }
+                    }
+                },
+                "End": true
+            }
+        }
+    })
+    .to_string();
+
+    let create = client
+        .create_state_machine()
+        .name("map-empty-sm")
+        .definition(definition)
+        .role_arn("arn:aws:iam::123456789012:role/test-role")
+        .send()
+        .await
+        .unwrap();
+
+    let start = client
+        .start_execution()
+        .state_machine_arn(create.state_machine_arn())
+        .input(r#"{"items": []}"#)
+        .send()
+        .await
+        .unwrap();
+
+    let status = wait_for_execution(&client, start.execution_arn()).await;
+    assert_eq!(status, "SUCCEEDED");
+
+    let desc = client
+        .describe_execution()
+        .execution_arn(start.execution_arn())
+        .send()
+        .await
+        .unwrap();
+    let output: serde_json::Value = serde_json::from_str(desc.output().unwrap_or("{}")).unwrap();
+    assert_eq!(output, serde_json::json!([]));
+}
+
+#[tokio::test]
+async fn sfn_map_state_history_events() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+
+    let definition = serde_json::json!({
+        "StartAt": "ProcessItems",
+        "States": {
+            "ProcessItems": {
+                "Type": "Map",
+                "ItemsPath": "$.items",
+                "ItemProcessor": {
+                    "StartAt": "Process",
+                    "States": {
+                        "Process": { "Type": "Pass", "End": true }
+                    }
+                },
+                "End": true
+            }
+        }
+    })
+    .to_string();
+
+    let create = client
+        .create_state_machine()
+        .name("map-history-sm")
+        .definition(definition)
+        .role_arn("arn:aws:iam::123456789012:role/test-role")
+        .send()
+        .await
+        .unwrap();
+
+    let start = client
+        .start_execution()
+        .state_machine_arn(create.state_machine_arn())
+        .input(r#"{"items": [1, 2]}"#)
+        .send()
+        .await
+        .unwrap();
+
+    let status = wait_for_execution(&client, start.execution_arn()).await;
+    assert_eq!(status, "SUCCEEDED");
+
+    let history = client
+        .get_execution_history()
+        .execution_arn(start.execution_arn())
+        .send()
+        .await
+        .unwrap();
+
+    let event_types: Vec<String> = history
+        .events()
+        .iter()
+        .map(|e| e.r#type().as_str().to_string())
+        .collect();
+
+    assert!(event_types.contains(&"MapStateEntered".to_string()));
+    assert!(event_types.contains(&"MapIterationStarted".to_string()));
+    assert!(event_types.contains(&"MapIterationSucceeded".to_string()));
+    assert!(event_types.contains(&"MapStateExited".to_string()));
+}
+
+#[tokio::test]
+async fn sfn_parallel_then_map_workflow() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+
+    // Parallel produces array, then Map processes each item
+    let definition = serde_json::json!({
+        "StartAt": "Gather",
+        "States": {
+            "Gather": {
+                "Type": "Parallel",
+                "ResultPath": "$.gathered",
+                "Branches": [
+                    {
+                        "StartAt": "Source1",
+                        "States": {
+                            "Source1": { "Type": "Pass", "Result": {"value": 10}, "End": true }
+                        }
+                    },
+                    {
+                        "StartAt": "Source2",
+                        "States": {
+                            "Source2": { "Type": "Pass", "Result": {"value": 20}, "End": true }
+                        }
+                    }
+                ],
+                "Next": "Process"
+            },
+            "Process": {
+                "Type": "Map",
+                "ItemsPath": "$.gathered",
+                "ItemProcessor": {
+                    "StartAt": "Transform",
+                    "States": {
+                        "Transform": {
+                            "Type": "Pass",
+                            "Result": "transformed",
+                            "ResultPath": "$.status",
+                            "End": true
+                        }
+                    }
+                },
+                "End": true
+            }
+        }
+    })
+    .to_string();
+
+    let create = client
+        .create_state_machine()
+        .name("parallel-map-sm")
+        .definition(definition)
+        .role_arn("arn:aws:iam::123456789012:role/test-role")
+        .send()
+        .await
+        .unwrap();
+
+    let start = client
+        .start_execution()
+        .state_machine_arn(create.state_machine_arn())
+        .input(r#"{}"#)
+        .send()
+        .await
+        .unwrap();
+
+    let status = wait_for_execution(&client, start.execution_arn()).await;
+    assert_eq!(status, "SUCCEEDED");
+
+    let desc = client
+        .describe_execution()
+        .execution_arn(start.execution_arn())
+        .send()
+        .await
+        .unwrap();
+    let output: serde_json::Value = serde_json::from_str(desc.output().unwrap_or("{}")).unwrap();
+    let arr = output.as_array().unwrap();
+    assert_eq!(arr.len(), 2);
+    assert_eq!(arr[0]["value"], 10);
+    assert_eq!(arr[0]["status"], "transformed");
+    assert_eq!(arr[1]["value"], 20);
+}
