@@ -23,7 +23,7 @@ pub enum AwsProtocol {
 const REST_XML_SERVICES: &[&str] = &["s3"];
 
 /// Services that use REST protocol with JSON responses (detected from SigV4 credential scope).
-const REST_JSON_SERVICES: &[&str] = &["lambda", "ses", "apigateway"];
+const REST_JSON_SERVICES: &[&str] = &["lambda", "ses", "apigateway", "bedrock"];
 
 /// Detected service name and action from an incoming HTTP request.
 #[derive(Debug)]

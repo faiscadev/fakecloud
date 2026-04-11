@@ -195,6 +195,16 @@ impl TestServer {
         aws_sdk_apigatewayv2::Client::new(&self.aws_config().await)
     }
 
+    /// Create a Bedrock client.
+    pub async fn bedrock_client(&self) -> aws_sdk_bedrock::Client {
+        aws_sdk_bedrock::Client::new(&self.aws_config().await)
+    }
+
+    /// Create a Bedrock Runtime client.
+    pub async fn bedrock_runtime_client(&self) -> aws_sdk_bedrockruntime::Client {
+        aws_sdk_bedrockruntime::Client::new(&self.aws_config().await)
+    }
+
     /// Create an S3 client (path-style addressing for single-endpoint emulator).
     pub async fn s3_client(&self) -> aws_sdk_s3::Client {
         let config = self.aws_config().await;

@@ -138,6 +138,14 @@ impl TestServer {
         aws_sdk_sfn::Client::new(&self.aws_config().await)
     }
 
+    pub async fn bedrock_client(&self) -> aws_sdk_bedrock::Client {
+        aws_sdk_bedrock::Client::new(&self.aws_config().await)
+    }
+
+    pub async fn bedrock_runtime_client(&self) -> aws_sdk_bedrockruntime::Client {
+        aws_sdk_bedrockruntime::Client::new(&self.aws_config().await)
+    }
+
     pub async fn s3_client(&self) -> aws_sdk_s3::Client {
         let config = self.aws_config().await;
         let s3_config = aws_sdk_s3::config::Builder::from(&config)

@@ -1,0 +1,21 @@
+[package]
+name = "fakecloud-bedrock"
+description = "Bedrock implementation for FakeCloud"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+version.workspace = true
+
+[dependencies]
+fakecloud-core = { workspace = true }
+fakecloud-aws = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+http = { workspace = true }
+parking_lot = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+regex = { workspace = true }
+percent-encoding = { workspace = true }
