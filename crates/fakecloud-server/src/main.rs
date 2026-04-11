@@ -37,6 +37,7 @@ use fakecloud_ses::service::SesV2Service;
 use fakecloud_sns::service::SnsService;
 use fakecloud_sqs::service::SqsService;
 use fakecloud_ssm::service::SsmService;
+use fakecloud_stepfunctions::service::StepFunctionsService;
 
 #[derive(Parser)]
 #[command(name = "fakecloud")]
@@ -152,6 +153,10 @@ async fn main() {
     ));
     let elasticache_state = Arc::new(parking_lot::RwLock::new(
         fakecloud_elasticache::state::ElastiCacheState::new(&cli.account_id, &cli.region),
+    ));
+
+    let stepfunctions_state = Arc::new(parking_lot::RwLock::new(
+        fakecloud_stepfunctions::state::StepFunctionsState::new(&cli.account_id, &cli.region),
     ));
 
     let rds_runtime = fakecloud_rds::runtime::RdsRuntime::new().map(Arc::new);
@@ -306,6 +311,7 @@ async fn main() {
         kinesis: kinesis_state.clone(),
         rds: rds_state.clone(),
         elasticache: elasticache_state.clone(),
+        stepfunctions: stepfunctions_state.clone(),
         container_runtime: container_runtime.clone(),
         rds_runtime: rds_runtime.clone(),
         elasticache_runtime: elasticache_runtime.clone(),
@@ -429,6 +435,9 @@ async fn main() {
         elasticache_service = elasticache_service.with_runtime(rt.clone());
     }
     registry.register(Arc::new(elasticache_service));
+    registry.register(Arc::new(StepFunctionsService::new(
+        stepfunctions_state.clone(),
+    )));
 
     // Spawn background tasks
     let lifecycle_processor = fakecloud_s3::lifecycle::LifecycleProcessor::new(s3_state);
@@ -1234,6 +1243,7 @@ struct ResetState {
     kinesis: fakecloud_kinesis::state::SharedKinesisState,
     rds: fakecloud_rds::state::SharedRdsState,
     elasticache: fakecloud_elasticache::state::SharedElastiCacheState,
+    stepfunctions: fakecloud_stepfunctions::state::SharedStepFunctionsState,
     container_runtime: Option<Arc<fakecloud_lambda::runtime::ContainerRuntime>>,
     rds_runtime: Option<Arc<fakecloud_rds::runtime::RdsRuntime>>,
     elasticache_runtime: Option<Arc<fakecloud_elasticache::runtime::ElastiCacheRuntime>>,
@@ -1319,6 +1329,9 @@ impl ResetState {
                     tokio::spawn(async move { rt.stop_all().await });
                 }
             }
+            "states" | "stepfunctions" => {
+                self.stepfunctions.write().reset();
+            }
             _ => {
                 return Err(format!("Unknown service: {service}"));
             }
@@ -1375,6 +1388,7 @@ impl ResetState {
             let rt = rt.clone();
             tokio::spawn(async move { rt.stop_all().await });
         }
+        self.stepfunctions.write().reset();
         tracing::info!("state reset via reset API");
         axum::Json(types::ResetResponse {
             status: "ok".to_string(),
@@ -1577,6 +1591,12 @@ mod tests {
             rds: Arc::new(parking_lot::RwLock::new(rds)),
             elasticache: Arc::new(parking_lot::RwLock::new(
                 fakecloud_elasticache::state::ElastiCacheState::new("123456789012", "us-east-1"),
+            )),
+            stepfunctions: Arc::new(parking_lot::RwLock::new(
+                fakecloud_stepfunctions::state::StepFunctionsState::new(
+                    "123456789012",
+                    "us-east-1",
+                ),
             )),
             container_runtime: None,
             rds_runtime: None,

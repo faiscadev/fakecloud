@@ -134,6 +134,7 @@ fn parse_amz_target(target: &str) -> Option<DetectedRequest> {
         s if s.starts_with("TrentService") => "kms",
         s if s.starts_with("AWSCognitoIdentityProviderService") => "cognito-idp",
         s if s.starts_with("Kinesis_20131202") => "kinesis",
+        s if s.starts_with("AWSStepFunctions") => "states",
         _ => return None,
     };
 

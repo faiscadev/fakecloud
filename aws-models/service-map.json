@@ -70,5 +70,9 @@
   "elasticache": {
     "repo_dir": "elasticache",
     "service_name": "elasticache"
+  },
+  "sfn": {
+    "repo_dir": "sfn",
+    "service_name": "states"
   }
 }
