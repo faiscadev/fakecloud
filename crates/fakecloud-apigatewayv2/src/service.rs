@@ -8,7 +8,7 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceErr
 use fakecloud_core::validation::*;
 
 use crate::state::{Deployment, HttpApi, Integration, Route, SharedApiGatewayV2State, Stage};
-use crate::{lambda_proxy, router::Router};
+use crate::{cors, http_proxy, lambda_proxy, mock, router::Router};
 
 const SUPPORTED: &[&str] = &[
     "CreateApi",
@@ -280,10 +280,24 @@ impl ApiGatewayV2Service {
                 .collect()
         });
 
+        // Parse CORS configuration if provided
+        let cors_configuration = if let Some(cors) = body.get("corsConfiguration") {
+            Some(serde_json::from_value(cors.clone()).map_err(|e| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationException",
+                    format!("Invalid corsConfiguration: {}", e),
+                )
+            })?)
+        } else {
+            None
+        };
+
         let api_id = generate_id("api");
         let region = &req.region;
 
-        let api = HttpApi::new(api_id, name, description, tags, region);
+        let mut api = HttpApi::new(api_id, name, description, tags, region);
+        api.cors_configuration = cors_configuration;
 
         let mut state = self.state.write();
         let api_clone = api.clone();
@@ -356,6 +370,16 @@ impl ApiGatewayV2Service {
 
         if let Some(description) = body["description"].as_str() {
             api.description = Some(description.to_string());
+        }
+
+        if let Some(cors) = body.get("corsConfiguration") {
+            api.cors_configuration = Some(serde_json::from_value(cors.clone()).map_err(|e| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationException",
+                    format!("Invalid corsConfiguration: {}", e),
+                )
+            })?);
         }
 
         Ok(AwsResponse::ok_json(json!(api)))
@@ -1270,8 +1294,8 @@ impl ApiGatewayV2Service {
         let stage_name = &req.path_segments[0];
         let resource_path = format!("/{}", req.path_segments[1..].join("/"));
 
-        // Find the API for this stage
-        let (api_id, routes) = {
+        // Find the API for this stage and get CORS configuration
+        let (api_id, routes, cors_config) = {
             let state = self.state.read();
 
             // Find which API has this stage
@@ -1298,8 +1322,21 @@ impl ApiGatewayV2Service {
                 .map(|r| r.values().cloned().collect())
                 .unwrap_or_default();
 
-            Ok::<_, AwsServiceError>((api_id, routes))
+            // Get CORS configuration from API
+            let cors_config = state
+                .apis
+                .get(&api_id)
+                .and_then(|api| api.cors_configuration.clone());
+
+            Ok::<_, AwsServiceError>((api_id, routes, cors_config))
         }?;
+
+        // Handle CORS preflight requests
+        if let Some(ref cors_cfg) = cors_config {
+            if cors::is_preflight_request(&req) {
+                return Ok(cors::handle_preflight(cors_cfg, &req));
+            }
+        }
 
         // Match the request against routes
         let router = Router::new(routes);
@@ -1344,7 +1381,7 @@ impl ApiGatewayV2Service {
         };
 
         // Handle based on integration type
-        match integration.integration_type.as_str() {
+        let mut response = match integration.integration_type.as_str() {
             "AWS_PROXY" => {
                 // Lambda proxy integration
                 let delivery = self.delivery.as_ref().ok_or_else(|| {
@@ -1370,17 +1407,43 @@ impl ApiGatewayV2Service {
                     route_match.path_parameters,
                 );
 
-                lambda_proxy::invoke_lambda(delivery, function_arn, event).await
+                lambda_proxy::invoke_lambda(delivery, function_arn, event).await?
             }
-            _ => Err(AwsServiceError::aws_error(
-                StatusCode::NOT_IMPLEMENTED,
-                "NotImplemented",
-                format!(
-                    "Integration type not supported: {}",
-                    integration.integration_type
-                ),
-            )),
+            "HTTP_PROXY" => {
+                // HTTP proxy integration
+                let target_url = integration.integration_uri.as_ref().ok_or_else(|| {
+                    AwsServiceError::aws_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "InternalError",
+                        "Integration has no URI",
+                    )
+                })?;
+
+                http_proxy::forward_request(target_url, &req, integration.timeout_in_millis)
+                    .await?
+            }
+            "MOCK" => {
+                // Mock integration
+                mock::create_mock_response()
+            }
+            _ => {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::NOT_IMPLEMENTED,
+                    "NotImplemented",
+                    format!(
+                        "Integration type not supported: {}",
+                        integration.integration_type
+                    ),
+                ));
+            }
+        };
+
+        // Add CORS headers if CORS is configured
+        if let Some(ref cors_cfg) = cors_config {
+            response = cors::add_cors_headers(response, cors_cfg);
         }
+
+        Ok(response)
     }
 }
 

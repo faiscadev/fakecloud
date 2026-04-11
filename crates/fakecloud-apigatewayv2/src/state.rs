@@ -39,6 +39,8 @@ pub struct HttpApi {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub cors_configuration: Option<CorsConfiguration>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub tags: Option<HashMap<String, String>>,
     pub created_date: DateTime<Utc>,
     pub api_endpoint: String,
@@ -60,11 +62,29 @@ impl HttpApi {
             name,
             protocol_type: "HTTP".to_string(),
             description,
+            cors_configuration: None,
             tags,
             created_date,
             api_endpoint,
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CorsConfiguration {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allow_credentials: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allow_headers: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allow_methods: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allow_origins: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expose_headers: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_age: Option<i32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
