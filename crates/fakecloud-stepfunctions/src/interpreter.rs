@@ -1523,6 +1523,16 @@ fn add_event(
 }
 
 fn succeed_execution(state: &SharedStepFunctionsState, execution_arn: &str, output: &Value) {
+    // Check terminal status before recording events to avoid inconsistent history
+    {
+        let s = state.read();
+        if let Some(exec) = s.executions.get(execution_arn) {
+            if exec.status != ExecutionStatus::Running {
+                return;
+            }
+        }
+    }
+
     let output_str = serde_json::to_string(output).unwrap_or_default();
 
     add_event(
@@ -1535,10 +1545,6 @@ fn succeed_execution(state: &SharedStepFunctionsState, execution_arn: &str, outp
 
     let mut s = state.write();
     if let Some(exec) = s.executions.get_mut(execution_arn) {
-        // Don't overwrite terminal states (e.g. ABORTED by StopExecution)
-        if exec.status != ExecutionStatus::Running {
-            return;
-        }
         exec.status = ExecutionStatus::Succeeded;
         exec.output = Some(output_str);
         exec.stop_date = Some(Utc::now());
@@ -1546,6 +1552,16 @@ fn succeed_execution(state: &SharedStepFunctionsState, execution_arn: &str, outp
 }
 
 fn fail_execution(state: &SharedStepFunctionsState, execution_arn: &str, error: &str, cause: &str) {
+    // Check terminal status before recording events to avoid inconsistent history
+    {
+        let s = state.read();
+        if let Some(exec) = s.executions.get(execution_arn) {
+            if exec.status != ExecutionStatus::Running {
+                return;
+            }
+        }
+    }
+
     add_event(
         state,
         execution_arn,
@@ -1556,10 +1572,6 @@ fn fail_execution(state: &SharedStepFunctionsState, execution_arn: &str, error: 
 
     let mut s = state.write();
     if let Some(exec) = s.executions.get_mut(execution_arn) {
-        // Don't overwrite terminal states (e.g. ABORTED by StopExecution)
-        if exec.status != ExecutionStatus::Running {
-            return;
-        }
         exec.status = ExecutionStatus::Failed;
         exec.error = Some(error.to_string());
         exec.cause = Some(cause.to_string());

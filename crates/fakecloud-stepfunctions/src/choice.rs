@@ -237,23 +237,46 @@ fn string_matches(value: &str, pattern: &str) -> bool {
 /// Check if a field referenced by a JsonPath expression actually exists in the input,
 /// including fields explicitly set to null. This is different from resolve_path which
 /// returns Value::Null for both missing and null fields.
+/// Handles both object fields ($.foo.bar) and array indices ($.items[0]).
 fn field_exists_in_input(root: &Value, path: &str) -> bool {
     if path == "$" {
         return true;
     }
     let path = path.strip_prefix("$.").unwrap_or(path);
-    let segments: Vec<&str> = path.split('.').collect();
+    let parts: Vec<&str> = path.split('.').collect();
     let mut current = root;
 
-    for (i, segment) in segments.iter().enumerate() {
-        if i == segments.len() - 1 {
-            // Last segment — check if it exists (even if null)
+    for (i, part) in parts.iter().enumerate() {
+        let is_last = i == parts.len() - 1;
+
+        // Check for array index syntax: field[idx]
+        if let Some(bracket_pos) = part.find('[') {
+            let field_name = &part[..bracket_pos];
+            let idx_str = &part[bracket_pos + 1..part.len() - 1];
+
+            match current.get(field_name) {
+                Some(arr) => {
+                    if let Ok(idx) = idx_str.parse::<usize>() {
+                        if is_last {
+                            return arr.as_array().is_some_and(|a| idx < a.len());
+                        }
+                        match arr.get(idx) {
+                            Some(v) => current = v,
+                            None => return false,
+                        }
+                    } else {
+                        return false;
+                    }
+                }
+                None => return false,
+            }
+        } else if is_last {
             return match current.as_object() {
-                Some(obj) => obj.contains_key(*segment),
+                Some(obj) => obj.contains_key(*part),
                 None => false,
             };
         } else {
-            match current.get(*segment) {
+            match current.get(*part) {
                 Some(v) => current = v,
                 None => return false,
             }
@@ -373,6 +396,20 @@ mod tests {
         assert!(evaluate_rule(&rule, &input));
 
         let input = json!({"other": "value"});
+        assert!(!evaluate_rule(&rule, &input));
+    }
+
+    #[test]
+    fn test_is_present_with_array_index() {
+        let rule = json!({
+            "Variable": "$.items[0]",
+            "IsPresent": true,
+            "Next": "HasItem"
+        });
+        let input = json!({"items": [10, 20, 30]});
+        assert!(evaluate_rule(&rule, &input));
+
+        let input = json!({"items": []});
         assert!(!evaluate_rule(&rule, &input));
     }
 
