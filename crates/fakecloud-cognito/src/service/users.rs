@@ -98,6 +98,7 @@ impl CognitoService {
                 totp_secret: None,
                 totp_verified: false,
                 devices: HashMap::new(),
+                linked_providers: Vec::new(),
             };
 
             let resp = user_to_json(&user);

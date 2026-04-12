@@ -207,12 +207,14 @@ impl CognitoService {
             };
             if !password_matches {
                 state.auth_events.push(AuthEvent {
+                    event_id: Uuid::new_v4().to_string(),
                     event_type: "SIGN_IN_FAILURE".to_string(),
                     username: username.to_string(),
                     user_pool_id: pool_id.to_string(),
                     client_id: Some(client_id.to_string()),
                     timestamp: Utc::now(),
                     success: false,
+                    feedback_value: None,
                 });
                 return Err(AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
@@ -273,12 +275,14 @@ impl CognitoService {
             );
 
             state.auth_events.push(AuthEvent {
+                event_id: Uuid::new_v4().to_string(),
                 event_type: "SIGN_IN".to_string(),
                 username: username.to_string(),
                 user_pool_id: pool_id.to_string(),
                 client_id: Some(client_id.to_string()),
                 timestamp: Utc::now(),
                 success: true,
+                feedback_value: None,
             });
 
             tokens
@@ -469,12 +473,14 @@ impl CognitoService {
                     };
                     if !password_matches {
                         state.auth_events.push(AuthEvent {
+                            event_id: Uuid::new_v4().to_string(),
                             event_type: "SIGN_IN_FAILURE".to_string(),
                             username: username.to_string(),
                             user_pool_id: pool_id.to_string(),
                             client_id: Some(client_id.to_string()),
                             timestamp: Utc::now(),
                             success: false,
+                            feedback_value: None,
                         });
                         return Err(AwsServiceError::aws_error(
                             StatusCode::BAD_REQUEST,
@@ -531,12 +537,14 @@ impl CognitoService {
                     );
 
                     state.auth_events.push(AuthEvent {
+                        event_id: Uuid::new_v4().to_string(),
                         event_type: "SIGN_IN".to_string(),
                         username: username.to_string(),
                         user_pool_id: pool_id.to_string(),
                         client_id: Some(client_id.to_string()),
                         timestamp: Utc::now(),
                         success: true,
+                        feedback_value: None,
                     });
 
                     tokens
@@ -686,12 +694,14 @@ impl CognitoService {
                 if fail_auth {
                     let mut state = self.state.write();
                     state.auth_events.push(AuthEvent {
+                        event_id: Uuid::new_v4().to_string(),
                         event_type: "SIGN_IN_FAILURE".to_string(),
                         username: username_owned.clone(),
                         user_pool_id: pool_id.clone(),
                         client_id: Some(client_id_owned.clone()),
                         timestamp: Utc::now(),
                         success: false,
+                        feedback_value: None,
                     });
                     return Err(AwsServiceError::aws_error(
                         StatusCode::BAD_REQUEST,
@@ -738,12 +748,14 @@ impl CognitoService {
                         },
                     );
                     state.auth_events.push(AuthEvent {
+                        event_id: Uuid::new_v4().to_string(),
                         event_type: "SIGN_IN".to_string(),
                         username: username_owned,
                         user_pool_id: pool_id,
                         client_id: Some(client_id_owned),
                         timestamp: Utc::now(),
                         success: true,
+                        feedback_value: None,
                     });
 
                     return Ok(AwsResponse::ok_json(json!({
@@ -1271,12 +1283,14 @@ impl CognitoService {
                 if fail_auth {
                     let mut state = self.state.write();
                     state.auth_events.push(AuthEvent {
+                        event_id: Uuid::new_v4().to_string(),
                         event_type: "SIGN_IN_FAILURE".to_string(),
                         username: username.clone(),
                         user_pool_id: pool_id,
                         client_id: Some(session_client_id),
                         timestamp: Utc::now(),
                         success: false,
+                        feedback_value: None,
                     });
                     return Err(AwsServiceError::aws_error(
                         StatusCode::BAD_REQUEST,
@@ -1323,12 +1337,14 @@ impl CognitoService {
                         },
                     );
                     state.auth_events.push(AuthEvent {
+                        event_id: Uuid::new_v4().to_string(),
                         event_type: "SIGN_IN".to_string(),
                         username,
                         user_pool_id: pool_id,
                         client_id: Some(session_client_id),
                         timestamp: Utc::now(),
                         success: true,
+                        feedback_value: None,
                     });
 
                     return Ok(AwsResponse::ok_json(json!({
@@ -1494,6 +1510,7 @@ impl CognitoService {
                 totp_secret: None,
                 totp_verified: false,
                 devices: HashMap::new(),
+                linked_providers: Vec::new(),
             };
 
             pool_users.insert(username.to_string(), user.clone());
@@ -1502,12 +1519,14 @@ impl CognitoService {
             let account_id = state.account_id.clone();
 
             state.auth_events.push(AuthEvent {
+                event_id: Uuid::new_v4().to_string(),
                 event_type: "SIGN_UP".to_string(),
                 username: username.to_string(),
                 user_pool_id: pool_id.clone(),
                 client_id: Some(client_id.to_string()),
                 timestamp: Utc::now(),
                 success: true,
+                feedback_value: None,
             });
 
             (pool_id, sub, user, region, account_id)
@@ -1757,12 +1776,14 @@ impl CognitoService {
         user.user_last_modified_date = Utc::now();
 
         state.auth_events.push(AuthEvent {
+            event_id: Uuid::new_v4().to_string(),
             event_type: "PASSWORD_CHANGE".to_string(),
             username,
             user_pool_id: pool_id,
             client_id: None,
             timestamp: Utc::now(),
             success: true,
+            feedback_value: None,
         });
 
         Ok(AwsResponse::ok_json(json!({})))
@@ -1830,12 +1851,14 @@ impl CognitoService {
         let account_id = state.account_id.clone();
 
         state.auth_events.push(AuthEvent {
+            event_id: Uuid::new_v4().to_string(),
             event_type: "FORGOT_PASSWORD".to_string(),
             username: username.to_string(),
             user_pool_id: pool_id.clone(),
             client_id: Some(client_id.to_string()),
             timestamp: Utc::now(),
             success: true,
+            feedback_value: None,
         });
 
         drop(state);

@@ -3067,3 +3067,155 @@ async fn cognito_get_csv_header() {
     assert_eq!(resp.user_pool_id().unwrap(), pool_id);
     assert!(!resp.csv_header().is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// Legacy MFA Settings
+// ---------------------------------------------------------------------------
+
+#[test_action("cognito-idp", "AdminSetUserSettings", checksum = "e9566291")]
+#[tokio::test]
+async fn cognito_admin_set_user_settings() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+    let (pool_id, _client_id, _access_token) =
+        setup_authenticated_user(&client, "legacy-settings-pool").await;
+
+    client
+        .admin_set_user_settings()
+        .user_pool_id(&pool_id)
+        .username("selfuser")
+        .mfa_options(
+            aws_sdk_cognitoidentityprovider::types::MfaOptionType::builder()
+                .delivery_medium(aws_sdk_cognitoidentityprovider::types::DeliveryMediumType::Sms)
+                .attribute_name("phone_number")
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("cognito-idp", "SetUserSettings", checksum = "dcf3e62f")]
+#[tokio::test]
+async fn cognito_set_user_settings() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+    let (_pool_id, _client_id, access_token) =
+        setup_authenticated_user(&client, "legacy-usettings-pool").await;
+
+    client
+        .set_user_settings()
+        .access_token(&access_token)
+        .mfa_options(
+            aws_sdk_cognitoidentityprovider::types::MfaOptionType::builder()
+                .delivery_medium(aws_sdk_cognitoidentityprovider::types::DeliveryMediumType::Sms)
+                .attribute_name("phone_number")
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Provider Linking
+// ---------------------------------------------------------------------------
+
+#[test_action("cognito-idp", "AdminLinkProviderForUser", checksum = "f709054a")]
+#[test_action("cognito-idp", "AdminDisableProviderForUser", checksum = "5e2a50fd")]
+#[tokio::test]
+async fn cognito_admin_link_disable_provider() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+    let (pool_id, _client_id, _access_token) =
+        setup_authenticated_user(&client, "link-provider-pool").await;
+
+    // Link a provider
+    client
+        .admin_link_provider_for_user()
+        .user_pool_id(&pool_id)
+        .destination_user(
+            aws_sdk_cognitoidentityprovider::types::ProviderUserIdentifierType::builder()
+                .provider_name("Cognito")
+                .provider_attribute_value("selfuser")
+                .build(),
+        )
+        .source_user(
+            aws_sdk_cognitoidentityprovider::types::ProviderUserIdentifierType::builder()
+                .provider_name("Google")
+                .provider_attribute_name("Cognito_Subject")
+                .provider_attribute_value("google-123")
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    // Disable the provider
+    client
+        .admin_disable_provider_for_user()
+        .user_pool_id(&pool_id)
+        .user(
+            aws_sdk_cognitoidentityprovider::types::ProviderUserIdentifierType::builder()
+                .provider_name("Google")
+                .provider_attribute_value("google-123")
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Auth Events
+// ---------------------------------------------------------------------------
+
+#[test_action("cognito-idp", "AdminListUserAuthEvents", checksum = "da6f6313")]
+#[test_action("cognito-idp", "AdminUpdateAuthEventFeedback", checksum = "581f73ed")]
+#[test_action("cognito-idp", "UpdateAuthEventFeedback", checksum = "3136afd3")]
+#[tokio::test]
+async fn cognito_auth_events() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+    let (pool_id, _client_id, _access_token) =
+        setup_authenticated_user(&client, "auth-events-pool").await;
+
+    // List auth events (should have at least one from the sign-in)
+    let events = client
+        .admin_list_user_auth_events()
+        .user_pool_id(&pool_id)
+        .username("selfuser")
+        .send()
+        .await
+        .unwrap();
+    assert!(!events.auth_events().is_empty());
+
+    let event_id = events.auth_events()[0].event_id().unwrap().to_string();
+
+    // Update feedback (admin)
+    client
+        .admin_update_auth_event_feedback()
+        .user_pool_id(&pool_id)
+        .username("selfuser")
+        .event_id(&event_id)
+        .feedback_value(aws_sdk_cognitoidentityprovider::types::FeedbackValueType::Valid)
+        .send()
+        .await
+        .unwrap();
+
+    // Update feedback (user-facing) — requires a feedback token (we use the access token)
+    // Get a second event
+    if events.auth_events().len() > 1 {
+        let event_id2 = events.auth_events()[1].event_id().unwrap().to_string();
+        client
+            .update_auth_event_feedback()
+            .user_pool_id(&pool_id)
+            .username("selfuser")
+            .event_id(&event_id2)
+            .feedback_token(&_access_token)
+            .feedback_value(aws_sdk_cognitoidentityprovider::types::FeedbackValueType::Invalid)
+            .send()
+            .await
+            .unwrap();
+    }
+}

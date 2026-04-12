@@ -40,12 +40,22 @@ pub struct CognitoState {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct AuthEvent {
+    pub event_id: String,
     pub event_type: String,
     pub username: String,
     pub user_pool_id: String,
     pub client_id: Option<String>,
     pub timestamp: DateTime<Utc>,
     pub success: bool,
+    pub feedback_value: Option<String>,
+}
+
+/// Linked external provider for a user
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LinkedProvider {
+    pub provider_name: String,
+    pub provider_attribute_name: Option<String>,
+    pub provider_attribute_value: Option<String>,
 }
 
 impl CognitoState {
@@ -302,6 +312,7 @@ pub struct User {
     pub totp_secret: Option<String>,
     pub totp_verified: bool,
     pub devices: HashMap<String, Device>,
+    pub linked_providers: Vec<LinkedProvider>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
