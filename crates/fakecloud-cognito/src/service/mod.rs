@@ -156,7 +156,7 @@ impl AwsService for CognitoService {
             "AdminListUserAuthEvents" => self.admin_list_user_auth_events(&req),
             "AdminUpdateAuthEventFeedback" => self.admin_update_auth_event_feedback(&req),
             "UpdateAuthEventFeedback" => self.update_auth_event_feedback(&req),
-"StartUserImportJob" => self.start_user_import_job(&req),
+            "StartUserImportJob" => self.start_user_import_job(&req),
             "StopUserImportJob" => self.stop_user_import_job(&req),
             _ => Err(AwsServiceError::action_not_implemented(
                 "cognito-idp",
@@ -267,7 +267,7 @@ impl AwsService for CognitoService {
             "AdminListUserAuthEvents",
             "AdminUpdateAuthEventFeedback",
             "UpdateAuthEventFeedback",
-"StartUserImportJob",
+            "StartUserImportJob",
             "StopUserImportJob",
         ]
     }

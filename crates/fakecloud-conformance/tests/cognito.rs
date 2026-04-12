@@ -3088,6 +3088,14 @@ async fn cognito_admin_set_user_settings() {
             aws_sdk_cognitoidentityprovider::types::MfaOptionType::builder()
                 .delivery_medium(aws_sdk_cognitoidentityprovider::types::DeliveryMediumType::Sms)
                 .attribute_name("phone_number")
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+}
+
+// ---------------------------------------------------------------------------
 // Custom Attributes
 // ---------------------------------------------------------------------------
 
@@ -3245,16 +3253,6 @@ async fn cognito_auth_events() {
             .await
             .unwrap();
     }
-let desc = client
-        .describe_user_pool()
-        .user_pool_id(&pool_id)
-        .send()
-        .await
-        .unwrap();
-    let attrs = desc.user_pool().unwrap().schema_attributes();
-    assert!(attrs
-        .iter()
-        .any(|a| a.name() == Some("custom:favorite_color")));
 }
 
 // ---------------------------------------------------------------------------
