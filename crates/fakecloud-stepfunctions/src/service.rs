@@ -841,3 +841,77 @@ fn validate_arn(arn: &str) -> Result<(), AwsServiceError> {
     }
     Ok(())
 }
+
+/// Start a Step Functions execution from a cross-service delivery (e.g. EventBridge).
+///
+/// This is the public entry point used by `StepFunctionsDeliveryImpl` in the server crate.
+/// It mirrors the logic from `StartExecution` but without the AWS request/response wrapper.
+pub fn start_execution_from_delivery(
+    state: &SharedStepFunctionsState,
+    delivery: &Option<Arc<DeliveryBus>>,
+    dynamodb_state: &Option<SharedDynamoDbState>,
+    state_machine_arn: &str,
+    input: &str,
+) {
+    // Validate input is valid JSON
+    if serde_json::from_str::<serde_json::Value>(input).is_err() {
+        tracing::warn!(
+            state_machine_arn,
+            "Step Functions delivery: invalid JSON input, skipping execution"
+        );
+        return;
+    }
+
+    let execution_name = uuid::Uuid::new_v4().to_string();
+
+    let mut st = state.write();
+    let sm = match st.state_machines.get(state_machine_arn) {
+        Some(sm) => sm,
+        None => {
+            tracing::warn!(
+                state_machine_arn,
+                "Step Functions delivery: state machine not found"
+            );
+            return;
+        }
+    };
+
+    let sm_name = sm.name.clone();
+    let definition = sm.definition.clone();
+    let exec_arn = st.execution_arn(&sm_name, &execution_name);
+
+    let now = Utc::now();
+    let execution = Execution {
+        execution_arn: exec_arn.clone(),
+        state_machine_arn: state_machine_arn.to_string(),
+        state_machine_name: sm_name,
+        name: execution_name,
+        status: ExecutionStatus::Running,
+        input: Some(input.to_string()),
+        output: None,
+        start_date: now,
+        stop_date: None,
+        error: None,
+        cause: None,
+        history_events: vec![],
+    };
+
+    st.executions.insert(exec_arn.clone(), execution);
+    drop(st);
+
+    let shared_state = state.clone();
+    let delivery = delivery.clone();
+    let dynamodb_state = dynamodb_state.clone();
+    let input = Some(input.to_string());
+    tokio::spawn(async move {
+        interpreter::execute_state_machine(
+            shared_state,
+            exec_arn,
+            definition,
+            input,
+            delivery,
+            dynamodb_state,
+        )
+        .await;
+    });
+}

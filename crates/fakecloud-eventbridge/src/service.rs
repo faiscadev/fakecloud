@@ -1988,9 +1988,9 @@ impl EventBridgeService {
                 } else if arn.contains(":states:") {
                     tracing::info!(
                         state_machine_arn = %arn,
-                        payload = %body_str,
-                        "EventBridge delivering to Step Functions (stub)"
+                        "EventBridge delivering to Step Functions"
                     );
+                    self.delivery.start_stepfunctions_execution(arn, &body_str);
                     let mut state = self.state.write();
                     state
                         .step_function_executions
@@ -3180,6 +3180,8 @@ impl EventBridgeService {
                         deliver_to_logs(log_state, target_arn, &body_str, Utc::now());
                     }
                 } else if target_arn.contains(":states:") {
+                    self.delivery
+                        .start_stepfunctions_execution(target_arn, &body_str);
                     let mut state = self.state.write();
                     state
                         .step_function_executions

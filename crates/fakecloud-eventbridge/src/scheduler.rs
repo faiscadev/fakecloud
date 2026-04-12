@@ -294,9 +294,9 @@ impl Scheduler {
                 } else if arn.contains(":states:") {
                     tracing::info!(
                         state_machine_arn = %arn,
-                        payload = %event_str,
-                        "Scheduler delivering to Step Functions (stub)"
+                        "Scheduler delivering to Step Functions"
                     );
+                    self.delivery.start_stepfunctions_execution(arn, &event_str);
                     let mut state = self.state.write();
                     state
                         .step_function_executions

@@ -4,14 +4,16 @@ use serde_json::{json, Value};
 
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
-use crate::state::{default_schema_attributes, PoolPolicies, UserPool, UserPoolClient};
+use crate::state::{
+    default_schema_attributes, ClientSecretDescriptor, PoolPolicies, UserPool, UserPoolClient,
+};
 
 use super::{
     generate_client_id, generate_client_secret, generate_pool_id, parse_account_recovery_setting,
     parse_admin_create_user_config, parse_email_configuration, parse_password_policy,
     parse_schema_attribute, parse_sms_configuration, parse_string_array, parse_tags,
-    parse_token_validity_units, user_pool_client_to_json, user_pool_to_json, validate_enum,
-    validate_range, validate_string_length, CognitoService,
+    parse_token_validity_units, require_str, user_pool_client_to_json, user_pool_to_json,
+    validate_enum, validate_range, validate_string_length, CognitoService,
 };
 
 impl CognitoService {
@@ -459,6 +461,7 @@ impl CognitoService {
             last_modified_date: now,
             enable_token_revocation: body["EnableTokenRevocation"].as_bool().unwrap_or(true),
             auth_session_validity: body["AuthSessionValidity"].as_i64(),
+            client_secrets: Vec::new(),
         };
 
         let response = user_pool_client_to_json(&client);
@@ -772,5 +775,216 @@ impl CognitoService {
         }
 
         Ok(AwsResponse::ok_json(response))
+    }
+
+    // ── Custom Attributes ──────────────────────────────────────────────
+
+    pub(super) fn add_custom_attributes(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let pool_id = require_str(&body, "UserPoolId")?;
+
+        let custom_attrs = body["CustomAttributes"].as_array().ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterException",
+                "CustomAttributes is required",
+            )
+        })?;
+
+        let mut state = self.state.write();
+
+        let pool = state.user_pools.get_mut(pool_id).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("User pool {pool_id} does not exist."),
+            )
+        })?;
+
+        for attr_val in custom_attrs {
+            if let Some(mut attr) = parse_schema_attribute(attr_val) {
+                // Ensure custom attributes have the custom: prefix
+                if !attr.name.starts_with("custom:") {
+                    attr.name = format!("custom:{}", attr.name);
+                }
+                // Don't add duplicates
+                if !pool.schema_attributes.iter().any(|a| a.name == attr.name) {
+                    pool.schema_attributes.push(attr);
+                }
+            }
+        }
+
+        pool.last_modified_date = Utc::now();
+
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    // ── Client Secrets ─────────────────────────────────────────────────
+
+    pub(super) fn add_user_pool_client_secret(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let pool_id = require_str(&body, "UserPoolId")?;
+        let client_id = require_str(&body, "ClientId")?;
+        let custom_secret = body["ClientSecret"].as_str();
+
+        let mut state = self.state.write();
+
+        if !state.user_pools.contains_key(pool_id) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("User pool {pool_id} does not exist."),
+            ));
+        }
+
+        let upc = state.user_pool_clients.get_mut(client_id).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("Client {client_id} does not exist."),
+            )
+        })?;
+
+        let now = Utc::now();
+        let secret_value = custom_secret
+            .map(|s| s.to_string())
+            .unwrap_or_else(generate_client_secret);
+        let secret_id = format!("{}--{}", client_id, now.timestamp());
+
+        let descriptor = ClientSecretDescriptor {
+            client_secret_id: secret_id,
+            client_secret_value: secret_value,
+            client_secret_create_date: now,
+        };
+
+        let resp = json!({
+            "ClientSecretDescriptor": {
+                "ClientSecretId": descriptor.client_secret_id,
+                "ClientSecretValue": descriptor.client_secret_value,
+                "ClientSecretCreateDate": descriptor.client_secret_create_date.timestamp() as f64,
+            }
+        });
+
+        upc.client_secrets.push(descriptor);
+
+        Ok(AwsResponse::ok_json(resp))
+    }
+
+    pub(super) fn delete_user_pool_client_secret(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let pool_id = require_str(&body, "UserPoolId")?;
+        let client_id = require_str(&body, "ClientId")?;
+        let secret_id = require_str(&body, "ClientSecretId")?;
+
+        let mut state = self.state.write();
+
+        if !state.user_pools.contains_key(pool_id) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("User pool {pool_id} does not exist."),
+            ));
+        }
+
+        let upc = state.user_pool_clients.get_mut(client_id).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("Client {client_id} does not exist."),
+            )
+        })?;
+
+        let idx = upc
+            .client_secrets
+            .iter()
+            .position(|s| s.client_secret_id == secret_id)
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ResourceNotFoundException",
+                    format!("Client secret {secret_id} does not exist."),
+                )
+            })?;
+
+        upc.client_secrets.remove(idx);
+
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    pub(super) fn list_user_pool_client_secrets(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let pool_id = require_str(&body, "UserPoolId")?;
+        let client_id = require_str(&body, "ClientId")?;
+        let _next_token = body["NextToken"].as_str();
+
+        let state = self.state.read();
+
+        if !state.user_pools.contains_key(pool_id) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("User pool {pool_id} does not exist."),
+            ));
+        }
+
+        let upc = state.user_pool_clients.get(client_id).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("Client {client_id} does not exist."),
+            )
+        })?;
+
+        let secrets: Vec<Value> = upc
+            .client_secrets
+            .iter()
+            .map(|s| {
+                json!({
+                    "ClientSecretId": s.client_secret_id,
+                    "ClientSecretCreateDate": s.client_secret_create_date.timestamp() as f64,
+                })
+            })
+            .collect();
+
+        Ok(AwsResponse::ok_json(json!({
+            "ClientSecrets": secrets
+        })))
+    }
+
+    // ── Signing Certificate ────────────────────────────────────────────
+
+    pub(super) fn get_signing_certificate(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let pool_id = require_str(&body, "UserPoolId")?;
+
+        let state = self.state.read();
+
+        if !state.user_pools.contains_key(pool_id) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("User pool {pool_id} does not exist."),
+            ));
+        }
+
+        // Return a placeholder self-signed certificate (base64-encoded DER)
+        Ok(AwsResponse::ok_json(json!({
+            "Certificate": "MIICpTCCAY0CFDfakecloud000000000000000000000MA0GCSqGSIb3DQEBCwUAMBUxEzARBgNVBAMMCmZha2VjbG91ZDAeFw0yNjAxMDEwMDAwMDBaFw0yNzAxMDEwMDAwMDBaMBUxEzARBgNVBAMMCmZha2VjbG91ZDCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBALfakecloud00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000002DAQABo1MwUTAdBgNVHQ4EFgQUfakecloud0000000000000000wHwYDVR0jBBgwFoAUfakecloud0000000000000000wDwYDVR0TAQH/BAUwAwEB/zANBgkqhkiG9w0BAQsFAAOCAQEAfakecloud0000000000000000000000000000000000000"
+        })))
     }
 }
