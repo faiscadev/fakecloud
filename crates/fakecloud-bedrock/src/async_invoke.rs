@@ -107,7 +107,8 @@ pub fn list_async_invokes(
         .query_params
         .get("maxResults")
         .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(100);
+        .unwrap_or(100)
+        .max(1);
     let next_token = req.query_params.get("nextToken");
     let status_filter = req.query_params.get("statusEquals");
 
@@ -143,8 +144,9 @@ pub fn list_async_invokes(
         .collect();
 
     let mut resp = json!({ "asyncInvokeSummaries": page });
-    if start + max_results < items.len() {
-        if let Some(last) = items.get(start + max_results - 1) {
+    let end = start.saturating_add(max_results);
+    if end < items.len() {
+        if let Some(last) = items.get(end - 1) {
             resp["nextToken"] = json!(last.invocation_arn);
         }
     }

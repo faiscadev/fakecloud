@@ -103,7 +103,8 @@ pub fn list_provisioned_model_throughputs(
         .query_params
         .get("maxResults")
         .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(100);
+        .unwrap_or(100)
+        .max(1);
     let next_token = req.query_params.get("nextToken");
 
     let s = state.read();
@@ -140,8 +141,9 @@ pub fn list_provisioned_model_throughputs(
         .collect();
 
     let mut resp = json!({ "provisionedModelSummaries": page });
-    if start + max_results < items.len() {
-        if let Some(last) = items.get(start + max_results - 1) {
+    let end = start.saturating_add(max_results);
+    if end < items.len() {
+        if let Some(last) = items.get(end - 1) {
             resp["nextToken"] = json!(last.provisioned_model_id);
         }
     }
