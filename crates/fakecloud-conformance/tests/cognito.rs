@@ -3250,7 +3250,86 @@ async fn cognito_terms() {
         .unwrap();
 }
 
-// WebAuthn operations (StartWebAuthnRegistration, CompleteWebAuthnRegistration,
-// DeleteWebAuthnCredential, ListWebAuthnCredentials) are implemented and pass
-// conformance probes but the AWS SDK version doesn't expose these methods yet,
-// so handwritten tests are skipped. They are fully covered by probe variants.
+// ---------------------------------------------------------------------------
+// WebAuthn (raw HTTP — SDK doesn't expose these methods in this version)
+// ---------------------------------------------------------------------------
+
+#[test_action("cognito-idp", "StartWebAuthnRegistration", checksum = "372f550e")]
+#[test_action("cognito-idp", "CompleteWebAuthnRegistration", checksum = "f18b9292")]
+#[test_action("cognito-idp", "DeleteWebAuthnCredential", checksum = "271bbdea")]
+#[test_action("cognito-idp", "ListWebAuthnCredentials", checksum = "e93ad619")]
+#[tokio::test]
+async fn cognito_webauthn() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+    let (_pool_id, _client_id, access_token) =
+        setup_authenticated_user(&client, "webauthn-pool").await;
+
+    let http = reqwest::Client::new();
+    let endpoint = server.endpoint();
+
+    // StartWebAuthnRegistration
+    let resp = http
+        .post(endpoint)
+        .header(
+            "X-Amz-Target",
+            "AWSCognitoIdentityProviderService.StartWebAuthnRegistration",
+        )
+        .header("Content-Type", "application/x-amz-json-1.1")
+        .body(format!(r#"{{"AccessToken":"{}"}}"#, access_token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // CompleteWebAuthnRegistration
+    let resp = http
+        .post(endpoint)
+        .header(
+            "X-Amz-Target",
+            "AWSCognitoIdentityProviderService.CompleteWebAuthnRegistration",
+        )
+        .header("Content-Type", "application/x-amz-json-1.1")
+        .body(format!(
+            r#"{{"AccessToken":"{}","Credential":{{"id":"test-cred"}}}}"#,
+            access_token
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // ListWebAuthnCredentials
+    let resp = http
+        .post(endpoint)
+        .header(
+            "X-Amz-Target",
+            "AWSCognitoIdentityProviderService.ListWebAuthnCredentials",
+        )
+        .header("Content-Type", "application/x-amz-json-1.1")
+        .body(format!(r#"{{"AccessToken":"{}"}}"#, access_token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["Credentials"].as_array().unwrap().len(), 1);
+    let cred_id = body["Credentials"][0]["CredentialId"].as_str().unwrap();
+
+    // DeleteWebAuthnCredential
+    let resp = http
+        .post(endpoint)
+        .header(
+            "X-Amz-Target",
+            "AWSCognitoIdentityProviderService.DeleteWebAuthnCredential",
+        )
+        .header("Content-Type", "application/x-amz-json-1.1")
+        .body(format!(
+            r#"{{"AccessToken":"{}","CredentialId":"{}"}}"#,
+            access_token, cred_id
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+}
