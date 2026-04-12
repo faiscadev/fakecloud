@@ -176,7 +176,17 @@ fn anthropic_response(model_id: &str, _input: &Value) -> String {
     .unwrap()
 }
 
-fn amazon_titan_response(_model_id: &str, _input: &Value) -> String {
+fn amazon_titan_response(model_id: &str, _input: &Value) -> String {
+    // Titan embed models return embedding vectors, not text completions
+    if model_id.starts_with("amazon.titan-embed") {
+        let embedding: Vec<f64> = (0..256).map(|i| (i as f64 * 0.001).sin()).collect();
+        return serde_json::to_string(&json!({
+            "embedding": embedding,
+            "inputTextTokenCount": 10
+        }))
+        .unwrap();
+    }
+
     serde_json::to_string(&json!({
         "inputTextTokenCount": 10,
         "results": [

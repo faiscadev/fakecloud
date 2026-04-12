@@ -12,7 +12,10 @@ pub fn create_custom_model_deployment(
     req: &AwsRequest,
     body: &Value,
 ) -> Result<AwsResponse, AwsServiceError> {
-    let deployment_name = body["modelDeploymentName"].as_str().unwrap_or("deployment");
+    let default_name = format!("deployment-{}", &Uuid::new_v4().to_string()[..8]);
+    let deployment_name = body["modelDeploymentName"]
+        .as_str()
+        .unwrap_or(&default_name);
     let model_arn = body["modelArn"].as_str().unwrap_or_default();
 
     let deployment_id = Uuid::new_v4().to_string();

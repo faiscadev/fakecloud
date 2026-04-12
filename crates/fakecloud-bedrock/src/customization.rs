@@ -48,7 +48,13 @@ pub fn create_model_customization_job(
             .and_then(|v| v.as_object())
             .map(|obj| {
                 obj.iter()
-                    .map(|(k, v)| (k.clone(), v.as_str().unwrap_or_default().to_string()))
+                    .map(|(k, v)| {
+                        let val = match v.as_str() {
+                            Some(s) => s.to_string(),
+                            None => v.to_string(), // serialize non-string values
+                        };
+                        (k.clone(), val)
+                    })
                     .collect()
             })
             .unwrap_or_default(),
