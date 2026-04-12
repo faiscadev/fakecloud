@@ -3067,3 +3067,190 @@ async fn cognito_get_csv_header() {
     assert_eq!(resp.user_pool_id().unwrap(), pool_id);
     assert!(!resp.csv_header().is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// Managed Login Branding
+// ---------------------------------------------------------------------------
+
+#[test_action("cognito-idp", "CreateManagedLoginBranding", checksum = "cb913f30")]
+#[test_action("cognito-idp", "DescribeManagedLoginBranding", checksum = "078abe45")]
+#[test_action(
+    "cognito-idp",
+    "DescribeManagedLoginBrandingByClient",
+    checksum = "1614d8e7"
+)]
+#[test_action("cognito-idp", "UpdateManagedLoginBranding", checksum = "efc1e7bb")]
+#[test_action("cognito-idp", "DeleteManagedLoginBranding", checksum = "7f018306")]
+#[tokio::test]
+async fn cognito_managed_login_branding() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("branding-pool")
+        .send()
+        .await
+        .unwrap();
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    let upc = client
+        .create_user_pool_client()
+        .user_pool_id(&pool_id)
+        .client_name("branding-client")
+        .send()
+        .await
+        .unwrap();
+    let client_id = upc
+        .user_pool_client()
+        .unwrap()
+        .client_id()
+        .unwrap()
+        .to_string();
+
+    // Create branding
+    let created = client
+        .create_managed_login_branding()
+        .user_pool_id(&pool_id)
+        .client_id(&client_id)
+        .use_cognito_provided_values(true)
+        .send()
+        .await
+        .unwrap();
+    let branding = created.managed_login_branding().unwrap();
+    let branding_id = branding.managed_login_branding_id().unwrap().to_string();
+
+    // Describe by ID
+    client
+        .describe_managed_login_branding()
+        .user_pool_id(&pool_id)
+        .managed_login_branding_id(&branding_id)
+        .send()
+        .await
+        .unwrap();
+
+    // Describe by client
+    client
+        .describe_managed_login_branding_by_client()
+        .user_pool_id(&pool_id)
+        .client_id(&client_id)
+        .send()
+        .await
+        .unwrap();
+
+    // Update
+    client
+        .update_managed_login_branding()
+        .managed_login_branding_id(&branding_id)
+        .user_pool_id(&pool_id)
+        .use_cognito_provided_values(false)
+        .send()
+        .await
+        .unwrap();
+
+    // Delete
+    client
+        .delete_managed_login_branding()
+        .managed_login_branding_id(&branding_id)
+        .user_pool_id(&pool_id)
+        .send()
+        .await
+        .unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Terms of Service
+// ---------------------------------------------------------------------------
+
+#[test_action("cognito-idp", "CreateTerms", checksum = "b7975c85")]
+#[test_action("cognito-idp", "DescribeTerms", checksum = "a01327c5")]
+#[test_action("cognito-idp", "ListTerms", checksum = "86783ac4")]
+#[test_action("cognito-idp", "UpdateTerms", checksum = "fa5f729e")]
+#[test_action("cognito-idp", "DeleteTerms", checksum = "85c898a8")]
+#[tokio::test]
+async fn cognito_terms() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("terms-pool")
+        .send()
+        .await
+        .unwrap();
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    let upc = client
+        .create_user_pool_client()
+        .user_pool_id(&pool_id)
+        .client_name("terms-client")
+        .send()
+        .await
+        .unwrap();
+    let client_id = upc
+        .user_pool_client()
+        .unwrap()
+        .client_id()
+        .unwrap()
+        .to_string();
+
+    // Create terms
+    let created = client
+        .create_terms()
+        .user_pool_id(&pool_id)
+        .client_id(&client_id)
+        .terms_name("Test Terms")
+        .terms_source(aws_sdk_cognitoidentityprovider::types::TermsSourceType::from("LINK"))
+        .enforcement(
+            aws_sdk_cognitoidentityprovider::types::TermsEnforcementType::from(
+                "ENFORCE_ON_SIGN_IN",
+            ),
+        )
+        .send()
+        .await
+        .unwrap();
+    let terms = created.terms().unwrap();
+    let terms_id = terms.terms_id().to_string();
+
+    // Describe
+    client
+        .describe_terms()
+        .terms_id(&terms_id)
+        .user_pool_id(&pool_id)
+        .send()
+        .await
+        .unwrap();
+
+    // List
+    let list = client
+        .list_terms()
+        .user_pool_id(&pool_id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(list.terms().len(), 1);
+
+    // Update
+    client
+        .update_terms()
+        .terms_id(&terms_id)
+        .user_pool_id(&pool_id)
+        .terms_name("Updated Terms")
+        .send()
+        .await
+        .unwrap();
+
+    // Delete
+    client
+        .delete_terms()
+        .terms_id(&terms_id)
+        .user_pool_id(&pool_id)
+        .send()
+        .await
+        .unwrap();
+}
+
+// WebAuthn operations (StartWebAuthnRegistration, CompleteWebAuthnRegistration,
+// DeleteWebAuthnCredential, ListWebAuthnCredentials) are implemented and pass
+// conformance probes but the AWS SDK version doesn't expose these methods yet,
+// so handwritten tests are skipped. They are fully covered by probe variants.

@@ -36,6 +36,22 @@ pub struct CognitoState {
     pub import_jobs: HashMap<String, HashMap<String, UserImportJob>>,
     /// Auth events for introspection
     pub auth_events: Vec<AuthEvent>,
+    /// branding_id -> ManagedLoginBranding JSON
+    pub managed_login_brandings: HashMap<String, serde_json::Value>,
+    /// terms_id -> Terms JSON
+    pub terms: HashMap<String, serde_json::Value>,
+    /// (pool_id, username) -> WebAuthn credentials
+    pub webauthn_credentials: HashMap<String, Vec<WebAuthnCredential>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebAuthnCredential {
+    pub credential_id: String,
+    pub friendly_credential_name: Option<String>,
+    pub relying_party_id: String,
+    pub authenticator_attachment: Option<String>,
+    pub authenticator_transport: Vec<String>,
+    pub created_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -67,6 +83,9 @@ impl CognitoState {
             tags: HashMap::new(),
             import_jobs: HashMap::new(),
             auth_events: Vec::new(),
+            managed_login_brandings: HashMap::new(),
+            terms: HashMap::new(),
+            webauthn_credentials: HashMap::new(),
         }
     }
 
@@ -85,6 +104,9 @@ impl CognitoState {
         self.tags.clear();
         self.import_jobs.clear();
         self.auth_events.clear();
+        self.managed_login_brandings.clear();
+        self.terms.clear();
+        self.webauthn_credentials.clear();
     }
 }
 

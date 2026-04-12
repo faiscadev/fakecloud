@@ -1,4 +1,5 @@
 mod auth;
+mod branding;
 mod groups;
 mod identity_providers;
 mod mfa;
@@ -141,6 +142,22 @@ impl AwsService for CognitoService {
             "CreateUserImportJob" => self.create_user_import_job(&req),
             "DescribeUserImportJob" => self.describe_user_import_job(&req),
             "ListUserImportJobs" => self.list_user_import_jobs(&req),
+            "CreateManagedLoginBranding" => self.create_managed_login_branding(&req),
+            "DeleteManagedLoginBranding" => self.delete_managed_login_branding(&req),
+            "DescribeManagedLoginBranding" => self.describe_managed_login_branding(&req),
+            "DescribeManagedLoginBrandingByClient" => {
+                self.describe_managed_login_branding_by_client(&req)
+            }
+            "UpdateManagedLoginBranding" => self.update_managed_login_branding(&req),
+            "CreateTerms" => self.create_terms(&req),
+            "DeleteTerms" => self.delete_terms(&req),
+            "DescribeTerms" => self.describe_terms(&req),
+            "ListTerms" => self.list_terms(&req),
+            "UpdateTerms" => self.update_terms(&req),
+            "StartWebAuthnRegistration" => self.start_webauthn_registration(&req),
+            "CompleteWebAuthnRegistration" => self.complete_webauthn_registration(&req),
+            "DeleteWebAuthnCredential" => self.delete_webauthn_credential(&req),
+            "ListWebAuthnCredentials" => self.list_webauthn_credentials(&req),
             _ => Err(AwsServiceError::action_not_implemented(
                 "cognito-idp",
                 &req.action,
@@ -236,6 +253,20 @@ impl AwsService for CognitoService {
             "CreateUserImportJob",
             "DescribeUserImportJob",
             "ListUserImportJobs",
+            "CreateManagedLoginBranding",
+            "DeleteManagedLoginBranding",
+            "DescribeManagedLoginBranding",
+            "DescribeManagedLoginBrandingByClient",
+            "UpdateManagedLoginBranding",
+            "CreateTerms",
+            "DeleteTerms",
+            "DescribeTerms",
+            "ListTerms",
+            "UpdateTerms",
+            "StartWebAuthnRegistration",
+            "CompleteWebAuthnRegistration",
+            "DeleteWebAuthnCredential",
+            "ListWebAuthnCredentials",
         ]
     }
 }

@@ -1933,6 +1933,7 @@ version = "0.8.1"
 dependencies = [
  "axum",
  "base64 0.22.1",
+ "bytes",
  "chrono",
  "clap",
  "fakecloud-apigatewayv2",
@@ -1958,6 +1959,7 @@ dependencies = [
  "fakecloud-sqs",
  "fakecloud-ssm",
  "fakecloud-stepfunctions",
+ "md-5 0.10.6",
  "parking_lot",
  "serde",
  "serde_json",
@@ -1965,6 +1967,7 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
