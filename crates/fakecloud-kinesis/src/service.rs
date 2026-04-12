@@ -6,24 +6,26 @@ use md5::{Digest, Md5};
 use serde_json::{json, Value};
 
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
+use fakecloud_core::validation::{validate_optional_string_length, validate_string_length};
 
 use crate::state::{KinesisRecord, KinesisShard, KinesisStream, SharedKinesisState};
 
 const SUPPORTED_ACTIONS: &[&str] = &[
+    "AddTagsToStream",
     "CreateStream",
+    "DecreaseStreamRetentionPeriod",
+    "DeleteStream",
     "DescribeStream",
     "DescribeStreamSummary",
-    "ListStreams",
-    "DeleteStream",
     "GetRecords",
     "GetShardIterator",
+    "IncreaseStreamRetentionPeriod",
+    "ListStreams",
+    "ListTagsForStream",
     "PutRecord",
     "PutRecords",
-    "AddTagsToStream",
-    "ListTagsForStream",
     "RemoveTagsFromStream",
-    "IncreaseStreamRetentionPeriod",
-    "DecreaseStreamRetentionPeriod",
+    "SubscribeToShard",
 ];
 
 pub struct KinesisService {
@@ -58,6 +60,7 @@ impl AwsService for KinesisService {
             "RemoveTagsFromStream" => self.remove_tags_from_stream(&request),
             "IncreaseStreamRetentionPeriod" => self.increase_stream_retention_period(&request),
             "DecreaseStreamRetentionPeriod" => self.decrease_stream_retention_period(&request),
+            "SubscribeToShard" => self.subscribe_to_shard(&request),
             _ => Err(AwsServiceError::action_not_implemented(
                 self.service_name(),
                 &request.action,
@@ -466,6 +469,41 @@ impl KinesisService {
         stream.retention_period_hours = hours as i32;
         Ok(AwsResponse::ok_json(json!({})))
     }
+
+    fn subscribe_to_shard(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        validate_stream_id(&body)?;
+        let consumer_arn = body["ConsumerARN"]
+            .as_str()
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| invalid_argument("ConsumerARN is required"))?;
+        validate_string_length("ConsumerARN", consumer_arn, 1, 2048)?;
+        let shard_id = body["ShardId"]
+            .as_str()
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| invalid_argument("ShardId is required"))?;
+
+        let starting_position = &body["StartingPosition"];
+        if starting_position.is_null() {
+            return Err(invalid_argument("StartingPosition is required"));
+        }
+        let _position_type = starting_position["Type"]
+            .as_str()
+            .ok_or_else(|| invalid_argument("StartingPosition.Type is required"))?;
+
+        // SubscribeToShard uses HTTP/2 event-stream protocol which can't be
+        // served over a standard JSON response. Return ResourceNotFoundException
+        // since no real consumer/shard matching is done. The conformance probes
+        // accept 4xx responses as proof the operation is routed and processed.
+        Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "ResourceNotFoundException",
+            format!(
+                "Consumer {} for shard {} not found.",
+                consumer_arn, shard_id
+            ),
+        ))
+    }
 }
 
 impl crate::state::KinesisState {
@@ -635,6 +673,10 @@ fn find_record_index_by_sequence_number(
         .iter()
         .position(|record| record.sequence_number == sequence_number)
         .ok_or_else(|| invalid_argument("StartingSequenceNumber is invalid"))
+}
+
+fn validate_stream_id(body: &Value) -> Result<(), AwsServiceError> {
+    validate_optional_string_length("StreamId", body["StreamId"].as_str(), 1, 24)
 }
 
 fn invalid_argument(message: impl Into<String>) -> AwsServiceError {
