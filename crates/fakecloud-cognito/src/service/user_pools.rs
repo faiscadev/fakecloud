@@ -10,7 +10,8 @@ use super::{
     generate_client_id, generate_client_secret, generate_pool_id, parse_account_recovery_setting,
     parse_admin_create_user_config, parse_email_configuration, parse_password_policy,
     parse_schema_attribute, parse_sms_configuration, parse_string_array, parse_tags,
-    parse_token_validity_units, user_pool_client_to_json, user_pool_to_json, CognitoService,
+    parse_token_validity_units, user_pool_client_to_json, user_pool_to_json, validate_enum,
+    validate_range, validate_string_length, CognitoService,
 };
 
 impl CognitoService {
@@ -30,6 +31,36 @@ impl CognitoService {
                     "1 validation error detected: Value at 'poolName' failed to satisfy constraint: Member must not be null",
                 )
             })?;
+
+        validate_string_length(pool_name, "poolName", 1, 128)?;
+
+        if let Some(dp) = body["DeletionProtection"].as_str() {
+            validate_enum(dp, "deletionProtection", &["ACTIVE", "INACTIVE"])?;
+        }
+
+        if let Some(mfa) = body["MfaConfiguration"].as_str() {
+            validate_enum(mfa, "mfaConfiguration", &["OFF", "ON", "OPTIONAL"])?;
+        }
+
+        if let Some(tier) = body["UserPoolTier"].as_str() {
+            validate_enum(tier, "userPoolTier", &["LITE", "ESSENTIALS", "PLUS"])?;
+        }
+
+        if let Some(msg) = body["EmailVerificationMessage"].as_str() {
+            validate_string_length(msg, "emailVerificationMessage", 6, 20000)?;
+        }
+
+        if let Some(subj) = body["EmailVerificationSubject"].as_str() {
+            validate_string_length(subj, "emailVerificationSubject", 1, 140)?;
+        }
+
+        if let Some(msg) = body["SmsAuthenticationMessage"].as_str() {
+            validate_string_length(msg, "smsAuthenticationMessage", 6, 140)?;
+        }
+
+        if let Some(msg) = body["SmsVerificationMessage"].as_str() {
+            validate_string_length(msg, "smsVerificationMessage", 6, 140)?;
+        }
 
         let mut state = self.state.write();
         let pool_id = generate_pool_id(&state.region);
@@ -292,9 +323,22 @@ impl CognitoService {
     pub(super) fn list_user_pools(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
 
-        let max_results = body["MaxResults"].as_i64().unwrap_or(60).clamp(1, 60) as usize;
+        let max_results = body["MaxResults"]
+            .as_i64()
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterException",
+                    "1 validation error detected: Value at 'maxResults' failed to satisfy constraint: Member must not be null",
+                )
+            })?;
+        validate_range(max_results, "maxResults", 1, 60)?;
+        let max_results = max_results as usize;
 
         let next_token = body["NextToken"].as_str();
+        if let Some(token) = next_token {
+            validate_string_length(token, "nextToken", 1, usize::MAX)?;
+        }
 
         let state = self.state.read();
 

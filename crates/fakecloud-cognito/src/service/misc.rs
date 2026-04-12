@@ -10,7 +10,8 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 use crate::state::{CustomDomainConfig, Device, UserImportJob, UserPoolDomain};
 
 use super::{
-    device_to_json, domain_description_to_json, import_job_to_json, require_str, CognitoService,
+    device_to_json, domain_description_to_json, import_job_to_json, require_str,
+    validate_string_length, CognitoService,
 };
 
 impl CognitoService {
@@ -68,6 +69,7 @@ impl CognitoService {
         let body = req.json_body();
 
         let domain = require_str(&body, "Domain")?;
+        validate_string_length(domain, "domain", 1, 63)?;
 
         let state = self.state.read();
 

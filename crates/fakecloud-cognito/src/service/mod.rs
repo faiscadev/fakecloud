@@ -968,6 +968,67 @@ fn validate_password(password: &str, policy: &PasswordPolicy) -> Result<(), AwsS
     Ok(())
 }
 
+/// Validate that a string value is one of the allowed enum values.
+fn validate_enum(value: &str, field: &str, allowed: &[&str]) -> Result<(), AwsServiceError> {
+    if !allowed.contains(&value) {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidParameterException",
+            format!(
+                "1 validation error detected: Value '{}' at '{}' failed to satisfy constraint: Member must satisfy enum value set: [{}]",
+                value, field, allowed.join(", ")
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// Validate string length is within min..=max bounds.
+fn validate_string_length(
+    value: &str,
+    field: &str,
+    min: usize,
+    max: usize,
+) -> Result<(), AwsServiceError> {
+    let len = value.len();
+    if len < min {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidParameterException",
+            format!(
+                "1 validation error detected: Value '{}' at '{}' failed to satisfy constraint: Member must have length greater than or equal to {}",
+                value, field, min
+            ),
+        ));
+    }
+    if len > max {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidParameterException",
+            format!(
+                "1 validation error detected: Value at '{}' failed to satisfy constraint: Member must have length less than or equal to {}",
+                field, max
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// Validate an integer is within min..=max bounds.
+fn validate_range(value: i64, field: &str, min: i64, max: i64) -> Result<(), AwsServiceError> {
+    if value < min || value > max {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidParameterException",
+            format!(
+                "1 validation error detected: Value '{}' at '{}' failed to satisfy constraint: Member must have value between {} and {}",
+                value, field, min, max
+            ),
+        ));
+    }
+    Ok(())
+}
+
 struct TokenSet {
     id_token: String,
     access_token: String,
