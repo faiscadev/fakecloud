@@ -31,6 +31,12 @@ pub struct BedrockState {
     pub custom_models: HashMap<String, CustomModel>,
     /// Custom model deployments keyed by deployment ARN.
     pub custom_model_deployments: HashMap<String, CustomModelDeployment>,
+    /// Model import jobs keyed by job ARN.
+    pub model_import_jobs: HashMap<String, ModelImportJob>,
+    /// Imported models keyed by model ARN.
+    pub imported_models: HashMap<String, ImportedModel>,
+    /// Model copy jobs keyed by job ARN.
+    pub model_copy_jobs: HashMap<String, ModelCopyJob>,
 }
 
 impl BedrockState {
@@ -49,6 +55,9 @@ impl BedrockState {
             async_invocations: HashMap::new(),
             custom_models: HashMap::new(),
             custom_model_deployments: HashMap::new(),
+            model_import_jobs: HashMap::new(),
+            imported_models: HashMap::new(),
+            model_copy_jobs: HashMap::new(),
         }
     }
 
@@ -64,6 +73,9 @@ impl BedrockState {
         self.async_invocations.clear();
         self.custom_models.clear();
         self.custom_model_deployments.clear();
+        self.model_import_jobs.clear();
+        self.imported_models.clear();
+        self.model_copy_jobs.clear();
     }
 }
 
@@ -182,4 +194,36 @@ pub struct CustomModelDeployment {
     pub status: String,
     pub created_at: DateTime<Utc>,
     pub last_updated_at: DateTime<Utc>,
+}
+
+#[derive(Clone)]
+pub struct ModelImportJob {
+    pub job_arn: String,
+    pub job_name: String,
+    pub imported_model_name: String,
+    pub imported_model_arn: String,
+    pub role_arn: String,
+    pub model_data_source: serde_json::Value,
+    pub status: String,
+    pub creation_time: DateTime<Utc>,
+    pub last_modified_time: DateTime<Utc>,
+}
+
+#[derive(Clone)]
+pub struct ImportedModel {
+    pub model_arn: String,
+    pub model_name: String,
+    pub job_arn: String,
+    pub model_data_source: serde_json::Value,
+    pub creation_time: DateTime<Utc>,
+}
+
+#[derive(Clone)]
+pub struct ModelCopyJob {
+    pub job_arn: String,
+    pub source_model_arn: String,
+    pub target_model_arn: String,
+    pub target_model_name: String,
+    pub status: String,
+    pub creation_time: DateTime<Utc>,
 }

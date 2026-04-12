@@ -7,6 +7,8 @@ pub mod customization;
 pub mod guardrails;
 pub mod invoke;
 pub mod logging;
+pub mod model_copy;
+pub mod model_import;
 pub mod models;
 pub mod service;
 pub mod state;

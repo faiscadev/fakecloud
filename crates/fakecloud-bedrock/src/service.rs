@@ -94,6 +94,39 @@ impl BedrockService {
                 Some(("DeleteCustomModelDeployment", Some(decode(&segs[2])), None))
             }
 
+            // Model import jobs
+            (Method::POST, 1) if segs[0] == "model-import-jobs" => {
+                Some(("CreateModelImportJob", None, None))
+            }
+            (Method::GET, 1) if segs[0] == "model-import-jobs" => {
+                Some(("ListModelImportJobs", None, None))
+            }
+            (Method::GET, 2) if segs[0] == "model-import-jobs" => {
+                Some(("GetModelImportJob", Some(decode(&segs[1])), None))
+            }
+
+            // Imported models
+            (Method::GET, 1) if segs[0] == "imported-models" => {
+                Some(("ListImportedModels", None, None))
+            }
+            (Method::GET, 2) if segs[0] == "imported-models" => {
+                Some(("GetImportedModel", Some(decode(&segs[1])), None))
+            }
+            (Method::DELETE, 2) if segs[0] == "imported-models" => {
+                Some(("DeleteImportedModel", Some(decode(&segs[1])), None))
+            }
+
+            // Model copy jobs
+            (Method::POST, 1) if segs[0] == "model-copy-jobs" => {
+                Some(("CreateModelCopyJob", None, None))
+            }
+            (Method::GET, 1) if segs[0] == "model-copy-jobs" => {
+                Some(("ListModelCopyJobs", None, None))
+            }
+            (Method::GET, 2) if segs[0] == "model-copy-jobs" => {
+                Some(("GetModelCopyJob", Some(decode(&segs[1])), None))
+            }
+
             // Model customization jobs
             (Method::POST, 1) if segs[0] == "model-customization-jobs" => {
                 Some(("CreateModelCustomizationJob", None, None))
@@ -460,6 +493,34 @@ impl AwsService for BedrockService {
                     &resource_id.unwrap_or_default(),
                 )
             }
+            // Model import jobs
+            "CreateModelImportJob" => {
+                let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
+                crate::model_import::create_model_import_job(&self.state, &req, &body)
+            }
+            "GetModelImportJob" => crate::model_import::get_model_import_job(
+                &self.state,
+                &resource_id.unwrap_or_default(),
+            ),
+            "ListModelImportJobs" => crate::model_import::list_model_import_jobs(&self.state, &req),
+            "GetImportedModel" => crate::model_import::get_imported_model(
+                &self.state,
+                &resource_id.unwrap_or_default(),
+            ),
+            "ListImportedModels" => crate::model_import::list_imported_models(&self.state, &req),
+            "DeleteImportedModel" => crate::model_import::delete_imported_model(
+                &self.state,
+                &resource_id.unwrap_or_default(),
+            ),
+            // Model copy jobs
+            "CreateModelCopyJob" => {
+                let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
+                crate::model_copy::create_model_copy_job(&self.state, &req, &body)
+            }
+            "GetModelCopyJob" => {
+                crate::model_copy::get_model_copy_job(&self.state, &resource_id.unwrap_or_default())
+            }
+            "ListModelCopyJobs" => crate::model_copy::list_model_copy_jobs(&self.state, &req),
             // Model customization jobs
             "CreateModelCustomizationJob" => {
                 let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
@@ -615,6 +676,15 @@ impl AwsService for BedrockService {
             "ListCustomModelDeployments",
             "UpdateCustomModelDeployment",
             "DeleteCustomModelDeployment",
+            "CreateModelImportJob",
+            "GetModelImportJob",
+            "ListModelImportJobs",
+            "GetImportedModel",
+            "ListImportedModels",
+            "DeleteImportedModel",
+            "CreateModelCopyJob",
+            "GetModelCopyJob",
+            "ListModelCopyJobs",
             "CreateModelCustomizationJob",
             "GetModelCustomizationJob",
             "ListModelCustomizationJobs",

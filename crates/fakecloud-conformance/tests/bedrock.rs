@@ -705,6 +705,145 @@ async fn bedrock_bidirectional_stream_conformance() {
 }
 
 // ---------------------------------------------------------------------------
+// Model Import
+// ---------------------------------------------------------------------------
+
+#[test_action("bedrock", "CreateModelImportJob", checksum = "aa03dfa3")]
+#[test_action("bedrock", "GetModelImportJob", checksum = "49328baf")]
+#[test_action("bedrock", "ListModelImportJobs", checksum = "77700f04")]
+#[test_action("bedrock", "GetImportedModel", checksum = "4043fd91")]
+#[test_action("bedrock", "ListImportedModels", checksum = "7ece5cb8")]
+#[test_action("bedrock", "DeleteImportedModel", checksum = "c62da780")]
+#[tokio::test]
+async fn bedrock_model_import_lifecycle() {
+    let server = TestServer::start().await;
+    let http_client = reqwest::Client::new();
+    let auth = "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20260411/us-east-1/bedrock/aws4_request, SignedHeaders=host, Signature=fake";
+
+    let body = serde_json::json!({
+        "jobName": "conf-import",
+        "importedModelName": "conf-imported",
+        "roleArn": "arn:aws:iam::123456789012:role/test",
+        "modelDataSource": {"s3DataSource": {"s3Uri": "s3://bucket/model/"}}
+    });
+    let resp = http_client
+        .post(format!("{}/model-import-jobs", server.endpoint()))
+        .header("content-type", "application/json")
+        .header("authorization", auth)
+        .body(serde_json::to_string(&body).unwrap())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+    let result: serde_json::Value = resp.json().await.unwrap();
+    let job_arn = result["jobArn"].as_str().unwrap().to_string();
+    let job_id = job_arn.rsplit('/').next().unwrap();
+
+    // Get job
+    let resp = http_client
+        .get(format!(
+            "{}/model-import-jobs/{}",
+            server.endpoint(),
+            job_id
+        ))
+        .header("authorization", auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // List jobs
+    let resp = http_client
+        .get(format!("{}/model-import-jobs", server.endpoint()))
+        .header("authorization", auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // Get imported model
+    let resp = http_client
+        .get(format!(
+            "{}/imported-models/conf-imported",
+            server.endpoint()
+        ))
+        .header("authorization", auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // List imported models
+    let resp = http_client
+        .get(format!("{}/imported-models", server.endpoint()))
+        .header("authorization", auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // Delete imported model
+    let resp = http_client
+        .delete(format!(
+            "{}/imported-models/conf-imported",
+            server.endpoint()
+        ))
+        .header("authorization", auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+}
+
+#[test_action("bedrock", "CreateModelCopyJob", checksum = "75268069")]
+#[test_action("bedrock", "GetModelCopyJob", checksum = "b0dec5ba")]
+#[test_action("bedrock", "ListModelCopyJobs", checksum = "454a776c")]
+#[tokio::test]
+async fn bedrock_model_copy_lifecycle() {
+    let server = TestServer::start().await;
+    let http_client = reqwest::Client::new();
+    let auth = "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20260411/us-east-1/bedrock/aws4_request, SignedHeaders=host, Signature=fake";
+
+    let body = serde_json::json!({
+        "sourceModelArn": "arn:aws:bedrock:us-east-1:123456789012:custom-model/source",
+        "targetModelName": "conf-copy-target"
+    });
+    let resp = http_client
+        .post(format!("{}/model-copy-jobs", server.endpoint()))
+        .header("content-type", "application/json")
+        .header("authorization", auth)
+        .body(serde_json::to_string(&body).unwrap())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+    let result: serde_json::Value = resp.json().await.unwrap();
+    let job_arn = result["jobArn"].as_str().unwrap().to_string();
+    let job_id = job_arn.rsplit('/').next().unwrap();
+
+    let resp = http_client
+        .get(format!("{}/model-copy-jobs/{}", server.endpoint(), job_id))
+        .header("authorization", auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let resp = http_client
+        .get(format!("{}/model-copy-jobs", server.endpoint()))
+        .header("authorization", auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let result: serde_json::Value = resp.json().await.unwrap();
+    assert!(!result["modelCopyJobSummaries"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+}
+
+// ---------------------------------------------------------------------------
 // Custom Models
 // ---------------------------------------------------------------------------
 
