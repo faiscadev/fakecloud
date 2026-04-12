@@ -55,6 +55,10 @@ pub struct BedrockState {
     pub use_case_for_model_access: Option<serde_json::Value>,
     /// Enforced guardrail configurations keyed by config ID.
     pub enforced_guardrail_configs: HashMap<String, serde_json::Value>,
+    /// Automated reasoning policies keyed by policy ARN.
+    pub automated_reasoning_policies: HashMap<String, AutomatedReasoningPolicy>,
+    /// Automated reasoning test cases keyed by (policy_arn, test_case_id).
+    pub automated_reasoning_test_cases: HashMap<(String, String), AutomatedReasoningTestCase>,
 }
 
 impl BedrockState {
@@ -85,6 +89,8 @@ impl BedrockState {
             foundation_model_agreements: HashMap::new(),
             use_case_for_model_access: None,
             enforced_guardrail_configs: HashMap::new(),
+            automated_reasoning_policies: HashMap::new(),
+            automated_reasoning_test_cases: HashMap::new(),
         }
     }
 
@@ -112,6 +118,8 @@ impl BedrockState {
         self.foundation_model_agreements.clear();
         self.use_case_for_model_access = None;
         self.enforced_guardrail_configs.clear();
+        self.automated_reasoning_policies.clear();
+        self.automated_reasoning_test_cases.clear();
     }
 }
 
@@ -335,4 +343,29 @@ pub struct FoundationModelAgreement {
     pub agreement_id: String,
     pub model_id: String,
     pub created_at: DateTime<Utc>,
+}
+
+#[derive(Clone)]
+pub struct AutomatedReasoningPolicy {
+    pub policy_arn: String,
+    pub policy_name: String,
+    pub description: Option<String>,
+    pub policy_document: serde_json::Value,
+    pub status: String,
+    pub version: String,
+    pub versions: Vec<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Clone)]
+pub struct AutomatedReasoningTestCase {
+    pub test_case_id: String,
+    pub policy_arn: String,
+    pub test_case_name: String,
+    pub description: Option<String>,
+    pub input: serde_json::Value,
+    pub expected_output: serde_json::Value,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }

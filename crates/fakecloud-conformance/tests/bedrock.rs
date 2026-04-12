@@ -705,6 +705,258 @@ async fn bedrock_bidirectional_stream_conformance() {
 }
 
 // ---------------------------------------------------------------------------
+// Automated Reasoning Policies — Core
+// ---------------------------------------------------------------------------
+
+#[test_action("bedrock", "CreateAutomatedReasoningPolicy", checksum = "f393af04")]
+#[test_action("bedrock", "GetAutomatedReasoningPolicy", checksum = "72f1e179")]
+#[test_action("bedrock", "ListAutomatedReasoningPolicies", checksum = "8f74b1fa")]
+#[test_action("bedrock", "UpdateAutomatedReasoningPolicy", checksum = "152863e5")]
+#[test_action("bedrock", "DeleteAutomatedReasoningPolicy", checksum = "395df130")]
+#[test_action(
+    "bedrock",
+    "CreateAutomatedReasoningPolicyVersion",
+    checksum = "0d12d2b2"
+)]
+#[test_action(
+    "bedrock",
+    "ExportAutomatedReasoningPolicyVersion",
+    checksum = "07d318c1"
+)]
+#[tokio::test]
+async fn bedrock_automated_reasoning_policy_lifecycle() {
+    let server = TestServer::start().await;
+    let h = reqwest::Client::new();
+    let a = "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20260411/us-east-1/bedrock/aws4_request, SignedHeaders=host, Signature=fake";
+    let b = serde_json::json!({"policyName": "conf-policy", "policyDocument": {"rules": []}});
+    let r = h
+        .post(format!(
+            "{}/automated-reasoning-policies",
+            server.endpoint()
+        ))
+        .header("content-type", "application/json")
+        .header("authorization", a)
+        .body(serde_json::to_string(&b).unwrap())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 201);
+    let v: serde_json::Value = r.json().await.unwrap();
+    let arn = v["policyArn"].as_str().unwrap().to_string();
+    let id = arn.rsplit('/').next().unwrap();
+    assert_eq!(
+        h.get(format!(
+            "{}/automated-reasoning-policies/{}",
+            server.endpoint(),
+            id
+        ))
+        .header("authorization", a)
+        .send()
+        .await
+        .unwrap()
+        .status(),
+        200
+    );
+    assert_eq!(
+        h.get(format!(
+            "{}/automated-reasoning-policies",
+            server.endpoint()
+        ))
+        .header("authorization", a)
+        .send()
+        .await
+        .unwrap()
+        .status(),
+        200
+    );
+    let b = serde_json::json!({"description": "updated"});
+    assert_eq!(
+        h.patch(format!(
+            "{}/automated-reasoning-policies/{}",
+            server.endpoint(),
+            id
+        ))
+        .header("content-type", "application/json")
+        .header("authorization", a)
+        .body(serde_json::to_string(&b).unwrap())
+        .send()
+        .await
+        .unwrap()
+        .status(),
+        200
+    );
+    assert_eq!(
+        h.post(format!(
+            "{}/automated-reasoning-policies/{}/versions",
+            server.endpoint(),
+            id
+        ))
+        .header("content-type", "application/json")
+        .header("authorization", a)
+        .body("{}")
+        .send()
+        .await
+        .unwrap()
+        .status(),
+        201
+    );
+    assert_eq!(
+        h.get(format!(
+            "{}/automated-reasoning-policies/{}/export",
+            server.endpoint(),
+            id
+        ))
+        .header("authorization", a)
+        .send()
+        .await
+        .unwrap()
+        .status(),
+        200
+    );
+    assert_eq!(
+        h.delete(format!(
+            "{}/automated-reasoning-policies/{}",
+            server.endpoint(),
+            id
+        ))
+        .header("authorization", a)
+        .send()
+        .await
+        .unwrap()
+        .status(),
+        200
+    );
+}
+
+#[test_action(
+    "bedrock",
+    "CreateAutomatedReasoningPolicyTestCase",
+    checksum = "dbbd6c0c"
+)]
+#[test_action(
+    "bedrock",
+    "GetAutomatedReasoningPolicyTestCase",
+    checksum = "8847960f"
+)]
+#[test_action(
+    "bedrock",
+    "ListAutomatedReasoningPolicyTestCases",
+    checksum = "61acc65a"
+)]
+#[test_action(
+    "bedrock",
+    "UpdateAutomatedReasoningPolicyTestCase",
+    checksum = "ee06d0d0"
+)]
+#[test_action(
+    "bedrock",
+    "DeleteAutomatedReasoningPolicyTestCase",
+    checksum = "ec4f201a"
+)]
+#[tokio::test]
+async fn bedrock_automated_reasoning_test_case_lifecycle() {
+    let server = TestServer::start().await;
+    let h = reqwest::Client::new();
+    let a = "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20260411/us-east-1/bedrock/aws4_request, SignedHeaders=host, Signature=fake";
+    // Create a policy first
+    let b = serde_json::json!({"policyName": "tc-policy", "policyDocument": {}});
+    let r = h
+        .post(format!(
+            "{}/automated-reasoning-policies",
+            server.endpoint()
+        ))
+        .header("content-type", "application/json")
+        .header("authorization", a)
+        .body(serde_json::to_string(&b).unwrap())
+        .send()
+        .await
+        .unwrap();
+    let v: serde_json::Value = r.json().await.unwrap();
+    let policy_id = v["policyArn"]
+        .as_str()
+        .unwrap()
+        .rsplit('/')
+        .next()
+        .unwrap()
+        .to_string();
+    // Create test case
+    let b = serde_json::json!({"testCaseName": "conf-tc", "input": {"query": "test"}, "expectedOutput": {"result": true}});
+    let r = h
+        .post(format!(
+            "{}/automated-reasoning-policies/{}/test-cases",
+            server.endpoint(),
+            policy_id
+        ))
+        .header("content-type", "application/json")
+        .header("authorization", a)
+        .body(serde_json::to_string(&b).unwrap())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 201);
+    let v: serde_json::Value = r.json().await.unwrap();
+    let tc_id = v["testCaseId"].as_str().unwrap();
+    assert_eq!(
+        h.get(format!(
+            "{}/automated-reasoning-policies/{}/test-cases/{}",
+            server.endpoint(),
+            policy_id,
+            tc_id
+        ))
+        .header("authorization", a)
+        .send()
+        .await
+        .unwrap()
+        .status(),
+        200
+    );
+    assert_eq!(
+        h.get(format!(
+            "{}/automated-reasoning-policies/{}/test-cases",
+            server.endpoint(),
+            policy_id
+        ))
+        .header("authorization", a)
+        .send()
+        .await
+        .unwrap()
+        .status(),
+        200
+    );
+    let b = serde_json::json!({"description": "updated tc"});
+    assert_eq!(
+        h.patch(format!(
+            "{}/automated-reasoning-policies/{}/test-cases/{}",
+            server.endpoint(),
+            policy_id,
+            tc_id
+        ))
+        .header("content-type", "application/json")
+        .header("authorization", a)
+        .body(serde_json::to_string(&b).unwrap())
+        .send()
+        .await
+        .unwrap()
+        .status(),
+        200
+    );
+    assert_eq!(
+        h.delete(format!(
+            "{}/automated-reasoning-policies/{}/test-cases/{}",
+            server.endpoint(),
+            policy_id,
+            tc_id
+        ))
+        .header("authorization", a)
+        .send()
+        .await
+        .unwrap()
+        .status(),
+        200
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Marketplace + Agreements + Enforced Guardrails + Misc
 // ---------------------------------------------------------------------------
 

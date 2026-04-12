@@ -1,4 +1,5 @@
 pub mod async_invoke;
+pub mod automated_reasoning;
 pub mod converse;
 pub mod custom_model_deployments;
 pub mod custom_models;

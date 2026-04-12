@@ -281,6 +281,90 @@ impl BedrockService {
                 None,
             )),
 
+            // Automated reasoning policies
+            (Method::POST, 1) if segs[0] == "automated-reasoning-policies" => {
+                Some(("CreateAutomatedReasoningPolicy", None, None))
+            }
+            (Method::GET, 1) if segs[0] == "automated-reasoning-policies" => {
+                Some(("ListAutomatedReasoningPolicies", None, None))
+            }
+            (Method::GET, 2) if segs[0] == "automated-reasoning-policies" => {
+                Some(("GetAutomatedReasoningPolicy", Some(decode(&segs[1])), None))
+            }
+            (Method::PATCH, 2) if segs[0] == "automated-reasoning-policies" => Some((
+                "UpdateAutomatedReasoningPolicy",
+                Some(decode(&segs[1])),
+                None,
+            )),
+            (Method::DELETE, 2) if segs[0] == "automated-reasoning-policies" => Some((
+                "DeleteAutomatedReasoningPolicy",
+                Some(decode(&segs[1])),
+                None,
+            )),
+            (Method::POST, 3)
+                if segs[0] == "automated-reasoning-policies" && segs[2] == "versions" =>
+            {
+                Some((
+                    "CreateAutomatedReasoningPolicyVersion",
+                    Some(decode(&segs[1])),
+                    None,
+                ))
+            }
+            (Method::GET, 3)
+                if segs[0] == "automated-reasoning-policies" && segs[2] == "export" =>
+            {
+                Some((
+                    "ExportAutomatedReasoningPolicyVersion",
+                    Some(decode(&segs[1])),
+                    None,
+                ))
+            }
+            (Method::POST, 3)
+                if segs[0] == "automated-reasoning-policies" && segs[2] == "test-cases" =>
+            {
+                Some((
+                    "CreateAutomatedReasoningPolicyTestCase",
+                    Some(decode(&segs[1])),
+                    None,
+                ))
+            }
+            (Method::GET, 3)
+                if segs[0] == "automated-reasoning-policies" && segs[2] == "test-cases" =>
+            {
+                Some((
+                    "ListAutomatedReasoningPolicyTestCases",
+                    Some(decode(&segs[1])),
+                    None,
+                ))
+            }
+            (Method::GET, 4)
+                if segs[0] == "automated-reasoning-policies" && segs[2] == "test-cases" =>
+            {
+                Some((
+                    "GetAutomatedReasoningPolicyTestCase",
+                    Some(decode(&segs[1])),
+                    Some(decode(&segs[3])),
+                ))
+            }
+            (Method::PATCH, 4)
+                if segs[0] == "automated-reasoning-policies" && segs[2] == "test-cases" =>
+            {
+                Some((
+                    "UpdateAutomatedReasoningPolicyTestCase",
+                    Some(decode(&segs[1])),
+                    Some(decode(&segs[3])),
+                ))
+            }
+            (Method::DELETE, 4)
+                if segs[0] == "automated-reasoning-policies" && segs[2] == "test-cases" =>
+            {
+                Some((
+                    "DeleteAutomatedReasoningPolicyTestCase",
+                    Some(decode(&segs[1])),
+                    Some(decode(&segs[3])),
+                ))
+            }
+
             // Model customization jobs
             (Method::POST, 1) if segs[0] == "model-customization-jobs" => {
                 Some(("CreateModelCustomizationJob", None, None))
@@ -844,6 +928,91 @@ impl AwsService for BedrockService {
                     &resource_id.unwrap_or_default(),
                 )
             }
+            // Automated reasoning policies
+            "CreateAutomatedReasoningPolicy" => {
+                let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
+                crate::automated_reasoning::create_automated_reasoning_policy(
+                    &self.state,
+                    &req,
+                    &body,
+                )
+            }
+            "GetAutomatedReasoningPolicy" => {
+                crate::automated_reasoning::get_automated_reasoning_policy(
+                    &self.state,
+                    &resource_id.unwrap_or_default(),
+                )
+            }
+            "ListAutomatedReasoningPolicies" => {
+                crate::automated_reasoning::list_automated_reasoning_policies(&self.state, &req)
+            }
+            "UpdateAutomatedReasoningPolicy" => {
+                let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
+                crate::automated_reasoning::update_automated_reasoning_policy(
+                    &self.state,
+                    &resource_id.unwrap_or_default(),
+                    &body,
+                )
+            }
+            "DeleteAutomatedReasoningPolicy" => {
+                crate::automated_reasoning::delete_automated_reasoning_policy(
+                    &self.state,
+                    &resource_id.unwrap_or_default(),
+                )
+            }
+            "CreateAutomatedReasoningPolicyVersion" => {
+                let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
+                crate::automated_reasoning::create_automated_reasoning_policy_version(
+                    &self.state,
+                    &resource_id.unwrap_or_default(),
+                    &body,
+                )
+            }
+            "ExportAutomatedReasoningPolicyVersion" => {
+                crate::automated_reasoning::export_automated_reasoning_policy_version(
+                    &self.state,
+                    &resource_id.unwrap_or_default(),
+                    &req,
+                )
+            }
+            "CreateAutomatedReasoningPolicyTestCase" => {
+                let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
+                crate::automated_reasoning::create_automated_reasoning_policy_test_case(
+                    &self.state,
+                    &resource_id.unwrap_or_default(),
+                    &body,
+                )
+            }
+            "GetAutomatedReasoningPolicyTestCase" => {
+                crate::automated_reasoning::get_automated_reasoning_policy_test_case(
+                    &self.state,
+                    &resource_id.unwrap_or_default(),
+                    extra_id.as_deref().unwrap_or_default(),
+                )
+            }
+            "ListAutomatedReasoningPolicyTestCases" => {
+                crate::automated_reasoning::list_automated_reasoning_policy_test_cases(
+                    &self.state,
+                    &resource_id.unwrap_or_default(),
+                    &req,
+                )
+            }
+            "UpdateAutomatedReasoningPolicyTestCase" => {
+                let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
+                crate::automated_reasoning::update_automated_reasoning_policy_test_case(
+                    &self.state,
+                    &resource_id.unwrap_or_default(),
+                    extra_id.as_deref().unwrap_or_default(),
+                    &body,
+                )
+            }
+            "DeleteAutomatedReasoningPolicyTestCase" => {
+                crate::automated_reasoning::delete_automated_reasoning_policy_test_case(
+                    &self.state,
+                    &resource_id.unwrap_or_default(),
+                    extra_id.as_deref().unwrap_or_default(),
+                )
+            }
             // Model customization jobs
             "CreateModelCustomizationJob" => {
                 let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
@@ -1044,6 +1213,18 @@ impl AwsService for BedrockService {
             "PutEnforcedGuardrailConfiguration",
             "ListEnforcedGuardrailsConfiguration",
             "DeleteEnforcedGuardrailConfiguration",
+            "CreateAutomatedReasoningPolicy",
+            "GetAutomatedReasoningPolicy",
+            "ListAutomatedReasoningPolicies",
+            "UpdateAutomatedReasoningPolicy",
+            "DeleteAutomatedReasoningPolicy",
+            "CreateAutomatedReasoningPolicyVersion",
+            "ExportAutomatedReasoningPolicyVersion",
+            "CreateAutomatedReasoningPolicyTestCase",
+            "GetAutomatedReasoningPolicyTestCase",
+            "ListAutomatedReasoningPolicyTestCases",
+            "UpdateAutomatedReasoningPolicyTestCase",
+            "DeleteAutomatedReasoningPolicyTestCase",
             "CreateModelCustomizationJob",
             "GetModelCustomizationJob",
             "ListModelCustomizationJobs",
