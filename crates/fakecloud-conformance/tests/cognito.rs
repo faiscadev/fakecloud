@@ -2780,6 +2780,159 @@ async fn cognito_admin_update_forget_device() {
 }
 
 // ---------------------------------------------------------------------------
+// User-facing Device Operations
+// ---------------------------------------------------------------------------
+
+#[test_action("cognito-idp", "ForgetDevice", checksum = "b406e013")]
+#[test_action("cognito-idp", "GetDevice", checksum = "29875916")]
+#[test_action("cognito-idp", "ListDevices", checksum = "c3f85481")]
+#[test_action("cognito-idp", "UpdateDeviceStatus", checksum = "830e0020")]
+#[tokio::test]
+async fn cognito_user_device_ops() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+    let (_pool_id, _client_id, access_token) = setup_authenticated_user(&client, "udev-pool").await;
+
+    // Confirm a device
+    client
+        .confirm_device()
+        .access_token(&access_token)
+        .device_key("user-dev-1")
+        .send()
+        .await
+        .unwrap();
+
+    // GetDevice
+    let dev = client
+        .get_device()
+        .access_token(&access_token)
+        .device_key("user-dev-1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(dev.device().unwrap().device_key().unwrap(), "user-dev-1");
+
+    // ListDevices
+    let list = client
+        .list_devices()
+        .access_token(&access_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(list.devices().len(), 1);
+
+    // UpdateDeviceStatus
+    client
+        .update_device_status()
+        .access_token(&access_token)
+        .device_key("user-dev-1")
+        .device_remembered_status(
+            aws_sdk_cognitoidentityprovider::types::DeviceRememberedStatusType::Remembered,
+        )
+        .send()
+        .await
+        .unwrap();
+
+    // ForgetDevice
+    client
+        .forget_device()
+        .access_token(&access_token)
+        .device_key("user-dev-1")
+        .send()
+        .await
+        .unwrap();
+
+    let list = client
+        .list_devices()
+        .access_token(&access_token)
+        .send()
+        .await
+        .unwrap();
+    assert!(list.devices().is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// Token Operations
+// ---------------------------------------------------------------------------
+
+#[test_action("cognito-idp", "RevokeToken", checksum = "8874ade0")]
+#[tokio::test]
+async fn cognito_revoke_token() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+    let (_pool_id, client_id, _access_token) =
+        setup_authenticated_user(&client, "revoke-pool").await;
+
+    // Sign in to get a refresh token
+    let auth = client
+        .initiate_auth()
+        .auth_flow(aws_sdk_cognitoidentityprovider::types::AuthFlowType::UserPasswordAuth)
+        .client_id(&client_id)
+        .auth_parameters("USERNAME", "selfuser")
+        .auth_parameters("PASSWORD", "SelfPass1!")
+        .send()
+        .await
+        .unwrap();
+
+    let refresh_token = auth
+        .authentication_result()
+        .unwrap()
+        .refresh_token()
+        .unwrap();
+
+    // Revoke it
+    client
+        .revoke_token()
+        .token(refresh_token)
+        .client_id(&client_id)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("cognito-idp", "GetTokensFromRefreshToken", checksum = "667ba23d")]
+#[tokio::test]
+async fn cognito_get_tokens_from_refresh_token() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+    let (_pool_id, client_id, _access_token) =
+        setup_authenticated_user(&client, "refresh-pool").await;
+
+    // Sign in to get a refresh token
+    let auth = client
+        .initiate_auth()
+        .auth_flow(aws_sdk_cognitoidentityprovider::types::AuthFlowType::UserPasswordAuth)
+        .client_id(&client_id)
+        .auth_parameters("USERNAME", "selfuser")
+        .auth_parameters("PASSWORD", "SelfPass1!")
+        .send()
+        .await
+        .unwrap();
+
+    let refresh_token = auth
+        .authentication_result()
+        .unwrap()
+        .refresh_token()
+        .unwrap();
+
+    // Exchange refresh token for new tokens
+    let result = client
+        .get_tokens_from_refresh_token()
+        .refresh_token(refresh_token)
+        .client_id(&client_id)
+        .send()
+        .await
+        .unwrap();
+
+    assert!(result
+        .authentication_result()
+        .unwrap()
+        .access_token()
+        .is_some());
+    assert!(result.authentication_result().unwrap().id_token().is_some());
+}
+
+// ---------------------------------------------------------------------------
 // Tags
 // ---------------------------------------------------------------------------
 

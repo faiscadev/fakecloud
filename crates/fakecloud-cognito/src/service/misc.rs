@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
-use crate::state::{CustomDomainConfig, Device, UserImportJob, UserPoolDomain};
+use crate::state::{AccessTokenData, CustomDomainConfig, Device, UserImportJob, UserPoolDomain};
 
 use super::{
     device_to_json, domain_description_to_json, import_job_to_json, require_str,
@@ -376,6 +376,316 @@ impl CognitoService {
 
         Ok(AwsResponse::ok_json(json!({
             "UserConfirmationNecessary": false
+        })))
+    }
+
+    // ── User-facing Device Operations ─────────────────────────────────
+
+    pub(super) fn forget_device(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let access_token = body["AccessToken"].as_str();
+        let device_key = require_str(&body, "DeviceKey")?;
+
+        let mut state = self.state.write();
+
+        let (pool_id, username) = if let Some(token) = access_token {
+            let td = state.access_tokens.get(token).ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "NotAuthorizedException",
+                    "Invalid access token.",
+                )
+            })?;
+            (td.user_pool_id.clone(), td.username.clone())
+        } else {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterException",
+                "AccessToken is required",
+            ));
+        };
+
+        let user = state
+            .users
+            .get_mut(&pool_id)
+            .and_then(|users| users.get_mut(&username))
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ResourceNotFoundException",
+                    "User not found.",
+                )
+            })?;
+
+        if user.devices.remove(device_key).is_none() {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("Device {device_key} does not exist."),
+            ));
+        }
+
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    pub(super) fn get_device(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let access_token = body["AccessToken"].as_str();
+        let device_key = require_str(&body, "DeviceKey")?;
+
+        let state = self.state.read();
+
+        let (pool_id, username) = if let Some(token) = access_token {
+            let td = state.access_tokens.get(token).ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "NotAuthorizedException",
+                    "Invalid access token.",
+                )
+            })?;
+            (td.user_pool_id.clone(), td.username.clone())
+        } else {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterException",
+                "AccessToken is required",
+            ));
+        };
+
+        let user = state
+            .users
+            .get(&pool_id)
+            .and_then(|users| users.get(&username))
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ResourceNotFoundException",
+                    "User not found.",
+                )
+            })?;
+
+        let device = user.devices.get(device_key).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("Device {device_key} does not exist."),
+            )
+        })?;
+
+        Ok(AwsResponse::ok_json(json!({
+            "Device": device_to_json(device)
+        })))
+    }
+
+    pub(super) fn list_devices(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let access_token = require_str(&body, "AccessToken")?;
+        let limit = body["Limit"].as_i64().unwrap_or(10).clamp(1, 60) as usize;
+        let pagination_token = body["PaginationToken"].as_str();
+
+        let state = self.state.read();
+
+        let token_data = state.access_tokens.get(access_token).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "NotAuthorizedException",
+                "Invalid access token.",
+            )
+        })?;
+        let pool_id = &token_data.user_pool_id;
+        let username = &token_data.username;
+
+        let user = state
+            .users
+            .get(pool_id.as_str())
+            .and_then(|users| users.get(username.as_str()))
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ResourceNotFoundException",
+                    "User not found.",
+                )
+            })?;
+
+        let mut devices: Vec<&Device> = user.devices.values().collect();
+        devices.sort_by(|a, b| a.device_create_date.cmp(&b.device_create_date));
+
+        let start = pagination_token
+            .and_then(|t| devices.iter().position(|d| d.device_key == t))
+            .unwrap_or(0);
+
+        let page = &devices[start..devices.len().min(start + limit)];
+        let next_token = if start + limit < devices.len() {
+            devices.get(start + limit).map(|d| d.device_key.clone())
+        } else {
+            None
+        };
+
+        let mut result = json!({
+            "Devices": page.iter().map(|d| device_to_json(d)).collect::<Vec<_>>()
+        });
+        if let Some(token) = next_token {
+            result["PaginationToken"] = json!(token);
+        }
+
+        Ok(AwsResponse::ok_json(result))
+    }
+
+    pub(super) fn update_device_status(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let access_token = require_str(&body, "AccessToken")?;
+        let device_key = require_str(&body, "DeviceKey")?;
+        let status = body["DeviceRememberedStatus"]
+            .as_str()
+            .map(|s| s.to_string());
+
+        let mut state = self.state.write();
+
+        let token_data = state.access_tokens.get(access_token).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "NotAuthorizedException",
+                "Invalid access token.",
+            )
+        })?;
+        let pool_id = token_data.user_pool_id.clone();
+        let username = token_data.username.clone();
+
+        let user = state
+            .users
+            .get_mut(&pool_id)
+            .and_then(|users| users.get_mut(&username))
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ResourceNotFoundException",
+                    "User not found.",
+                )
+            })?;
+
+        let device = user.devices.get_mut(device_key).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("Device {device_key} does not exist."),
+            )
+        })?;
+
+        device.device_remembered_status = status;
+        device.device_last_modified_date = Utc::now();
+
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    // ── Token Operations ───────────────────────────────────────────────
+
+    pub(super) fn revoke_token(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let token = require_str(&body, "Token")?;
+        let client_id = require_str(&body, "ClientId")?;
+        // ClientSecret is optional
+        let _client_secret = body["ClientSecret"].as_str();
+
+        let mut state = self.state.write();
+
+        // Validate client exists
+        if !state.user_pool_clients.contains_key(client_id) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterException",
+                format!("Client {client_id} does not exist."),
+            ));
+        }
+
+        // Remove the refresh token if it exists
+        state.refresh_tokens.remove(token);
+
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    pub(super) fn get_tokens_from_refresh_token(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let refresh_token = require_str(&body, "RefreshToken")?;
+        let client_id = require_str(&body, "ClientId")?;
+        // Optional fields
+        let _client_secret = body["ClientSecret"].as_str();
+        let _device_key = body["DeviceKey"].as_str();
+
+        let mut state = self.state.write();
+
+        // Validate client exists
+        if !state.user_pool_clients.contains_key(client_id) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterException",
+                format!("Client {client_id} does not exist."),
+            ));
+        }
+
+        let token_data = state.refresh_tokens.get(refresh_token).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "NotAuthorizedException",
+                "Invalid refresh token.",
+            )
+        })?;
+
+        // Verify client matches
+        if token_data.client_id != client_id {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "NotAuthorizedException",
+                "Invalid refresh token.",
+            ));
+        }
+
+        let pool_id = token_data.user_pool_id.clone();
+        let username = token_data.username.clone();
+
+        // Find user to get sub
+        let user = state
+            .users
+            .get(pool_id.as_str())
+            .and_then(|users| users.get(username.as_str()))
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "NotAuthorizedException",
+                    "User not found.",
+                )
+            })?;
+
+        let sub = user.sub.clone();
+        let region = state.region.clone();
+
+        // Generate new tokens
+        let tokens = super::generate_tokens(&pool_id, client_id, &sub, &username, &region);
+
+        // Store the new access token
+        let now = Utc::now();
+        state.access_tokens.insert(
+            tokens.access_token.clone(),
+            AccessTokenData {
+                user_pool_id: pool_id,
+                username,
+                client_id: client_id.to_string(),
+                issued_at: now,
+            },
+        );
+
+        Ok(AwsResponse::ok_json(json!({
+            "AuthenticationResult": {
+                "AccessToken": tokens.access_token,
+                "IdToken": tokens.id_token,
+                "TokenType": "Bearer",
+                "ExpiresIn": 3600
+            }
         })))
     }
 
