@@ -9,6 +9,17 @@ use uuid::Uuid;
 
 pub type SharedRdsState = Arc<RwLock<RdsState>>;
 
+/// Supported DB instance classes — single source of truth.
+pub const SUPPORTED_INSTANCE_CLASSES: &[&str] = &[
+    "db.t3.micro",
+    "db.t3.small",
+    "db.t3.medium",
+    "db.t3.large",
+    "db.t4g.micro",
+    "db.t4g.small",
+    "db.m5.large",
+];
+
 #[derive(Clone)]
 pub struct DbInstance {
     pub db_instance_identifier: String,
@@ -36,7 +47,7 @@ pub struct DbInstance {
     pub db_parameter_group_name: Option<String>,
     pub backup_retention_period: i32,
     pub preferred_backup_window: String,
-    pub latest_restorable_time: DateTime<Utc>,
+    pub latest_restorable_time: Option<DateTime<Utc>>,
     pub option_group_name: Option<String>,
     pub multi_az: bool,
     pub pending_modified_values: Option<PendingModifiedValues>,
@@ -397,18 +408,8 @@ pub fn default_orderable_options() -> Vec<OrderableDbInstanceOption> {
         ("mariadb", "10.6.16", "general-public-license"),
     ];
 
-    let instance_classes = vec![
-        "db.t3.micro",
-        "db.t3.small",
-        "db.t3.medium",
-        "db.t3.large",
-        "db.t4g.micro",
-        "db.t4g.small",
-        "db.m5.large",
-    ];
-
     for (engine, version, license) in engines_and_versions {
-        for class in &instance_classes {
+        for class in SUPPORTED_INSTANCE_CLASSES {
             options.push(OrderableDbInstanceOption {
                 engine: engine.to_string(),
                 engine_version: version.to_string(),
@@ -505,7 +506,7 @@ mod tests {
                 db_parameter_group_name: None,
                 backup_retention_period: 1,
                 preferred_backup_window: "03:00-04:00".to_string(),
-                latest_restorable_time: created_at,
+                latest_restorable_time: Some(created_at),
                 option_group_name: None,
                 multi_az: false,
                 pending_modified_values: None,

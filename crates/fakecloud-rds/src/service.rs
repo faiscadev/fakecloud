@@ -251,7 +251,11 @@ impl RdsService {
             db_parameter_group_name,
             backup_retention_period,
             preferred_backup_window,
-            latest_restorable_time: created_at,
+            latest_restorable_time: if backup_retention_period > 0 {
+                Some(created_at)
+            } else {
+                None
+            },
             option_group_name,
             multi_az,
             pending_modified_values: None,
@@ -342,10 +346,11 @@ impl RdsService {
                     .cloned()
                     .ok_or_else(|| db_instance_not_found(&db_instance_identifier))?;
 
+                let default_db = default_db_name(&instance.engine);
                 let db_name = instance
                     .db_name
                     .as_deref()
-                    .unwrap_or("postgres")
+                    .unwrap_or(default_db)
                     .to_string();
 
                 (instance, db_name)
@@ -354,7 +359,9 @@ impl RdsService {
             let dump_data = runtime
                 .dump_database(
                     &db_instance_identifier,
+                    &instance_for_snapshot.engine,
                     &instance_for_snapshot.master_username,
+                    &instance_for_snapshot.master_user_password,
                     &db_name,
                 )
                 .await
@@ -560,7 +567,10 @@ impl RdsService {
                 &instance.engine,
                 &instance.master_username,
                 &instance.master_user_password,
-                instance.db_name.as_deref().unwrap_or("postgres"),
+                instance
+                    .db_name
+                    .as_deref()
+                    .unwrap_or(default_db_name(&instance.engine)),
             )
             .await
             .map_err(runtime_error_to_service_error)?;
@@ -852,17 +862,24 @@ impl RdsService {
                 .cloned()
                 .ok_or_else(|| db_instance_not_found(&db_instance_identifier))?;
 
+            let default_db = default_db_name(&instance.engine);
             let db_name = instance
                 .db_name
                 .as_deref()
-                .unwrap_or("postgres")
+                .unwrap_or(default_db)
                 .to_string();
 
             (instance, db_name)
         };
 
         let dump_data = runtime
-            .dump_database(&db_instance_identifier, &instance.master_username, &db_name)
+            .dump_database(
+                &db_instance_identifier,
+                &instance.engine,
+                &instance.master_username,
+                &instance.master_user_password,
+                &db_name,
+            )
             .await
             .map_err(runtime_error_to_service_error)?;
 
@@ -1059,7 +1076,10 @@ impl RdsService {
             (snapshot, dbi_resource_id, db_instance_arn, created_at)
         };
 
-        let db_name = snapshot.db_name.as_deref().unwrap_or("postgres");
+        let db_name = snapshot
+            .db_name
+            .as_deref()
+            .unwrap_or(default_db_name(&snapshot.engine));
         let running = match runtime
             .ensure_postgres(
                 &db_instance_identifier,
@@ -1083,7 +1103,9 @@ impl RdsService {
         if let Err(e) = runtime
             .restore_database(
                 &db_instance_identifier,
+                &snapshot.engine,
                 &snapshot.master_username,
+                &snapshot.master_user_password,
                 db_name,
                 &snapshot.dump_data,
             )
@@ -1124,7 +1146,7 @@ impl RdsService {
             db_parameter_group_name: None,
             backup_retention_period: 1,
             preferred_backup_window: "03:00-04:00".to_string(),
-            latest_restorable_time: created_at,
+            latest_restorable_time: Some(created_at),
             option_group_name: None,
             multi_az: false,
             pending_modified_values: None,
@@ -1180,10 +1202,11 @@ impl RdsService {
                 }
             };
 
+            let default_db = default_db_name(&source_instance.engine);
             let db_name = source_instance
                 .db_name
                 .as_deref()
-                .unwrap_or("postgres")
+                .unwrap_or(default_db)
                 .to_string();
 
             (source_instance, db_name)
@@ -1192,7 +1215,9 @@ impl RdsService {
         let dump_data = match runtime
             .dump_database(
                 &source_db_instance_identifier,
+                &source_instance.engine,
                 &source_instance.master_username,
+                &source_instance.master_user_password,
                 &db_name,
             )
             .await
@@ -1233,7 +1258,9 @@ impl RdsService {
         if let Err(e) = runtime
             .restore_database(
                 &db_instance_identifier,
+                &source_instance.engine,
                 &source_instance.master_username,
+                &source_instance.master_user_password,
                 &db_name,
                 &dump_data,
             )
@@ -1272,7 +1299,7 @@ impl RdsService {
             db_parameter_group_name: source_instance.db_parameter_group_name.clone(),
             backup_retention_period: source_instance.backup_retention_period,
             preferred_backup_window: source_instance.preferred_backup_window.clone(),
-            latest_restorable_time: created_at,
+            latest_restorable_time: Some(created_at),
             option_group_name: source_instance.option_group_name.clone(),
             multi_az: source_instance.multi_az,
             pending_modified_values: None,
@@ -2034,16 +2061,7 @@ fn validate_create_request(
 }
 
 fn validate_db_instance_class(db_instance_class: &str) -> Result<(), AwsServiceError> {
-    let supported_classes = [
-        "db.t3.micro",
-        "db.t3.small",
-        "db.t3.medium",
-        "db.t3.large",
-        "db.t4g.micro",
-        "db.t4g.small",
-        "db.m5.large",
-    ];
-    if !supported_classes.contains(&db_instance_class) {
+    if !crate::state::SUPPORTED_INSTANCE_CLASSES.contains(&db_instance_class) {
         return Err(AwsServiceError::aws_error(
             StatusCode::BAD_REQUEST,
             "InvalidParameterValue",
@@ -2323,14 +2341,14 @@ fn db_instance_xml(instance: &DbInstance, status_override: Option<&str>) -> Stri
          {}\
          {}\
          <AvailabilityZone>us-east-1a</AvailabilityZone>\
-         <LatestRestorableTime>{}</LatestRestorableTime>\
+         {}\
          <PreferredMaintenanceWindow>sun:00:00-sun:00:30</PreferredMaintenanceWindow>\
          <MultiAZ>{}</MultiAZ>\
          <EngineVersion>{}</EngineVersion>\
          <AutoMinorVersionUpgrade>true</AutoMinorVersionUpgrade>\
          {}\
          {}\
-         <LicenseModel>postgresql-license</LicenseModel>\
+         <LicenseModel>{}</LicenseModel>\
          {}\
          <PubliclyAccessible>{}</PubliclyAccessible>\
          <StorageType>gp2</StorageType>\
@@ -2354,11 +2372,18 @@ fn db_instance_xml(instance: &DbInstance, status_override: Option<&str>) -> Stri
         instance.backup_retention_period,
         vpc_security_groups_xml,
         db_parameter_groups_xml,
-        instance.latest_restorable_time.to_rfc3339(),
+        instance
+            .latest_restorable_time
+            .map(|t| format!(
+                "<LatestRestorableTime>{}</LatestRestorableTime>",
+                t.to_rfc3339()
+            ))
+            .unwrap_or_default(),
         if instance.multi_az { "true" } else { "false" },
         xml_escape(&instance.engine_version),
         read_replica_identifiers_xml,
         read_replica_source_xml,
+        license_model_for_engine(&instance.engine),
         option_group_memberships_xml,
         if instance.publicly_accessible {
             "true"
@@ -2517,6 +2542,20 @@ fn merge_tags(existing: &mut Vec<RdsTag>, incoming: &[RdsTag]) {
     }
 }
 
+fn license_model_for_engine(engine: &str) -> &'static str {
+    match engine {
+        "mysql" | "mariadb" => "general-public-license",
+        _ => "postgresql-license",
+    }
+}
+
+fn default_db_name(engine: &str) -> &'static str {
+    match engine {
+        "mysql" | "mariadb" => "mysql",
+        _ => "postgres",
+    }
+}
+
 fn runtime_error_to_service_error(error: RuntimeError) -> AwsServiceError {
     match error {
         RuntimeError::Unavailable => AwsServiceError::aws_error(
@@ -2626,7 +2665,7 @@ mod tests {
             db_parameter_group_name: Some("default.postgres16".to_string()),
             backup_retention_period: 1,
             preferred_backup_window: "03:00-04:00".to_string(),
-            latest_restorable_time: created_at,
+            latest_restorable_time: Some(created_at),
             option_group_name: None,
             multi_az: false,
             pending_modified_values: None,

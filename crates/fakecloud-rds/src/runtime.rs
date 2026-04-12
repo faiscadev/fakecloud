@@ -372,7 +372,9 @@ impl RdsRuntime {
     pub async fn dump_database(
         &self,
         db_instance_identifier: &str,
+        engine: &str,
         username: &str,
+        password: &str,
         db_name: &str,
     ) -> Result<Vec<u8>, RuntimeError> {
         let container = self
@@ -382,24 +384,37 @@ impl RdsRuntime {
             .cloned()
             .ok_or(RuntimeError::Unavailable)?;
 
+        let args: Vec<String> = match engine {
+            "mysql" | "mariadb" => vec![
+                "exec".into(),
+                container.container_id.clone(),
+                "mysqldump".into(),
+                "-u".into(),
+                username.into(),
+                format!("-p{password}"),
+                db_name.into(),
+            ],
+            _ => vec![
+                "exec".into(),
+                container.container_id.clone(),
+                "pg_dump".into(),
+                "-U".into(),
+                username.into(),
+                "-d".into(),
+                db_name.into(),
+                "--no-password".into(),
+            ],
+        };
+
         let output = tokio::process::Command::new(&self.cli)
-            .args([
-                "exec",
-                &container.container_id,
-                "pg_dump",
-                "-U",
-                username,
-                "-d",
-                db_name,
-                "--no-password",
-            ])
+            .args(&args)
             .output()
             .await
             .map_err(|e| RuntimeError::ContainerStartFailed(e.to_string()))?;
 
         if !output.status.success() {
             return Err(RuntimeError::ContainerStartFailed(format!(
-                "pg_dump failed: {}",
+                "dump failed: {}",
                 String::from_utf8_lossy(&output.stderr).trim()
             )));
         }
@@ -410,7 +425,9 @@ impl RdsRuntime {
     pub async fn restore_database(
         &self,
         db_instance_identifier: &str,
+        engine: &str,
         username: &str,
+        password: &str,
         db_name: &str,
         dump_data: &[u8],
     ) -> Result<(), RuntimeError> {
@@ -421,20 +438,34 @@ impl RdsRuntime {
             .cloned()
             .ok_or(RuntimeError::Unavailable)?;
 
+        let args: Vec<String> = match engine {
+            "mysql" | "mariadb" => vec![
+                "exec".into(),
+                "-i".into(),
+                container.container_id.clone(),
+                "mysql".into(),
+                "-u".into(),
+                username.into(),
+                format!("-p{password}"),
+                db_name.into(),
+            ],
+            _ => vec![
+                "exec".into(),
+                "-i".into(),
+                container.container_id.clone(),
+                "psql".into(),
+                "-U".into(),
+                username.into(),
+                "-d".into(),
+                db_name.into(),
+                "--no-password".into(),
+                "-v".into(),
+                "ON_ERROR_STOP=1".into(),
+            ],
+        };
+
         let mut child = tokio::process::Command::new(&self.cli)
-            .args([
-                "exec",
-                "-i",
-                &container.container_id,
-                "psql",
-                "-U",
-                username,
-                "-d",
-                db_name,
-                "--no-password",
-                "-v",
-                "ON_ERROR_STOP=1",
-            ])
+            .args(&args)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -457,7 +488,7 @@ impl RdsRuntime {
 
         if !output.status.success() {
             return Err(RuntimeError::ContainerStartFailed(format!(
-                "psql restore failed: {}",
+                "restore failed: {}",
                 String::from_utf8_lossy(&output.stderr).trim()
             )));
         }
