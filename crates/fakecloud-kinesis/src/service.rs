@@ -511,10 +511,7 @@ impl KinesisService {
         Ok(AwsResponse::ok_json(json!({})))
     }
 
-    fn stop_stream_encryption(
-        &self,
-        request: &AwsRequest,
-    ) -> Result<AwsResponse, AwsServiceError> {
+    fn stop_stream_encryption(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = request.json_body();
         validate_stream_id(&body)?;
         let _encryption_type = body["EncryptionType"]
@@ -628,9 +625,7 @@ impl KinesisService {
         if desired.contains(&"ALL".to_string()) {
             stream.enhanced_metrics.clear();
         } else {
-            stream
-                .enhanced_metrics
-                .retain(|m| !desired.contains(m));
+            stream.enhanced_metrics.retain(|m| !desired.contains(m));
         }
 
         Ok(AwsResponse::ok_json(json!({
