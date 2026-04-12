@@ -37,6 +37,10 @@ pub struct BedrockState {
     pub imported_models: HashMap<String, ImportedModel>,
     /// Model copy jobs keyed by job ARN.
     pub model_copy_jobs: HashMap<String, ModelCopyJob>,
+    /// Model invocation jobs (batch inference) keyed by job ARN.
+    pub model_invocation_jobs: HashMap<String, ModelInvocationJob>,
+    /// Evaluation jobs keyed by job ARN.
+    pub evaluation_jobs: HashMap<String, EvaluationJob>,
 }
 
 impl BedrockState {
@@ -58,6 +62,8 @@ impl BedrockState {
             model_import_jobs: HashMap::new(),
             imported_models: HashMap::new(),
             model_copy_jobs: HashMap::new(),
+            model_invocation_jobs: HashMap::new(),
+            evaluation_jobs: HashMap::new(),
         }
     }
 
@@ -76,6 +82,8 @@ impl BedrockState {
         self.model_import_jobs.clear();
         self.imported_models.clear();
         self.model_copy_jobs.clear();
+        self.model_invocation_jobs.clear();
+        self.evaluation_jobs.clear();
     }
 }
 
@@ -226,4 +234,33 @@ pub struct ModelCopyJob {
     pub target_model_name: String,
     pub status: String,
     pub creation_time: DateTime<Utc>,
+}
+
+#[derive(Clone)]
+pub struct ModelInvocationJob {
+    pub job_arn: String,
+    pub job_name: String,
+    pub model_id: String,
+    pub role_arn: String,
+    pub input_data_config: serde_json::Value,
+    pub output_data_config: serde_json::Value,
+    pub status: String,
+    pub submit_time: DateTime<Utc>,
+    pub last_modified_time: DateTime<Utc>,
+    pub end_time: Option<DateTime<Utc>>,
+}
+
+#[derive(Clone)]
+pub struct EvaluationJob {
+    pub job_arn: String,
+    pub job_name: String,
+    pub job_description: Option<String>,
+    pub role_arn: String,
+    pub status: String,
+    pub job_type: String,
+    pub evaluation_config: serde_json::Value,
+    pub inference_config: serde_json::Value,
+    pub output_data_config: serde_json::Value,
+    pub creation_time: DateTime<Utc>,
+    pub last_modified_time: DateTime<Utc>,
 }

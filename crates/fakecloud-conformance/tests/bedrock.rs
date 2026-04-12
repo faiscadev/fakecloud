@@ -705,6 +705,148 @@ async fn bedrock_bidirectional_stream_conformance() {
 }
 
 // ---------------------------------------------------------------------------
+// Model Invocation Jobs + Evaluation Jobs
+// ---------------------------------------------------------------------------
+
+#[test_action("bedrock", "CreateModelInvocationJob", checksum = "5880c108")]
+#[test_action("bedrock", "GetModelInvocationJob", checksum = "480ec99e")]
+#[test_action("bedrock", "ListModelInvocationJobs", checksum = "b0e2ea2f")]
+#[test_action("bedrock", "StopModelInvocationJob", checksum = "88af9f13")]
+#[tokio::test]
+async fn bedrock_invocation_job_lifecycle() {
+    let server = TestServer::start().await;
+    let http_client = reqwest::Client::new();
+    let auth = "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20260411/us-east-1/bedrock/aws4_request, SignedHeaders=host, Signature=fake";
+
+    let body = serde_json::json!({
+        "jobName": "conf-inv-job",
+        "modelId": "anthropic.claude-3-5-sonnet-20241022-v2:0",
+        "roleArn": "arn:aws:iam::123456789012:role/test",
+        "inputDataConfig": {"s3InputDataConfig": {"s3Uri": "s3://bucket/input/"}},
+        "outputDataConfig": {"s3OutputDataConfig": {"s3Uri": "s3://bucket/output/"}}
+    });
+    let resp = http_client
+        .post(format!("{}/model-invocation-job", server.endpoint()))
+        .header("content-type", "application/json")
+        .header("authorization", auth)
+        .body(serde_json::to_string(&body).unwrap())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+    let result: serde_json::Value = resp.json().await.unwrap();
+    let job_arn = result["jobArn"].as_str().unwrap().to_string();
+    let job_id = job_arn.rsplit('/').next().unwrap();
+
+    let resp = http_client
+        .get(format!(
+            "{}/model-invocation-job/{}",
+            server.endpoint(),
+            job_id
+        ))
+        .header("authorization", auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let resp = http_client
+        .get(format!("{}/model-invocation-jobs", server.endpoint()))
+        .header("authorization", auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let resp = http_client
+        .post(format!(
+            "{}/model-invocation-job/{}/stop",
+            server.endpoint(),
+            job_id
+        ))
+        .header("authorization", auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+}
+
+#[test_action("bedrock", "CreateEvaluationJob", checksum = "381c6747")]
+#[test_action("bedrock", "GetEvaluationJob", checksum = "78e37cc5")]
+#[test_action("bedrock", "ListEvaluationJobs", checksum = "90cf9a61")]
+#[test_action("bedrock", "StopEvaluationJob", checksum = "3b4c4189")]
+#[test_action("bedrock", "BatchDeleteEvaluationJob", checksum = "f6a3ed26")]
+#[tokio::test]
+async fn bedrock_evaluation_job_lifecycle() {
+    let server = TestServer::start().await;
+    let http_client = reqwest::Client::new();
+    let auth = "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20260411/us-east-1/bedrock/aws4_request, SignedHeaders=host, Signature=fake";
+
+    let body = serde_json::json!({
+        "jobName": "conf-eval-job",
+        "roleArn": "arn:aws:iam::123456789012:role/test",
+        "evaluationConfig": {"automated": {"datasetMetricConfigs": []}},
+        "inferenceConfig": {"models": []},
+        "outputDataConfig": {"s3Uri": "s3://bucket/output/"}
+    });
+    let resp = http_client
+        .post(format!("{}/evaluation-jobs", server.endpoint()))
+        .header("content-type", "application/json")
+        .header("authorization", auth)
+        .body(serde_json::to_string(&body).unwrap())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+    let result: serde_json::Value = resp.json().await.unwrap();
+    let job_arn = result["jobArn"].as_str().unwrap().to_string();
+    let job_id = job_arn.rsplit('/').next().unwrap();
+
+    let resp = http_client
+        .get(format!("{}/evaluation-jobs/{}", server.endpoint(), job_id))
+        .header("authorization", auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let resp = http_client
+        .get(format!("{}/evaluation-jobs", server.endpoint()))
+        .header("authorization", auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let resp = http_client
+        .post(format!(
+            "{}/evaluation-job/{}/stop",
+            server.endpoint(),
+            job_id
+        ))
+        .header("authorization", auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // Batch delete
+    let body = serde_json::json!({"jobIdentifiers": [job_arn]});
+    let resp = http_client
+        .post(format!(
+            "{}/evaluation-jobs/batch-delete",
+            server.endpoint()
+        ))
+        .header("content-type", "application/json")
+        .header("authorization", auth)
+        .body(serde_json::to_string(&body).unwrap())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+}
+
+// ---------------------------------------------------------------------------
 // Model Import
 // ---------------------------------------------------------------------------
 
