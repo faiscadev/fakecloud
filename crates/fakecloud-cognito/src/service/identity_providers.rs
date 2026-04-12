@@ -263,6 +263,44 @@ impl CognitoService {
         Ok(AwsResponse::ok_json(response))
     }
 
+    pub(super) fn get_identity_provider_by_identifier(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+
+        let pool_id = require_str(&body, "UserPoolId")?;
+        let idp_identifier = require_str(&body, "IdpIdentifier")?;
+
+        let state = self.state.read();
+
+        if !state.user_pools.contains_key(pool_id) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("User pool {pool_id} does not exist."),
+            ));
+        }
+
+        let empty = HashMap::new();
+        let pool_providers = state.identity_providers.get(pool_id).unwrap_or(&empty);
+
+        let idp = pool_providers
+            .values()
+            .find(|p| p.idp_identifiers.iter().any(|id| id == idp_identifier))
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ResourceNotFoundException",
+                    format!("Identity provider with identifier {idp_identifier} does not exist."),
+                )
+            })?;
+
+        Ok(AwsResponse::ok_json(json!({
+            "IdentityProvider": identity_provider_to_json(idp)
+        })))
+    }
+
     // ── Resource Servers ──────────────────────────────────────────────
 
     pub(super) fn create_resource_server(

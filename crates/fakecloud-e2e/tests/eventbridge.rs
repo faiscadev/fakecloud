@@ -1275,3 +1275,87 @@ async fn eb_put_events_delivers_to_kinesis_target() {
     assert_eq!(event["detail-type"], "TestEvent");
     assert_eq!(event["detail"]["key"], "value");
 }
+
+/// Verify EventBridge rule targeting Step Functions actually starts an execution.
+#[tokio::test]
+async fn eb_rule_starts_stepfunctions_execution() {
+    let server = TestServer::start().await;
+    let eb = server.eventbridge_client().await;
+    let sfn = server.sfn_client().await;
+
+    // Create a simple Pass state machine
+    let definition = serde_json::json!({
+        "StartAt": "PassState",
+        "States": {
+            "PassState": {
+                "Type": "Pass",
+                "End": true
+            }
+        }
+    });
+    let sm = sfn
+        .create_state_machine()
+        .name("eb-target-machine")
+        .definition(definition.to_string())
+        .role_arn("arn:aws:iam::123456789012:role/test-role")
+        .send()
+        .await
+        .expect("create state machine");
+    let sm_arn = sm.state_machine_arn();
+
+    // Create EventBridge rule targeting the state machine
+    eb.put_rule()
+        .name("sfn-trigger")
+        .event_pattern(r#"{"source": ["test.sfn"]}"#)
+        .send()
+        .await
+        .unwrap();
+
+    eb.put_targets()
+        .rule("sfn-trigger")
+        .targets(
+            Target::builder()
+                .id("sfn-target")
+                .arn(sm_arn)
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    // Put a matching event
+    eb.put_events()
+        .entries(
+            PutEventsRequestEntry::builder()
+                .source("test.sfn")
+                .detail_type("TriggerExecution")
+                .detail(r#"{"message": "hello from EventBridge"}"#)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    // Give the async execution a moment to start
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    // Verify execution was started
+    let executions = sfn
+        .list_executions()
+        .state_machine_arn(sm_arn)
+        .send()
+        .await
+        .expect("list executions");
+
+    assert_eq!(
+        executions.executions().len(),
+        1,
+        "expected 1 execution started by EventBridge rule"
+    );
+    let exec = &executions.executions()[0];
+    assert_eq!(
+        exec.status(),
+        &aws_sdk_sfn::types::ExecutionStatus::Succeeded
+    );
+}
