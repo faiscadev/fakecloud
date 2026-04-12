@@ -281,6 +281,135 @@ impl BedrockService {
                 None,
             )),
 
+            // Automated reasoning build workflows (longer paths first)
+            (Method::GET, 7)
+                if segs[0] == "automated-reasoning-policies"
+                    && segs[2] == "build-workflows"
+                    && segs[4] == "test-cases"
+                    && segs[6] == "test-results" =>
+            {
+                Some((
+                    "GetAutomatedReasoningPolicyTestResult",
+                    Some(decode(&segs[1])),
+                    Some(format!("{}:{}", decode(&segs[3]), decode(&segs[5]))),
+                ))
+            }
+            (Method::POST, 5)
+                if segs[0] == "automated-reasoning-policies"
+                    && segs[2] == "build-workflows"
+                    && segs[4] == "start" =>
+            {
+                Some((
+                    "StartAutomatedReasoningPolicyBuildWorkflow",
+                    Some(decode(&segs[1])),
+                    Some(decode(&segs[3])),
+                ))
+            }
+            (Method::POST, 5)
+                if segs[0] == "automated-reasoning-policies"
+                    && segs[2] == "build-workflows"
+                    && segs[4] == "cancel" =>
+            {
+                Some((
+                    "CancelAutomatedReasoningPolicyBuildWorkflow",
+                    Some(decode(&segs[1])),
+                    Some(decode(&segs[3])),
+                ))
+            }
+            (Method::POST, 5)
+                if segs[0] == "automated-reasoning-policies"
+                    && segs[2] == "build-workflows"
+                    && segs[4] == "test-workflows" =>
+            {
+                Some((
+                    "StartAutomatedReasoningPolicyTestWorkflow",
+                    Some(decode(&segs[1])),
+                    Some(decode(&segs[3])),
+                ))
+            }
+            (Method::GET, 5)
+                if segs[0] == "automated-reasoning-policies"
+                    && segs[2] == "build-workflows"
+                    && segs[4] == "result-assets" =>
+            {
+                Some((
+                    "GetAutomatedReasoningPolicyBuildWorkflowResultAssets",
+                    Some(decode(&segs[1])),
+                    Some(decode(&segs[3])),
+                ))
+            }
+            (Method::GET, 5)
+                if segs[0] == "automated-reasoning-policies"
+                    && segs[2] == "build-workflows"
+                    && segs[4] == "annotations" =>
+            {
+                Some((
+                    "GetAutomatedReasoningPolicyAnnotations",
+                    Some(decode(&segs[1])),
+                    Some(decode(&segs[3])),
+                ))
+            }
+            (Method::PATCH, 5)
+                if segs[0] == "automated-reasoning-policies"
+                    && segs[2] == "build-workflows"
+                    && segs[4] == "annotations" =>
+            {
+                Some((
+                    "UpdateAutomatedReasoningPolicyAnnotations",
+                    Some(decode(&segs[1])),
+                    Some(decode(&segs[3])),
+                ))
+            }
+            (Method::GET, 5)
+                if segs[0] == "automated-reasoning-policies"
+                    && segs[2] == "build-workflows"
+                    && segs[4] == "scenarios" =>
+            {
+                Some((
+                    "GetAutomatedReasoningPolicyNextScenario",
+                    Some(decode(&segs[1])),
+                    Some(decode(&segs[3])),
+                ))
+            }
+            (Method::GET, 5)
+                if segs[0] == "automated-reasoning-policies"
+                    && segs[2] == "build-workflows"
+                    && segs[4] == "test-results" =>
+            {
+                Some((
+                    "ListAutomatedReasoningPolicyTestResults",
+                    Some(decode(&segs[1])),
+                    Some(decode(&segs[3])),
+                ))
+            }
+            (Method::GET, 4)
+                if segs[0] == "automated-reasoning-policies" && segs[2] == "build-workflows" =>
+            {
+                Some((
+                    "GetAutomatedReasoningPolicyBuildWorkflow",
+                    Some(decode(&segs[1])),
+                    Some(decode(&segs[3])),
+                ))
+            }
+            (Method::DELETE, 4)
+                if segs[0] == "automated-reasoning-policies" && segs[2] == "build-workflows" =>
+            {
+                Some((
+                    "DeleteAutomatedReasoningPolicyBuildWorkflow",
+                    Some(decode(&segs[1])),
+                    Some(decode(&segs[3])),
+                ))
+            }
+            (Method::GET, 3)
+                if segs[0] == "automated-reasoning-policies" && segs[2] == "build-workflows" =>
+            {
+                Some((
+                    "ListAutomatedReasoningPolicyBuildWorkflows",
+                    Some(decode(&segs[1])),
+                    None,
+                ))
+            }
+
             // Automated reasoning policies
             (Method::POST, 1) if segs[0] == "automated-reasoning-policies" => {
                 Some(("CreateAutomatedReasoningPolicy", None, None))
@@ -1013,6 +1142,99 @@ impl AwsService for BedrockService {
                     extra_id.as_deref().unwrap_or_default(),
                 )
             }
+            // Automated reasoning build workflows
+            "StartAutomatedReasoningPolicyBuildWorkflow" => {
+                crate::automated_reasoning_workflows::start_build_workflow(
+                    &self.state,
+                    &resource_id.unwrap_or_default(),
+                    extra_id.as_deref().unwrap_or_default(),
+                )
+            }
+            "GetAutomatedReasoningPolicyBuildWorkflow" => {
+                crate::automated_reasoning_workflows::get_build_workflow(
+                    &self.state,
+                    &resource_id.unwrap_or_default(),
+                    extra_id.as_deref().unwrap_or_default(),
+                )
+            }
+            "ListAutomatedReasoningPolicyBuildWorkflows" => {
+                crate::automated_reasoning_workflows::list_build_workflows(
+                    &self.state,
+                    &resource_id.unwrap_or_default(),
+                    &req,
+                )
+            }
+            "CancelAutomatedReasoningPolicyBuildWorkflow" => {
+                crate::automated_reasoning_workflows::cancel_build_workflow(
+                    &self.state,
+                    &resource_id.unwrap_or_default(),
+                    extra_id.as_deref().unwrap_or_default(),
+                )
+            }
+            "DeleteAutomatedReasoningPolicyBuildWorkflow" => {
+                crate::automated_reasoning_workflows::delete_build_workflow(
+                    &self.state,
+                    &resource_id.unwrap_or_default(),
+                    extra_id.as_deref().unwrap_or_default(),
+                )
+            }
+            "GetAutomatedReasoningPolicyBuildWorkflowResultAssets" => {
+                crate::automated_reasoning_workflows::get_build_workflow_result_assets(
+                    &self.state,
+                    &resource_id.unwrap_or_default(),
+                    extra_id.as_deref().unwrap_or_default(),
+                )
+            }
+            "StartAutomatedReasoningPolicyTestWorkflow" => {
+                crate::automated_reasoning_workflows::start_test_workflow(
+                    &self.state,
+                    &resource_id.unwrap_or_default(),
+                    extra_id.as_deref().unwrap_or_default(),
+                )
+            }
+            "GetAutomatedReasoningPolicyTestResult" => {
+                let extra = extra_id.unwrap_or_default();
+                let parts: Vec<&str> = extra.splitn(2, ':').collect();
+                let workflow_id = parts.first().copied().unwrap_or_default();
+                let test_case_id = parts.get(1).copied().unwrap_or_default();
+                crate::automated_reasoning_workflows::get_test_result(
+                    &self.state,
+                    &resource_id.unwrap_or_default(),
+                    workflow_id,
+                    test_case_id,
+                )
+            }
+            "ListAutomatedReasoningPolicyTestResults" => {
+                crate::automated_reasoning_workflows::list_test_results(
+                    &self.state,
+                    &resource_id.unwrap_or_default(),
+                    extra_id.as_deref().unwrap_or_default(),
+                    &req,
+                )
+            }
+            "GetAutomatedReasoningPolicyAnnotations" => {
+                crate::automated_reasoning_workflows::get_annotations(
+                    &self.state,
+                    &resource_id.unwrap_or_default(),
+                    extra_id.as_deref().unwrap_or_default(),
+                )
+            }
+            "UpdateAutomatedReasoningPolicyAnnotations" => {
+                let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
+                crate::automated_reasoning_workflows::update_annotations(
+                    &self.state,
+                    &resource_id.unwrap_or_default(),
+                    extra_id.as_deref().unwrap_or_default(),
+                    &body,
+                )
+            }
+            "GetAutomatedReasoningPolicyNextScenario" => {
+                crate::automated_reasoning_workflows::get_next_scenario(
+                    &self.state,
+                    &resource_id.unwrap_or_default(),
+                    extra_id.as_deref().unwrap_or_default(),
+                )
+            }
             // Model customization jobs
             "CreateModelCustomizationJob" => {
                 let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
@@ -1225,6 +1447,18 @@ impl AwsService for BedrockService {
             "ListAutomatedReasoningPolicyTestCases",
             "UpdateAutomatedReasoningPolicyTestCase",
             "DeleteAutomatedReasoningPolicyTestCase",
+            "StartAutomatedReasoningPolicyBuildWorkflow",
+            "GetAutomatedReasoningPolicyBuildWorkflow",
+            "ListAutomatedReasoningPolicyBuildWorkflows",
+            "CancelAutomatedReasoningPolicyBuildWorkflow",
+            "DeleteAutomatedReasoningPolicyBuildWorkflow",
+            "GetAutomatedReasoningPolicyBuildWorkflowResultAssets",
+            "StartAutomatedReasoningPolicyTestWorkflow",
+            "GetAutomatedReasoningPolicyTestResult",
+            "ListAutomatedReasoningPolicyTestResults",
+            "GetAutomatedReasoningPolicyAnnotations",
+            "UpdateAutomatedReasoningPolicyAnnotations",
+            "GetAutomatedReasoningPolicyNextScenario",
             "CreateModelCustomizationJob",
             "GetModelCustomizationJob",
             "ListModelCustomizationJobs",

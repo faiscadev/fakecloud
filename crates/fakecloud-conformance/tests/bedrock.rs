@@ -705,6 +705,316 @@ async fn bedrock_bidirectional_stream_conformance() {
 }
 
 // ---------------------------------------------------------------------------
+// Automated Reasoning Policies — Workflows
+// ---------------------------------------------------------------------------
+
+#[test_action(
+    "bedrock",
+    "StartAutomatedReasoningPolicyBuildWorkflow",
+    checksum = "ffad1b60"
+)]
+#[test_action(
+    "bedrock",
+    "GetAutomatedReasoningPolicyBuildWorkflow",
+    checksum = "24cafd85"
+)]
+#[test_action(
+    "bedrock",
+    "ListAutomatedReasoningPolicyBuildWorkflows",
+    checksum = "c8a0242f"
+)]
+#[test_action(
+    "bedrock",
+    "CancelAutomatedReasoningPolicyBuildWorkflow",
+    checksum = "e98ffac9"
+)]
+#[test_action(
+    "bedrock",
+    "DeleteAutomatedReasoningPolicyBuildWorkflow",
+    checksum = "0f44a2ea"
+)]
+#[test_action(
+    "bedrock",
+    "GetAutomatedReasoningPolicyBuildWorkflowResultAssets",
+    checksum = "51cd3df4"
+)]
+#[test_action(
+    "bedrock",
+    "StartAutomatedReasoningPolicyTestWorkflow",
+    checksum = "624bf27c"
+)]
+#[test_action(
+    "bedrock",
+    "ListAutomatedReasoningPolicyTestResults",
+    checksum = "3cf287ac"
+)]
+#[test_action(
+    "bedrock",
+    "GetAutomatedReasoningPolicyAnnotations",
+    checksum = "9aca0a7a"
+)]
+#[test_action(
+    "bedrock",
+    "UpdateAutomatedReasoningPolicyAnnotations",
+    checksum = "917c31c9"
+)]
+#[test_action(
+    "bedrock",
+    "GetAutomatedReasoningPolicyNextScenario",
+    checksum = "9506938d"
+)]
+#[tokio::test]
+async fn bedrock_ar_build_workflow_lifecycle() {
+    let server = TestServer::start().await;
+    let h = reqwest::Client::new();
+    let a = "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20260411/us-east-1/bedrock/aws4_request, SignedHeaders=host, Signature=fake";
+    // Create policy first
+    let b = serde_json::json!({"policyName": "wf-policy", "policyDocument": {}});
+    let r = h
+        .post(format!(
+            "{}/automated-reasoning-policies",
+            server.endpoint()
+        ))
+        .header("content-type", "application/json")
+        .header("authorization", a)
+        .body(serde_json::to_string(&b).unwrap())
+        .send()
+        .await
+        .unwrap();
+    let v: serde_json::Value = r.json().await.unwrap();
+    let pid = v["policyArn"]
+        .as_str()
+        .unwrap()
+        .rsplit('/')
+        .next()
+        .unwrap()
+        .to_string();
+    // Start build workflow
+    let r = h
+        .post(format!(
+            "{}/automated-reasoning-policies/{}/build-workflows/FULL/start",
+            server.endpoint(),
+            pid
+        ))
+        .header("content-type", "application/json")
+        .header("authorization", a)
+        .body("{}")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 201);
+    let v: serde_json::Value = r.json().await.unwrap();
+    let wid = v["buildWorkflowId"].as_str().unwrap().to_string();
+    // Get, List, Cancel, ResultAssets, TestWorkflow, TestResults, Annotations, Scenario
+    assert_eq!(
+        h.get(format!(
+            "{}/automated-reasoning-policies/{}/build-workflows/{}",
+            server.endpoint(),
+            pid,
+            wid
+        ))
+        .header("authorization", a)
+        .send()
+        .await
+        .unwrap()
+        .status(),
+        200
+    );
+    assert_eq!(
+        h.get(format!(
+            "{}/automated-reasoning-policies/{}/build-workflows",
+            server.endpoint(),
+            pid
+        ))
+        .header("authorization", a)
+        .send()
+        .await
+        .unwrap()
+        .status(),
+        200
+    );
+    assert_eq!(
+        h.post(format!(
+            "{}/automated-reasoning-policies/{}/build-workflows/{}/cancel",
+            server.endpoint(),
+            pid,
+            wid
+        ))
+        .header("authorization", a)
+        .send()
+        .await
+        .unwrap()
+        .status(),
+        200
+    );
+    assert_eq!(
+        h.get(format!(
+            "{}/automated-reasoning-policies/{}/build-workflows/{}/result-assets",
+            server.endpoint(),
+            pid,
+            wid
+        ))
+        .header("authorization", a)
+        .send()
+        .await
+        .unwrap()
+        .status(),
+        200
+    );
+    assert_eq!(
+        h.post(format!(
+            "{}/automated-reasoning-policies/{}/build-workflows/{}/test-workflows",
+            server.endpoint(),
+            pid,
+            wid
+        ))
+        .header("content-type", "application/json")
+        .header("authorization", a)
+        .body("{}")
+        .send()
+        .await
+        .unwrap()
+        .status(),
+        200
+    );
+    assert_eq!(
+        h.get(format!(
+            "{}/automated-reasoning-policies/{}/build-workflows/{}/test-results",
+            server.endpoint(),
+            pid,
+            wid
+        ))
+        .header("authorization", a)
+        .send()
+        .await
+        .unwrap()
+        .status(),
+        200
+    );
+    let b = serde_json::json!({"annotations": [{"key": "note", "value": "test"}]});
+    assert_eq!(
+        h.patch(format!(
+            "{}/automated-reasoning-policies/{}/build-workflows/{}/annotations",
+            server.endpoint(),
+            pid,
+            wid
+        ))
+        .header("content-type", "application/json")
+        .header("authorization", a)
+        .body(serde_json::to_string(&b).unwrap())
+        .send()
+        .await
+        .unwrap()
+        .status(),
+        200
+    );
+    assert_eq!(
+        h.get(format!(
+            "{}/automated-reasoning-policies/{}/build-workflows/{}/annotations",
+            server.endpoint(),
+            pid,
+            wid
+        ))
+        .header("authorization", a)
+        .send()
+        .await
+        .unwrap()
+        .status(),
+        200
+    );
+    assert_eq!(
+        h.get(format!(
+            "{}/automated-reasoning-policies/{}/build-workflows/{}/scenarios",
+            server.endpoint(),
+            pid,
+            wid
+        ))
+        .header("authorization", a)
+        .send()
+        .await
+        .unwrap()
+        .status(),
+        200
+    );
+    // Delete workflow
+    assert_eq!(
+        h.delete(format!(
+            "{}/automated-reasoning-policies/{}/build-workflows/{}",
+            server.endpoint(),
+            pid,
+            wid
+        ))
+        .header("authorization", a)
+        .send()
+        .await
+        .unwrap()
+        .status(),
+        200
+    );
+}
+
+#[test_action(
+    "bedrock",
+    "GetAutomatedReasoningPolicyTestResult",
+    checksum = "41563a3e"
+)]
+#[tokio::test]
+async fn bedrock_ar_test_result() {
+    let server = TestServer::start().await;
+    let h = reqwest::Client::new();
+    let a = "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20260411/us-east-1/bedrock/aws4_request, SignedHeaders=host, Signature=fake";
+    let b = serde_json::json!({"policyName": "tr-policy", "policyDocument": {}});
+    let r = h
+        .post(format!(
+            "{}/automated-reasoning-policies",
+            server.endpoint()
+        ))
+        .header("content-type", "application/json")
+        .header("authorization", a)
+        .body(serde_json::to_string(&b).unwrap())
+        .send()
+        .await
+        .unwrap();
+    let v: serde_json::Value = r.json().await.unwrap();
+    let pid = v["policyArn"]
+        .as_str()
+        .unwrap()
+        .rsplit('/')
+        .next()
+        .unwrap()
+        .to_string();
+    let r = h
+        .post(format!(
+            "{}/automated-reasoning-policies/{}/build-workflows/FULL/start",
+            server.endpoint(),
+            pid
+        ))
+        .header("content-type", "application/json")
+        .header("authorization", a)
+        .body("{}")
+        .send()
+        .await
+        .unwrap();
+    let v: serde_json::Value = r.json().await.unwrap();
+    let wid = v["buildWorkflowId"].as_str().unwrap().to_string();
+    // Get test result (returns default)
+    assert_eq!(
+        h.get(format!(
+            "{}/automated-reasoning-policies/{}/build-workflows/{}/test-cases/tc-1/test-results",
+            server.endpoint(),
+            pid,
+            wid
+        ))
+        .header("authorization", a)
+        .send()
+        .await
+        .unwrap()
+        .status(),
+        200
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Automated Reasoning Policies — Core
 // ---------------------------------------------------------------------------
 

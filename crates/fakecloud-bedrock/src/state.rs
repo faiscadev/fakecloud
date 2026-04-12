@@ -59,6 +59,12 @@ pub struct BedrockState {
     pub automated_reasoning_policies: HashMap<String, AutomatedReasoningPolicy>,
     /// Automated reasoning test cases keyed by (policy_arn, test_case_id).
     pub automated_reasoning_test_cases: HashMap<(String, String), AutomatedReasoningTestCase>,
+    /// Automated reasoning build workflows keyed by (policy_arn, workflow_id).
+    pub ar_build_workflows: HashMap<(String, String), AutomatedReasoningBuildWorkflow>,
+    /// Automated reasoning test results keyed by (policy_arn, workflow_id, test_case_id).
+    pub ar_test_results: HashMap<(String, String, String), serde_json::Value>,
+    /// Automated reasoning annotations keyed by (policy_arn, workflow_id).
+    pub ar_annotations: HashMap<(String, String), serde_json::Value>,
 }
 
 impl BedrockState {
@@ -91,6 +97,9 @@ impl BedrockState {
             enforced_guardrail_configs: HashMap::new(),
             automated_reasoning_policies: HashMap::new(),
             automated_reasoning_test_cases: HashMap::new(),
+            ar_build_workflows: HashMap::new(),
+            ar_test_results: HashMap::new(),
+            ar_annotations: HashMap::new(),
         }
     }
 
@@ -120,6 +129,9 @@ impl BedrockState {
         self.enforced_guardrail_configs.clear();
         self.automated_reasoning_policies.clear();
         self.automated_reasoning_test_cases.clear();
+        self.ar_build_workflows.clear();
+        self.ar_test_results.clear();
+        self.ar_annotations.clear();
     }
 }
 
@@ -354,6 +366,16 @@ pub struct AutomatedReasoningPolicy {
     pub status: String,
     pub version: String,
     pub versions: Vec<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Clone)]
+pub struct AutomatedReasoningBuildWorkflow {
+    pub workflow_id: String,
+    pub policy_arn: String,
+    pub workflow_type: String,
+    pub status: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
