@@ -1,4 +1,6 @@
 mod auth;
+mod branding;
+mod config;
 mod groups;
 mod identity_providers;
 mod legacy;
@@ -158,6 +160,28 @@ impl AwsService for CognitoService {
             "UpdateAuthEventFeedback" => self.update_auth_event_feedback(&req),
             "StartUserImportJob" => self.start_user_import_job(&req),
             "StopUserImportJob" => self.stop_user_import_job(&req),
+            "GetUICustomization" => self.get_ui_customization(&req),
+            "SetUICustomization" => self.set_ui_customization(&req),
+            "GetLogDeliveryConfiguration" => self.get_log_delivery_configuration(&req),
+            "SetLogDeliveryConfiguration" => self.set_log_delivery_configuration(&req),
+            "DescribeRiskConfiguration" => self.describe_risk_configuration(&req),
+            "SetRiskConfiguration" => self.set_risk_configuration(&req),
+            "CreateManagedLoginBranding" => self.create_managed_login_branding(&req),
+            "DeleteManagedLoginBranding" => self.delete_managed_login_branding(&req),
+            "DescribeManagedLoginBranding" => self.describe_managed_login_branding(&req),
+            "DescribeManagedLoginBrandingByClient" => {
+                self.describe_managed_login_branding_by_client(&req)
+            }
+            "UpdateManagedLoginBranding" => self.update_managed_login_branding(&req),
+            "CreateTerms" => self.create_terms(&req),
+            "DeleteTerms" => self.delete_terms(&req),
+            "DescribeTerms" => self.describe_terms(&req),
+            "ListTerms" => self.list_terms(&req),
+            "UpdateTerms" => self.update_terms(&req),
+            "StartWebAuthnRegistration" => self.start_web_authn_registration(&req),
+            "CompleteWebAuthnRegistration" => self.complete_web_authn_registration(&req),
+            "DeleteWebAuthnCredential" => self.delete_web_authn_credential(&req),
+            "ListWebAuthnCredentials" => self.list_web_authn_credentials(&req),
             _ => Err(AwsServiceError::action_not_implemented(
                 "cognito-idp",
                 &req.action,
@@ -269,6 +293,26 @@ impl AwsService for CognitoService {
             "UpdateAuthEventFeedback",
             "StartUserImportJob",
             "StopUserImportJob",
+            "GetUICustomization",
+            "SetUICustomization",
+            "GetLogDeliveryConfiguration",
+            "SetLogDeliveryConfiguration",
+            "DescribeRiskConfiguration",
+            "SetRiskConfiguration",
+            "CreateManagedLoginBranding",
+            "DeleteManagedLoginBranding",
+            "DescribeManagedLoginBranding",
+            "DescribeManagedLoginBrandingByClient",
+            "UpdateManagedLoginBranding",
+            "CreateTerms",
+            "DeleteTerms",
+            "DescribeTerms",
+            "ListTerms",
+            "UpdateTerms",
+            "StartWebAuthnRegistration",
+            "CompleteWebAuthnRegistration",
+            "DeleteWebAuthnCredential",
+            "ListWebAuthnCredentials",
         ]
     }
 }

@@ -36,6 +36,18 @@ pub struct CognitoState {
     pub import_jobs: HashMap<String, HashMap<String, UserImportJob>>,
     /// Auth events for introspection
     pub auth_events: Vec<AuthEvent>,
+    /// (pool_id, client_id|"") -> UICustomization JSON
+    pub ui_customizations: HashMap<String, serde_json::Value>,
+    /// pool_id -> LogDeliveryConfiguration JSON
+    pub log_delivery_configs: HashMap<String, serde_json::Value>,
+    /// (pool_id, client_id|"") -> RiskConfiguration JSON
+    pub risk_configurations: HashMap<String, serde_json::Value>,
+    /// branding_id -> ManagedLoginBranding JSON
+    pub managed_login_brandings: HashMap<String, serde_json::Value>,
+    /// terms_id -> Terms JSON
+    pub terms: HashMap<String, serde_json::Value>,
+    /// (pool_id:username) -> WebAuthn credentials
+    pub webauthn_credentials: HashMap<String, Vec<WebAuthnCredential>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -48,6 +60,16 @@ pub struct AuthEvent {
     pub timestamp: DateTime<Utc>,
     pub success: bool,
     pub feedback_value: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebAuthnCredential {
+    pub credential_id: String,
+    pub friendly_credential_name: Option<String>,
+    pub relying_party_id: String,
+    pub authenticator_attachment: Option<String>,
+    pub authenticator_transport: Vec<String>,
+    pub created_at: DateTime<Utc>,
 }
 
 /// Linked external provider for a user
@@ -77,6 +99,12 @@ impl CognitoState {
             tags: HashMap::new(),
             import_jobs: HashMap::new(),
             auth_events: Vec::new(),
+            ui_customizations: HashMap::new(),
+            log_delivery_configs: HashMap::new(),
+            risk_configurations: HashMap::new(),
+            managed_login_brandings: HashMap::new(),
+            terms: HashMap::new(),
+            webauthn_credentials: HashMap::new(),
         }
     }
 
@@ -95,6 +123,12 @@ impl CognitoState {
         self.tags.clear();
         self.import_jobs.clear();
         self.auth_events.clear();
+        self.ui_customizations.clear();
+        self.log_delivery_configs.clear();
+        self.risk_configurations.clear();
+        self.managed_login_brandings.clear();
+        self.terms.clear();
+        self.webauthn_credentials.clear();
     }
 }
 

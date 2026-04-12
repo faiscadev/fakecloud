@@ -3494,3 +3494,981 @@ async fn cognito_get_signing_certificate() {
         .unwrap();
     assert!(resp.certificate().is_some());
 }
+
+// ---------------------------------------------------------------------------
+// UI Customization
+// ---------------------------------------------------------------------------
+
+#[test_action("cognito-idp", "SetUICustomization", checksum = "27bc4b26")]
+#[tokio::test]
+async fn cognito_set_ui_customization() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("ui-custom-pool")
+        .send()
+        .await
+        .unwrap();
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    let resp = client
+        .set_ui_customization()
+        .user_pool_id(&pool_id)
+        .css("body { background: red; }")
+        .send()
+        .await
+        .unwrap();
+    let ui = resp.ui_customization().unwrap();
+    assert_eq!(ui.user_pool_id().unwrap(), pool_id);
+    assert_eq!(ui.css().unwrap(), "body { background: red; }");
+}
+
+#[test_action("cognito-idp", "GetUICustomization", checksum = "807d92dc")]
+#[tokio::test]
+async fn cognito_get_ui_customization() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("ui-get-pool")
+        .send()
+        .await
+        .unwrap();
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    // Set first
+    client
+        .set_ui_customization()
+        .user_pool_id(&pool_id)
+        .css(".header { color: blue; }")
+        .send()
+        .await
+        .unwrap();
+
+    // Get
+    let resp = client
+        .get_ui_customization()
+        .user_pool_id(&pool_id)
+        .send()
+        .await
+        .unwrap();
+    let ui = resp.ui_customization().unwrap();
+    assert_eq!(ui.user_pool_id().unwrap(), pool_id);
+    assert_eq!(ui.css().unwrap(), ".header { color: blue; }");
+}
+
+// ---------------------------------------------------------------------------
+// Log Delivery Configuration
+// ---------------------------------------------------------------------------
+
+#[test_action("cognito-idp", "SetLogDeliveryConfiguration", checksum = "8a6a037d")]
+#[tokio::test]
+async fn cognito_set_log_delivery_configuration() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("log-config-pool")
+        .send()
+        .await
+        .unwrap();
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    let log_config = aws_sdk_cognitoidentityprovider::types::LogConfigurationType::builder()
+        .log_level(aws_sdk_cognitoidentityprovider::types::LogLevel::Error)
+        .event_source(aws_sdk_cognitoidentityprovider::types::EventSourceName::UserNotification)
+        .build()
+        .unwrap();
+
+    let resp = client
+        .set_log_delivery_configuration()
+        .user_pool_id(&pool_id)
+        .log_configurations(log_config)
+        .send()
+        .await
+        .unwrap();
+    let cfg = resp.log_delivery_configuration().unwrap();
+    assert_eq!(cfg.user_pool_id(), &pool_id);
+    assert!(!cfg.log_configurations().is_empty());
+}
+
+#[test_action("cognito-idp", "GetLogDeliveryConfiguration", checksum = "37aab735")]
+#[tokio::test]
+async fn cognito_get_log_delivery_configuration() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("log-get-pool")
+        .send()
+        .await
+        .unwrap();
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    // Get before set (should return empty)
+    let resp = client
+        .get_log_delivery_configuration()
+        .user_pool_id(&pool_id)
+        .send()
+        .await
+        .unwrap();
+    let cfg = resp.log_delivery_configuration().unwrap();
+    assert_eq!(cfg.user_pool_id(), &pool_id);
+
+    // Set and get again
+    let log_config = aws_sdk_cognitoidentityprovider::types::LogConfigurationType::builder()
+        .log_level(aws_sdk_cognitoidentityprovider::types::LogLevel::Error)
+        .event_source(aws_sdk_cognitoidentityprovider::types::EventSourceName::UserNotification)
+        .build()
+        .unwrap();
+
+    client
+        .set_log_delivery_configuration()
+        .user_pool_id(&pool_id)
+        .log_configurations(log_config)
+        .send()
+        .await
+        .unwrap();
+
+    let resp2 = client
+        .get_log_delivery_configuration()
+        .user_pool_id(&pool_id)
+        .send()
+        .await
+        .unwrap();
+    let cfg2 = resp2.log_delivery_configuration().unwrap();
+    assert!(!cfg2.log_configurations().is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// Risk Configuration
+// ---------------------------------------------------------------------------
+
+#[test_action("cognito-idp", "SetRiskConfiguration", checksum = "f74ed3fe")]
+#[tokio::test]
+async fn cognito_set_risk_configuration() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("risk-config-pool")
+        .send()
+        .await
+        .unwrap();
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    let risk_exception =
+        aws_sdk_cognitoidentityprovider::types::RiskExceptionConfigurationType::builder()
+            .blocked_ip_range_list("192.168.1.0/24")
+            .build();
+
+    let resp = client
+        .set_risk_configuration()
+        .user_pool_id(&pool_id)
+        .risk_exception_configuration(risk_exception)
+        .send()
+        .await
+        .unwrap();
+    let cfg = resp.risk_configuration().unwrap();
+    assert_eq!(cfg.user_pool_id().unwrap(), pool_id);
+}
+
+#[test_action("cognito-idp", "DescribeRiskConfiguration", checksum = "da8ca179")]
+#[tokio::test]
+async fn cognito_describe_risk_configuration() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("risk-describe-pool")
+        .send()
+        .await
+        .unwrap();
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    // Describe before set (should return default)
+    let resp = client
+        .describe_risk_configuration()
+        .user_pool_id(&pool_id)
+        .send()
+        .await
+        .unwrap();
+    let cfg = resp.risk_configuration().unwrap();
+    assert_eq!(cfg.user_pool_id().unwrap(), pool_id);
+
+    // Set and describe again
+    let risk_exception =
+        aws_sdk_cognitoidentityprovider::types::RiskExceptionConfigurationType::builder()
+            .blocked_ip_range_list("10.0.0.0/8")
+            .build();
+
+    client
+        .set_risk_configuration()
+        .user_pool_id(&pool_id)
+        .risk_exception_configuration(risk_exception)
+        .send()
+        .await
+        .unwrap();
+
+    let resp2 = client
+        .describe_risk_configuration()
+        .user_pool_id(&pool_id)
+        .send()
+        .await
+        .unwrap();
+    let cfg2 = resp2.risk_configuration().unwrap();
+    assert!(cfg2.risk_exception_configuration().is_some());
+}
+
+// ---------------------------------------------------------------------------
+// Managed Login Branding
+// ---------------------------------------------------------------------------
+
+#[test_action("cognito-idp", "CreateManagedLoginBranding", checksum = "cb913f30")]
+#[tokio::test]
+async fn cognito_create_managed_login_branding() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("branding-pool")
+        .send()
+        .await
+        .unwrap();
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    let upc = client
+        .create_user_pool_client()
+        .user_pool_id(&pool_id)
+        .client_name("branding-client")
+        .send()
+        .await
+        .unwrap();
+    let client_id = upc
+        .user_pool_client()
+        .unwrap()
+        .client_id()
+        .unwrap()
+        .to_string();
+
+    let resp = client
+        .create_managed_login_branding()
+        .user_pool_id(&pool_id)
+        .client_id(&client_id)
+        .use_cognito_provided_values(true)
+        .send()
+        .await
+        .unwrap();
+    let branding = resp.managed_login_branding().unwrap();
+    assert!(!branding.managed_login_branding_id().unwrap().is_empty());
+    assert_eq!(branding.user_pool_id().unwrap(), pool_id);
+}
+
+#[test_action("cognito-idp", "DescribeManagedLoginBranding", checksum = "078abe45")]
+#[tokio::test]
+async fn cognito_describe_managed_login_branding() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("branding-describe-pool")
+        .send()
+        .await
+        .unwrap();
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    let upc = client
+        .create_user_pool_client()
+        .user_pool_id(&pool_id)
+        .client_name("branding-desc-client")
+        .send()
+        .await
+        .unwrap();
+    let client_id = upc
+        .user_pool_client()
+        .unwrap()
+        .client_id()
+        .unwrap()
+        .to_string();
+
+    let created = client
+        .create_managed_login_branding()
+        .user_pool_id(&pool_id)
+        .client_id(&client_id)
+        .use_cognito_provided_values(true)
+        .send()
+        .await
+        .unwrap();
+    let branding_id = created
+        .managed_login_branding()
+        .unwrap()
+        .managed_login_branding_id()
+        .unwrap()
+        .to_string();
+
+    let resp = client
+        .describe_managed_login_branding()
+        .user_pool_id(&pool_id)
+        .managed_login_branding_id(&branding_id)
+        .send()
+        .await
+        .unwrap();
+    let b = resp.managed_login_branding().unwrap();
+    assert_eq!(b.managed_login_branding_id().unwrap(), branding_id);
+    assert_eq!(b.user_pool_id().unwrap(), pool_id);
+}
+
+#[test_action(
+    "cognito-idp",
+    "DescribeManagedLoginBrandingByClient",
+    checksum = "1614d8e7"
+)]
+#[tokio::test]
+async fn cognito_describe_managed_login_branding_by_client() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("branding-by-client-pool")
+        .send()
+        .await
+        .unwrap();
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    let upc = client
+        .create_user_pool_client()
+        .user_pool_id(&pool_id)
+        .client_name("branding-by-client")
+        .send()
+        .await
+        .unwrap();
+    let client_id = upc
+        .user_pool_client()
+        .unwrap()
+        .client_id()
+        .unwrap()
+        .to_string();
+
+    client
+        .create_managed_login_branding()
+        .user_pool_id(&pool_id)
+        .client_id(&client_id)
+        .use_cognito_provided_values(true)
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .describe_managed_login_branding_by_client()
+        .user_pool_id(&pool_id)
+        .client_id(&client_id)
+        .send()
+        .await
+        .unwrap();
+    let b = resp.managed_login_branding().unwrap();
+    assert_eq!(b.user_pool_id().unwrap(), pool_id);
+}
+
+#[test_action("cognito-idp", "UpdateManagedLoginBranding", checksum = "efc1e7bb")]
+#[tokio::test]
+async fn cognito_update_managed_login_branding() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("branding-update-pool")
+        .send()
+        .await
+        .unwrap();
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    let upc = client
+        .create_user_pool_client()
+        .user_pool_id(&pool_id)
+        .client_name("branding-upd-client")
+        .send()
+        .await
+        .unwrap();
+    let client_id = upc
+        .user_pool_client()
+        .unwrap()
+        .client_id()
+        .unwrap()
+        .to_string();
+
+    let created = client
+        .create_managed_login_branding()
+        .user_pool_id(&pool_id)
+        .client_id(&client_id)
+        .use_cognito_provided_values(true)
+        .send()
+        .await
+        .unwrap();
+    let branding_id = created
+        .managed_login_branding()
+        .unwrap()
+        .managed_login_branding_id()
+        .unwrap()
+        .to_string();
+
+    let resp = client
+        .update_managed_login_branding()
+        .user_pool_id(&pool_id)
+        .managed_login_branding_id(&branding_id)
+        .use_cognito_provided_values(false)
+        .send()
+        .await
+        .unwrap();
+    let b = resp.managed_login_branding().unwrap();
+    assert_eq!(b.managed_login_branding_id().unwrap(), branding_id);
+}
+
+#[test_action("cognito-idp", "DeleteManagedLoginBranding", checksum = "7f018306")]
+#[tokio::test]
+async fn cognito_delete_managed_login_branding() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("branding-delete-pool")
+        .send()
+        .await
+        .unwrap();
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    let upc = client
+        .create_user_pool_client()
+        .user_pool_id(&pool_id)
+        .client_name("branding-del-client")
+        .send()
+        .await
+        .unwrap();
+    let client_id = upc
+        .user_pool_client()
+        .unwrap()
+        .client_id()
+        .unwrap()
+        .to_string();
+
+    let created = client
+        .create_managed_login_branding()
+        .user_pool_id(&pool_id)
+        .client_id(&client_id)
+        .use_cognito_provided_values(true)
+        .send()
+        .await
+        .unwrap();
+    let branding_id = created
+        .managed_login_branding()
+        .unwrap()
+        .managed_login_branding_id()
+        .unwrap()
+        .to_string();
+
+    client
+        .delete_managed_login_branding()
+        .user_pool_id(&pool_id)
+        .managed_login_branding_id(&branding_id)
+        .send()
+        .await
+        .unwrap();
+
+    // Should fail to describe after delete
+    let err = client
+        .describe_managed_login_branding()
+        .user_pool_id(&pool_id)
+        .managed_login_branding_id(&branding_id)
+        .send()
+        .await;
+    assert!(err.is_err());
+}
+
+// ---------------------------------------------------------------------------
+// Terms
+// ---------------------------------------------------------------------------
+
+#[test_action("cognito-idp", "CreateTerms", checksum = "b7975c85")]
+#[tokio::test]
+async fn cognito_create_terms() {
+    let server = TestServer::start().await;
+    let http = reqwest::Client::new();
+    let endpoint = server.endpoint();
+
+    // First create a pool via SDK
+    let client = server.cognito_client().await;
+    let pool = client
+        .create_user_pool()
+        .pool_name("terms-pool")
+        .send()
+        .await
+        .unwrap();
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    let resp = http
+        .post(endpoint)
+        .header("Content-Type", "application/x-amz-json-1.1")
+        .header(
+            "X-Amz-Target",
+            "AWSCognitoIdentityProviderService.CreateTerms",
+        )
+        .json(&serde_json::json!({
+            "UserPoolId": pool_id,
+            "TermsName": "test-terms"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert!(!body["Terms"]["TermsId"].as_str().unwrap().is_empty());
+    assert_eq!(body["Terms"]["UserPoolId"].as_str().unwrap(), pool_id);
+    assert_eq!(body["Terms"]["TermsName"].as_str().unwrap(), "test-terms");
+}
+
+#[test_action("cognito-idp", "DescribeTerms", checksum = "a01327c5")]
+#[tokio::test]
+async fn cognito_describe_terms() {
+    let server = TestServer::start().await;
+    let http = reqwest::Client::new();
+    let endpoint = server.endpoint();
+
+    let client = server.cognito_client().await;
+    let pool = client
+        .create_user_pool()
+        .pool_name("terms-desc-pool")
+        .send()
+        .await
+        .unwrap();
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    // Create terms
+    let create_resp = http
+        .post(endpoint)
+        .header("Content-Type", "application/x-amz-json-1.1")
+        .header(
+            "X-Amz-Target",
+            "AWSCognitoIdentityProviderService.CreateTerms",
+        )
+        .json(&serde_json::json!({
+            "UserPoolId": pool_id,
+            "TermsName": "desc-terms"
+        }))
+        .send()
+        .await
+        .unwrap();
+    let create_body: serde_json::Value = create_resp.json().await.unwrap();
+    let terms_id = create_body["Terms"]["TermsId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Describe
+    let resp = http
+        .post(endpoint)
+        .header("Content-Type", "application/x-amz-json-1.1")
+        .header(
+            "X-Amz-Target",
+            "AWSCognitoIdentityProviderService.DescribeTerms",
+        )
+        .json(&serde_json::json!({
+            "UserPoolId": pool_id,
+            "TermsId": terms_id
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["Terms"]["TermsId"].as_str().unwrap(), terms_id);
+    assert_eq!(body["Terms"]["TermsName"].as_str().unwrap(), "desc-terms");
+}
+
+#[test_action("cognito-idp", "ListTerms", checksum = "86783ac4")]
+#[tokio::test]
+async fn cognito_list_terms() {
+    let server = TestServer::start().await;
+    let http = reqwest::Client::new();
+    let endpoint = server.endpoint();
+
+    let client = server.cognito_client().await;
+    let pool = client
+        .create_user_pool()
+        .pool_name("terms-list-pool")
+        .send()
+        .await
+        .unwrap();
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    // Create two terms
+    for name in &["terms-a", "terms-b"] {
+        http.post(endpoint)
+            .header("Content-Type", "application/x-amz-json-1.1")
+            .header(
+                "X-Amz-Target",
+                "AWSCognitoIdentityProviderService.CreateTerms",
+            )
+            .json(&serde_json::json!({
+                "UserPoolId": pool_id,
+                "TermsName": name
+            }))
+            .send()
+            .await
+            .unwrap();
+    }
+
+    let resp = http
+        .post(endpoint)
+        .header("Content-Type", "application/x-amz-json-1.1")
+        .header(
+            "X-Amz-Target",
+            "AWSCognitoIdentityProviderService.ListTerms",
+        )
+        .json(&serde_json::json!({
+            "UserPoolId": pool_id
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let terms = body["Terms"].as_array().unwrap();
+    assert_eq!(terms.len(), 2);
+}
+
+#[test_action("cognito-idp", "UpdateTerms", checksum = "fa5f729e")]
+#[tokio::test]
+async fn cognito_update_terms() {
+    let server = TestServer::start().await;
+    let http = reqwest::Client::new();
+    let endpoint = server.endpoint();
+
+    let client = server.cognito_client().await;
+    let pool = client
+        .create_user_pool()
+        .pool_name("terms-update-pool")
+        .send()
+        .await
+        .unwrap();
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    // Create
+    let create_resp = http
+        .post(endpoint)
+        .header("Content-Type", "application/x-amz-json-1.1")
+        .header(
+            "X-Amz-Target",
+            "AWSCognitoIdentityProviderService.CreateTerms",
+        )
+        .json(&serde_json::json!({
+            "UserPoolId": pool_id,
+            "TermsName": "old-name"
+        }))
+        .send()
+        .await
+        .unwrap();
+    let create_body: serde_json::Value = create_resp.json().await.unwrap();
+    let terms_id = create_body["Terms"]["TermsId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Update
+    let resp = http
+        .post(endpoint)
+        .header("Content-Type", "application/x-amz-json-1.1")
+        .header(
+            "X-Amz-Target",
+            "AWSCognitoIdentityProviderService.UpdateTerms",
+        )
+        .json(&serde_json::json!({
+            "UserPoolId": pool_id,
+            "TermsId": terms_id,
+            "TermsName": "new-name"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["Terms"]["TermsName"].as_str().unwrap(), "new-name");
+}
+
+#[test_action("cognito-idp", "DeleteTerms", checksum = "85c898a8")]
+#[tokio::test]
+async fn cognito_delete_terms() {
+    let server = TestServer::start().await;
+    let http = reqwest::Client::new();
+    let endpoint = server.endpoint();
+
+    let client = server.cognito_client().await;
+    let pool = client
+        .create_user_pool()
+        .pool_name("terms-delete-pool")
+        .send()
+        .await
+        .unwrap();
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    // Create
+    let create_resp = http
+        .post(endpoint)
+        .header("Content-Type", "application/x-amz-json-1.1")
+        .header(
+            "X-Amz-Target",
+            "AWSCognitoIdentityProviderService.CreateTerms",
+        )
+        .json(&serde_json::json!({
+            "UserPoolId": pool_id,
+            "TermsName": "delete-me"
+        }))
+        .send()
+        .await
+        .unwrap();
+    let create_body: serde_json::Value = create_resp.json().await.unwrap();
+    let terms_id = create_body["Terms"]["TermsId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Delete
+    let resp = http
+        .post(endpoint)
+        .header("Content-Type", "application/x-amz-json-1.1")
+        .header(
+            "X-Amz-Target",
+            "AWSCognitoIdentityProviderService.DeleteTerms",
+        )
+        .json(&serde_json::json!({
+            "UserPoolId": pool_id,
+            "TermsId": terms_id
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // Describe should fail
+    let err_resp = http
+        .post(endpoint)
+        .header("Content-Type", "application/x-amz-json-1.1")
+        .header(
+            "X-Amz-Target",
+            "AWSCognitoIdentityProviderService.DescribeTerms",
+        )
+        .json(&serde_json::json!({
+            "UserPoolId": pool_id,
+            "TermsId": terms_id
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(err_resp.status(), 400);
+}
+
+// ---------------------------------------------------------------------------
+// WebAuthn
+// ---------------------------------------------------------------------------
+
+#[test_action("cognito-idp", "StartWebAuthnRegistration", checksum = "372f550e")]
+#[tokio::test]
+async fn cognito_start_web_authn_registration() {
+    let server = TestServer::start().await;
+    let http = reqwest::Client::new();
+    let endpoint = server.endpoint();
+    let client = server.cognito_client().await;
+    let (_pool_id, _client_id, access_token) =
+        setup_authenticated_user(&client, "webauthn-start-pool").await;
+
+    let resp = http
+        .post(endpoint)
+        .header("Content-Type", "application/x-amz-json-1.1")
+        .header(
+            "X-Amz-Target",
+            "AWSCognitoIdentityProviderService.StartWebAuthnRegistration",
+        )
+        .json(&serde_json::json!({
+            "AccessToken": access_token
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert!(body["CredentialCreationOptions"]["challenge"]
+        .as_str()
+        .is_some());
+    assert!(body["CredentialCreationOptions"]["rp"].is_object());
+    assert!(body["CredentialCreationOptions"]["user"].is_object());
+}
+
+#[test_action("cognito-idp", "CompleteWebAuthnRegistration", checksum = "f18b9292")]
+#[tokio::test]
+async fn cognito_complete_web_authn_registration() {
+    let server = TestServer::start().await;
+    let http = reqwest::Client::new();
+    let endpoint = server.endpoint();
+    let client = server.cognito_client().await;
+    let (_pool_id, _client_id, access_token) =
+        setup_authenticated_user(&client, "webauthn-complete-pool").await;
+
+    let resp = http
+        .post(endpoint)
+        .header("Content-Type", "application/x-amz-json-1.1")
+        .header(
+            "X-Amz-Target",
+            "AWSCognitoIdentityProviderService.CompleteWebAuthnRegistration",
+        )
+        .json(&serde_json::json!({
+            "AccessToken": access_token,
+            "Credential": {
+                "id": "cred-123",
+                "type": "public-key",
+                "authenticatorAttachment": "platform",
+                "response": {
+                    "clientDataJSON": "eyJ0ZXN0IjogdHJ1ZX0",
+                    "attestationObject": "o2NmbXRkbm9uZQ",
+                    "transports": ["internal"]
+                },
+                "clientExtensionResults": {}
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+}
+
+#[test_action("cognito-idp", "ListWebAuthnCredentials", checksum = "e93ad619")]
+#[tokio::test]
+async fn cognito_list_web_authn_credentials() {
+    let server = TestServer::start().await;
+    let http = reqwest::Client::new();
+    let endpoint = server.endpoint();
+    let client = server.cognito_client().await;
+    let (_pool_id, _client_id, access_token) =
+        setup_authenticated_user(&client, "webauthn-list-pool").await;
+
+    // Register a credential first
+    http.post(endpoint)
+        .header("Content-Type", "application/x-amz-json-1.1")
+        .header(
+            "X-Amz-Target",
+            "AWSCognitoIdentityProviderService.CompleteWebAuthnRegistration",
+        )
+        .json(&serde_json::json!({
+            "AccessToken": access_token,
+            "Credential": {
+                "id": "list-cred-1",
+                "type": "public-key",
+                "response": {
+                    "clientDataJSON": "eyJ0ZXN0IjogdHJ1ZX0",
+                    "attestationObject": "o2NmbXRkbm9uZQ",
+                    "transports": ["usb"]
+                },
+                "clientExtensionResults": {}
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    let resp = http
+        .post(endpoint)
+        .header("Content-Type", "application/x-amz-json-1.1")
+        .header(
+            "X-Amz-Target",
+            "AWSCognitoIdentityProviderService.ListWebAuthnCredentials",
+        )
+        .json(&serde_json::json!({
+            "AccessToken": access_token
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let creds = body["Credentials"].as_array().unwrap();
+    assert!(!creds.is_empty());
+    assert_eq!(creds[0]["CredentialId"].as_str().unwrap(), "list-cred-1");
+}
+
+#[test_action("cognito-idp", "DeleteWebAuthnCredential", checksum = "271bbdea")]
+#[tokio::test]
+async fn cognito_delete_web_authn_credential() {
+    let server = TestServer::start().await;
+    let http = reqwest::Client::new();
+    let endpoint = server.endpoint();
+    let client = server.cognito_client().await;
+    let (_pool_id, _client_id, access_token) =
+        setup_authenticated_user(&client, "webauthn-delete-pool").await;
+
+    // Register a credential
+    http.post(endpoint)
+        .header("Content-Type", "application/x-amz-json-1.1")
+        .header(
+            "X-Amz-Target",
+            "AWSCognitoIdentityProviderService.CompleteWebAuthnRegistration",
+        )
+        .json(&serde_json::json!({
+            "AccessToken": access_token,
+            "Credential": {
+                "id": "del-cred-1",
+                "type": "public-key",
+                "response": {
+                    "clientDataJSON": "eyJ0ZXN0IjogdHJ1ZX0",
+                    "attestationObject": "o2NmbXRkbm9uZQ",
+                    "transports": ["ble"]
+                },
+                "clientExtensionResults": {}
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    // Delete
+    let resp = http
+        .post(endpoint)
+        .header("Content-Type", "application/x-amz-json-1.1")
+        .header(
+            "X-Amz-Target",
+            "AWSCognitoIdentityProviderService.DeleteWebAuthnCredential",
+        )
+        .json(&serde_json::json!({
+            "AccessToken": access_token,
+            "CredentialId": "del-cred-1"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // List should be empty
+    let list_resp = http
+        .post(endpoint)
+        .header("Content-Type", "application/x-amz-json-1.1")
+        .header(
+            "X-Amz-Target",
+            "AWSCognitoIdentityProviderService.ListWebAuthnCredentials",
+        )
+        .json(&serde_json::json!({
+            "AccessToken": access_token
+        }))
+        .send()
+        .await
+        .unwrap();
+    let list_body: serde_json::Value = list_resp.json().await.unwrap();
+    assert!(list_body["Credentials"].as_array().unwrap().is_empty());
+}
