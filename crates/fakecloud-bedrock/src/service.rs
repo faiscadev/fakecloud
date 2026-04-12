@@ -53,6 +53,47 @@ impl BedrockService {
                 Some(("CreateGuardrailVersion", Some(decode(&segs[1])), None))
             }
 
+            // Custom models
+            (Method::POST, 2) if segs[0] == "custom-models" && segs[1] == "create-custom-model" => {
+                Some(("CreateCustomModel", None, None))
+            }
+            (Method::GET, 1) if segs[0] == "custom-models" => {
+                Some(("ListCustomModels", None, None))
+            }
+            (Method::GET, 2) if segs[0] == "custom-models" => {
+                Some(("GetCustomModel", Some(decode(&segs[1])), None))
+            }
+            (Method::DELETE, 2) if segs[0] == "custom-models" => {
+                Some(("DeleteCustomModel", Some(decode(&segs[1])), None))
+            }
+
+            // Custom model deployments
+            (Method::POST, 2)
+                if segs[0] == "model-customization" && segs[1] == "custom-model-deployments" =>
+            {
+                Some(("CreateCustomModelDeployment", None, None))
+            }
+            (Method::GET, 2)
+                if segs[0] == "model-customization" && segs[1] == "custom-model-deployments" =>
+            {
+                Some(("ListCustomModelDeployments", None, None))
+            }
+            (Method::GET, 3)
+                if segs[0] == "model-customization" && segs[1] == "custom-model-deployments" =>
+            {
+                Some(("GetCustomModelDeployment", Some(decode(&segs[2])), None))
+            }
+            (Method::PATCH, 3)
+                if segs[0] == "model-customization" && segs[1] == "custom-model-deployments" =>
+            {
+                Some(("UpdateCustomModelDeployment", Some(decode(&segs[2])), None))
+            }
+            (Method::DELETE, 3)
+                if segs[0] == "model-customization" && segs[1] == "custom-model-deployments" =>
+            {
+                Some(("DeleteCustomModelDeployment", Some(decode(&segs[2])), None))
+            }
+
             // Model customization jobs
             (Method::POST, 1) if segs[0] == "model-customization-jobs" => {
                 Some(("CreateModelCustomizationJob", None, None))
@@ -373,6 +414,52 @@ impl AwsService for BedrockService {
                 &extra_id.unwrap_or_default(),
                 &req.body,
             ),
+            // Custom models
+            "CreateCustomModel" => {
+                let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
+                crate::custom_models::create_custom_model(&self.state, &req, &body)
+            }
+            "GetCustomModel" => crate::custom_models::get_custom_model(
+                &self.state,
+                &resource_id.unwrap_or_default(),
+            ),
+            "ListCustomModels" => crate::custom_models::list_custom_models(&self.state, &req),
+            "DeleteCustomModel" => crate::custom_models::delete_custom_model(
+                &self.state,
+                &resource_id.unwrap_or_default(),
+            ),
+            // Custom model deployments
+            "CreateCustomModelDeployment" => {
+                let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
+                crate::custom_model_deployments::create_custom_model_deployment(
+                    &self.state,
+                    &req,
+                    &body,
+                )
+            }
+            "GetCustomModelDeployment" => {
+                crate::custom_model_deployments::get_custom_model_deployment(
+                    &self.state,
+                    &resource_id.unwrap_or_default(),
+                )
+            }
+            "ListCustomModelDeployments" => {
+                crate::custom_model_deployments::list_custom_model_deployments(&self.state, &req)
+            }
+            "UpdateCustomModelDeployment" => {
+                let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
+                crate::custom_model_deployments::update_custom_model_deployment(
+                    &self.state,
+                    &resource_id.unwrap_or_default(),
+                    &body,
+                )
+            }
+            "DeleteCustomModelDeployment" => {
+                crate::custom_model_deployments::delete_custom_model_deployment(
+                    &self.state,
+                    &resource_id.unwrap_or_default(),
+                )
+            }
             // Model customization jobs
             "CreateModelCustomizationJob" => {
                 let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
@@ -519,6 +606,15 @@ impl AwsService for BedrockService {
             "DeleteGuardrail",
             "CreateGuardrailVersion",
             "ApplyGuardrail",
+            "CreateCustomModel",
+            "GetCustomModel",
+            "ListCustomModels",
+            "DeleteCustomModel",
+            "CreateCustomModelDeployment",
+            "GetCustomModelDeployment",
+            "ListCustomModelDeployments",
+            "UpdateCustomModelDeployment",
+            "DeleteCustomModelDeployment",
             "CreateModelCustomizationJob",
             "GetModelCustomizationJob",
             "ListModelCustomizationJobs",

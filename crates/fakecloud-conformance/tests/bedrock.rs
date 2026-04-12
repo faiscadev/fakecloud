@@ -705,6 +705,147 @@ async fn bedrock_bidirectional_stream_conformance() {
 }
 
 // ---------------------------------------------------------------------------
+// Custom Models
+// ---------------------------------------------------------------------------
+
+#[test_action("bedrock", "CreateCustomModel", checksum = "4887448e")]
+#[test_action("bedrock", "GetCustomModel", checksum = "93aaf6da")]
+#[test_action("bedrock", "ListCustomModels", checksum = "0966941c")]
+#[test_action("bedrock", "DeleteCustomModel", checksum = "287a1b06")]
+#[tokio::test]
+async fn bedrock_custom_model_crud() {
+    let server = TestServer::start().await;
+    let http_client = reqwest::Client::new();
+    let auth = "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20260411/us-east-1/bedrock/aws4_request, SignedHeaders=host, Signature=fake";
+
+    let body = serde_json::json!({"modelName": "conf-model", "modelSourceConfig": {}});
+    let resp = http_client
+        .post(format!(
+            "{}/custom-models/create-custom-model",
+            server.endpoint()
+        ))
+        .header("content-type", "application/json")
+        .header("authorization", auth)
+        .body(serde_json::to_string(&body).unwrap())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+    let result: serde_json::Value = resp.json().await.unwrap();
+    let arn = result["modelArn"].as_str().unwrap().to_string();
+    let id = arn.rsplit('/').next().unwrap();
+
+    let resp = http_client
+        .get(format!("{}/custom-models/{}", server.endpoint(), id))
+        .header("authorization", auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let resp = http_client
+        .get(format!("{}/custom-models", server.endpoint()))
+        .header("authorization", auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let resp = http_client
+        .delete(format!("{}/custom-models/{}", server.endpoint(), id))
+        .header("authorization", auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+}
+
+#[test_action("bedrock", "CreateCustomModelDeployment", checksum = "798775b9")]
+#[test_action("bedrock", "GetCustomModelDeployment", checksum = "452bbfdb")]
+#[test_action("bedrock", "ListCustomModelDeployments", checksum = "8b36e796")]
+#[test_action("bedrock", "UpdateCustomModelDeployment", checksum = "860d20f9")]
+#[test_action("bedrock", "DeleteCustomModelDeployment", checksum = "74d8fc2e")]
+#[tokio::test]
+async fn bedrock_custom_model_deployment_crud() {
+    let server = TestServer::start().await;
+    let http_client = reqwest::Client::new();
+    let auth = "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20260411/us-east-1/bedrock/aws4_request, SignedHeaders=host, Signature=fake";
+
+    let body = serde_json::json!({
+        "modelDeploymentName": "conf-deployment",
+        "modelArn": "arn:aws:bedrock:us-east-1:123456789012:custom-model/test"
+    });
+    let resp = http_client
+        .post(format!(
+            "{}/model-customization/custom-model-deployments",
+            server.endpoint()
+        ))
+        .header("content-type", "application/json")
+        .header("authorization", auth)
+        .body(serde_json::to_string(&body).unwrap())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+    let result: serde_json::Value = resp.json().await.unwrap();
+    let arn = result["customModelDeploymentArn"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let id = arn.rsplit('/').next().unwrap();
+
+    let resp = http_client
+        .get(format!(
+            "{}/model-customization/custom-model-deployments/{}",
+            server.endpoint(),
+            id
+        ))
+        .header("authorization", auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let resp = http_client
+        .get(format!(
+            "{}/model-customization/custom-model-deployments",
+            server.endpoint()
+        ))
+        .header("authorization", auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let body = serde_json::json!({"modelArn": "arn:aws:bedrock:us-east-1:123456789012:custom-model/updated"});
+    let resp = http_client
+        .patch(format!(
+            "{}/model-customization/custom-model-deployments/{}",
+            server.endpoint(),
+            id
+        ))
+        .header("content-type", "application/json")
+        .header("authorization", auth)
+        .body(serde_json::to_string(&body).unwrap())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let resp = http_client
+        .delete(format!(
+            "{}/model-customization/custom-model-deployments/{}",
+            server.endpoint(),
+            id
+        ))
+        .header("authorization", auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+}
+
+// ---------------------------------------------------------------------------
 // Streaming (raw HTTP since SDK event stream parsing is complex)
 // ---------------------------------------------------------------------------
 

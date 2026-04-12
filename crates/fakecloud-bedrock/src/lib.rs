@@ -1,5 +1,7 @@
 pub mod async_invoke;
 pub mod converse;
+pub mod custom_model_deployments;
+pub mod custom_models;
 pub mod customization;
 
 pub mod guardrails;

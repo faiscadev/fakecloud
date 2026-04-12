@@ -1183,3 +1183,192 @@ async fn bedrock_converse_stream_raw() {
         "converse stream should have multiple events"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Custom Models
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn bedrock_custom_model_crud() {
+    let server = TestServer::start().await;
+    let http_client = reqwest::Client::new();
+    let auth = "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20260411/us-east-1/bedrock/aws4_request, SignedHeaders=host, Signature=fake";
+
+    // Create custom model
+    let body = serde_json::json!({
+        "modelName": "my-custom-model",
+        "modelSourceConfig": {"s3DataSource": {"s3Uri": "s3://bucket/model/"}}
+    });
+    let resp = http_client
+        .post(format!(
+            "{}/custom-models/create-custom-model",
+            server.endpoint()
+        ))
+        .header("content-type", "application/json")
+        .header("authorization", auth)
+        .body(serde_json::to_string(&body).unwrap())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+    let result: serde_json::Value = resp.json().await.unwrap();
+    let model_arn = result["modelArn"].as_str().unwrap().to_string();
+    assert!(model_arn.contains("custom-model/"));
+
+    // Get custom model
+    let model_id = model_arn.rsplit('/').next().unwrap();
+    let resp = http_client
+        .get(format!("{}/custom-models/{}", server.endpoint(), model_id))
+        .header("authorization", auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let result: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(result["modelName"], "my-custom-model");
+    assert_eq!(result["modelStatus"], "Active");
+
+    // List custom models
+    let resp = http_client
+        .get(format!("{}/custom-models", server.endpoint()))
+        .header("authorization", auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let result: serde_json::Value = resp.json().await.unwrap();
+    assert!(!result["modelSummaries"].as_array().unwrap().is_empty());
+
+    // Delete custom model
+    let resp = http_client
+        .delete(format!("{}/custom-models/{}", server.endpoint(), model_id))
+        .header("authorization", auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // Verify deleted
+    let resp = http_client
+        .get(format!("{}/custom-models/{}", server.endpoint(), model_id))
+        .header("authorization", auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+}
+
+// ---------------------------------------------------------------------------
+// Custom Model Deployments
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn bedrock_custom_model_deployment_crud() {
+    let server = TestServer::start().await;
+    let http_client = reqwest::Client::new();
+    let auth = "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20260411/us-east-1/bedrock/aws4_request, SignedHeaders=host, Signature=fake";
+
+    // Create deployment
+    let body = serde_json::json!({
+        "modelDeploymentName": "my-deployment",
+        "modelArn": "arn:aws:bedrock:us-east-1:123456789012:custom-model/test-model",
+        "description": "Test deployment"
+    });
+    let resp = http_client
+        .post(format!(
+            "{}/model-customization/custom-model-deployments",
+            server.endpoint()
+        ))
+        .header("content-type", "application/json")
+        .header("authorization", auth)
+        .body(serde_json::to_string(&body).unwrap())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+    let result: serde_json::Value = resp.json().await.unwrap();
+    let deployment_arn = result["customModelDeploymentArn"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(deployment_arn.contains("custom-model-deployment/"));
+
+    // Get deployment
+    let deployment_id = deployment_arn.rsplit('/').next().unwrap();
+    let resp = http_client
+        .get(format!(
+            "{}/model-customization/custom-model-deployments/{}",
+            server.endpoint(),
+            deployment_id
+        ))
+        .header("authorization", auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let result: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(result["modelDeploymentName"], "my-deployment");
+    assert_eq!(result["status"], "Active");
+    assert_eq!(result["description"], "Test deployment");
+
+    // List deployments
+    let resp = http_client
+        .get(format!(
+            "{}/model-customization/custom-model-deployments",
+            server.endpoint()
+        ))
+        .header("authorization", auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let result: serde_json::Value = resp.json().await.unwrap();
+    assert!(!result["modelDeploymentSummaries"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+
+    // Update deployment
+    let body = serde_json::json!({
+        "modelArn": "arn:aws:bedrock:us-east-1:123456789012:custom-model/updated-model"
+    });
+    let resp = http_client
+        .patch(format!(
+            "{}/model-customization/custom-model-deployments/{}",
+            server.endpoint(),
+            deployment_id
+        ))
+        .header("content-type", "application/json")
+        .header("authorization", auth)
+        .body(serde_json::to_string(&body).unwrap())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // Delete deployment
+    let resp = http_client
+        .delete(format!(
+            "{}/model-customization/custom-model-deployments/{}",
+            server.endpoint(),
+            deployment_id
+        ))
+        .header("authorization", auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // Verify deleted
+    let resp = http_client
+        .get(format!(
+            "{}/model-customization/custom-model-deployments/{}",
+            server.endpoint(),
+            deployment_id
+        ))
+        .header("authorization", auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+}

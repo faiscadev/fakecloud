@@ -27,6 +27,10 @@ pub struct BedrockState {
     pub custom_responses: HashMap<String, String>,
     /// Async invocations keyed by invocation ARN.
     pub async_invocations: HashMap<String, AsyncInvocation>,
+    /// Custom models keyed by model ARN.
+    pub custom_models: HashMap<String, CustomModel>,
+    /// Custom model deployments keyed by deployment ARN.
+    pub custom_model_deployments: HashMap<String, CustomModelDeployment>,
 }
 
 impl BedrockState {
@@ -43,6 +47,8 @@ impl BedrockState {
             invocations: Vec::new(),
             custom_responses: HashMap::new(),
             async_invocations: HashMap::new(),
+            custom_models: HashMap::new(),
+            custom_model_deployments: HashMap::new(),
         }
     }
 
@@ -56,6 +62,8 @@ impl BedrockState {
         self.invocations.clear();
         self.custom_responses.clear();
         self.async_invocations.clear();
+        self.custom_models.clear();
+        self.custom_model_deployments.clear();
     }
 }
 
@@ -152,4 +160,26 @@ pub struct AsyncInvocation {
     pub submit_time: DateTime<Utc>,
     pub last_modified_time: DateTime<Utc>,
     pub end_time: Option<DateTime<Utc>>,
+}
+
+#[derive(Clone)]
+pub struct CustomModel {
+    pub model_arn: String,
+    pub model_name: String,
+    pub model_source_config: serde_json::Value,
+    pub model_kms_key_arn: Option<String>,
+    pub role_arn: Option<String>,
+    pub model_status: String,
+    pub creation_time: DateTime<Utc>,
+}
+
+#[derive(Clone)]
+pub struct CustomModelDeployment {
+    pub deployment_arn: String,
+    pub deployment_name: String,
+    pub model_arn: String,
+    pub description: Option<String>,
+    pub status: String,
+    pub created_at: DateTime<Utc>,
+    pub last_updated_at: DateTime<Utc>,
 }
