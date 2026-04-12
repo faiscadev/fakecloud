@@ -24,7 +24,8 @@ impl IamService {
 
         let mut state = self.state.write();
 
-        let arn = Arn::global("iam", &state.account_id, &format!("saml-provider/{name}")).to_string();
+        let arn =
+            Arn::global("iam", &state.account_id, &format!("saml-provider/{name}")).to_string();
 
         let provider = SamlProvider {
             arn: arn.clone(),

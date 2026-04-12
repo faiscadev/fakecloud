@@ -238,7 +238,13 @@ impl LogsService {
         let region = state_r.region.clone();
         drop(state_r);
 
-        let arn = Arn::new("logs", &region, &account_id, &format!("lookup-table:{lookup_table_name}")).to_string();
+        let arn = Arn::new(
+            "logs",
+            &region,
+            &account_id,
+            &format!("lookup-table:{lookup_table_name}"),
+        )
+        .to_string();
         let now = Utc::now().timestamp_millis();
 
         let table = LookupTable {
@@ -390,7 +396,13 @@ impl LogsService {
         let region = state_r.region.clone();
         drop(state_r);
 
-        let arn = Arn::new("logs", &region, &account_id, &format!("scheduled-query:{name}")).to_string();
+        let arn = Arn::new(
+            "logs",
+            &region,
+            &account_id,
+            &format!("scheduled-query:{name}"),
+        )
+        .to_string();
         let now = Utc::now().timestamp_millis();
 
         let sq = ScheduledQuery {

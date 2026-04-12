@@ -446,7 +446,13 @@ pub fn default_parameter_groups(
         let group_name = format!("default.{}", family);
         let group = DbParameterGroup {
             db_parameter_group_name: group_name.clone(),
-            db_parameter_group_arn: Arn::new("rds", region, account_id, &format!("pg:{group_name}")).to_string(),
+            db_parameter_group_arn: Arn::new(
+                "rds",
+                region,
+                account_id,
+                &format!("pg:{group_name}"),
+            )
+            .to_string(),
             db_parameter_group_family: family.to_string(),
             description: description.to_string(),
             parameters: HashMap::new(),

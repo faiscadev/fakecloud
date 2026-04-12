@@ -499,14 +499,26 @@ fn default_parameter_groups(account_id: &str, region: &str) -> Vec<CacheParamete
             cache_parameter_group_family: "redis7".to_string(),
             description: "Default parameter group for redis7".to_string(),
             is_global: false,
-            arn: Arn::new("elasticache", region, account_id, "parametergroup:default.redis7").to_string(),
+            arn: Arn::new(
+                "elasticache",
+                region,
+                account_id,
+                "parametergroup:default.redis7",
+            )
+            .to_string(),
         },
         CacheParameterGroup {
             cache_parameter_group_name: "default.valkey8".to_string(),
             cache_parameter_group_family: "valkey8".to_string(),
             description: "Default parameter group for valkey8".to_string(),
             is_global: false,
-            arn: Arn::new("elasticache", region, account_id, "parametergroup:default.valkey8").to_string(),
+            arn: Arn::new(
+                "elasticache",
+                region,
+                account_id,
+                "parametergroup:default.valkey8",
+            )
+            .to_string(),
         },
     ]
 }
