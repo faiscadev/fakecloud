@@ -28,11 +28,17 @@ pub struct KinesisStream {
     pub open_shard_count: i32,
     pub tags: HashMap<String, String>,
     pub shards: Vec<KinesisShard>,
+    pub next_shard_index: i32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KinesisShard {
     pub shard_id: String,
+    pub starting_hash_key: String,
+    pub ending_hash_key: String,
+    pub parent_shard_id: Option<String>,
+    pub adjacent_parent_shard_id: Option<String>,
+    pub is_open: bool,
     pub next_sequence_number: u128,
     pub records: Vec<KinesisRecord>,
 }
@@ -69,6 +75,13 @@ impl KinesisState {
         self.streams.clear();
         self.iterators.clear();
         self.lambda_checkpoints.clear();
+    }
+
+    pub fn stream_name_from_arn(&self, arn: &str) -> Option<String> {
+        arn.rsplit('/')
+            .next()
+            .filter(|name| self.streams.contains_key(*name))
+            .map(|name| name.to_string())
     }
 
     pub fn stream_arn(&self, stream_name: &str) -> String {

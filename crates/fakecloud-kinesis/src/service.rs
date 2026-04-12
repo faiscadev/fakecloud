@@ -6,24 +6,29 @@ use md5::{Digest, Md5};
 use serde_json::{json, Value};
 
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
+use fakecloud_core::validation::{validate_optional_json_range, validate_optional_string_length};
 
 use crate::state::{KinesisRecord, KinesisShard, KinesisStream, SharedKinesisState};
 
 const SUPPORTED_ACTIONS: &[&str] = &[
+    "AddTagsToStream",
     "CreateStream",
+    "DecreaseStreamRetentionPeriod",
+    "DeleteStream",
     "DescribeStream",
     "DescribeStreamSummary",
-    "ListStreams",
-    "DeleteStream",
     "GetRecords",
     "GetShardIterator",
+    "IncreaseStreamRetentionPeriod",
+    "ListShards",
+    "ListStreams",
+    "ListTagsForStream",
+    "MergeShards",
     "PutRecord",
     "PutRecords",
-    "AddTagsToStream",
-    "ListTagsForStream",
     "RemoveTagsFromStream",
-    "IncreaseStreamRetentionPeriod",
-    "DecreaseStreamRetentionPeriod",
+    "SplitShard",
+    "UpdateShardCount",
 ];
 
 pub struct KinesisService {
@@ -58,6 +63,10 @@ impl AwsService for KinesisService {
             "RemoveTagsFromStream" => self.remove_tags_from_stream(&request),
             "IncreaseStreamRetentionPeriod" => self.increase_stream_retention_period(&request),
             "DecreaseStreamRetentionPeriod" => self.decrease_stream_retention_period(&request),
+            "ListShards" => self.list_shards(&request),
+            "MergeShards" => self.merge_shards(&request),
+            "SplitShard" => self.split_shard(&request),
+            "UpdateShardCount" => self.update_shard_count(&request),
             _ => Err(AwsServiceError::action_not_implemented(
                 self.service_name(),
                 &request.action,
@@ -105,6 +114,7 @@ impl KinesisService {
             open_shard_count: shard_count,
             tags: std::collections::HashMap::new(),
             shards: build_stream_shards(shard_count),
+            next_shard_index: shard_count,
         };
         state.streams.insert(stream_name.to_string(), stream);
 
@@ -466,6 +476,260 @@ impl KinesisService {
         stream.retention_period_hours = hours as i32;
         Ok(AwsResponse::ok_json(json!({})))
     }
+
+    fn list_shards(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        validate_stream_id(&body)?;
+        validate_optional_string_length("NextToken", body["NextToken"].as_str(), 1, 1048576)?;
+        validate_optional_json_range("MaxResults", &body["MaxResults"], 1, 10000)?;
+        let max_results = body["MaxResults"].as_i64().unwrap_or(10000) as usize;
+
+        let state = self.state.read();
+        let stream = state.lookup_stream(&body)?;
+
+        let exclusive_start = body["ExclusiveStartShardId"].as_str();
+        let shards: Vec<Value> = stream
+            .shards
+            .iter()
+            .filter(|s| {
+                if let Some(start_id) = exclusive_start {
+                    s.shard_id.as_str() > start_id
+                } else {
+                    true
+                }
+            })
+            .take(max_results)
+            .map(shard_to_json)
+            .collect();
+
+        Ok(AwsResponse::ok_json(json!({ "Shards": shards })))
+    }
+
+    fn merge_shards(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        validate_stream_id(&body)?;
+        let shard_to_merge = body["ShardToMerge"]
+            .as_str()
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| invalid_argument("ShardToMerge is required"))?;
+        let adjacent_shard = body["AdjacentShardToMerge"]
+            .as_str()
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| invalid_argument("AdjacentShardToMerge is required"))?;
+
+        let mut state = self.state.write();
+        let stream_name = resolve_stream_name(&state, &body)?;
+        let account_id = state.account_id.clone();
+        let stream = state
+            .streams
+            .get_mut(&stream_name)
+            .ok_or_else(|| stream_not_found(&account_id, &stream_name))?;
+
+        let shard1_idx = stream
+            .shards
+            .iter()
+            .position(|s| s.shard_id == shard_to_merge && s.is_open)
+            .ok_or_else(|| invalid_argument(format!("Shard {shard_to_merge} not found or not open")))?;
+        let shard2_idx = stream
+            .shards
+            .iter()
+            .position(|s| s.shard_id == adjacent_shard && s.is_open)
+            .ok_or_else(|| invalid_argument(format!("Shard {adjacent_shard} not found or not open")))?;
+
+        // Determine new range from the two shards
+        let starting = stream.shards[shard1_idx]
+            .starting_hash_key
+            .parse::<u128>()
+            .unwrap_or(0)
+            .min(
+                stream.shards[shard2_idx]
+                    .starting_hash_key
+                    .parse::<u128>()
+                    .unwrap_or(0),
+            );
+        let ending = stream.shards[shard1_idx]
+            .ending_hash_key
+            .parse::<u128>()
+            .unwrap_or(MAX_HASH_KEY)
+            .max(
+                stream.shards[shard2_idx]
+                    .ending_hash_key
+                    .parse::<u128>()
+                    .unwrap_or(MAX_HASH_KEY),
+            );
+
+        // Close both shards
+        stream.shards[shard1_idx].is_open = false;
+        stream.shards[shard2_idx].is_open = false;
+
+        // Create new merged shard
+        let new_id = format!("shardId-{:012}", stream.next_shard_index);
+        stream.next_shard_index += 1;
+        stream.shards.push(KinesisShard {
+            shard_id: new_id,
+            starting_hash_key: starting.to_string(),
+            ending_hash_key: ending.to_string(),
+            parent_shard_id: Some(shard_to_merge.to_string()),
+            adjacent_parent_shard_id: Some(adjacent_shard.to_string()),
+            is_open: true,
+            next_sequence_number: 1,
+            records: Vec::new(),
+        });
+
+        stream.shard_count = stream.shards.len() as i32;
+        stream.open_shard_count = stream.shards.iter().filter(|s| s.is_open).count() as i32;
+
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    fn split_shard(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        validate_stream_id(&body)?;
+        let shard_to_split = body["ShardToSplit"]
+            .as_str()
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| invalid_argument("ShardToSplit is required"))?;
+        let new_starting_hash_key = body["NewStartingHashKey"]
+            .as_str()
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| invalid_argument("NewStartingHashKey is required"))?;
+
+        let mut state = self.state.write();
+        let stream_name = resolve_stream_name(&state, &body)?;
+        let account_id = state.account_id.clone();
+        let stream = state
+            .streams
+            .get_mut(&stream_name)
+            .ok_or_else(|| stream_not_found(&account_id, &stream_name))?;
+
+        let shard_idx = stream
+            .shards
+            .iter()
+            .position(|s| s.shard_id == shard_to_split && s.is_open)
+            .ok_or_else(|| invalid_argument(format!("Shard {shard_to_split} not found or not open")))?;
+
+        let old_starting: u128 = stream.shards[shard_idx]
+            .starting_hash_key
+            .parse()
+            .unwrap_or(0);
+        let old_ending: u128 = stream.shards[shard_idx]
+            .ending_hash_key
+            .parse()
+            .unwrap_or(MAX_HASH_KEY);
+        let split_point: u128 = new_starting_hash_key
+            .parse()
+            .map_err(|_| invalid_argument("NewStartingHashKey must be a valid number"))?;
+
+        if split_point <= old_starting || split_point > old_ending {
+            return Err(invalid_argument(
+                "NewStartingHashKey must be within the shard's hash key range",
+            ));
+        }
+
+        // Close the old shard
+        stream.shards[shard_idx].is_open = false;
+
+        // Create two new shards
+        let id1 = format!("shardId-{:012}", stream.next_shard_index);
+        stream.next_shard_index += 1;
+        let id2 = format!("shardId-{:012}", stream.next_shard_index);
+        stream.next_shard_index += 1;
+
+        stream.shards.push(KinesisShard {
+            shard_id: id1,
+            starting_hash_key: old_starting.to_string(),
+            ending_hash_key: (split_point - 1).to_string(),
+            parent_shard_id: Some(shard_to_split.to_string()),
+            adjacent_parent_shard_id: None,
+            is_open: true,
+            next_sequence_number: 1,
+            records: Vec::new(),
+        });
+        stream.shards.push(KinesisShard {
+            shard_id: id2,
+            starting_hash_key: split_point.to_string(),
+            ending_hash_key: old_ending.to_string(),
+            parent_shard_id: Some(shard_to_split.to_string()),
+            adjacent_parent_shard_id: None,
+            is_open: true,
+            next_sequence_number: 1,
+            records: Vec::new(),
+        });
+
+        stream.shard_count = stream.shards.len() as i32;
+        stream.open_shard_count = stream.shards.iter().filter(|s| s.is_open).count() as i32;
+
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    fn update_shard_count(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        validate_stream_id(&body)?;
+        let target = body["TargetShardCount"]
+            .as_i64()
+            .ok_or_else(|| invalid_argument("TargetShardCount is required"))?;
+        if target <= 0 {
+            return Err(invalid_argument("TargetShardCount must be positive"));
+        }
+        let _scaling_type = body["ScalingType"]
+            .as_str()
+            .ok_or_else(|| invalid_argument("ScalingType is required"))?;
+
+        let mut state = self.state.write();
+        let stream_name = resolve_stream_name(&state, &body)?;
+        let account_id = state.account_id.clone();
+        let stream_arn = state.stream_arn(&stream_name);
+        let stream = state
+            .streams
+            .get_mut(&stream_name)
+            .ok_or_else(|| stream_not_found(&account_id, &stream_name))?;
+
+        let current = stream.open_shard_count;
+
+        // Close all existing open shards and rebuild with target count
+        for shard in &mut stream.shards {
+            if shard.is_open {
+                shard.is_open = false;
+            }
+        }
+
+        let count = target as u128;
+        for i in 0..target {
+            let idx = i as u128;
+            let starting = if idx == 0 {
+                0u128
+            } else {
+                (MAX_HASH_KEY / count) * idx + 1
+            };
+            let ending = if idx == count - 1 {
+                MAX_HASH_KEY
+            } else {
+                (MAX_HASH_KEY / count) * (idx + 1)
+            };
+            let new_id = format!("shardId-{:012}", stream.next_shard_index);
+            stream.next_shard_index += 1;
+            stream.shards.push(KinesisShard {
+                shard_id: new_id,
+                starting_hash_key: starting.to_string(),
+                ending_hash_key: ending.to_string(),
+                parent_shard_id: None,
+                adjacent_parent_shard_id: None,
+                is_open: true,
+                next_sequence_number: 1,
+                records: Vec::new(),
+            });
+        }
+
+        stream.shard_count = stream.shards.len() as i32;
+        stream.open_shard_count = target as i32;
+
+        Ok(AwsResponse::ok_json(json!({
+            "StreamName": stream_name,
+            "StreamARN": stream_arn,
+            "CurrentShardCount": current,
+            "TargetShardCount": target,
+        })))
+    }
 }
 
 impl crate::state::KinesisState {
@@ -507,30 +771,65 @@ fn resolve_stream_name(
     Err(invalid_argument("StreamName or StreamARN is required"))
 }
 
+/// The maximum hash key value (2^128 - 1).
+const MAX_HASH_KEY: u128 = u128::MAX;
+
+fn shard_to_json(shard: &KinesisShard) -> Value {
+    let mut obj = json!({
+        "ShardId": shard.shard_id,
+        "HashKeyRange": {
+            "StartingHashKey": shard.starting_hash_key,
+            "EndingHashKey": shard.ending_hash_key,
+        },
+        "SequenceNumberRange": {
+            "StartingSequenceNumber": format!("{:020}", 1),
+        },
+    });
+    if let Some(ref parent) = shard.parent_shard_id {
+        obj["ParentShardId"] = json!(parent);
+    }
+    if let Some(ref adj) = shard.adjacent_parent_shard_id {
+        obj["AdjacentParentShardId"] = json!(adj);
+    }
+    if !shard.is_open {
+        obj["SequenceNumberRange"]["EndingSequenceNumber"] =
+            json!(format!("{:020}", shard.next_sequence_number.saturating_sub(1).max(1)));
+    }
+    obj
+}
+
 fn build_shards(shard_count: i32) -> Vec<Value> {
     build_stream_shards(shard_count)
-        .into_iter()
-        .map(|shard| {
-            json!({
-                "HashKeyRange": {
-                    "EndingHashKey": "340282366920938463463374607431768211455",
-                    "StartingHashKey": "0"
-                },
-                "SequenceNumberRange": {
-                    "StartingSequenceNumber": format!("{}0000000000000000000", 1)
-                },
-                "ShardId": shard.shard_id
-            })
-        })
+        .iter()
+        .map(shard_to_json)
         .collect()
 }
 
 fn build_stream_shards(shard_count: i32) -> Vec<KinesisShard> {
+    let count = shard_count as u128;
     (0..shard_count)
-        .map(|index| KinesisShard {
-            shard_id: format!("shardId-{:012}", index),
-            next_sequence_number: 1,
-            records: Vec::new(),
+        .map(|index| {
+            let i = index as u128;
+            let starting = if i == 0 {
+                0u128
+            } else {
+                (MAX_HASH_KEY / count) * i + 1
+            };
+            let ending = if i == count - 1 {
+                MAX_HASH_KEY
+            } else {
+                (MAX_HASH_KEY / count) * (i + 1)
+            };
+            KinesisShard {
+                shard_id: format!("shardId-{:012}", index),
+                starting_hash_key: starting.to_string(),
+                ending_hash_key: ending.to_string(),
+                parent_shard_id: None,
+                adjacent_parent_shard_id: None,
+                is_open: true,
+                next_sequence_number: 1,
+                records: Vec::new(),
+            }
         })
         .collect()
 }
@@ -637,6 +936,10 @@ fn find_record_index_by_sequence_number(
         .ok_or_else(|| invalid_argument("StartingSequenceNumber is invalid"))
 }
 
+fn validate_stream_id(body: &Value) -> Result<(), AwsServiceError> {
+    validate_optional_string_length("StreamId", body["StreamId"].as_str(), 1, 24)
+}
+
 fn invalid_argument(message: impl Into<String>) -> AwsServiceError {
     AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "InvalidArgumentException", message)
 }
@@ -685,6 +988,19 @@ mod tests {
             method: Method::POST,
             is_query_protocol: false,
             access_key_id: None,
+        }
+    }
+
+    fn test_shard() -> KinesisShard {
+        KinesisShard {
+            shard_id: "shardId-000000000000".to_string(),
+            starting_hash_key: "0".to_string(),
+            ending_hash_key: MAX_HASH_KEY.to_string(),
+            parent_shard_id: None,
+            adjacent_parent_shard_id: None,
+            is_open: true,
+            next_sequence_number: 1,
+            records: Vec::new(),
         }
     }
 
@@ -764,11 +1080,7 @@ mod tests {
 
     #[test]
     fn append_record_advances_sequence_numbers() {
-        let mut shard = KinesisShard {
-            shard_id: "shardId-000000000000".to_string(),
-            next_sequence_number: 1,
-            records: Vec::new(),
-        };
+        let mut shard = test_shard();
 
         let first = append_record(&mut shard, "key", b"first".to_vec());
         let second = append_record(&mut shard, "key", b"second".to_vec());
@@ -780,11 +1092,7 @@ mod tests {
 
     #[test]
     fn trim_horizon_iterator_starts_at_zero() {
-        let mut shard = KinesisShard {
-            shard_id: "shardId-000000000000".to_string(),
-            next_sequence_number: 1,
-            records: Vec::new(),
-        };
+        let mut shard = test_shard();
         append_record(&mut shard, "key", b"first".to_vec());
 
         let index = shard_iterator_start_index(&shard, "TRIM_HORIZON", &json!({})).unwrap();
@@ -793,11 +1101,7 @@ mod tests {
 
     #[test]
     fn latest_iterator_starts_after_existing_records() {
-        let mut shard = KinesisShard {
-            shard_id: "shardId-000000000000".to_string(),
-            next_sequence_number: 1,
-            records: Vec::new(),
-        };
+        let mut shard = test_shard();
         append_record(&mut shard, "key", b"first".to_vec());
         append_record(&mut shard, "key", b"second".to_vec());
 
