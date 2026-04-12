@@ -153,7 +153,7 @@ impl KinesisService {
             "StreamDescriptionSummary": {
                 "ConsumerCount": 0,
                 "EncryptionType": stream.encryption_type,
-                "KeyId": Value::Null,
+                "KeyId": stream.key_id.as_deref().unwrap_or_default(),
                 "OpenShardCount": stream.open_shard_count,
                 "RetentionPeriodHours": stream.retention_period_hours,
                 "StreamARN": stream.stream_arn,
@@ -487,9 +487,9 @@ impl KinesisService {
         let encryption_type = body["EncryptionType"]
             .as_str()
             .ok_or_else(|| invalid_argument("EncryptionType is required"))?;
-        if encryption_type != "KMS" && encryption_type != "NONE" {
+        if encryption_type != "KMS" {
             return Err(invalid_argument(format!(
-                "EncryptionType must be KMS or NONE, got {encryption_type}"
+                "EncryptionType must be KMS for StartStreamEncryption, got {encryption_type}"
             )));
         }
         let key_id = body["KeyId"]
@@ -563,6 +563,13 @@ impl KinesisService {
             .iter()
             .filter_map(|v| v.as_str().map(|s| s.to_string()))
             .collect();
+        for metric in &desired {
+            if !SHARD_LEVEL_METRICS.contains(&metric.as_str()) {
+                return Err(invalid_argument(format!(
+                    "Invalid ShardLevelMetrics value: {metric}"
+                )));
+            }
+        }
 
         if desired.contains(&"ALL".to_string()) {
             stream.enhanced_metrics = SHARD_LEVEL_METRICS
@@ -610,6 +617,13 @@ impl KinesisService {
             .iter()
             .filter_map(|v| v.as_str().map(|s| s.to_string()))
             .collect();
+        for metric in &desired {
+            if !SHARD_LEVEL_METRICS.contains(&metric.as_str()) {
+                return Err(invalid_argument(format!(
+                    "Invalid ShardLevelMetrics value: {metric}"
+                )));
+            }
+        }
 
         if desired.contains(&"ALL".to_string()) {
             stream.enhanced_metrics.clear();
