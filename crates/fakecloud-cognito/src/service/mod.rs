@@ -1,4 +1,5 @@
 mod auth;
+mod config;
 mod groups;
 mod identity_providers;
 mod mfa;
@@ -141,6 +142,12 @@ impl AwsService for CognitoService {
             "CreateUserImportJob" => self.create_user_import_job(&req),
             "DescribeUserImportJob" => self.describe_user_import_job(&req),
             "ListUserImportJobs" => self.list_user_import_jobs(&req),
+            "GetUICustomization" => self.get_ui_customization(&req),
+            "SetUICustomization" => self.set_ui_customization(&req),
+            "GetLogDeliveryConfiguration" => self.get_log_delivery_configuration(&req),
+            "SetLogDeliveryConfiguration" => self.set_log_delivery_configuration(&req),
+            "DescribeRiskConfiguration" => self.describe_risk_configuration(&req),
+            "SetRiskConfiguration" => self.set_risk_configuration(&req),
             _ => Err(AwsServiceError::action_not_implemented(
                 "cognito-idp",
                 &req.action,
@@ -236,6 +243,12 @@ impl AwsService for CognitoService {
             "CreateUserImportJob",
             "DescribeUserImportJob",
             "ListUserImportJobs",
+            "GetUICustomization",
+            "SetUICustomization",
+            "GetLogDeliveryConfiguration",
+            "SetLogDeliveryConfiguration",
+            "DescribeRiskConfiguration",
+            "SetRiskConfiguration",
         ]
     }
 }

@@ -3067,3 +3067,123 @@ async fn cognito_get_csv_header() {
     assert_eq!(resp.user_pool_id().unwrap(), pool_id);
     assert!(!resp.csv_header().is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// UI Customization
+// ---------------------------------------------------------------------------
+
+#[test_action("cognito-idp", "SetUICustomization", checksum = "27bc4b26")]
+#[test_action("cognito-idp", "GetUICustomization", checksum = "807d92dc")]
+#[tokio::test]
+async fn cognito_ui_customization() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("ui-custom-pool")
+        .send()
+        .await
+        .unwrap();
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    client
+        .set_ui_customization()
+        .user_pool_id(&pool_id)
+        .css("body { background: red; }")
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .get_ui_customization()
+        .user_pool_id(&pool_id)
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.ui_customization().is_some());
+}
+
+// ---------------------------------------------------------------------------
+// Log Delivery Configuration
+// ---------------------------------------------------------------------------
+
+#[test_action("cognito-idp", "SetLogDeliveryConfiguration", checksum = "8a6a037d")]
+#[test_action("cognito-idp", "GetLogDeliveryConfiguration", checksum = "37aab735")]
+#[tokio::test]
+async fn cognito_log_delivery_config() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("log-config-pool")
+        .send()
+        .await
+        .unwrap();
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    client
+        .set_log_delivery_configuration()
+        .user_pool_id(&pool_id)
+        .log_configurations(
+            aws_sdk_cognitoidentityprovider::types::LogConfigurationType::builder()
+                .log_level(aws_sdk_cognitoidentityprovider::types::LogLevel::Error)
+                .event_source(
+                    aws_sdk_cognitoidentityprovider::types::EventSourceName::UserNotification,
+                )
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .get_log_delivery_configuration()
+        .user_pool_id(&pool_id)
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.log_delivery_configuration().is_some());
+}
+
+// ---------------------------------------------------------------------------
+// Risk Configuration
+// ---------------------------------------------------------------------------
+
+#[test_action("cognito-idp", "SetRiskConfiguration", checksum = "f74ed3fe")]
+#[test_action("cognito-idp", "DescribeRiskConfiguration", checksum = "da8ca179")]
+#[tokio::test]
+async fn cognito_risk_configuration() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("risk-config-pool")
+        .send()
+        .await
+        .unwrap();
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    client
+        .set_risk_configuration()
+        .user_pool_id(&pool_id)
+        .risk_exception_configuration(
+            aws_sdk_cognitoidentityprovider::types::RiskExceptionConfigurationType::builder()
+                .blocked_ip_range_list("192.168.1.0/24")
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .describe_risk_configuration()
+        .user_pool_id(&pool_id)
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.risk_configuration().is_some());
+}

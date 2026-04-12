@@ -36,6 +36,12 @@ pub struct CognitoState {
     pub import_jobs: HashMap<String, HashMap<String, UserImportJob>>,
     /// Auth events for introspection
     pub auth_events: Vec<AuthEvent>,
+    /// (pool_id, client_id|"") -> UICustomization JSON
+    pub ui_customizations: HashMap<String, serde_json::Value>,
+    /// pool_id -> LogDeliveryConfiguration JSON
+    pub log_delivery_configs: HashMap<String, serde_json::Value>,
+    /// (pool_id, client_id|"") -> RiskConfiguration JSON
+    pub risk_configurations: HashMap<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -67,6 +73,9 @@ impl CognitoState {
             tags: HashMap::new(),
             import_jobs: HashMap::new(),
             auth_events: Vec::new(),
+            ui_customizations: HashMap::new(),
+            log_delivery_configs: HashMap::new(),
+            risk_configurations: HashMap::new(),
         }
     }
 
@@ -85,6 +94,9 @@ impl CognitoState {
         self.tags.clear();
         self.import_jobs.clear();
         self.auth_events.clear();
+        self.ui_customizations.clear();
+        self.log_delivery_configs.clear();
+        self.risk_configurations.clear();
     }
 }
 
