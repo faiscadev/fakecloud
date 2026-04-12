@@ -127,6 +127,37 @@ impl BedrockService {
                 Some(("GetModelCopyJob", Some(decode(&segs[1])), None))
             }
 
+            // Model invocation jobs (batch inference)
+            (Method::POST, 1) if segs[0] == "model-invocation-job" => {
+                Some(("CreateModelInvocationJob", None, None))
+            }
+            (Method::GET, 1) if segs[0] == "model-invocation-jobs" => {
+                Some(("ListModelInvocationJobs", None, None))
+            }
+            (Method::GET, 2) if segs[0] == "model-invocation-job" => {
+                Some(("GetModelInvocationJob", Some(decode(&segs[1])), None))
+            }
+            (Method::POST, 3) if segs[0] == "model-invocation-job" && segs[2] == "stop" => {
+                Some(("StopModelInvocationJob", Some(decode(&segs[1])), None))
+            }
+
+            // Evaluation jobs
+            (Method::POST, 1) if segs[0] == "evaluation-jobs" => {
+                Some(("CreateEvaluationJob", None, None))
+            }
+            (Method::GET, 1) if segs[0] == "evaluation-jobs" => {
+                Some(("ListEvaluationJobs", None, None))
+            }
+            (Method::GET, 2) if segs[0] == "evaluation-jobs" => {
+                Some(("GetEvaluationJob", Some(decode(&segs[1])), None))
+            }
+            (Method::POST, 3) if segs[0] == "evaluation-job" && segs[2] == "stop" => {
+                Some(("StopEvaluationJob", Some(decode(&segs[1])), None))
+            }
+            (Method::POST, 2) if segs[0] == "evaluation-jobs" && segs[1] == "batch-delete" => {
+                Some(("BatchDeleteEvaluationJob", None, None))
+            }
+
             // Model customization jobs
             (Method::POST, 1) if segs[0] == "model-customization-jobs" => {
                 Some(("CreateModelCustomizationJob", None, None))
@@ -521,6 +552,39 @@ impl AwsService for BedrockService {
                 crate::model_copy::get_model_copy_job(&self.state, &resource_id.unwrap_or_default())
             }
             "ListModelCopyJobs" => crate::model_copy::list_model_copy_jobs(&self.state, &req),
+            // Model invocation jobs
+            "CreateModelInvocationJob" => {
+                let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
+                crate::invocation_jobs::create_model_invocation_job(&self.state, &req, &body)
+            }
+            "GetModelInvocationJob" => crate::invocation_jobs::get_model_invocation_job(
+                &self.state,
+                &resource_id.unwrap_or_default(),
+            ),
+            "ListModelInvocationJobs" => {
+                crate::invocation_jobs::list_model_invocation_jobs(&self.state, &req)
+            }
+            "StopModelInvocationJob" => crate::invocation_jobs::stop_model_invocation_job(
+                &self.state,
+                &resource_id.unwrap_or_default(),
+            ),
+            // Evaluation jobs
+            "CreateEvaluationJob" => {
+                let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
+                crate::evaluation::create_evaluation_job(&self.state, &req, &body)
+            }
+            "GetEvaluationJob" => {
+                crate::evaluation::get_evaluation_job(&self.state, &resource_id.unwrap_or_default())
+            }
+            "ListEvaluationJobs" => crate::evaluation::list_evaluation_jobs(&self.state, &req),
+            "StopEvaluationJob" => crate::evaluation::stop_evaluation_job(
+                &self.state,
+                &resource_id.unwrap_or_default(),
+            ),
+            "BatchDeleteEvaluationJob" => {
+                let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
+                crate::evaluation::batch_delete_evaluation_job(&self.state, &body)
+            }
             // Model customization jobs
             "CreateModelCustomizationJob" => {
                 let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
@@ -685,6 +749,15 @@ impl AwsService for BedrockService {
             "CreateModelCopyJob",
             "GetModelCopyJob",
             "ListModelCopyJobs",
+            "CreateModelInvocationJob",
+            "GetModelInvocationJob",
+            "ListModelInvocationJobs",
+            "StopModelInvocationJob",
+            "CreateEvaluationJob",
+            "GetEvaluationJob",
+            "ListEvaluationJobs",
+            "StopEvaluationJob",
+            "BatchDeleteEvaluationJob",
             "CreateModelCustomizationJob",
             "GetModelCustomizationJob",
             "ListModelCustomizationJobs",

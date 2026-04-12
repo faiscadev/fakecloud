@@ -1498,3 +1498,181 @@ async fn bedrock_model_copy_lifecycle() {
         .unwrap()
         .is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// Model Invocation Jobs
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn bedrock_model_invocation_job_lifecycle() {
+    let server = TestServer::start().await;
+    let http_client = reqwest::Client::new();
+    let auth = "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20260411/us-east-1/bedrock/aws4_request, SignedHeaders=host, Signature=fake";
+
+    let body = serde_json::json!({
+        "jobName": "my-batch-job",
+        "modelId": "anthropic.claude-3-5-sonnet-20241022-v2:0",
+        "roleArn": "arn:aws:iam::123456789012:role/test",
+        "inputDataConfig": {"s3InputDataConfig": {"s3Uri": "s3://bucket/input/"}},
+        "outputDataConfig": {"s3OutputDataConfig": {"s3Uri": "s3://bucket/output/"}}
+    });
+    let resp = http_client
+        .post(format!("{}/model-invocation-job", server.endpoint()))
+        .header("content-type", "application/json")
+        .header("authorization", auth)
+        .body(serde_json::to_string(&body).unwrap())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+    let result: serde_json::Value = resp.json().await.unwrap();
+    let job_arn = result["jobArn"].as_str().unwrap().to_string();
+    let job_id = job_arn.rsplit('/').next().unwrap();
+
+    let resp = http_client
+        .get(format!(
+            "{}/model-invocation-job/{}",
+            server.endpoint(),
+            job_id
+        ))
+        .header("authorization", auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let result: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(result["jobName"], "my-batch-job");
+    assert_eq!(result["status"], "InProgress");
+
+    let resp = http_client
+        .get(format!("{}/model-invocation-jobs", server.endpoint()))
+        .header("authorization", auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let result: serde_json::Value = resp.json().await.unwrap();
+    assert!(!result["invocationJobSummaries"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+
+    // Stop job
+    let resp = http_client
+        .post(format!(
+            "{}/model-invocation-job/{}/stop",
+            server.endpoint(),
+            job_id
+        ))
+        .header("authorization", auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // Verify stopped
+    let resp = http_client
+        .get(format!(
+            "{}/model-invocation-job/{}",
+            server.endpoint(),
+            job_id
+        ))
+        .header("authorization", auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let result: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(result["status"], "Stopped");
+}
+
+// ---------------------------------------------------------------------------
+// Evaluation Jobs
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn bedrock_evaluation_job_lifecycle() {
+    let server = TestServer::start().await;
+    let http_client = reqwest::Client::new();
+    let auth = "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20260411/us-east-1/bedrock/aws4_request, SignedHeaders=host, Signature=fake";
+
+    let body = serde_json::json!({
+        "jobName": "my-eval-job",
+        "jobDescription": "Test evaluation",
+        "roleArn": "arn:aws:iam::123456789012:role/test",
+        "evaluationConfig": {"automated": {"datasetMetricConfigs": []}},
+        "inferenceConfig": {"models": []},
+        "outputDataConfig": {"s3Uri": "s3://bucket/output/"}
+    });
+    let resp = http_client
+        .post(format!("{}/evaluation-jobs", server.endpoint()))
+        .header("content-type", "application/json")
+        .header("authorization", auth)
+        .body(serde_json::to_string(&body).unwrap())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+    let result: serde_json::Value = resp.json().await.unwrap();
+    let job_arn = result["jobArn"].as_str().unwrap().to_string();
+    let job_id = job_arn.rsplit('/').next().unwrap();
+
+    let resp = http_client
+        .get(format!("{}/evaluation-jobs/{}", server.endpoint(), job_id))
+        .header("authorization", auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let result: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(result["jobName"], "my-eval-job");
+    assert_eq!(result["status"], "InProgress");
+    assert_eq!(result["jobType"], "Automated");
+
+    let resp = http_client
+        .get(format!("{}/evaluation-jobs", server.endpoint()))
+        .header("authorization", auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // Stop
+    let resp = http_client
+        .post(format!(
+            "{}/evaluation-job/{}/stop",
+            server.endpoint(),
+            job_id
+        ))
+        .header("authorization", auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // Batch delete
+    let body = serde_json::json!({"jobIdentifiers": [job_arn]});
+    let resp = http_client
+        .post(format!(
+            "{}/evaluation-jobs/batch-delete",
+            server.endpoint()
+        ))
+        .header("content-type", "application/json")
+        .header("authorization", auth)
+        .body(serde_json::to_string(&body).unwrap())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let result: serde_json::Value = resp.json().await.unwrap();
+    assert!(result["errors"].as_array().unwrap().is_empty());
+
+    // Verify deleted
+    let resp = http_client
+        .get(format!("{}/evaluation-jobs/{}", server.endpoint(), job_id))
+        .header("authorization", auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+}
