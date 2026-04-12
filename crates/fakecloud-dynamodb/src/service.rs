@@ -465,6 +465,7 @@ impl DynamoDbService {
         // Capture kinesis delivery info alongside the return value
         let (old_item, kinesis_info) = {
             let mut state = self.state.write();
+            let region = state.region.clone();
             let table = get_table_mut(&mut state.tables, table_name)?;
 
             validate_key_in_item(table, &item)?;
@@ -517,6 +518,7 @@ impl DynamoDbService {
                     key.clone(),
                     old_item_for_stream.clone(),
                     Some(item.clone()),
+                    &region,
                 ) {
                     crate::streams::add_stream_record(table, record);
                 }
@@ -631,6 +633,7 @@ impl DynamoDbService {
 
         let (result, kinesis_info) = {
             let mut state = self.state.write();
+            let region = state.region.clone();
             let table = get_table_mut(&mut state.tables, table_name)?;
 
             let condition = body["ConditionExpression"].as_str();
@@ -663,6 +666,7 @@ impl DynamoDbService {
                         key.clone(),
                         Some(old_item.clone()),
                         None,
+                        &region,
                     ) {
                         crate::streams::add_stream_record(table, record);
                     }
@@ -714,6 +718,7 @@ impl DynamoDbService {
         let key = require_object(&body, "Key")?;
 
         let mut state = self.state.write();
+        let region = state.region.clone();
         let table = get_table_mut(&mut state.tables, table_name)?;
 
         validate_key_attributes_in_key(table, &key)?;
@@ -789,6 +794,7 @@ impl DynamoDbService {
                 key.clone(),
                 old_item_for_stream.clone(),
                 Some(new_item_for_stream.clone()),
+                &region,
             ) {
                 crate::streams::add_stream_record(table, record);
             }
