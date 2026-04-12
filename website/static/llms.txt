@@ -3,7 +3,7 @@
 > fakecloud is a free, open-source local AWS cloud emulator written in Rust. It runs on a single port (4566), requires no account or auth token, and aims for 100% behavioral parity with real AWS on every service it implements. It is an open-source alternative to LocalStack, which went proprietary in March 2026.
 
 - Single binary, no Docker required, starts in under 100ms
-- 20 AWS services (1044 operations): S3, SQS, SNS, EventBridge, IAM/STS, SSM, DynamoDB, Lambda, Secrets Manager, CloudWatch Logs, KMS, CloudFormation, SES, Cognito User Pools, Kinesis, RDS, ElastiCache, Step Functions, API Gateway v2
+- 22 AWS services (1155 operations): S3, SQS, SNS, EventBridge, IAM/STS, SSM, DynamoDB, Lambda, Secrets Manager, CloudWatch Logs, KMS, CloudFormation, SES, Cognito User Pools, Kinesis, RDS, ElastiCache, Step Functions, API Gateway v2, Bedrock, Bedrock Runtime
 - 30+ cross-service integrations: S3 notifications, SNS fanout, EventBridge rules, DynamoDB Streams, CloudWatch Logs subscriptions, Cognito triggers, API Gateway → Lambda, Step Functions task integrations, and more
 - Scheduled EventBridge rules (cron and rate) that actually fire
 - Conformance tested against real AWS behavior
@@ -42,6 +42,8 @@
 - [ElastiCache](https://github.com/faiscadev/fakecloud#supported-services): 44 actions — cache clusters, replication groups, global replication groups, serverless caches and snapshots, subnet groups, users/user groups, failover, tagging (Redis and Valkey via Docker)
 - [Step Functions](https://github.com/faiscadev/fakecloud#supported-services): 14 actions — state machines, executions, ASL interpreter (Pass, Task, Choice, Wait, Parallel, Map, Succeed, Fail), Retry/Catch, Lambda/SQS/SNS/EventBridge/DynamoDB task integrations
 - [API Gateway v2](https://github.com/faiscadev/fakecloud#supported-services): 28 actions — HTTP APIs, routes with path parameters and wildcards, Lambda proxy integration v2.0, HTTP proxy, Mock integrations, stages, deployments, authorizers (JWT and Lambda), CORS
+- [Bedrock](https://github.com/faiscadev/fakecloud#supported-services): 101 actions — foundation models, guardrails, custom models/deployments, import/copy/invocation/evaluation jobs, inference profiles, prompt routers, marketplace endpoints, automated reasoning policies
+- [Bedrock Runtime](https://github.com/faiscadev/fakecloud#supported-services): 10 actions — InvokeModel (Anthropic, Titan, Meta, Cohere, Mistral), Converse, streaming, ApplyGuardrail, CountTokens, async invoke
 
 ## Optional
 

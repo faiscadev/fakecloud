@@ -56,6 +56,7 @@ tests; they are an extra layer, not the whole story.
 | SES inbound email   | Real receipt rule action execution                 | [Stored but never executed](https://docs.localstack.cloud/user-guide/aws/ses/) |
 | RDS                 | 22 operations, PostgreSQL/MySQL/MariaDB via Docker | [Paid only](https://docs.localstack.cloud/references/licensing/)               |
 | ElastiCache         | 44 operations, Redis and Valkey via Docker         | [Paid only](https://docs.localstack.cloud/references/licensing/)               |
+| Bedrock             | 111 operations (control plane + runtime)           | Not available                                                                  |
 
 ## First-party SDKs
 
@@ -321,13 +322,14 @@ fakecloud is organized as a Cargo workspace:
 | `fakecloud-kinesis`        | Kinesis implementation                                                   |
 | `fakecloud-rds`            | RDS implementation with Docker-backed database execution                 |
 | `fakecloud-elasticache`    | ElastiCache implementation with Docker-backed Redis execution            |
+| `fakecloud-bedrock`        | Bedrock + Bedrock Runtime implementation (111 operations)                |
 | `fakecloud-e2e`            | End-to-end tests using aws-sdk-rust                                      |
 
 Protocol handling:
 
 - **Query protocol** (SQS, SNS, IAM, STS, CloudFormation, SES v1, RDS, ElastiCache): form-encoded body, `Action` parameter, XML responses
 - **JSON protocol** (SSM, EventBridge, DynamoDB, Secrets Manager, CloudWatch Logs, KMS, Cognito User Pools, Kinesis): JSON body, `X-Amz-Target` header, JSON responses
-- **REST protocol** (S3, Lambda, SES v2): HTTP method + path-based routing, XML/JSON responses
+- **REST protocol** (S3, Lambda, SES v2, Bedrock, Bedrock Runtime): HTTP method + path-based routing, XML/JSON responses
 - **SES v1 inbound** uses Query protocol for receipt rule/filter operations
 - SigV4 signatures are parsed for service routing but never validated
 

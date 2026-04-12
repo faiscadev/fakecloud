@@ -4,7 +4,7 @@
 
 ## Overview
 
-fakecloud emulates 20 AWS services locally for integration testing and development. It is a single Rust binary — no Docker required, no signup, starts in under 100ms. Point any AWS SDK or the AWS CLI at `http://localhost:4566` with dummy credentials.
+fakecloud emulates 22 AWS services locally for integration testing and development. It is a single Rust binary — no Docker required, no signup, starts in under 100ms. Point any AWS SDK or the AWS CLI at `http://localhost:4566` with dummy credentials.
 
 Key design principles:
 - **Correctness over coverage**: Every implemented service targets 100% behavioral parity with real AWS, verified by automated conformance tests against AWS Smithy models
@@ -328,6 +328,28 @@ Features: HTTP APIs with route-based request handling, path parameters and wildc
 
 Protocol: REST (HTTP method + path-based routing, JSON responses)
 
+### Bedrock (101 actions) + Bedrock Runtime (10 actions)
+
+**Foundation Models:** ListFoundationModels, GetFoundationModel
+**Guardrails:** CreateGuardrail, GetGuardrail, ListGuardrails, UpdateGuardrail, DeleteGuardrail, CreateGuardrailVersion, ApplyGuardrail
+**Custom Models:** CreateCustomModel, GetCustomModel, ListCustomModels, DeleteCustomModel
+**Custom Model Deployments:** CreateCustomModelDeployment, GetCustomModelDeployment, ListCustomModelDeployments, UpdateCustomModelDeployment, DeleteCustomModelDeployment
+**Model Import:** CreateModelImportJob, GetModelImportJob, ListModelImportJobs, GetImportedModel, ListImportedModels, DeleteImportedModel
+**Model Copy:** CreateModelCopyJob, GetModelCopyJob, ListModelCopyJobs
+**Model Customization:** CreateModelCustomizationJob, GetModelCustomizationJob, ListModelCustomizationJobs, StopModelCustomizationJob
+**Provisioned Throughput:** CreateProvisionedModelThroughput, GetProvisionedModelThroughput, ListProvisionedModelThroughputs, UpdateProvisionedModelThroughput, DeleteProvisionedModelThroughput
+**Model Invocation Jobs:** CreateModelInvocationJob, GetModelInvocationJob, ListModelInvocationJobs, StopModelInvocationJob
+**Evaluation Jobs:** CreateEvaluationJob, GetEvaluationJob, ListEvaluationJobs, StopEvaluationJob, BatchDeleteEvaluationJob
+**Inference Profiles:** CreateInferenceProfile, GetInferenceProfile, ListInferenceProfiles, DeleteInferenceProfile
+**Prompt Routers:** CreatePromptRouter, GetPromptRouter, ListPromptRouters, DeletePromptRouter
+**Marketplace:** CreateMarketplaceModelEndpoint, GetMarketplaceModelEndpoint, ListMarketplaceModelEndpoints, UpdateMarketplaceModelEndpoint, DeleteMarketplaceModelEndpoint, RegisterMarketplaceModelEndpoint, DeregisterMarketplaceModelEndpoint
+**Automated Reasoning:** Full CRUD for policies, versions, test cases, build workflows, annotations, and scenarios (24 operations)
+**Runtime:** InvokeModel, InvokeModelWithResponseStream, InvokeModelWithBidirectionalStream, Converse, ConverseStream, CountTokens, ApplyGuardrail, StartAsyncInvoke, GetAsyncInvoke, ListAsyncInvokes
+
+Features: Foundation model catalog with 20+ models (Anthropic Claude, Amazon Titan, Meta Llama, Cohere, Mistral), provider-specific response formats, guardrail content evaluation (word, topic, PII detection), model invocation introspection, custom response simulation, event-stream encoding for streaming.
+
+Protocol: REST-JSON (HTTP method + path-based routing, JSON responses)
+
 ## Cross-Service Integration
 
 fakecloud implements real cross-service message delivery:
@@ -356,7 +378,7 @@ fakecloud handles three AWS protocol families:
 
 - **Query protocol** (SQS, SNS, IAM, STS, CloudFormation, SES v1, RDS, ElastiCache): form-encoded body with `Action` parameter, XML responses
 - **JSON protocol** (SSM, EventBridge, DynamoDB, Secrets Manager, CloudWatch Logs, KMS, Cognito User Pools, Kinesis, Step Functions): JSON body, `X-Amz-Target` header, JSON responses
-- **REST protocol** (S3, Lambda, SES v2, API Gateway v2): HTTP method + path-based routing, XML or JSON responses
+- **REST protocol** (S3, Lambda, SES v2, API Gateway v2, Bedrock, Bedrock Runtime): HTTP method + path-based routing, XML or JSON responses
 
 SigV4 signatures are parsed for service routing but never validated. Use any dummy credentials.
 

@@ -5,8 +5,8 @@ Local AWS cloud emulator. Part of the faisca project family.
 ## Product Context
 
 - FakeCloud is a local AWS emulator focused on high-fidelity behavior and AWS-compatible responses.
-- Current project state from prior work: 20 services, 1044 operations, version 0.6.1, with SES, Cognito User Pools, Docker-backed Lambda execution, Kinesis, RDS, ElastiCache, Step Functions, and API Gateway v2 already shipped.
-- The broader roadmap prioritizes services that LocalStack keeps behind paid tiers, especially ECR, ECS, ELB/ALB, CloudFront, CloudWatch Metrics, Bedrock, and EC2.
+- Current project state from prior work: 22 services, 1155 operations, with SES, Cognito User Pools, Docker-backed Lambda execution, Kinesis, RDS, ElastiCache, Step Functions, API Gateway v2, Bedrock (111 ops), and Bedrock Runtime already shipped.
+- The broader roadmap prioritizes services that LocalStack keeps behind paid tiers, especially ECR, ECS, ELB/ALB, CloudFront, CloudWatch Metrics, and EC2.
 - Introspection SDKs (Rust, Python, TypeScript, Go) are already built and maintained for the `/_fakecloud/*` endpoints.
 
 ## Build And Run
