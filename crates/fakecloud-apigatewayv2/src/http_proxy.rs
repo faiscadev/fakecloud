@@ -11,7 +11,9 @@ pub async fn forward_request(
     timeout_millis: Option<i64>,
 ) -> Result<AwsResponse, AwsServiceError> {
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_millis(timeout_millis.unwrap_or(30000).max(0) as u64))
+        .timeout(Duration::from_millis(
+            timeout_millis.unwrap_or(30000).max(0) as u64,
+        ))
         .build()
         .map_err(|e| {
             AwsServiceError::aws_error(
