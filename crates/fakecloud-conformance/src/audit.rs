@@ -6,22 +6,24 @@ use std::path::{Path, PathBuf};
 /// containing `supported_actions()`.
 fn service_source_files(project_root: &Path) -> Vec<(String, Vec<PathBuf>)> {
     // service_name -> (crate_suffix, list of source filenames)
+    // For each service, try both `src/<name>.rs` and `src/<name>/mod.rs` to
+    // handle services that have been split into sub-module directories.
     let mappings: &[(&str, &str, &[&str])] = &[
         ("sqs", "sqs", &["service.rs"]),
         ("sns", "sns", &["service.rs"]),
         ("events", "eventbridge", &["service.rs"]),
-        ("iam", "iam", &["iam_service.rs"]),
+        ("iam", "iam", &["iam_service/mod.rs", "iam_service.rs"]),
         ("sts", "iam", &["sts_service.rs"]),
-        ("ssm", "ssm", &["service.rs"]),
-        ("s3", "s3", &["service.rs"]),
-        ("dynamodb", "dynamodb", &["service.rs"]),
+        ("ssm", "ssm", &["service/mod.rs", "service.rs"]),
+        ("s3", "s3", &["service/mod.rs", "service.rs"]),
+        ("dynamodb", "dynamodb", &["service/mod.rs", "service.rs"]),
         ("lambda", "lambda", &["service.rs"]),
         ("secretsmanager", "secretsmanager", &["service.rs"]),
-        ("logs", "logs", &["service.rs"]),
+        ("logs", "logs", &["service/mod.rs", "service.rs"]),
         ("kms", "kms", &["service.rs"]),
         ("cloudformation", "cloudformation", &["service.rs"]),
         ("ses", "ses", &["service/mod.rs", "service.rs"]),
-        ("cognito-idp", "cognito", &["service.rs"]),
+        ("cognito-idp", "cognito", &["service/mod.rs", "service.rs"]),
     ];
 
     mappings

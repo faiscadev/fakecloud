@@ -3,6 +3,7 @@ use std::sync::Arc;
 use axum::extract::Extension;
 use axum::Router;
 use clap::Parser;
+use md5::Digest;
 use tokio::net::TcpListener;
 use tower_http::trace::TraceLayer;
 
@@ -612,6 +613,28 @@ async fn main() {
             "/_fakecloud/ses/inbound",
             axum::routing::post({
                 let ss = ses_inbound_state.clone();
+                let s3_for_inbound = s3_introspection_state.clone();
+                let delivery_for_inbound = {
+                    let mut bus = DeliveryBus::new();
+                    let sns_fanout_bus = {
+                        let mut b = DeliveryBus::new().with_sqs(sqs_delivery.clone());
+                        if let Some(ref ld) = lambda_delivery {
+                            b = b.with_lambda(ld.clone());
+                        }
+                        Arc::new(b)
+                    };
+                    let sns_for_inbound = Arc::new(
+                        fakecloud_sns::delivery::SnsDeliveryImpl::new(
+                            sns_introspection_state.clone(),
+                            sns_fanout_bus,
+                        ),
+                    );
+                    bus = bus.with_sns(sns_for_inbound);
+                    if let Some(ref ld) = lambda_delivery {
+                        bus = bus.with_lambda(ld.clone());
+                    }
+                    Arc::new(bus)
+                };
                 move |axum::Json(body): axum::Json<types::InboundEmailRequest>| async move {
                     let (message_id, matched_rules, actions) =
                         fakecloud_ses::v1::evaluate_inbound_email(
@@ -621,6 +644,155 @@ async fn main() {
                             &body.subject,
                             &body.body,
                         );
+
+                    // Execute actions for real
+                    for (_rule, action) in &actions {
+                        match action {
+                            fakecloud_ses::state::ReceiptAction::S3 {
+                                bucket_name,
+                                object_key_prefix,
+                                ..
+                            } => {
+                                let prefix = object_key_prefix.as_deref().unwrap_or("");
+                                let key = format!("{prefix}{message_id}");
+                                let now = chrono::Utc::now();
+                                let data = bytes::Bytes::from(body.body.clone());
+                                let size = data.len() as u64;
+                                let etag = format!("\"{:x}\"", md5::Md5::digest(&data));
+                                let obj = fakecloud_s3::state::S3Object {
+                                    key: key.clone(),
+                                    data,
+                                    content_type: "text/plain".to_string(),
+                                    etag,
+                                    size,
+                                    last_modified: now,
+                                    metadata: std::collections::HashMap::new(),
+                                    storage_class: "STANDARD".to_string(),
+                                    tags: std::collections::HashMap::new(),
+                                    acl_grants: Vec::new(),
+                                    acl_owner_id: None,
+                                    parts_count: None,
+                                    part_sizes: None,
+                                    sse_algorithm: None,
+                                    sse_kms_key_id: None,
+                                    bucket_key_enabled: None,
+                                    version_id: None,
+                                    is_delete_marker: false,
+                                    content_encoding: None,
+                                    website_redirect_location: None,
+                                    restore_ongoing: None,
+                                    restore_expiry: None,
+                                    checksum_algorithm: None,
+                                    checksum_value: None,
+                                    lock_mode: None,
+                                    lock_retain_until: None,
+                                    lock_legal_hold: None,
+                                };
+                                let mut state = s3_for_inbound.write();
+                                if let Some(bucket) = state.buckets.get_mut(bucket_name) {
+                                    tracing::info!(
+                                        bucket = %bucket_name,
+                                        key = %key,
+                                        "SES inbound: stored email in S3"
+                                    );
+                                    bucket.objects.insert(key, obj);
+                                } else {
+                                    tracing::warn!(
+                                        bucket = %bucket_name,
+                                        "SES inbound: S3 bucket not found, skipping S3 action"
+                                    );
+                                }
+                            }
+                            fakecloud_ses::state::ReceiptAction::Sns { topic_arn, .. } => {
+                                let notification = serde_json::json!({
+                                    "notificationType": "Received",
+                                    "mail": {
+                                        "messageId": message_id,
+                                        "source": body.from,
+                                        "destination": body.to,
+                                        "commonHeaders": {
+                                            "from": [&body.from],
+                                            "to": &body.to,
+                                            "subject": &body.subject,
+                                        }
+                                    },
+                                    "content": &body.body,
+                                });
+                                tracing::info!(
+                                    topic_arn = %topic_arn,
+                                    "SES inbound: publishing to SNS"
+                                );
+                                delivery_for_inbound.publish_to_sns(
+                                    topic_arn,
+                                    &notification.to_string(),
+                                    Some(&body.subject),
+                                );
+                            }
+                            fakecloud_ses::state::ReceiptAction::Lambda {
+                                function_arn,
+                                invocation_type,
+                                ..
+                            } => {
+                                let ses_event = serde_json::json!({
+                                    "Records": [{
+                                        "eventSource": "aws:ses",
+                                        "eventVersion": "1.0",
+                                        "ses": {
+                                            "mail": {
+                                                "messageId": message_id,
+                                                "source": body.from,
+                                                "destination": body.to,
+                                                "commonHeaders": {
+                                                    "from": [&body.from],
+                                                    "to": &body.to,
+                                                    "subject": &body.subject,
+                                                }
+                                            },
+                                            "receipt": {
+                                                "recipients": &body.to,
+                                                "action": {
+                                                    "type": "Lambda",
+                                                    "functionArn": function_arn,
+                                                    "invocationType": invocation_type.as_deref().unwrap_or("Event"),
+                                                }
+                                            }
+                                        }
+                                    }]
+                                });
+                                let payload = ses_event.to_string();
+                                let delivery = delivery_for_inbound.clone();
+                                let function_arn = function_arn.clone();
+                                tracing::info!(
+                                    function_arn = %function_arn,
+                                    "SES inbound: invoking Lambda"
+                                );
+                                tokio::spawn(async move {
+                                    match delivery.invoke_lambda(&function_arn, &payload).await {
+                                        Some(Ok(_)) => {
+                                            tracing::info!(
+                                                function_arn = %function_arn,
+                                                "SES inbound: Lambda invocation succeeded"
+                                            );
+                                        }
+                                        Some(Err(e)) => {
+                                            tracing::error!(
+                                                function_arn = %function_arn,
+                                                error = %e,
+                                                "SES inbound: Lambda invocation failed"
+                                            );
+                                        }
+                                        None => {
+                                            tracing::warn!(
+                                                "SES inbound: no container runtime available for Lambda invocation"
+                                            );
+                                        }
+                                    }
+                                });
+                            }
+                            // Bounce, AddHeader, Stop are metadata-only — no cross-service delivery
+                            _ => {}
+                        }
+                    }
 
                     let actions_executed = actions
                         .iter()

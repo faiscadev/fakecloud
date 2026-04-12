@@ -518,3 +518,263 @@ async fn test_update_receipt_rule() {
     assert!(!rule.enabled());
     assert_eq!(rule.actions().len(), 1);
 }
+
+#[tokio::test]
+async fn test_inbound_email_s3_action_stores_object() {
+    let server = TestServer::start().await;
+    let ses_client = server.ses_client().await;
+    let s3_client = server.s3_client().await;
+    let http_client = reqwest::Client::new();
+
+    // Create the S3 bucket first
+    s3_client
+        .create_bucket()
+        .bucket("inbound-emails")
+        .send()
+        .await
+        .expect("create bucket");
+
+    // Set up receipt rule with S3 action
+    ses_client
+        .create_receipt_rule_set()
+        .rule_set_name("s3-test")
+        .send()
+        .await
+        .unwrap();
+
+    let rule = aws_sdk_ses::types::ReceiptRule::builder()
+        .name("store-to-s3")
+        .enabled(true)
+        .actions(
+            aws_sdk_ses::types::ReceiptAction::builder()
+                .s3_action(
+                    aws_sdk_ses::types::S3Action::builder()
+                        .bucket_name("inbound-emails")
+                        .object_key_prefix("inbox/")
+                        .build()
+                        .unwrap(),
+                )
+                .build(),
+        )
+        .build()
+        .unwrap();
+    ses_client
+        .create_receipt_rule()
+        .rule_set_name("s3-test")
+        .rule(rule)
+        .send()
+        .await
+        .unwrap();
+
+    ses_client
+        .set_active_receipt_rule_set()
+        .rule_set_name("s3-test")
+        .send()
+        .await
+        .unwrap();
+
+    // Send inbound email
+    let resp = http_client
+        .post(format!("{}/_fakecloud/ses/inbound", server.endpoint()))
+        .json(&serde_json::json!({
+            "from": "sender@example.com",
+            "to": ["recipient@example.com"],
+            "subject": "Test S3 Action",
+            "body": "Email body for S3 storage"
+        }))
+        .send()
+        .await
+        .expect("post inbound email");
+
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let message_id = body["messageId"].as_str().unwrap();
+
+    // Verify object was stored in S3
+    let key = format!("inbox/{message_id}");
+    let obj = s3_client
+        .get_object()
+        .bucket("inbound-emails")
+        .key(&key)
+        .send()
+        .await
+        .expect("get object from S3");
+
+    let data = obj.body.collect().await.unwrap().into_bytes();
+    assert_eq!(
+        std::str::from_utf8(&data).unwrap(),
+        "Email body for S3 storage"
+    );
+}
+
+#[tokio::test]
+async fn test_inbound_email_sns_action_publishes_message() {
+    let server = TestServer::start().await;
+    let ses_client = server.ses_client().await;
+    let sns_client = server.sns_client().await;
+    let sqs_client = server.sqs_client().await;
+    let http_client = reqwest::Client::new();
+
+    // Create SNS topic and SQS queue, subscribe queue to topic
+    let topic = sns_client
+        .create_topic()
+        .name("ses-notifications")
+        .send()
+        .await
+        .expect("create topic");
+    let topic_arn = topic.topic_arn().unwrap();
+
+    let queue = sqs_client
+        .create_queue()
+        .queue_name("ses-queue")
+        .send()
+        .await
+        .expect("create queue");
+    let queue_url = queue.queue_url().unwrap();
+
+    // Get queue ARN
+    let attrs = sqs_client
+        .get_queue_attributes()
+        .queue_url(queue_url)
+        .attribute_names(aws_sdk_sqs::types::QueueAttributeName::QueueArn)
+        .send()
+        .await
+        .unwrap();
+    let queue_arn = attrs
+        .attributes()
+        .unwrap()
+        .get(&aws_sdk_sqs::types::QueueAttributeName::QueueArn)
+        .unwrap();
+
+    sns_client
+        .subscribe()
+        .topic_arn(topic_arn)
+        .protocol("sqs")
+        .endpoint(queue_arn)
+        .send()
+        .await
+        .expect("subscribe");
+
+    // Set up receipt rule with SNS action
+    ses_client
+        .create_receipt_rule_set()
+        .rule_set_name("sns-test")
+        .send()
+        .await
+        .unwrap();
+
+    let rule = aws_sdk_ses::types::ReceiptRule::builder()
+        .name("notify-sns")
+        .enabled(true)
+        .actions(
+            aws_sdk_ses::types::ReceiptAction::builder()
+                .sns_action(
+                    aws_sdk_ses::types::SnsAction::builder()
+                        .topic_arn(topic_arn)
+                        .build()
+                        .unwrap(),
+                )
+                .build(),
+        )
+        .build()
+        .unwrap();
+    ses_client
+        .create_receipt_rule()
+        .rule_set_name("sns-test")
+        .rule(rule)
+        .send()
+        .await
+        .unwrap();
+
+    ses_client
+        .set_active_receipt_rule_set()
+        .rule_set_name("sns-test")
+        .send()
+        .await
+        .unwrap();
+
+    // First verify direct SNS->SQS fanout works
+    sns_client
+        .publish()
+        .topic_arn(topic_arn)
+        .message("direct-test")
+        .send()
+        .await
+        .expect("direct publish");
+    let direct = sqs_client
+        .receive_message()
+        .queue_url(queue_url)
+        .max_number_of_messages(1)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        direct.messages().len(),
+        1,
+        "direct SNS->SQS fanout should work"
+    );
+
+    // Purge queue for the real test
+    sqs_client
+        .purge_queue()
+        .queue_url(queue_url)
+        .send()
+        .await
+        .unwrap();
+
+    // Send inbound email
+    let resp = http_client
+        .post(format!("{}/_fakecloud/ses/inbound", server.endpoint()))
+        .json(&serde_json::json!({
+            "from": "sender@example.com",
+            "to": ["recipient@example.com"],
+            "subject": "Test SNS Action",
+            "body": "Email body for SNS"
+        }))
+        .send()
+        .await
+        .expect("post inbound email");
+
+    assert_eq!(resp.status(), 200);
+    let inbound_body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(
+        inbound_body["actionsExecuted"][0]["actionType"], "SNS",
+        "SNS action should be in executed list"
+    );
+
+    // Check that the SNS message was published via introspection
+    let sns_msgs_resp = http_client
+        .get(format!("{}/_fakecloud/sns/messages", server.endpoint()))
+        .send()
+        .await
+        .unwrap();
+    let sns_msgs: serde_json::Value = sns_msgs_resp.json().await.unwrap();
+    let msg_count = sns_msgs["messages"]
+        .as_array()
+        .map(|a| a.len())
+        .unwrap_or(0);
+    // Should be 2: 1 from direct publish + 1 from inbound
+    assert!(
+        msg_count >= 2,
+        "expected at least 2 SNS messages (direct + inbound), got {msg_count}"
+    );
+
+    // Check that a message was delivered to SQS via SNS
+    let messages = sqs_client
+        .receive_message()
+        .queue_url(queue_url)
+        .max_number_of_messages(1)
+        .send()
+        .await
+        .expect("receive message");
+
+    let msgs = messages.messages();
+    assert_eq!(msgs.len(), 1, "expected 1 message in SQS from SNS fanout");
+    let msg_body = msgs[0].body().unwrap();
+    // The message body is an SNS notification envelope containing the SES notification
+    let sns_envelope: serde_json::Value = serde_json::from_str(msg_body).unwrap();
+    let ses_notification: serde_json::Value =
+        serde_json::from_str(sns_envelope["Message"].as_str().unwrap()).unwrap();
+    assert_eq!(ses_notification["notificationType"], "Received");
+    assert_eq!(ses_notification["mail"]["source"], "sender@example.com");
+}
