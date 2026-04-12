@@ -525,6 +525,11 @@ impl KinesisService {
             .get_mut(&stream_name)
             .ok_or_else(|| stream_not_found(&account_id, &stream_name))?;
 
+        if shard_to_merge == adjacent_shard {
+            return Err(invalid_argument(
+                "ShardToMerge and AdjacentShardToMerge must be different shards",
+            ));
+        }
         let shard1_idx = stream
             .shards
             .iter()
@@ -539,6 +544,29 @@ impl KinesisService {
             .ok_or_else(|| {
                 invalid_argument(format!("Shard {adjacent_shard} not found or not open"))
             })?;
+
+        // Verify shards are adjacent (ending of one == starting of other - 1)
+        let end1: u128 = stream.shards[shard1_idx]
+            .ending_hash_key
+            .parse()
+            .unwrap_or(0);
+        let start2: u128 = stream.shards[shard2_idx]
+            .starting_hash_key
+            .parse()
+            .unwrap_or(0);
+        let end2: u128 = stream.shards[shard2_idx]
+            .ending_hash_key
+            .parse()
+            .unwrap_or(0);
+        let start1: u128 = stream.shards[shard1_idx]
+            .starting_hash_key
+            .parse()
+            .unwrap_or(0);
+        if end1 + 1 != start2 && end2 + 1 != start1 {
+            return Err(invalid_argument(
+                "ShardToMerge and AdjacentShardToMerge must be adjacent shards",
+            ));
+        }
 
         // Determine new range from the two shards
         let starting = stream.shards[shard1_idx]
@@ -869,8 +897,21 @@ fn select_shard_mut<'a>(
     stream: &'a mut KinesisStream,
     partition_key: &str,
 ) -> &'a mut KinesisShard {
-    let shard_index = partition_key_to_shard_index(partition_key, stream.shards.len());
-    &mut stream.shards[shard_index]
+    // Only route to open shards
+    let open_indices: Vec<usize> = stream
+        .shards
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| s.is_open)
+        .map(|(i, _)| i)
+        .collect();
+    if open_indices.is_empty() {
+        // Fallback: if no open shards (shouldn't happen), use all shards
+        let idx = partition_key_to_shard_index(partition_key, stream.shards.len());
+        return &mut stream.shards[idx];
+    }
+    let idx = partition_key_to_shard_index(partition_key, open_indices.len());
+    &mut stream.shards[open_indices[idx]]
 }
 
 fn partition_key_to_shard_index(partition_key: &str, shard_count: usize) -> usize {
