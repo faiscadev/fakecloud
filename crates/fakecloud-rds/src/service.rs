@@ -1299,7 +1299,11 @@ impl RdsService {
             db_parameter_group_name: source_instance.db_parameter_group_name.clone(),
             backup_retention_period: source_instance.backup_retention_period,
             preferred_backup_window: source_instance.preferred_backup_window.clone(),
-            latest_restorable_time: Some(created_at),
+            latest_restorable_time: if source_instance.backup_retention_period > 0 {
+                Some(created_at)
+            } else {
+                None
+            },
             option_group_name: source_instance.option_group_name.clone(),
             multi_az: source_instance.multi_az,
             pending_modified_values: None,
