@@ -15,38 +15,39 @@ pub fn handle_preflight(cors_config: &CorsConfiguration, _req: &AwsRequest) -> A
         } else {
             origins.first().map(|s| s.as_str()).unwrap_or("*")
         };
-        headers.insert("access-control-allow-origin", origin_value.parse().unwrap());
+        if let Ok(val) = origin_value.parse() {
+            headers.insert("access-control-allow-origin", val);
+        }
     }
 
     // Add Access-Control-Allow-Methods
     if let Some(ref methods) = cors_config.allow_methods {
         let methods_value = methods.join(",");
-        headers.insert(
-            "access-control-allow-methods",
-            methods_value.parse().unwrap(),
-        );
+        if let Ok(val) = methods_value.parse() {
+            headers.insert("access-control-allow-methods", val);
+        }
     }
 
     // Add Access-Control-Allow-Headers
     if let Some(ref allow_headers) = cors_config.allow_headers {
         let headers_value = allow_headers.join(",");
-        headers.insert(
-            "access-control-allow-headers",
-            headers_value.parse().unwrap(),
-        );
+        if let Ok(val) = headers_value.parse() {
+            headers.insert("access-control-allow-headers", val);
+        }
     }
 
     // Add Access-Control-Max-Age
     if let Some(max_age) = cors_config.max_age {
-        headers.insert(
-            "access-control-max-age",
-            max_age.to_string().parse().unwrap(),
-        );
+        if let Ok(val) = max_age.to_string().parse() {
+            headers.insert("access-control-max-age", val);
+        }
     }
 
     // Add Access-Control-Allow-Credentials
     if let Some(true) = cors_config.allow_credentials {
-        headers.insert("access-control-allow-credentials", "true".parse().unwrap());
+        if let Ok(val) = "true".parse() {
+            headers.insert("access-control-allow-credentials", val);
+        }
     }
 
     AwsResponse {
@@ -66,25 +67,28 @@ pub fn add_cors_headers(mut response: AwsResponse, cors_config: &CorsConfigurati
         } else {
             origins.first().map(|s| s.as_str()).unwrap_or("*")
         };
-        response
-            .headers
-            .insert("access-control-allow-origin", origin_value.parse().unwrap());
+        if let Ok(val) = origin_value.parse() {
+            response.headers.insert("access-control-allow-origin", val);
+        }
     }
 
     // Add Access-Control-Expose-Headers
     if let Some(ref expose_headers) = cors_config.expose_headers {
         let headers_value = expose_headers.join(",");
-        response.headers.insert(
-            "access-control-expose-headers",
-            headers_value.parse().unwrap(),
-        );
+        if let Ok(val) = headers_value.parse() {
+            response
+                .headers
+                .insert("access-control-expose-headers", val);
+        }
     }
 
     // Add Access-Control-Allow-Credentials
     if let Some(true) = cors_config.allow_credentials {
-        response
-            .headers
-            .insert("access-control-allow-credentials", "true".parse().unwrap());
+        if let Ok(val) = "true".parse() {
+            response
+                .headers
+                .insert("access-control-allow-credentials", val);
+        }
     }
 
     response

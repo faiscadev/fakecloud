@@ -85,7 +85,10 @@ fn set_at_path(root: &Value, path: &str, value: &Value) -> Value {
                     obj.insert(segment.to_string(), serde_json::json!({}));
                 }
             }
-            current = current.get_mut(*segment).unwrap();
+            match current.get_mut(*segment) {
+                Some(v) => current = v,
+                None => return result, // non-object intermediate, bail out
+            }
         }
     }
 
@@ -182,6 +185,17 @@ mod tests {
         let result = json!("hello");
         let output = apply_result_path(&input, &result, Some("$.result"));
         assert_eq!(output, json!({"x": 1, "result": "hello"}));
+    }
+
+    #[test]
+    fn test_set_at_path_non_object_intermediate() {
+        // When an intermediate path segment is a non-object (e.g., a number),
+        // set_at_path should not panic — it should bail out gracefully.
+        let input = json!({"x": 42});
+        let result = json!("hello");
+        let output = apply_result_path(&input, &result, Some("$.x.nested"));
+        // x is a number, can't set nested on it — should return input unchanged
+        assert_eq!(output, json!({"x": 42}));
     }
 
     #[test]

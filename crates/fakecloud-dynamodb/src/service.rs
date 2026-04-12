@@ -3969,7 +3969,12 @@ fn split_on_and(expr: &str) -> Vec<&str> {
             if depth > 0 {
                 depth -= 1;
             }
-        } else if depth == 0 && i + 5 <= len && expr[i..i + 5].eq_ignore_ascii_case(" AND ") {
+        } else if depth == 0
+            && i + 5 <= len
+            && expr.is_char_boundary(i)
+            && expr.is_char_boundary(i + 5)
+            && expr[i..i + 5].eq_ignore_ascii_case(" AND ")
+        {
             parts.push(&expr[start..i]);
             start = i + 5;
             i = start;
@@ -3995,7 +4000,12 @@ fn split_on_or(expr: &str) -> Vec<&str> {
             if depth > 0 {
                 depth -= 1;
             }
-        } else if depth == 0 && i + 4 <= len && expr[i..i + 4].eq_ignore_ascii_case(" OR ") {
+        } else if depth == 0
+            && i + 4 <= len
+            && expr.is_char_boundary(i)
+            && expr.is_char_boundary(i + 4)
+            && expr[i..i + 4].eq_ignore_ascii_case(" OR ")
+        {
             parts.push(&expr[start..i]);
             start = i + 4;
             i = start;

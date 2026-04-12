@@ -106,7 +106,7 @@ impl DynamoDbStreamsLambdaPoller {
                             true
                         }
                     })
-                    .take(batch_size as usize)
+                    .take(batch_size.max(0) as usize)
                     .cloned()
                     .collect();
 
