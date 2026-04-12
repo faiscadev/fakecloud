@@ -13,6 +13,7 @@ pub struct KinesisState {
     pub streams: HashMap<String, KinesisStream>,
     pub iterators: HashMap<String, ShardIteratorLease>,
     pub lambda_checkpoints: HashMap<String, usize>,
+    pub resource_policies: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -62,6 +63,7 @@ impl KinesisState {
             streams: HashMap::new(),
             iterators: HashMap::new(),
             lambda_checkpoints: HashMap::new(),
+            resource_policies: HashMap::new(),
         }
     }
 
@@ -69,6 +71,16 @@ impl KinesisState {
         self.streams.clear();
         self.iterators.clear();
         self.lambda_checkpoints.clear();
+        self.resource_policies.clear();
+    }
+
+    /// Look up a stream by its ARN (e.g. `arn:aws:kinesis:us-east-1:123456789012:stream/my-stream`).
+    /// Returns the stream name if found.
+    pub fn stream_name_from_arn(&self, arn: &str) -> Option<String> {
+        arn.rsplit('/')
+            .next()
+            .filter(|name| self.streams.contains_key(*name))
+            .map(|name| name.to_string())
     }
 
     pub fn stream_arn(&self, stream_name: &str) -> String {

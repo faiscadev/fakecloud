@@ -6,24 +6,31 @@ use md5::{Digest, Md5};
 use serde_json::{json, Value};
 
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
+use fakecloud_core::validation::validate_optional_string_length;
 
 use crate::state::{KinesisRecord, KinesisShard, KinesisStream, SharedKinesisState};
 
 const SUPPORTED_ACTIONS: &[&str] = &[
     "CreateStream",
+    "DecreaseStreamRetentionPeriod",
+    "DeleteResourcePolicy",
+    "DeleteStream",
     "DescribeStream",
     "DescribeStreamSummary",
-    "ListStreams",
-    "DeleteStream",
     "GetRecords",
+    "GetResourcePolicy",
     "GetShardIterator",
+    "IncreaseStreamRetentionPeriod",
+    "ListStreams",
+    "ListTagsForResource",
+    "ListTagsForStream",
+    "AddTagsToStream",
     "PutRecord",
     "PutRecords",
-    "AddTagsToStream",
-    "ListTagsForStream",
+    "PutResourcePolicy",
     "RemoveTagsFromStream",
-    "IncreaseStreamRetentionPeriod",
-    "DecreaseStreamRetentionPeriod",
+    "TagResource",
+    "UntagResource",
 ];
 
 pub struct KinesisService {
@@ -58,6 +65,12 @@ impl AwsService for KinesisService {
             "RemoveTagsFromStream" => self.remove_tags_from_stream(&request),
             "IncreaseStreamRetentionPeriod" => self.increase_stream_retention_period(&request),
             "DecreaseStreamRetentionPeriod" => self.decrease_stream_retention_period(&request),
+            "TagResource" => self.tag_resource(&request),
+            "UntagResource" => self.untag_resource(&request),
+            "ListTagsForResource" => self.list_tags_for_resource(&request),
+            "GetResourcePolicy" => self.get_resource_policy(&request),
+            "PutResourcePolicy" => self.put_resource_policy(&request),
+            "DeleteResourcePolicy" => self.delete_resource_policy(&request),
             _ => Err(AwsServiceError::action_not_implemented(
                 self.service_name(),
                 &request.action,
@@ -466,6 +479,123 @@ impl KinesisService {
         stream.retention_period_hours = hours as i32;
         Ok(AwsResponse::ok_json(json!({})))
     }
+
+    fn tag_resource(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        validate_stream_id(&body)?;
+        let resource_arn = require_resource_arn(&body)?;
+        let tags = body["Tags"]
+            .as_object()
+            .ok_or_else(|| invalid_argument("Tags must be a map"))?;
+
+        let mut state = self.state.write();
+        let stream_name = state
+            .stream_name_from_arn(resource_arn)
+            .ok_or_else(|| resource_not_found_arn(resource_arn))?;
+        let stream = state.streams.get_mut(&stream_name).unwrap();
+        for (key, value) in tags {
+            if let Some(value) = value.as_str() {
+                stream.tags.insert(key.clone(), value.to_string());
+            }
+        }
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    fn untag_resource(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        validate_stream_id(&body)?;
+        let resource_arn = require_resource_arn(&body)?;
+        let tag_keys = body["TagKeys"]
+            .as_array()
+            .ok_or_else(|| invalid_argument("TagKeys must be a list"))?;
+
+        let mut state = self.state.write();
+        let stream_name = state
+            .stream_name_from_arn(resource_arn)
+            .ok_or_else(|| resource_not_found_arn(resource_arn))?;
+        let stream = state.streams.get_mut(&stream_name).unwrap();
+        for key in tag_keys.iter().filter_map(|v| v.as_str()) {
+            stream.tags.remove(key);
+        }
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    fn list_tags_for_resource(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        validate_stream_id(&body)?;
+        let resource_arn = require_resource_arn(&body)?;
+
+        let state = self.state.read();
+        let stream_name = state
+            .stream_name_from_arn(resource_arn)
+            .ok_or_else(|| resource_not_found_arn(resource_arn))?;
+        let stream = state.streams.get(&stream_name).unwrap();
+        let tags: Vec<Value> = stream
+            .tags
+            .iter()
+            .map(|(key, value)| json!({ "Key": key, "Value": value }))
+            .collect();
+
+        Ok(AwsResponse::ok_json(json!({ "Tags": tags })))
+    }
+
+    fn get_resource_policy(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        validate_stream_id(&body)?;
+        let resource_arn = require_resource_arn(&body)?;
+
+        let state = self.state.read();
+        // Verify the stream exists
+        state
+            .stream_name_from_arn(resource_arn)
+            .ok_or_else(|| resource_not_found_arn(resource_arn))?;
+        let policy = state
+            .resource_policies
+            .get(resource_arn)
+            .cloned()
+            .unwrap_or_default();
+
+        Ok(AwsResponse::ok_json(json!({ "Policy": policy })))
+    }
+
+    fn put_resource_policy(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        validate_stream_id(&body)?;
+        let resource_arn = require_resource_arn(&body)?;
+        let policy = body["Policy"]
+            .as_str()
+            .ok_or_else(|| invalid_argument("Policy is required"))?;
+
+        let mut state = self.state.write();
+        state
+            .stream_name_from_arn(resource_arn)
+            .ok_or_else(|| resource_not_found_arn(resource_arn))?;
+        state
+            .resource_policies
+            .insert(resource_arn.to_string(), policy.to_string());
+
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    fn delete_resource_policy(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        validate_stream_id(&body)?;
+        let resource_arn = require_resource_arn(&body)?;
+
+        let mut state = self.state.write();
+        state
+            .stream_name_from_arn(resource_arn)
+            .ok_or_else(|| resource_not_found_arn(resource_arn))?;
+        state.resource_policies.remove(resource_arn);
+
+        Ok(AwsResponse::ok_json(json!({})))
+    }
 }
 
 impl crate::state::KinesisState {
@@ -635,6 +765,25 @@ fn find_record_index_by_sequence_number(
         .iter()
         .position(|record| record.sequence_number == sequence_number)
         .ok_or_else(|| invalid_argument("StartingSequenceNumber is invalid"))
+}
+
+fn validate_stream_id(body: &Value) -> Result<(), AwsServiceError> {
+    validate_optional_string_length("StreamId", body["StreamId"].as_str(), 1, 24)
+}
+
+fn require_resource_arn(body: &Value) -> Result<&str, AwsServiceError> {
+    body["ResourceARN"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| invalid_argument("ResourceARN is required"))
+}
+
+fn resource_not_found_arn(arn: &str) -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::BAD_REQUEST,
+        "ResourceNotFoundException",
+        format!("Resource {arn} not found."),
+    )
 }
 
 fn invalid_argument(message: impl Into<String>) -> AwsServiceError {
