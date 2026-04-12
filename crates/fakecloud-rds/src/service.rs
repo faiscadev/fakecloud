@@ -1800,20 +1800,11 @@ impl RdsService {
 }
 
 fn optional_param(req: &AwsRequest, name: &str) -> Option<String> {
-    req.query_params
-        .get(name)
-        .cloned()
-        .filter(|value| !value.is_empty())
+    fakecloud_core::query::optional_query_param(req, name)
 }
 
 fn required_param(req: &AwsRequest, name: &str) -> Result<String, AwsServiceError> {
-    optional_param(req, name).ok_or_else(|| {
-        AwsServiceError::aws_error(
-            StatusCode::BAD_REQUEST,
-            "MissingParameter",
-            format!("The request must contain the parameter {name}."),
-        )
-    })
+    fakecloud_core::query::required_query_param(req, name)
 }
 
 fn required_i32_param(req: &AwsRequest, name: &str) -> Result<i32, AwsServiceError> {
@@ -2149,13 +2140,7 @@ fn filter_orderable_options(
 }
 
 fn xml_wrap(action: &str, inner: &str, request_id: &str) -> String {
-    format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
-         <{action}Response xmlns=\"{RDS_NS}\">\
-         <{action}Result>{inner}</{action}Result>\
-         <ResponseMetadata><RequestId>{request_id}</RequestId></ResponseMetadata>\
-         </{action}Response>"
-    )
+    fakecloud_core::query::query_response_xml(action, RDS_NS, inner, request_id)
 }
 
 fn engine_version_xml(version: &EngineVersionInfo) -> String {

@@ -18,23 +18,12 @@ const SES_NS: &str = "http://ses.amazonaws.com/doc/2010-12-01/";
 
 /// Wrap a v1 action result in the standard SES Query protocol XML envelope.
 fn xml_wrap(action: &str, inner: &str, request_id: &str) -> String {
-    format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
-         <{action}Response xmlns=\"{SES_NS}\">\
-         <{action}Result>{inner}</{action}Result>\
-         <ResponseMetadata><RequestId>{request_id}</RequestId></ResponseMetadata>\
-         </{action}Response>"
-    )
+    fakecloud_core::query::query_response_xml(action, SES_NS, inner, request_id)
 }
 
 /// Response with only metadata (no result body).
 fn xml_metadata_only(action: &str, request_id: &str) -> AwsResponse {
-    let xml = format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
-         <{action}Response xmlns=\"{SES_NS}\">\
-         <ResponseMetadata><RequestId>{request_id}</RequestId></ResponseMetadata>\
-         </{action}Response>"
-    );
+    let xml = fakecloud_core::query::query_metadata_only_xml(action, SES_NS, request_id);
     AwsResponse::xml(StatusCode::OK, xml)
 }
 

@@ -173,23 +173,14 @@ fn val_as_i64(v: &Value) -> Option<i64> {
 
 use fakecloud_aws::xml::xml_escape;
 
+const SQS_NS: &str = "http://queue.amazonaws.com/doc/2012-11-05/";
+
 fn xml_wrap(action: &str, inner: &str, request_id: &str) -> String {
-    format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
-         <{action}Response xmlns=\"http://queue.amazonaws.com/doc/2012-11-05/\">\
-         <{action}Result>{inner}</{action}Result>\
-         <ResponseMetadata><RequestId>{request_id}</RequestId></ResponseMetadata>\
-         </{action}Response>"
-    )
+    fakecloud_core::query::query_response_xml(action, SQS_NS, inner, request_id)
 }
 
 fn xml_metadata_only(action: &str, request_id: &str) -> AwsResponse {
-    let xml = format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
-         <{action}Response xmlns=\"http://queue.amazonaws.com/doc/2012-11-05/\">\
-         <ResponseMetadata><RequestId>{request_id}</RequestId></ResponseMetadata>\
-         </{action}Response>"
-    );
+    let xml = fakecloud_core::query::query_metadata_only_xml(action, SQS_NS, request_id);
     AwsResponse::xml(StatusCode::OK, xml)
 }
 
@@ -2774,14 +2765,14 @@ fn queue_not_found() -> AwsServiceError {
     )
 }
 
-pub fn md5_hex(input: &str) -> String {
+pub(crate) fn md5_hex(input: &str) -> String {
     use md5::Digest;
     let mut hasher = Md5::new();
     hasher.update(input.as_bytes());
     format!("{:032x}", hasher.finalize())
 }
 
-pub fn sha256_hex(input: &str) -> String {
+pub(crate) fn sha256_hex(input: &str) -> String {
     use sha2::Digest;
     let mut hasher = Sha256::new();
     hasher.update(input.as_bytes());
