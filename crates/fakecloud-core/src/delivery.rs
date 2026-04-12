@@ -17,6 +17,8 @@ pub struct DeliveryBus {
     lambda_invoker: Option<Arc<dyn LambdaDelivery>>,
     /// Put records to a Kinesis Data Stream by ARN.
     kinesis_sender: Option<Arc<dyn KinesisDelivery>>,
+    /// Start Step Functions executions.
+    stepfunctions_starter: Option<Arc<dyn StepFunctionsDelivery>>,
 }
 
 /// Message attribute for SQS delivery from SNS.
@@ -81,6 +83,13 @@ pub trait KinesisDelivery: Send + Sync {
     fn put_record(&self, stream_arn: &str, data: &str, partition_key: &str);
 }
 
+/// Trait for starting Step Functions executions from cross-service integrations.
+pub trait StepFunctionsDelivery: Send + Sync {
+    /// Start a state machine execution with the given input.
+    /// The state machine is identified by ARN.
+    fn start_execution(&self, state_machine_arn: &str, input: &str);
+}
+
 impl DeliveryBus {
     pub fn new() -> Self {
         Self {
@@ -89,6 +98,7 @@ impl DeliveryBus {
             eventbridge_sender: None,
             lambda_invoker: None,
             kinesis_sender: None,
+            stepfunctions_starter: None,
         }
     }
 
@@ -114,6 +124,11 @@ impl DeliveryBus {
 
     pub fn with_kinesis(mut self, sender: Arc<dyn KinesisDelivery>) -> Self {
         self.kinesis_sender = Some(sender);
+        self
+    }
+
+    pub fn with_stepfunctions(mut self, starter: Arc<dyn StepFunctionsDelivery>) -> Self {
+        self.stepfunctions_starter = Some(starter);
         self
     }
 
@@ -186,6 +201,13 @@ impl DeliveryBus {
     pub fn send_to_kinesis(&self, stream_arn: &str, data: &str, partition_key: &str) {
         if let Some(ref sender) = self.kinesis_sender {
             sender.put_record(stream_arn, data, partition_key);
+        }
+    }
+
+    /// Start a Step Functions execution identified by state machine ARN.
+    pub fn start_stepfunctions_execution(&self, state_machine_arn: &str, input: &str) {
+        if let Some(ref starter) = self.stepfunctions_starter {
+            starter.start_execution(state_machine_arn, input);
         }
     }
 }
