@@ -4248,7 +4248,54 @@ fn evaluate_single_filter_condition(
         }
     }
 
+    if let Some((attr_ref, value_refs)) = parse_in_expression(part) {
+        let attr_name = resolve_attr_name(attr_ref, expr_attr_names);
+        let actual = item.get(&attr_name);
+        return evaluate_in_match(actual, &value_refs, expr_attr_values);
+    }
+
     evaluate_single_key_condition(part, item, "", expr_attr_names, expr_attr_values)
+}
+
+/// Parse an `attr IN (:v1, :v2, ...)` expression. Mirrors the DynamoDB
+/// ConditionExpression / FilterExpression grammar where IN takes a single
+/// operand on the left and 1–100 comma-separated value refs inside parens
+/// on the right. Case-insensitive; tolerates missing spaces after commas
+/// (aws-sdk-go's `expression` builder emits ", " but hand-built expressions
+/// often use `strings.Join(..., ",")`). Returns None for non-IN inputs so
+/// callers can fall through to their other grammar branches.
+fn parse_in_expression(expr: &str) -> Option<(&str, Vec<&str>)> {
+    let upper = expr.to_ascii_uppercase();
+    let in_pos = upper.find(" IN ")?;
+    let attr_ref = expr[..in_pos].trim();
+    if attr_ref.is_empty() {
+        return None;
+    }
+    let rest = expr[in_pos + 4..].trim_start();
+    let inner = rest.strip_prefix('(')?.strip_suffix(')')?;
+    let values: Vec<&str> = inner
+        .split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if values.is_empty() {
+        return None;
+    }
+    Some((attr_ref, values))
+}
+
+/// Return true iff `actual` equals any of the `value_refs` resolved through
+/// `expr_attr_values`. A missing attribute never matches (mirrors AWS, which
+/// evaluates `IN` against undefined attributes as false).
+fn evaluate_in_match(
+    actual: Option<&AttributeValue>,
+    value_refs: &[&str],
+    expr_attr_values: &HashMap<String, Value>,
+) -> bool {
+    value_refs.iter().any(|v_ref| {
+        let expected = expr_attr_values.get(*v_ref);
+        matches!((actual, expected), (Some(a), Some(e)) if a == e)
+    })
 }
 
 fn apply_update_expression(
@@ -4335,7 +4382,15 @@ fn apply_set_assignment(
         return Ok(());
     };
 
-    let attr = resolve_attr_name(left.trim(), expr_attr_names);
+    let left_trimmed = left.trim();
+    // Split off a trailing `[N]` list-index suffix so we can resolve the
+    // attribute name ref on its own. Without this, `resolve_attr_name` sees
+    // "#items[0]" as a whole and misses the `#items` → `items` mapping.
+    let (attr_ref, list_index) = match parse_list_index_suffix(left_trimmed) {
+        Some((name, idx)) => (name, Some(idx)),
+        None => (left_trimmed, None),
+    };
+    let attr = resolve_attr_name(attr_ref, expr_attr_names);
     let right = right.trim();
 
     // if_not_exists(attr, :val)
@@ -4413,10 +4468,60 @@ fn apply_set_assignment(
     // Simple assignment
     let val = resolve_value(right, item, expr_attr_names, expr_attr_values);
     if let Some(v) = val {
-        item.insert(attr, v);
+        match list_index {
+            Some(idx) => assign_list_index(item, &attr, idx, v),
+            None => {
+                item.insert(attr, v);
+            }
+        }
     }
 
     Ok(())
+}
+
+/// Parse a trailing `[N]` list-index suffix off the LHS of a SET assignment.
+/// Returns the bare attribute reference and the index, or None when the LHS
+/// is a plain attribute (or a path shape we don't yet support).
+fn parse_list_index_suffix(path: &str) -> Option<(&str, usize)> {
+    let path = path.trim();
+    if !path.ends_with(']') {
+        return None;
+    }
+    let open = path.rfind('[')?;
+    // Require no further `.` / `[` / `]` inside the bracketed portion and no
+    // further path segments after — we only handle the single-index case
+    // `name[N]`, not nested shapes like `a.b[0].c`.
+    let idx_str = &path[open + 1..path.len() - 1];
+    let idx: usize = idx_str.parse().ok()?;
+    let name = &path[..open];
+    if name.is_empty() || name.contains('[') || name.contains(']') || name.contains('.') {
+        return None;
+    }
+    Some((name, idx))
+}
+
+/// Assign a value to a specific index of a `L`-typed attribute. If `idx` is
+/// within the current list, replaces that slot; if it's at the end, appends.
+/// AWS rejects writes beyond `len`, but callers that compute the index from
+/// a fresh read should never hit that — no-op on a non-list attribute or an
+/// out-of-range index so we don't corrupt unrelated state.
+fn assign_list_index(
+    item: &mut HashMap<String, AttributeValue>,
+    attr: &str,
+    idx: usize,
+    value: Value,
+) {
+    let Some(existing) = item.get_mut(attr) else {
+        return;
+    };
+    let Some(list) = existing.get_mut("L").and_then(|l| l.as_array_mut()) else {
+        return;
+    };
+    if idx < list.len() {
+        list[idx] = value;
+    } else if idx == list.len() {
+        list.push(value);
+    }
 }
 
 fn resolve_value(
@@ -6881,5 +6986,222 @@ mod tests {
             &names,
             &values
         ));
+    }
+
+    #[test]
+    fn test_evaluate_filter_expression_in_match() {
+        // aws-sdk-go v2's expression.Name("state").In(Value("active"), Value("pending"))
+        // emits "#0 IN (:0, :1)". Before fix: neither evaluate_single_filter_condition
+        // nor evaluate_single_key_condition handled IN, so the filter leaf fell through
+        // to the simple-comparison loop, hit no operators, and returned `true` — meaning
+        // every item matched every IN filter regardless of value.
+        let item = cond_item(&[("state", "active")]);
+        let names = cond_names(&[("#s", "state")]);
+        let values = cond_values(&[(":a", "active"), (":p", "pending")]);
+
+        assert!(
+            evaluate_filter_expression("#s IN (:a, :p)", &item, &names, &values),
+            "state=active should match IN (active, pending)"
+        );
+    }
+
+    #[test]
+    fn test_evaluate_filter_expression_in_no_match() {
+        let item = cond_item(&[("state", "complete")]);
+        let names = cond_names(&[("#s", "state")]);
+        let values = cond_values(&[(":a", "active"), (":p", "pending")]);
+
+        assert!(
+            !evaluate_filter_expression("#s IN (:a, :p)", &item, &names, &values),
+            "state=complete should not match IN (active, pending)"
+        );
+    }
+
+    #[test]
+    fn test_evaluate_filter_expression_in_no_spaces() {
+        // orderbot emits the raw form
+        //     "#status IN (" + strings.Join(keys, ",") + ")"
+        // which produces "IN (:v0,:v1,:v2)" — no spaces after commas. Must parse.
+        let item = cond_item(&[("status", "shipped")]);
+        let names = cond_names(&[("#s", "status")]);
+        let values = cond_values(&[(":a", "pending"), (":b", "shipped"), (":c", "delivered")]);
+
+        assert!(
+            evaluate_filter_expression("#s IN (:a,:b,:c)", &item, &names, &values),
+            "no-space IN list should still parse"
+        );
+    }
+
+    #[test]
+    fn test_evaluate_filter_expression_in_missing_attribute() {
+        // A missing attribute must not match any IN list — the silent-true
+        // fallthrough would wrongly accept these items.
+        let item: HashMap<String, AttributeValue> = HashMap::new();
+        let names = cond_names(&[("#s", "state")]);
+        let values = cond_values(&[(":a", "active")]);
+
+        assert!(
+            !evaluate_filter_expression("#s IN (:a)", &item, &names, &values),
+            "missing attribute should not match any IN list"
+        );
+    }
+
+    #[test]
+    fn test_evaluate_filter_expression_compound_in_and_eq() {
+        // Shape emitted by `Name("state").In(...).And(Name("priority").Equal(...))`:
+        //     "(#0 IN (:0, :1)) AND (#1 = :2)"
+        // split_on_and handles the outer parens, but the IN leaf had the
+        // silent-true fallthrough, so any item with priority=high would match
+        // regardless of state.
+        let item = cond_item(&[("state", "active"), ("priority", "high")]);
+        let names = cond_names(&[("#s", "state"), ("#p", "priority")]);
+        let values = cond_values(&[(":a", "active"), (":pe", "pending"), (":h", "high")]);
+
+        assert!(
+            evaluate_filter_expression("(#s IN (:a, :pe)) AND (#p = :h)", &item, &names, &values,),
+            "(active IN (active, pending)) AND (high = high) should match"
+        );
+
+        let item2 = cond_item(&[("state", "complete"), ("priority", "high")]);
+        assert!(
+            !evaluate_filter_expression("(#s IN (:a, :pe)) AND (#p = :h)", &item2, &names, &values,),
+            "(complete IN (active, pending)) AND (high = high) should not match"
+        );
+    }
+
+    #[test]
+    fn test_evaluate_condition_in_match() {
+        // evaluate_condition delegates to evaluate_filter_expression, so this
+        // also proves the ConditionExpression path. Before fix: silently Ok.
+        let item = cond_item(&[("state", "active")]);
+        let names = cond_names(&[("#s", "state")]);
+        let values = cond_values(&[(":a", "active"), (":p", "pending")]);
+
+        assert!(
+            evaluate_condition("#s IN (:a, :p)", Some(&item), &names, &values).is_ok(),
+            "IN should succeed when actual value is in the list"
+        );
+    }
+
+    #[test]
+    fn test_evaluate_condition_in_no_match() {
+        // Before fix: evaluate_condition silently returned Ok(()) for IN — any
+        // conditional write was accepted regardless of actual state, the
+        // opposite of what the caller asked for.
+        let item = cond_item(&[("state", "complete")]);
+        let names = cond_names(&[("#s", "state")]);
+        let values = cond_values(&[(":a", "active"), (":p", "pending")]);
+
+        assert!(
+            evaluate_condition("#s IN (:a, :p)", Some(&item), &names, &values).is_err(),
+            "IN should fail when actual value is not in the list"
+        );
+    }
+
+    #[test]
+    fn test_apply_update_set_list_index_replaces_existing() {
+        // Shape emitted by orderbot's order-item update retry loop:
+        //     UpdateExpression: fmt.Sprintf("SET #items[%d] = :item", index)
+        // Before fix: apply_set_assignment called resolve_attr_name on the
+        // whole "#items[0]" token, which misses the name map, and then
+        // item.insert("#items[0]", :item), producing a top-level key
+        // literally named "#items[0]" rather than mutating the list.
+        let mut item = HashMap::new();
+        item.insert(
+            "items".to_string(),
+            json!({"L": [
+                {"M": {"sku": {"S": "OLD-A"}}},
+                {"M": {"sku": {"S": "OLD-B"}}},
+            ]}),
+        );
+
+        let names = cond_names(&[("#items", "items")]);
+        let mut values = HashMap::new();
+        values.insert(":item".to_string(), json!({"M": {"sku": {"S": "NEW-A"}}}));
+
+        apply_update_expression(&mut item, "SET #items[0] = :item", &names, &values).unwrap();
+
+        let items_list = item
+            .get("items")
+            .and_then(|v| v.get("L"))
+            .and_then(|v| v.as_array())
+            .expect("items should still be a list");
+        assert_eq!(items_list.len(), 2, "list length should be unchanged");
+        let sku0 = items_list[0]
+            .get("M")
+            .and_then(|m| m.get("sku"))
+            .and_then(|s| s.get("S"))
+            .and_then(|s| s.as_str());
+        assert_eq!(sku0, Some("NEW-A"), "index 0 should be replaced");
+        let sku1 = items_list[1]
+            .get("M")
+            .and_then(|m| m.get("sku"))
+            .and_then(|s| s.get("S"))
+            .and_then(|s| s.as_str());
+        assert_eq!(sku1, Some("OLD-B"), "index 1 should be untouched");
+
+        assert!(!item.contains_key("items[0]"));
+        assert!(!item.contains_key("#items[0]"));
+    }
+
+    #[test]
+    fn test_apply_update_set_list_index_second_slot() {
+        let mut item = HashMap::new();
+        item.insert(
+            "items".to_string(),
+            json!({"L": [
+                {"M": {"sku": {"S": "A"}}},
+                {"M": {"sku": {"S": "B"}}},
+                {"M": {"sku": {"S": "C"}}},
+            ]}),
+        );
+
+        let names = cond_names(&[("#items", "items")]);
+        let mut values = HashMap::new();
+        values.insert(":item".to_string(), json!({"M": {"sku": {"S": "B-PRIME"}}}));
+
+        apply_update_expression(&mut item, "SET #items[1] = :item", &names, &values).unwrap();
+
+        let items_list = item
+            .get("items")
+            .and_then(|v| v.get("L"))
+            .and_then(|v| v.as_array())
+            .unwrap();
+        let skus: Vec<&str> = items_list
+            .iter()
+            .map(|v| {
+                v.get("M")
+                    .and_then(|m| m.get("sku"))
+                    .and_then(|s| s.get("S"))
+                    .and_then(|s| s.as_str())
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(skus, vec!["A", "B-PRIME", "C"]);
+    }
+
+    #[test]
+    fn test_apply_update_set_list_index_without_name_ref() {
+        // Same fix must also work when the LHS is a literal attribute name,
+        // not an expression attribute name ref.
+        let mut item = HashMap::new();
+        item.insert(
+            "tags".to_string(),
+            json!({"L": [{"S": "red"}, {"S": "blue"}]}),
+        );
+
+        let names: HashMap<String, String> = HashMap::new();
+        let mut values = HashMap::new();
+        values.insert(":t".to_string(), json!({"S": "green"}));
+
+        apply_update_expression(&mut item, "SET tags[1] = :t", &names, &values).unwrap();
+
+        let tags = item
+            .get("tags")
+            .and_then(|v| v.get("L"))
+            .and_then(|v| v.as_array())
+            .unwrap();
+        assert_eq!(tags[0].get("S").and_then(|s| s.as_str()), Some("red"));
+        assert_eq!(tags[1].get("S").and_then(|s| s.as_str()), Some("green"));
     }
 }
