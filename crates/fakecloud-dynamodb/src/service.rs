@@ -4342,10 +4342,7 @@ fn apply_update_expression(
                 return Err(AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
                     "ValidationException",
-                    format!(
-                        "Invalid UpdateExpression: Invalid action: {}",
-                        other
-                    ),
+                    format!("Invalid UpdateExpression: Invalid action: {}", other),
                 ));
             }
         }
