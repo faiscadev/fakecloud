@@ -758,7 +758,16 @@ impl AwsService for BedrockService {
             }
             "TagResource" => {
                 let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
-                let arn = body["resourceARN"].as_str().unwrap_or_default();
+                let arn = body["resourceARN"]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| {
+                        AwsServiceError::aws_error(
+                            StatusCode::BAD_REQUEST,
+                            "ValidationException",
+                            "resourceARN is required",
+                        )
+                    })?;
                 self.tag_resource(&req, arn, &body)
             }
             "UntagResource" => {

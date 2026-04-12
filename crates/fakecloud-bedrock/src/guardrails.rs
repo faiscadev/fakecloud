@@ -442,8 +442,9 @@ pub fn evaluate_content(guardrail: &Guardrail, text: &str) -> Vec<Value> {
             for entry in managed {
                 if entry["type"].as_str() == Some("PROFANITY") {
                     let profanity_words = ["damn", "hell", "shit", "fuck", "ass"];
+                    let text_lower = text.to_lowercase();
                     for word in &profanity_words {
-                        if text.to_lowercase().contains(word) {
+                        if word_boundary_match(&text_lower, word) {
                             assessments.push(json!({
                                 "wordPolicy": {
                                     "managedWordLists": [{
@@ -614,4 +615,21 @@ fn guardrail_version_to_json(gv: &GuardrailVersion) -> Value {
     }
 
     obj
+}
+
+/// Check if `word` appears in `text` at word boundaries (not as a substring of another word).
+fn word_boundary_match(text: &str, word: &str) -> bool {
+    let mut start = 0;
+    while let Some(pos) = text[start..].find(word) {
+        let abs_pos = start + pos;
+        let before_ok = abs_pos == 0 || !text.as_bytes()[abs_pos - 1].is_ascii_alphanumeric();
+        let after_pos = abs_pos + word.len();
+        let after_ok =
+            after_pos >= text.len() || !text.as_bytes()[after_pos].is_ascii_alphanumeric();
+        if before_ok && after_ok {
+            return true;
+        }
+        start = abs_pos + 1;
+    }
+    false
 }
