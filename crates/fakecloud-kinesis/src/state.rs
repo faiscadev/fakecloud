@@ -13,6 +13,11 @@ pub struct KinesisState {
     pub streams: HashMap<String, KinesisStream>,
     pub iterators: HashMap<String, ShardIteratorLease>,
     pub lambda_checkpoints: HashMap<String, usize>,
+    pub consumers: HashMap<String, KinesisConsumer>,
+    pub resource_policies: HashMap<String, String>,
+    pub shard_limit: i32,
+    pub on_demand_stream_count_limit: i32,
+    pub billing_commitment_status: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -24,15 +29,25 @@ pub struct KinesisStream {
     pub retention_period_hours: i32,
     pub stream_mode: String,
     pub encryption_type: String,
+    pub key_id: Option<String>,
     pub shard_count: i32,
     pub open_shard_count: i32,
     pub tags: HashMap<String, String>,
     pub shards: Vec<KinesisShard>,
+    pub next_shard_index: i32,
+    pub enhanced_metrics: Vec<String>,
+    pub warm_throughput_mibps: Option<i64>,
+    pub max_record_size_kib: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KinesisShard {
     pub shard_id: String,
+    pub starting_hash_key: String,
+    pub ending_hash_key: String,
+    pub parent_shard_id: Option<String>,
+    pub adjacent_parent_shard_id: Option<String>,
+    pub is_open: bool,
     pub next_sequence_number: u128,
     pub records: Vec<KinesisRecord>,
 }
@@ -54,6 +69,15 @@ pub struct ShardIteratorLease {
     pub expires_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KinesisConsumer {
+    pub consumer_name: String,
+    pub consumer_arn: String,
+    pub consumer_status: String,
+    pub consumer_creation_timestamp: DateTime<Utc>,
+    pub stream_arn: String,
+}
+
 impl KinesisState {
     pub fn new(account_id: &str, region: &str) -> Self {
         Self {
@@ -62,6 +86,11 @@ impl KinesisState {
             streams: HashMap::new(),
             iterators: HashMap::new(),
             lambda_checkpoints: HashMap::new(),
+            consumers: HashMap::new(),
+            resource_policies: HashMap::new(),
+            shard_limit: 500,
+            on_demand_stream_count_limit: 50,
+            billing_commitment_status: "DISABLED".to_string(),
         }
     }
 
@@ -69,6 +98,16 @@ impl KinesisState {
         self.streams.clear();
         self.iterators.clear();
         self.lambda_checkpoints.clear();
+        self.consumers.clear();
+        self.resource_policies.clear();
+        self.billing_commitment_status = "DISABLED".to_string();
+    }
+
+    pub fn stream_name_from_arn(&self, arn: &str) -> Option<String> {
+        arn.rsplit('/')
+            .next()
+            .filter(|name| self.streams.contains_key(*name))
+            .map(|name| name.to_string())
     }
 
     pub fn stream_arn(&self, stream_name: &str) -> String {
