@@ -212,9 +212,7 @@ impl KinesisService {
         }
         // Clean up consumers associated with this stream
         let stream_arn = state.stream_arn(&stream_name);
-        state
-            .consumers
-            .retain(|_, c| c.stream_arn != stream_arn);
+        state.consumers.retain(|_, c| c.stream_arn != stream_arn);
 
         Ok(AwsResponse::ok_json(json!({})))
     }
@@ -517,9 +515,10 @@ impl KinesisService {
         );
 
         // Check for duplicate consumer name on this stream
-        let exists = state.consumers.values().any(|c| {
-            c.stream_arn == stream_arn && c.consumer_name == consumer_name
-        });
+        let exists = state
+            .consumers
+            .values()
+            .any(|c| c.stream_arn == stream_arn && c.consumer_name == consumer_name);
         if exists {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
@@ -555,9 +554,7 @@ impl KinesisService {
         validate_stream_id(&body)?;
         let mut state = self.state.write();
 
-        let consumer_arn = if let Some(arn) = body["ConsumerARN"]
-            .as_str()
-            .filter(|v| !v.is_empty())
+        let consumer_arn = if let Some(arn) = body["ConsumerARN"].as_str().filter(|v| !v.is_empty())
         {
             validate_string_length("ConsumerARN", arn, 1, 2048)?;
             arn.to_string()
@@ -602,10 +599,7 @@ impl KinesisService {
         validate_stream_id(&body)?;
         let state = self.state.read();
 
-        let consumer = if let Some(arn) = body["ConsumerARN"]
-            .as_str()
-            .filter(|v| !v.is_empty())
-        {
+        let consumer = if let Some(arn) = body["ConsumerARN"].as_str().filter(|v| !v.is_empty()) {
             validate_string_length("ConsumerARN", arn, 1, 2048)?;
             state
                 .consumers
@@ -646,10 +640,7 @@ impl KinesisService {
         })))
     }
 
-    fn list_stream_consumers(
-        &self,
-        request: &AwsRequest,
-    ) -> Result<AwsResponse, AwsServiceError> {
+    fn list_stream_consumers(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = request.json_body();
         validate_stream_id(&body)?;
         let stream_arn = body["StreamARN"]
@@ -675,11 +666,7 @@ impl KinesisService {
                 })
             })
             .collect();
-        consumers.sort_by(|a, b| {
-            a["ConsumerName"]
-                .as_str()
-                .cmp(&b["ConsumerName"].as_str())
-        });
+        consumers.sort_by(|a, b| a["ConsumerName"].as_str().cmp(&b["ConsumerName"].as_str()));
 
         // Handle NextToken-based pagination
         let next_token = body["NextToken"].as_str();
