@@ -5,16 +5,12 @@ use crate::state::CorsConfiguration;
 use fakecloud_core::service::{AwsRequest, AwsResponse};
 
 /// Handle CORS preflight OPTIONS request
-pub fn handle_preflight(cors_config: &CorsConfiguration, _req: &AwsRequest) -> AwsResponse {
+pub fn handle_preflight(cors_config: &CorsConfiguration, req: &AwsRequest) -> AwsResponse {
     let mut headers = HeaderMap::new();
 
-    // Add Access-Control-Allow-Origin
+    // Add Access-Control-Allow-Origin — reflect the matching origin from the request
     if let Some(ref origins) = cors_config.allow_origins {
-        let origin_value = if origins.contains(&"*".to_string()) {
-            "*"
-        } else {
-            origins.first().map(|s| s.as_str()).unwrap_or("*")
-        };
+        let origin_value = resolve_origin(origins, req);
         if let Ok(val) = origin_value.parse() {
             headers.insert("access-control-allow-origin", val);
         }
@@ -60,7 +56,7 @@ pub fn handle_preflight(cors_config: &CorsConfiguration, _req: &AwsRequest) -> A
 
 /// Add CORS headers to an existing response
 pub fn add_cors_headers(mut response: AwsResponse, cors_config: &CorsConfiguration) -> AwsResponse {
-    // Add Access-Control-Allow-Origin
+    // Add Access-Control-Allow-Origin — use wildcard for non-preflight responses
     if let Some(ref origins) = cors_config.allow_origins {
         let origin_value = if origins.contains(&"*".to_string()) {
             "*"
@@ -92,6 +88,20 @@ pub fn add_cors_headers(mut response: AwsResponse, cors_config: &CorsConfigurati
     }
 
     response
+}
+
+/// Resolve which origin to reflect: if the request's Origin header matches a configured origin,
+/// reflect it back. Otherwise fall back to the first configured origin or "*".
+fn resolve_origin<'a>(origins: &'a [String], req: &AwsRequest) -> &'a str {
+    if origins.contains(&"*".to_string()) {
+        return "*";
+    }
+    if let Some(request_origin) = req.headers.get("origin").and_then(|v| v.to_str().ok()) {
+        if let Some(matching) = origins.iter().find(|o| o.as_str() == request_origin) {
+            return matching.as_str();
+        }
+    }
+    origins.first().map(|s| s.as_str()).unwrap_or("*")
 }
 
 /// Check if the request is a CORS preflight request

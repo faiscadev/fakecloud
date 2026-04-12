@@ -210,8 +210,10 @@ impl AwsService for ApiGatewayV2Service {
         // Check if this is a management API request or an execute API request
         // Management API: /v2/apis/*
         // Execute API: /{stage}/{path}
-        if req.path_segments.first().map(|s| s.as_str()) == Some("v2") {
-            // Management API
+        if req.path_segments.first().map(|s| s.as_str()) == Some("v2")
+            && req.path_segments.get(1).map(|s| s.as_str()) == Some("apis")
+        {
+            // Management API: /v2/apis/*
             return self.handle_management_api(req).await;
         }
 
@@ -996,6 +998,19 @@ impl ApiGatewayV2Service {
             ));
         }
 
+        // Check for duplicate stage
+        if state
+            .stages
+            .get(api_id)
+            .is_some_and(|stages| stages.contains_key(&stage_name))
+        {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::CONFLICT,
+                "ConflictException",
+                format!("Stage already exists: {}", stage_name),
+            ));
+        }
+
         state
             .stages
             .entry(api_id.to_string())
@@ -1639,22 +1654,24 @@ impl ApiGatewayV2Service {
         let (api_id, routes, cors_config) = {
             let state = self.state.read();
 
-            // Find which API has this stage
-            let (api_id, _stage) = state
+            // Find which API has this stage (sort by API ID for deterministic resolution)
+            let mut stage_entries: Vec<_> = state
                 .stages
                 .iter()
-                .find_map(|(api_id, stages)| {
+                .filter_map(|(api_id, stages)| {
                     stages
                         .get(stage_name)
                         .map(|stage| (api_id.clone(), stage.clone()))
                 })
-                .ok_or_else(|| {
-                    AwsServiceError::aws_error(
-                        StatusCode::NOT_FOUND,
-                        "NotFoundException",
-                        format!("Stage not found: {}", stage_name),
-                    )
-                })?;
+                .collect();
+            stage_entries.sort_by(|a, b| a.0.cmp(&b.0));
+            let (api_id, _stage) = stage_entries.into_iter().next().ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::NOT_FOUND,
+                    "NotFoundException",
+                    format!("Stage not found: {}", stage_name),
+                )
+            })?;
 
             // Get routes for this API
             let routes = state
@@ -1784,6 +1801,25 @@ impl ApiGatewayV2Service {
         }
 
         // Record this request to history
+        self.record_request(
+            &req,
+            &api_id,
+            stage_name,
+            &resource_path,
+            response.status.as_u16(),
+        );
+
+        Ok(response)
+    }
+
+    fn record_request(
+        &self,
+        req: &AwsRequest,
+        api_id: &str,
+        stage: &str,
+        path: &str,
+        status_code: u16,
+    ) {
         let headers_map: std::collections::HashMap<String, String> = req
             .headers
             .iter()
@@ -1802,23 +1838,19 @@ impl ApiGatewayV2Service {
 
         let request_record = ApiRequest {
             request_id: uuid::Uuid::new_v4().to_string(),
-            api_id: api_id.clone(),
-            stage: stage_name.to_string(),
+            api_id: api_id.to_string(),
+            stage: stage.to_string(),
             method: req.method.to_string(),
-            path: resource_path,
+            path: path.to_string(),
             headers: headers_map,
             query_params: req.query_params.clone(),
             body: body_string,
             timestamp: chrono::Utc::now(),
-            status_code: response.status.as_u16(),
+            status_code,
         };
 
-        {
-            let mut state = self.state.write();
-            state.request_history.push(request_record);
-        }
-
-        Ok(response)
+        let mut state = self.state.write();
+        state.request_history.push(request_record);
     }
 }
 

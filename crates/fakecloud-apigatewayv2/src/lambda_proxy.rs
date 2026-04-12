@@ -148,13 +148,30 @@ pub async fn invoke_lambda(
 
 /// Parses a Lambda proxy integration response in v2.0 format.
 fn parse_lambda_response(response: serde_json::Value) -> Result<AwsResponse, AwsServiceError> {
-    let status_code = response["statusCode"]
-        .as_i64()
-        .unwrap_or(200)
-        .try_into()
-        .unwrap_or(200);
-
-    let status_code = StatusCode::from_u16(status_code).unwrap_or(StatusCode::OK);
+    let status_code = match response.get("statusCode") {
+        Some(v) => v.as_i64().ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_GATEWAY,
+                "BadGatewayException",
+                "Lambda response has invalid statusCode",
+            )
+        })?,
+        None => 200,
+    };
+    let status_code: u16 = status_code.try_into().map_err(|_| {
+        AwsServiceError::aws_error(
+            StatusCode::BAD_GATEWAY,
+            "BadGatewayException",
+            format!("Lambda response has invalid statusCode: {}", status_code),
+        )
+    })?;
+    let status_code = StatusCode::from_u16(status_code).map_err(|_| {
+        AwsServiceError::aws_error(
+            StatusCode::BAD_GATEWAY,
+            "BadGatewayException",
+            format!("Lambda response has invalid statusCode: {}", status_code),
+        )
+    })?;
 
     let mut headers = HeaderMap::new();
     if let Some(response_headers) = response["headers"].as_object() {
@@ -172,11 +189,13 @@ fn parse_lambda_response(response: serde_json::Value) -> Result<AwsResponse, Aws
     let is_base64 = response["isBase64Encoded"].as_bool().unwrap_or(false);
     let body = if let Some(body_str) = response["body"].as_str() {
         if is_base64 {
-            Bytes::from(
-                BASE64_STANDARD
-                    .decode(body_str)
-                    .unwrap_or_else(|_| body_str.as_bytes().to_vec()),
-            )
+            Bytes::from(BASE64_STANDARD.decode(body_str).map_err(|e| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_GATEWAY,
+                    "BadGatewayException",
+                    format!("Lambda response has invalid base64 body: {}", e),
+                )
+            })?)
         } else {
             Bytes::from(body_str.as_bytes().to_vec())
         }

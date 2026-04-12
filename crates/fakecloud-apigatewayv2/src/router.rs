@@ -32,7 +32,7 @@ impl ParsedRoute {
         let path = parts[1];
 
         let segments = Self::parse_path(path);
-        let priority = Self::calculate_priority(&segments);
+        let priority = Self::calculate_priority(&method, &segments);
 
         Some(Self {
             method,
@@ -60,7 +60,7 @@ impl ParsedRoute {
             .collect()
     }
 
-    fn calculate_priority(segments: &[RouteSegment]) -> i32 {
+    fn calculate_priority(method: &str, segments: &[RouteSegment]) -> i32 {
         let mut priority = 0;
         for seg in segments {
             priority += match seg {
@@ -68,6 +68,10 @@ impl ParsedRoute {
                 RouteSegment::Parameter(_) => 50,
                 RouteSegment::Greedy(_) => 10,
             };
+        }
+        // ANY routes should have lower priority than exact-method routes
+        if method == "ANY" {
+            priority -= 1;
         }
         priority
     }
@@ -291,6 +295,31 @@ mod tests {
         assert!(router.match_route("GET", "/pets").is_some());
         assert!(router.match_route("POST", "/pets").is_some());
         assert!(router.match_route("DELETE", "/pets").is_some());
+    }
+
+    #[test]
+    fn test_exact_method_over_any() {
+        let routes = vec![
+            Route {
+                route_id: "any".to_string(),
+                route_key: "ANY /pets".to_string(),
+                target: None,
+                authorization_type: None,
+                authorizer_id: None,
+            },
+            Route {
+                route_id: "get".to_string(),
+                route_key: "GET /pets".to_string(),
+                target: None,
+                authorization_type: None,
+                authorizer_id: None,
+            },
+        ];
+
+        let router = Router::new(routes);
+        let result = router.match_route("GET", "/pets");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().route.route_id, "get"); // Exact method wins over ANY
     }
 
     #[test]
