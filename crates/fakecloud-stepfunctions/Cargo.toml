@@ -8,6 +8,7 @@ homepage.workspace = true
 version.workspace = true
 
 [dependencies]
+fakecloud-aws = { workspace = true }
 fakecloud-core = { workspace = true }
 fakecloud-dynamodb = { workspace = true }
 async-trait = { workspace = true }

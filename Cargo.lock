@@ -2317,6 +2317,7 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "chrono",
+ "fakecloud-aws",
  "fakecloud-core",
  "flate2",
  "http 1.4.0",
@@ -2491,6 +2492,7 @@ version = "0.8.1"
 dependencies = [
  "async-trait",
  "chrono",
+ "fakecloud-aws",
  "fakecloud-core",
  "fakecloud-dynamodb",
  "http 1.4.0",

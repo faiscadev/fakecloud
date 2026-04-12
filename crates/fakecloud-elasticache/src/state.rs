@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use fakecloud_aws::arn::Arn;
 use parking_lot::RwLock;
 
 pub type SharedElastiCacheState = Arc<RwLock<ElastiCacheState>>;
@@ -498,16 +499,14 @@ fn default_parameter_groups(account_id: &str, region: &str) -> Vec<CacheParamete
             cache_parameter_group_family: "redis7".to_string(),
             description: "Default parameter group for redis7".to_string(),
             is_global: false,
-            arn: format!("arn:aws:elasticache:{region}:{account_id}:parametergroup:default.redis7"),
+            arn: Arn::new("elasticache", region, account_id, "parametergroup:default.redis7").to_string(),
         },
         CacheParameterGroup {
             cache_parameter_group_name: "default.valkey8".to_string(),
             cache_parameter_group_family: "valkey8".to_string(),
             description: "Default parameter group for valkey8".to_string(),
             is_global: false,
-            arn: format!(
-                "arn:aws:elasticache:{region}:{account_id}:parametergroup:default.valkey8"
-            ),
+            arn: Arn::new("elasticache", region, account_id, "parametergroup:default.valkey8").to_string(),
         },
     ]
 }
@@ -518,7 +517,7 @@ fn default_subnet_groups(account_id: &str, region: &str) -> HashMap<String, Cach
         cache_subnet_group_description: "Default CacheSubnetGroup".to_string(),
         vpc_id: "vpc-00000000".to_string(),
         subnet_ids: vec!["subnet-00000000".to_string()],
-        arn: format!("arn:aws:elasticache:{region}:{account_id}:subnetgroup:default"),
+        arn: Arn::new("elasticache", region, account_id, "subnetgroup:default").to_string(),
     };
     let mut map = HashMap::new();
     map.insert("default".to_string(), default_group);
@@ -607,7 +606,7 @@ fn default_users(account_id: &str, region: &str) -> HashMap<String, ElastiCacheU
             status: "active".to_string(),
             authentication_type: "no-password".to_string(),
             password_count: 0,
-            arn: format!("arn:aws:elasticache:{region}:{account_id}:user:default"),
+            arn: Arn::new("elasticache", region, account_id, "user:default").to_string(),
             minimum_engine_version: "6.0".to_string(),
             user_group_ids: Vec::new(),
         },

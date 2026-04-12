@@ -1,6 +1,7 @@
 use chrono::Utc;
 use http::StatusCode;
 
+use fakecloud_aws::arn::Arn;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 use fakecloud_core::validation::*;
 
@@ -90,7 +91,7 @@ impl IamService {
             None => {
                 let default_user = IamUser {
                     user_id: format!("AIDA{}", generate_id()),
-                    arn: format!("arn:aws:iam::{}:user/default_user", state.account_id),
+                    arn: Arn::global("iam", &state.account_id, "user/default_user").to_string(),
                     user_name: "default_user".to_string(),
                     path: "/".to_string(),
                     created_at: Utc::now(),

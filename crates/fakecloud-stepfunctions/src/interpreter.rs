@@ -5,6 +5,7 @@ use chrono::Utc;
 use serde_json::{json, Value};
 use tracing::{debug, warn};
 
+use fakecloud_aws::arn::Arn;
 use fakecloud_core::delivery::DeliveryBus;
 use fakecloud_dynamodb::state::SharedDynamoDbState;
 
@@ -1399,7 +1400,7 @@ fn queue_url_to_arn(url: &str) -> String {
     if parts.len() >= 2 {
         let queue_name = parts[0];
         let account_id = parts[1];
-        format!("arn:aws:sqs:us-east-1:{account_id}:{queue_name}")
+        Arn::new("sqs", "us-east-1", account_id, queue_name).to_string()
     } else {
         url.to_string()
     }

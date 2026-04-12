@@ -1,6 +1,7 @@
 use chrono::Utc;
 use http::StatusCode;
 
+use fakecloud_aws::arn::Arn;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use crate::state::{OidcProvider, SamlProvider, ServerCertificate};
@@ -23,7 +24,7 @@ impl IamService {
 
         let mut state = self.state.write();
 
-        let arn = format!("arn:aws:iam::{}:saml-provider/{}", state.account_id, name);
+        let arn = Arn::global("iam", &state.account_id, &format!("saml-provider/{name}")).to_string();
 
         let provider = SamlProvider {
             arn: arn.clone(),

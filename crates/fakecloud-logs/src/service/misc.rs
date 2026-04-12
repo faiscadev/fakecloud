@@ -1,6 +1,7 @@
 use http::StatusCode;
 use serde_json::{json, Value};
 
+use fakecloud_aws::arn::Arn;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 use fakecloud_core::validation::*;
 
@@ -237,7 +238,7 @@ impl LogsService {
         let region = state_r.region.clone();
         drop(state_r);
 
-        let arn = format!("arn:aws:logs:{region}:{account_id}:lookup-table:{lookup_table_name}");
+        let arn = Arn::new("logs", &region, &account_id, &format!("lookup-table:{lookup_table_name}")).to_string();
         let now = Utc::now().timestamp_millis();
 
         let table = LookupTable {
@@ -389,7 +390,7 @@ impl LogsService {
         let region = state_r.region.clone();
         drop(state_r);
 
-        let arn = format!("arn:aws:logs:{region}:{account_id}:scheduled-query:{name}");
+        let arn = Arn::new("logs", &region, &account_id, &format!("scheduled-query:{name}")).to_string();
         let now = Utc::now().timestamp_millis();
 
         let sq = ScheduledQuery {
