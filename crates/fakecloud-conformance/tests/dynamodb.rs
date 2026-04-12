@@ -145,7 +145,12 @@ async fn dynamodb_update_table() {
         .send()
         .await
         .unwrap();
-    assert!(resp.table().is_some());
+    let table = resp.table().expect("table should be present");
+    assert_eq!(table.table_name(), Some("UpdTable"));
+    assert_eq!(
+        table.billing_mode_summary().map(|b| b.billing_mode().cloned()),
+        Some(Some(BillingMode::PayPerRequest))
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1559,4 +1564,85 @@ async fn dynamodb_import_lifecycle() {
 
     let resp = client.list_imports().send().await.unwrap();
     assert!(!resp.import_summary_list().is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// Error path tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn dynamodb_create_duplicate_table_returns_error() {
+    let server = TestServer::start().await;
+    let client = server.dynamodb_client().await;
+
+    client
+        .create_table()
+        .table_name("DupTable")
+        .key_schema(
+            KeySchemaElement::builder()
+                .attribute_name("pk")
+                .key_type(KeyType::Hash)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            AttributeDefinition::builder()
+                .attribute_name("pk")
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .billing_mode(BillingMode::PayPerRequest)
+        .send()
+        .await
+        .unwrap();
+
+    let result = client
+        .create_table()
+        .table_name("DupTable")
+        .key_schema(
+            KeySchemaElement::builder()
+                .attribute_name("pk")
+                .key_type(KeyType::Hash)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            AttributeDefinition::builder()
+                .attribute_name("pk")
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .billing_mode(BillingMode::PayPerRequest)
+        .send()
+        .await;
+    assert!(result.is_err(), "Creating a duplicate table should fail");
+}
+
+#[tokio::test]
+async fn dynamodb_describe_nonexistent_table_returns_error() {
+    let server = TestServer::start().await;
+    let client = server.dynamodb_client().await;
+
+    let result = client
+        .describe_table()
+        .table_name("NoSuchTable")
+        .send()
+        .await;
+    assert!(result.is_err(), "Describing a nonexistent table should fail");
+}
+
+#[tokio::test]
+async fn dynamodb_get_item_nonexistent_table_returns_error() {
+    let server = TestServer::start().await;
+    let client = server.dynamodb_client().await;
+
+    let result = client
+        .get_item()
+        .table_name("NoSuchTable")
+        .key("pk", AttributeValue::S("val".into()))
+        .send()
+        .await;
+    assert!(result.is_err(), "GetItem on nonexistent table should fail");
 }

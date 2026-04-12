@@ -94,7 +94,11 @@ async fn sqs_get_queue_attributes() {
         .send()
         .await
         .unwrap();
-    assert!(resp.attributes().is_some());
+    let attrs = resp.attributes().expect("attributes should be present");
+    assert!(
+        attrs.contains_key(&aws_sdk_sqs::types::QueueAttributeName::QueueArn),
+        "QueueArn should be present in attributes"
+    );
 }
 
 #[test_action("sqs", "SetQueueAttributes", checksum = "e30a8436")]
@@ -555,4 +559,56 @@ async fn sqs_list_dead_letter_source_queues() {
         .await
         .unwrap();
     assert!(resp.queue_urls().is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// Error path tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn sqs_send_message_nonexistent_queue_returns_error() {
+    let server = TestServer::start().await;
+    let client = server.sqs_client().await;
+
+    let result = client
+        .send_message()
+        .queue_url("http://localhost:0/000000000000/no-such-queue")
+        .message_body("hello")
+        .send()
+        .await;
+    assert!(result.is_err(), "SendMessage to nonexistent queue should fail");
+}
+
+#[tokio::test]
+async fn sqs_receive_message_nonexistent_queue_returns_error() {
+    let server = TestServer::start().await;
+    let client = server.sqs_client().await;
+
+    let result = client
+        .receive_message()
+        .queue_url("http://localhost:0/000000000000/no-such-queue")
+        .send()
+        .await;
+    assert!(result.is_err(), "ReceiveMessage from nonexistent queue should fail");
+}
+
+#[tokio::test]
+async fn sqs_create_duplicate_queue_same_attrs_succeeds() {
+    let server = TestServer::start().await;
+    let client = server.sqs_client().await;
+
+    client
+        .create_queue()
+        .queue_name("dup-queue")
+        .send()
+        .await
+        .unwrap();
+
+    // Creating the same queue with the same attributes should succeed (idempotent)
+    let result = client
+        .create_queue()
+        .queue_name("dup-queue")
+        .send()
+        .await;
+    assert!(result.is_ok(), "Creating duplicate queue with same attrs should succeed");
 }

@@ -26,12 +26,13 @@ async fn s3_bucket_lifecycle() {
     let list = client.list_buckets().send().await.unwrap();
     assert!(!list.buckets().is_empty());
 
-    client
+    let head = client
         .head_bucket()
         .bucket("conf-bucket")
         .send()
         .await
         .unwrap();
+    assert!(head.bucket_region().is_some(), "HeadBucket should return bucket region");
 
     client
         .get_bucket_location()
@@ -272,13 +273,15 @@ async fn s3_get_object_attributes() {
         .await
         .unwrap();
 
-    let _ = client
+    let resp = client
         .get_object_attributes()
         .bucket("conf-attrs")
         .key("a.txt")
         .object_attributes(aws_sdk_s3::types::ObjectAttributes::ObjectSize)
         .send()
-        .await;
+        .await
+        .unwrap();
+    assert_eq!(resp.object_size().unwrap(), 4, "ObjectSize should match 'data' length");
 }
 
 // -- RestoreObject --
@@ -304,13 +307,14 @@ async fn s3_restore_object() {
         .await
         .unwrap();
 
-    let _ = client
+    client
         .restore_object()
         .bucket("conf-restore")
         .key("archive.txt")
         .restore_request(aws_sdk_s3::types::RestoreRequest::builder().days(1).build())
         .send()
-        .await;
+        .await
+        .unwrap();
 }
 
 // -- Object tagging --
@@ -1397,7 +1401,7 @@ async fn s3_upload_part_copy() {
         .unwrap();
     let upload_id = create.upload_id().unwrap().to_string();
 
-    let _ = client
+    client
         .upload_part_copy()
         .bucket("conf-upc")
         .key("dest.bin")
@@ -1405,5 +1409,58 @@ async fn s3_upload_part_copy() {
         .part_number(1)
         .copy_source("conf-upc/source.bin")
         .send()
+        .await
+        .unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Error path tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn s3_get_object_nonexistent_key_returns_error() {
+    let server = TestServer::start().await;
+    let client = server.s3_client().await;
+
+    client
+        .create_bucket()
+        .bucket("err-bucket")
+        .send()
+        .await
+        .unwrap();
+
+    let result = client
+        .get_object()
+        .bucket("err-bucket")
+        .key("does-not-exist")
+        .send()
         .await;
+    assert!(result.is_err(), "GetObject on nonexistent key should fail");
+}
+
+#[tokio::test]
+async fn s3_head_bucket_nonexistent_returns_error() {
+    let server = TestServer::start().await;
+    let client = server.s3_client().await;
+
+    let result = client
+        .head_bucket()
+        .bucket("no-such-bucket")
+        .send()
+        .await;
+    assert!(result.is_err(), "HeadBucket on nonexistent bucket should fail");
+}
+
+#[tokio::test]
+async fn s3_delete_object_nonexistent_bucket_returns_error() {
+    let server = TestServer::start().await;
+    let client = server.s3_client().await;
+
+    let result = client
+        .delete_object()
+        .bucket("no-such-bucket")
+        .key("k")
+        .send()
+        .await;
+    assert!(result.is_err(), "DeleteObject on nonexistent bucket should fail");
 }
