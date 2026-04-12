@@ -24,10 +24,12 @@ pub struct KinesisStream {
     pub retention_period_hours: i32,
     pub stream_mode: String,
     pub encryption_type: String,
+    pub key_id: Option<String>,
     pub shard_count: i32,
     pub open_shard_count: i32,
     pub tags: HashMap<String, String>,
     pub shards: Vec<KinesisShard>,
+    pub enhanced_metrics: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

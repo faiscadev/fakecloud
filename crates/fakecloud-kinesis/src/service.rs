@@ -6,24 +6,29 @@ use md5::{Digest, Md5};
 use serde_json::{json, Value};
 
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
+use fakecloud_core::validation::validate_optional_string_length;
 
 use crate::state::{KinesisRecord, KinesisShard, KinesisStream, SharedKinesisState};
 
 const SUPPORTED_ACTIONS: &[&str] = &[
+    "AddTagsToStream",
     "CreateStream",
+    "DecreaseStreamRetentionPeriod",
+    "DeleteStream",
     "DescribeStream",
     "DescribeStreamSummary",
-    "ListStreams",
-    "DeleteStream",
+    "DisableEnhancedMonitoring",
+    "EnableEnhancedMonitoring",
     "GetRecords",
     "GetShardIterator",
+    "IncreaseStreamRetentionPeriod",
+    "ListStreams",
+    "ListTagsForStream",
     "PutRecord",
     "PutRecords",
-    "AddTagsToStream",
-    "ListTagsForStream",
     "RemoveTagsFromStream",
-    "IncreaseStreamRetentionPeriod",
-    "DecreaseStreamRetentionPeriod",
+    "StartStreamEncryption",
+    "StopStreamEncryption",
 ];
 
 pub struct KinesisService {
@@ -58,6 +63,10 @@ impl AwsService for KinesisService {
             "RemoveTagsFromStream" => self.remove_tags_from_stream(&request),
             "IncreaseStreamRetentionPeriod" => self.increase_stream_retention_period(&request),
             "DecreaseStreamRetentionPeriod" => self.decrease_stream_retention_period(&request),
+            "StartStreamEncryption" => self.start_stream_encryption(&request),
+            "StopStreamEncryption" => self.stop_stream_encryption(&request),
+            "EnableEnhancedMonitoring" => self.enable_enhanced_monitoring(&request),
+            "DisableEnhancedMonitoring" => self.disable_enhanced_monitoring(&request),
             _ => Err(AwsServiceError::action_not_implemented(
                 self.service_name(),
                 &request.action,
@@ -101,10 +110,12 @@ impl KinesisService {
             retention_period_hours: 24,
             stream_mode: "PROVISIONED".to_string(),
             encryption_type: "NONE".to_string(),
+            key_id: None,
             shard_count,
             open_shard_count: shard_count,
             tags: std::collections::HashMap::new(),
             shards: build_stream_shards(shard_count),
+            enhanced_metrics: Vec::new(),
         };
         state.streams.insert(stream_name.to_string(), stream);
 
@@ -466,6 +477,155 @@ impl KinesisService {
         stream.retention_period_hours = hours as i32;
         Ok(AwsResponse::ok_json(json!({})))
     }
+
+    fn start_stream_encryption(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        validate_stream_id(&body)?;
+        let encryption_type = body["EncryptionType"]
+            .as_str()
+            .ok_or_else(|| invalid_argument("EncryptionType is required"))?;
+        if encryption_type != "KMS" && encryption_type != "NONE" {
+            return Err(invalid_argument(format!(
+                "EncryptionType must be KMS or NONE, got {encryption_type}"
+            )));
+        }
+        let key_id = body["KeyId"]
+            .as_str()
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| invalid_argument("KeyId is required"))?;
+        validate_optional_string_length("KeyId", Some(key_id), 1, 2048)?;
+
+        let mut state = self.state.write();
+        let stream_name = resolve_stream_name(&state, &body)?;
+        let account_id = state.account_id.clone();
+        let stream = state
+            .streams
+            .get_mut(&stream_name)
+            .ok_or_else(|| stream_not_found(&account_id, &stream_name))?;
+        stream.encryption_type = encryption_type.to_string();
+        stream.key_id = Some(key_id.to_string());
+
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    fn stop_stream_encryption(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        validate_stream_id(&body)?;
+        let _encryption_type = body["EncryptionType"]
+            .as_str()
+            .ok_or_else(|| invalid_argument("EncryptionType is required"))?;
+        let _key_id = body["KeyId"]
+            .as_str()
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| invalid_argument("KeyId is required"))?;
+        validate_optional_string_length("KeyId", body["KeyId"].as_str(), 1, 2048)?;
+
+        let mut state = self.state.write();
+        let stream_name = resolve_stream_name(&state, &body)?;
+        let account_id = state.account_id.clone();
+        let stream = state
+            .streams
+            .get_mut(&stream_name)
+            .ok_or_else(|| stream_not_found(&account_id, &stream_name))?;
+        stream.encryption_type = "NONE".to_string();
+        stream.key_id = None;
+
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    fn enable_enhanced_monitoring(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        validate_stream_id(&body)?;
+        let metrics = body["ShardLevelMetrics"]
+            .as_array()
+            .ok_or_else(|| invalid_argument("ShardLevelMetrics is required"))?;
+
+        let mut state = self.state.write();
+        let stream_name = resolve_stream_name(&state, &body)?;
+        let account_id = state.account_id.clone();
+        let stream_arn = state.stream_arn(&stream_name);
+        let stream = state
+            .streams
+            .get_mut(&stream_name)
+            .ok_or_else(|| stream_not_found(&account_id, &stream_name))?;
+
+        let current: Vec<String> = stream.enhanced_metrics.clone();
+        let desired: Vec<String> = metrics
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect();
+
+        if desired.contains(&"ALL".to_string()) {
+            stream.enhanced_metrics = SHARD_LEVEL_METRICS
+                .iter()
+                .filter(|m| **m != "ALL")
+                .map(|s| s.to_string())
+                .collect();
+        } else {
+            for metric in &desired {
+                if !stream.enhanced_metrics.contains(metric) {
+                    stream.enhanced_metrics.push(metric.clone());
+                }
+            }
+        }
+
+        Ok(AwsResponse::ok_json(json!({
+            "StreamName": stream_name,
+            "StreamARN": stream_arn,
+            "CurrentShardLevelMetrics": current,
+            "DesiredShardLevelMetrics": desired,
+        })))
+    }
+
+    fn disable_enhanced_monitoring(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        validate_stream_id(&body)?;
+        let metrics = body["ShardLevelMetrics"]
+            .as_array()
+            .ok_or_else(|| invalid_argument("ShardLevelMetrics is required"))?;
+
+        let mut state = self.state.write();
+        let stream_name = resolve_stream_name(&state, &body)?;
+        let account_id = state.account_id.clone();
+        let stream_arn = state.stream_arn(&stream_name);
+        let stream = state
+            .streams
+            .get_mut(&stream_name)
+            .ok_or_else(|| stream_not_found(&account_id, &stream_name))?;
+
+        let current: Vec<String> = stream.enhanced_metrics.clone();
+        let desired: Vec<String> = metrics
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect();
+
+        if desired.contains(&"ALL".to_string()) {
+            stream.enhanced_metrics.clear();
+        } else {
+            stream
+                .enhanced_metrics
+                .retain(|m| !desired.contains(m));
+        }
+
+        Ok(AwsResponse::ok_json(json!({
+            "StreamName": stream_name,
+            "StreamARN": stream_arn,
+            "CurrentShardLevelMetrics": current,
+            "DesiredShardLevelMetrics": desired,
+        })))
+    }
 }
 
 impl crate::state::KinesisState {
@@ -635,6 +795,21 @@ fn find_record_index_by_sequence_number(
         .iter()
         .position(|record| record.sequence_number == sequence_number)
         .ok_or_else(|| invalid_argument("StartingSequenceNumber is invalid"))
+}
+
+const SHARD_LEVEL_METRICS: &[&str] = &[
+    "IncomingBytes",
+    "IncomingRecords",
+    "OutgoingBytes",
+    "OutgoingRecords",
+    "WriteProvisionedThroughputExceeded",
+    "ReadProvisionedThroughputExceeded",
+    "IteratorAgeMilliseconds",
+    "ALL",
+];
+
+fn validate_stream_id(body: &Value) -> Result<(), AwsServiceError> {
+    validate_optional_string_length("StreamId", body["StreamId"].as_str(), 1, 24)
 }
 
 fn invalid_argument(message: impl Into<String>) -> AwsServiceError {
