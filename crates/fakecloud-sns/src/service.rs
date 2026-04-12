@@ -4857,9 +4857,10 @@ mod tests {
             protocol: "sqs".to_string(),
             endpoint: "arn:aws:sqs:us-east-1:123456789012:q".to_string(),
             owner: "123456789012".to_string(),
-            attributes: HashMap::from([
-                ("FilterPolicy".to_string(), "not valid json {{[".to_string()),
-            ]),
+            attributes: HashMap::from([(
+                "FilterPolicy".to_string(),
+                "not valid json {{[".to_string(),
+            )]),
             confirmed: true,
             confirmation_token: None,
         };
