@@ -174,6 +174,7 @@ jobs:
           publish fakecloud-elasticache
           publish fakecloud-kinesis
           publish fakecloud-apigatewayv2   # depends on core only
+          publish fakecloud-bedrock        # depends on aws + core
 
           # Layer 4: depend on layer 3 crates
           publish fakecloud-s3             # depends on kms

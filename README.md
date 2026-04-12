@@ -234,7 +234,7 @@ curl http://localhost:4566/_fakecloud/health
 ```json
 {
   "status": "ok",
-  "version": "0.7.1",
+  "version": "0.8.0",
   "services": [
     "apigatewayv2",
     "bedrock",
