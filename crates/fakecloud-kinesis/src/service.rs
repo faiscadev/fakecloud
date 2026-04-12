@@ -520,10 +520,7 @@ impl KinesisService {
         Ok(AwsResponse::ok_json(json!({})))
     }
 
-    fn list_tags_for_resource(
-        &self,
-        request: &AwsRequest,
-    ) -> Result<AwsResponse, AwsServiceError> {
+    fn list_tags_for_resource(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = request.json_body();
         validate_stream_id(&body)?;
         let resource_arn = require_resource_arn(&body)?;
@@ -580,10 +577,7 @@ impl KinesisService {
         Ok(AwsResponse::ok_json(json!({})))
     }
 
-    fn delete_resource_policy(
-        &self,
-        request: &AwsRequest,
-    ) -> Result<AwsResponse, AwsServiceError> {
+    fn delete_resource_policy(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = request.json_body();
         validate_stream_id(&body)?;
         let resource_arn = require_resource_arn(&body)?;
