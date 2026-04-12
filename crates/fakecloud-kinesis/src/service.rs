@@ -502,9 +502,9 @@ impl KinesisService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = request.json_body();
         let commitment = &body["MinimumThroughputBillingCommitment"];
-        let status = commitment["Status"]
-            .as_str()
-            .ok_or_else(|| invalid_argument("MinimumThroughputBillingCommitment.Status is required"))?;
+        let status = commitment["Status"].as_str().ok_or_else(|| {
+            invalid_argument("MinimumThroughputBillingCommitment.Status is required")
+        })?;
         if status != "ENABLED" && status != "DISABLED" {
             return Err(invalid_argument(format!(
                 "Invalid MinimumThroughputBillingCommitment status: {status}"
@@ -599,13 +599,15 @@ impl KinesisService {
         })))
     }
 
-    fn update_max_record_size(
-        &self,
-        request: &AwsRequest,
-    ) -> Result<AwsResponse, AwsServiceError> {
+    fn update_max_record_size(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = request.json_body();
         validate_stream_id(&body)?;
-        validate_optional_json_range("MaxRecordSizeInKiB", &body["MaxRecordSizeInKiB"], 1024, 10240)?;
+        validate_optional_json_range(
+            "MaxRecordSizeInKiB",
+            &body["MaxRecordSizeInKiB"],
+            1024,
+            10240,
+        )?;
         let max_size = body["MaxRecordSizeInKiB"]
             .as_i64()
             .ok_or_else(|| invalid_argument("MaxRecordSizeInKiB is required"))?;
