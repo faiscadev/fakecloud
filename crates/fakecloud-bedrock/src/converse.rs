@@ -37,8 +37,8 @@ pub fn converse(
     // Respect maxTokens by truncating (rough approximation: 1 token ~= 4 chars)
     let truncated_text = if max_tokens < u64::MAX {
         let char_limit = (max_tokens as usize) * 4;
-        if response_text.len() > char_limit {
-            response_text[..char_limit].to_string()
+        if response_text.chars().count() > char_limit {
+            response_text.chars().take(char_limit).collect::<String>()
         } else {
             response_text
         }
