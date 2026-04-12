@@ -386,9 +386,9 @@ fn matches_filter_pattern(pattern: &str, message: &str) -> bool {
         return matches_json_filter_pattern(pattern, message);
     }
 
-    // Array-style metric filter patterns - match everything (not implemented)
+    // Array-style metric filter patterns - not implemented, fail closed
     if pattern.starts_with('[') {
-        return true;
+        return false;
     }
 
     // Quoted pattern: exact substring match (handles escaped inner quotes)
@@ -528,7 +528,7 @@ fn matches_single_json_condition(condition: &str, json: &serde_json::Value) -> b
     // Extract JSON path from field_part (must start with $.)
     let path = match field_part.strip_prefix("$.") {
         Some(p) => p,
-        None => return true, // Don't understand this pattern, match everything
+        None => return false, // Don't understand this pattern, fail closed
     };
 
     let actual_value = match resolve_json_path_simple(json, path) {
@@ -565,7 +565,7 @@ fn matches_single_json_condition(condition: &str, json: &serde_json::Value) -> b
             _ => false,
         }
     } else {
-        true // Unknown value format, match everything
+        false // Unknown value format, fail closed
     };
 
     expected_str
@@ -660,5 +660,38 @@ pub(crate) mod test_helpers {
             }),
         );
         svc.put_log_events(&req).unwrap();
+    }
+
+    #[test]
+    fn array_filter_pattern_does_not_match() {
+        assert!(
+            !matches_filter_pattern("[w1, w2, w3]", "some log message"),
+            "array-style filter pattern must not match (fail closed)"
+        );
+    }
+
+    #[test]
+    fn unrecognized_json_filter_path_does_not_match() {
+        // A JSON filter condition where the field part doesn't start with $.
+        // should fail closed instead of matching everything.
+        assert!(
+            !matches_single_json_condition(
+                "level = \"ERROR\"",
+                &serde_json::json!({"level": "ERROR"}),
+            ),
+            "filter condition without $. prefix must not match (fail closed)"
+        );
+    }
+
+    #[test]
+    fn unknown_value_format_does_not_match() {
+        // A value that is not a string, number, or boolean should fail closed.
+        assert!(
+            !matches_single_json_condition(
+                "$.level = ERROR",
+                &serde_json::json!({"level": "ERROR"}),
+            ),
+            "unquoted non-numeric non-boolean value must not match (fail closed)"
+        );
     }
 }

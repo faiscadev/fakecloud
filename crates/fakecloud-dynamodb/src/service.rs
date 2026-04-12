@@ -4308,6 +4308,13 @@ fn apply_update_expression(
     expr_attr_values: &HashMap<String, Value>,
 ) -> Result<(), AwsServiceError> {
     let clauses = parse_update_clauses(expr);
+    if clauses.is_empty() && !expr.trim().is_empty() {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "ValidationException",
+            "Invalid UpdateExpression: Syntax error; token: \"<expression>\"",
+        ));
+    }
     for (action, assignments) in &clauses {
         match action.to_ascii_uppercase().as_str() {
             "SET" => {
@@ -4331,7 +4338,16 @@ fn apply_update_expression(
                     apply_delete_assignment(item, assignment, expr_attr_names, expr_attr_values)?;
                 }
             }
-            _ => {}
+            other => {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationException",
+                    format!(
+                        "Invalid UpdateExpression: Invalid action: {}",
+                        other
+                    ),
+                ));
+            }
         }
     }
     Ok(())
@@ -7344,6 +7360,27 @@ mod tests {
         assert!(
             result.is_err(),
             "list index on non-list attribute must return an error"
+        );
+    }
+
+    #[test]
+    fn test_unrecognized_update_action_returns_error() {
+        let mut item = HashMap::new();
+        item.insert("name".to_string(), json!({"S": "hello"}));
+
+        let names: HashMap<String, String> = HashMap::new();
+        let mut values = HashMap::new();
+        values.insert(":bar".to_string(), json!({"S": "baz"}));
+
+        let result = apply_update_expression(&mut item, "INVALID foo = :bar", &names, &values);
+        assert!(
+            result.is_err(),
+            "unrecognized UpdateExpression action must return an error"
+        );
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            err_msg.contains("Invalid UpdateExpression") || err_msg.contains("Syntax error"),
+            "error should mention Invalid UpdateExpression, got: {err_msg}"
         );
     }
 }

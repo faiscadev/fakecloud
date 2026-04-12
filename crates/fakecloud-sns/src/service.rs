@@ -2922,7 +2922,7 @@ fn matches_filter_policy(
 
     let filter: HashMap<String, Value> = match serde_json::from_str(filter_json) {
         Ok(f) => f,
-        Err(_) => return true,
+        Err(_) => return false,
     };
 
     let scope = sub
@@ -4846,6 +4846,27 @@ mod tests {
             state.read().subscriptions.len(),
             0,
             "Subscriptions should be removed with topic"
+        );
+    }
+
+    #[test]
+    fn malformed_filter_policy_does_not_match() {
+        let sub = SnsSubscription {
+            subscription_arn: "arn:aws:sns:us-east-1:123456789012:t:sub-1".to_string(),
+            topic_arn: "arn:aws:sns:us-east-1:123456789012:t".to_string(),
+            protocol: "sqs".to_string(),
+            endpoint: "arn:aws:sqs:us-east-1:123456789012:q".to_string(),
+            owner: "123456789012".to_string(),
+            attributes: HashMap::from([
+                ("FilterPolicy".to_string(), "not valid json {{[".to_string()),
+            ]),
+            confirmed: true,
+            confirmation_token: None,
+        };
+        let attrs = HashMap::new();
+        assert!(
+            !matches_filter_policy(&sub, &attrs, "hello"),
+            "malformed FilterPolicy JSON must not match (fail closed)"
         );
     }
 }
