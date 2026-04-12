@@ -23,6 +23,26 @@ pub fn create_provisioned_model_throughput(
     let model_id = body["modelId"].as_str().unwrap_or_default();
     let model_units = body["modelUnits"].as_i64().unwrap_or(1) as i32;
 
+    if model_units < 1 {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "ValidationException",
+            "modelUnits must be at least 1",
+        ));
+    }
+
+    if let Some(duration) = body["commitmentDuration"].as_str() {
+        if !["OneMonth", "SixMonths"].contains(&duration) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ValidationException",
+                format!(
+                    "Invalid commitmentDuration: {duration}. Valid values: OneMonth, SixMonths"
+                ),
+            ));
+        }
+    }
+
     let provisioned_model_id = Uuid::new_v4().to_string()[..12].to_string();
     let provisioned_model_arn = format!(
         "arn:aws:bedrock:{}:{}:provisioned-model/{}",
@@ -77,11 +97,32 @@ pub fn get_provisioned_model_throughput(
 
 pub fn list_provisioned_model_throughputs(
     state: &SharedBedrockState,
+    req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
+    let max_results = req
+        .query_params
+        .get("maxResults")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(100);
+    let next_token = req.query_params.get("nextToken");
+
     let s = state.read();
-    let summaries: Vec<Value> = s
-        .provisioned_throughputs
-        .values()
+    let mut items: Vec<&ProvisionedThroughput> = s.provisioned_throughputs.values().collect();
+    items.sort_by(|a, b| a.provisioned_model_id.cmp(&b.provisioned_model_id));
+
+    let start = if let Some(token) = next_token {
+        items
+            .iter()
+            .position(|t| t.provisioned_model_id.as_str() > token.as_str())
+            .unwrap_or(items.len())
+    } else {
+        0
+    };
+
+    let page: Vec<Value> = items
+        .iter()
+        .skip(start)
+        .take(max_results)
         .map(|t| {
             json!({
                 "provisionedModelName": t.provisioned_model_name,
@@ -98,9 +139,14 @@ pub fn list_provisioned_model_throughputs(
         })
         .collect();
 
-    Ok(AwsResponse::ok_json(
-        json!({ "provisionedModelSummaries": summaries }),
-    ))
+    let mut resp = json!({ "provisionedModelSummaries": page });
+    if start + max_results < items.len() {
+        if let Some(last) = items.get(start + max_results - 1) {
+            resp["nextToken"] = json!(last.provisioned_model_id);
+        }
+    }
+
+    Ok(AwsResponse::ok_json(resp))
 }
 
 pub fn update_provisioned_model_throughput(

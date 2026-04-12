@@ -113,11 +113,32 @@ pub fn get_model_customization_job(
 
 pub fn list_model_customization_jobs(
     state: &SharedBedrockState,
+    req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
+    let max_results = req
+        .query_params
+        .get("maxResults")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(100);
+    let next_token = req.query_params.get("nextToken");
+
     let s = state.read();
-    let summaries: Vec<Value> = s
-        .customization_jobs
-        .values()
+    let mut items: Vec<&crate::state::CustomizationJob> = s.customization_jobs.values().collect();
+    items.sort_by(|a, b| a.job_arn.cmp(&b.job_arn));
+
+    let start = if let Some(token) = next_token {
+        items
+            .iter()
+            .position(|j| j.job_arn.as_str() > token.as_str())
+            .unwrap_or(items.len())
+    } else {
+        0
+    };
+
+    let page: Vec<Value> = items
+        .iter()
+        .skip(start)
+        .take(max_results)
         .map(|j| {
             json!({
                 "jobArn": j.job_arn,
@@ -131,9 +152,14 @@ pub fn list_model_customization_jobs(
         })
         .collect();
 
-    Ok(AwsResponse::ok_json(
-        json!({ "modelCustomizationJobSummaries": summaries }),
-    ))
+    let mut resp = json!({ "modelCustomizationJobSummaries": page });
+    if start + max_results < items.len() {
+        if let Some(last) = items.get(start + max_results - 1) {
+            resp["nextToken"] = json!(last.job_arn);
+        }
+    }
+
+    Ok(AwsResponse::ok_json(resp))
 }
 
 pub fn stop_model_customization_job(

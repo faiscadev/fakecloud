@@ -49,7 +49,7 @@ tests; they are an extra layer, not the whole story.
 | Startup time        | ~500ms                                             | ~3s                                                                            |
 | Idle memory         | ~10 MiB                                            | ~150 MiB                                                                       |
 | Install size        | ~19 MB binary                                      | ~1 GB Docker image                                                             |
-| AWS services        | 19                                                 | 30+                                                                            |
+| AWS services        | 22                                                 | 30+                                                                            |
 | Test assertion SDKs | TypeScript, Python, Go, Rust                       | Python, Java                                                                   |
 | Cognito User Pools  | 80 operations                                      | [Paid only](https://docs.localstack.cloud/references/licensing/)               |
 | SES v2              | 97 operations                                      | [Paid only](https://docs.localstack.cloud/references/licensing/)               |
@@ -156,7 +156,7 @@ aws --endpoint-url http://localhost:4566 sqs create-queue --queue-name my-queue
 
 ## Supported Services
 
-21 AWS services, 1071 API operations:
+22 AWS services, 1077 API operations:
 
 | Service                | Actions | Highlights                                                                                                                                                                                                                                                                                                                                                                                                  |
 | ---------------------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -180,7 +180,8 @@ aws --endpoint-url http://localhost:4566 sqs create-queue --queue-name my-queue
 | **ElastiCache**        | 44      | Cache clusters, replication groups, global replication groups, serverless caches and snapshots, subnet groups, users/user groups, failover, tagging (Redis and Valkey via Docker)                                                                                                                                                                                                                           |
 | **Step Functions**     | 14      | State machine CRUD, executions, ASL interpreter (Pass, Task, Choice, Wait, Parallel, Map, Succeed, Fail), Retry/Catch, Lambda/SQS/SNS/EventBridge/DynamoDB task integrations                                                                                                                                                                                                                              |
 | **API Gateway v2**     | 28      | HTTP APIs, routes with path parameters and wildcards, Lambda proxy integration, HTTP proxy integration, Mock integration, stages, deployments, authorizers (JWT and Lambda), CORS configuration, request history                                                                                                                                                                                          |
-| **Bedrock**            | 27      | Foundation models, guardrails with versioning, model customization jobs, provisioned throughput, invocation logging, InvokeModel/Converse (sync and streaming), tagging                                                                                                                                                                                                                                    |
+| **Bedrock**            | 27      | Foundation models, guardrails (CRUD, versioning, content evaluation), model customization jobs, provisioned throughput, logging configuration, tagging                                                                                                                                                                                                                                                     |
+| **Bedrock Runtime**    | 6       | InvokeModel (Anthropic, Titan, Meta, Cohere, Mistral), Converse, streaming, ApplyGuardrail, CountTokens, async invoke                                                                                                                                                                                                                                                                                     |
 
 ### Cross-Service Integration
 

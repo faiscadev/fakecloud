@@ -13,6 +13,15 @@ pub fn invoke_model(
     model_id: &str,
     body: &[u8],
 ) -> Result<AwsResponse, AwsServiceError> {
+    // Validate model ID
+    if model_id.is_empty() {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "ValidationException",
+            "modelId is required",
+        ));
+    }
+
     let input: Value = serde_json::from_slice(body).unwrap_or_default();
 
     let response_body = {
@@ -38,6 +47,10 @@ pub fn invoke_model(
     let mut headers = http::HeaderMap::new();
     headers.insert("x-amzn-bedrock-input-token-count", "10".parse().unwrap());
     headers.insert("x-amzn-bedrock-output-token-count", "20".parse().unwrap());
+    headers.insert(
+        "x-amzn-bedrock-performanceconfig-latency",
+        "standard".parse().unwrap(),
+    );
 
     Ok(AwsResponse {
         status: StatusCode::OK,
@@ -45,6 +58,74 @@ pub fn invoke_model(
         body: bytes::Bytes::from(response_body),
         headers,
     })
+}
+
+/// Count tokens for the given input text (rough approximation).
+pub fn count_tokens(
+    _state: &SharedBedrockState,
+    model_id: &str,
+    body: &[u8],
+) -> Result<AwsResponse, AwsServiceError> {
+    if model_id.is_empty() {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "ValidationException",
+            "modelId is required",
+        ));
+    }
+
+    let input: Value = serde_json::from_slice(body).unwrap_or_default();
+
+    // Extract text from either invokeModel or converse format
+    let text = if let Some(invoke_input) = input.get("input") {
+        if let Some(invoke_model) = invoke_input.get("invokeModel") {
+            // InvokeModel format — body is a document
+            if let Some(body_doc) = invoke_model.get("body") {
+                serde_json::to_string(body_doc).unwrap_or_default()
+            } else {
+                String::new()
+            }
+        } else if let Some(converse) = invoke_input.get("converse") {
+            // Converse format — extract messages and system text
+            let mut all_text = String::new();
+            if let Some(system) = converse.get("system").and_then(|s| s.as_array()) {
+                for block in system {
+                    if let Some(t) = block["text"].as_str() {
+                        all_text.push_str(t);
+                        all_text.push(' ');
+                    }
+                }
+            }
+            if let Some(messages) = converse.get("messages").and_then(|m| m.as_array()) {
+                for msg in messages {
+                    if let Some(content) = msg.get("content").and_then(|c| c.as_array()) {
+                        for block in content {
+                            if let Some(t) = block["text"].as_str() {
+                                all_text.push_str(t);
+                                all_text.push(' ');
+                            }
+                        }
+                    }
+                }
+            }
+            all_text
+        } else {
+            serde_json::to_string(&input).unwrap_or_default()
+        }
+    } else {
+        serde_json::to_string(&input).unwrap_or_default()
+    };
+
+    // Rough token count: split by whitespace
+    let token_count = if text.is_empty() {
+        0
+    } else {
+        text.split_whitespace().count()
+    };
+
+    Ok(AwsResponse::ok_json(json!({
+        "inputTokens": token_count
+    })))
 }
 
 /// Generate a deterministic canned response based on the model provider.

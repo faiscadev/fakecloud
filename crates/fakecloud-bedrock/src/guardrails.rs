@@ -106,11 +106,34 @@ pub fn get_guardrail(
     Ok(AwsResponse::ok_json(guardrail_to_json(guardrail)))
 }
 
-pub fn list_guardrails(state: &SharedBedrockState) -> Result<AwsResponse, AwsServiceError> {
+pub fn list_guardrails(
+    state: &SharedBedrockState,
+    req: &AwsRequest,
+) -> Result<AwsResponse, AwsServiceError> {
+    let max_results = req
+        .query_params
+        .get("maxResults")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(100);
+    let next_token = req.query_params.get("nextToken");
+
     let s = state.read();
-    let guardrails: Vec<Value> = s
-        .guardrails
-        .values()
+    let mut items: Vec<&Guardrail> = s.guardrails.values().collect();
+    items.sort_by(|a, b| a.guardrail_id.cmp(&b.guardrail_id));
+
+    let start = if let Some(token) = next_token {
+        items
+            .iter()
+            .position(|g| g.guardrail_id.as_str() > token.as_str())
+            .unwrap_or(items.len())
+    } else {
+        0
+    };
+
+    let page: Vec<Value> = items
+        .iter()
+        .skip(start)
+        .take(max_results)
         .map(|g| {
             json!({
                 "id": g.guardrail_id,
@@ -125,7 +148,14 @@ pub fn list_guardrails(state: &SharedBedrockState) -> Result<AwsResponse, AwsSer
         })
         .collect();
 
-    Ok(AwsResponse::ok_json(json!({ "guardrails": guardrails })))
+    let mut resp = json!({ "guardrails": page });
+    if start + max_results < items.len() {
+        if let Some(last) = items.get(start + max_results - 1) {
+            resp["nextToken"] = json!(last.guardrail_id);
+        }
+    }
+
+    Ok(AwsResponse::ok_json(resp))
 }
 
 pub fn update_guardrail(
@@ -249,6 +279,128 @@ pub fn create_guardrail_version(
         }))
         .unwrap(),
     ))
+}
+
+/// Handle the ApplyGuardrail API — evaluate content against a guardrail.
+pub fn apply_guardrail(
+    state: &SharedBedrockState,
+    guardrail_id: &str,
+    guardrail_version: &str,
+    body: &[u8],
+) -> Result<AwsResponse, AwsServiceError> {
+    let input: Value = serde_json::from_slice(body).unwrap_or_default();
+
+    let s = state.read();
+
+    // Build a temporary guardrail for evaluation from DRAFT or versioned
+    let not_found_err = || {
+        AwsServiceError::aws_error(
+            StatusCode::NOT_FOUND,
+            "ResourceNotFoundException",
+            format!("Guardrail {guardrail_id} version {guardrail_version} not found"),
+        )
+    };
+
+    let temp_guardrail = if guardrail_version == "DRAFT" {
+        let g = s.guardrails.get(guardrail_id).ok_or_else(not_found_err)?;
+        Guardrail {
+            guardrail_id: g.guardrail_id.clone(),
+            guardrail_arn: g.guardrail_arn.clone(),
+            name: g.name.clone(),
+            description: g.description.clone(),
+            status: g.status.clone(),
+            version: g.version.clone(),
+            next_version_number: g.next_version_number,
+            blocked_input_messaging: g.blocked_input_messaging.clone(),
+            blocked_outputs_messaging: g.blocked_outputs_messaging.clone(),
+            content_policy: g.content_policy.clone(),
+            word_policy: g.word_policy.clone(),
+            sensitive_information_policy: g.sensitive_information_policy.clone(),
+            topic_policy: g.topic_policy.clone(),
+            created_at: g.created_at,
+            updated_at: g.updated_at,
+        }
+    } else {
+        let key = (guardrail_id.to_string(), guardrail_version.to_string());
+        let gv = s.guardrail_versions.get(&key).ok_or_else(not_found_err)?;
+        Guardrail {
+            guardrail_id: gv.guardrail_id.clone(),
+            guardrail_arn: gv.guardrail_arn.clone(),
+            name: gv.name.clone(),
+            description: gv.description.clone(),
+            status: gv.status.clone(),
+            version: gv.version.clone(),
+            next_version_number: 0,
+            blocked_input_messaging: gv.blocked_input_messaging.clone(),
+            blocked_outputs_messaging: gv.blocked_outputs_messaging.clone(),
+            content_policy: gv.content_policy.clone(),
+            word_policy: gv.word_policy.clone(),
+            sensitive_information_policy: gv.sensitive_information_policy.clone(),
+            topic_policy: gv.topic_policy.clone(),
+            created_at: gv.created_at,
+            updated_at: gv.created_at,
+        }
+    };
+
+    // Extract text from content blocks
+    // Content blocks can be: {"text": {"text": "..."}} (GuardrailTextBlock union variant)
+    // or {"text": "..."} (simple text)
+    let content_blocks = input["content"].as_array();
+    let mut all_text = String::new();
+    if let Some(blocks) = content_blocks {
+        for block in blocks {
+            let text_str = block["text"]["text"]
+                .as_str()
+                .or_else(|| block["text"].as_str());
+            if let Some(text) = text_str {
+                if !all_text.is_empty() {
+                    all_text.push(' ');
+                }
+                all_text.push_str(text);
+            }
+        }
+    }
+
+    let assessments = evaluate_content(&temp_guardrail, &all_text);
+    let action = if assessments.is_empty() {
+        "NONE"
+    } else {
+        "GUARDRAIL_INTERVENED"
+    };
+
+    let source = input["source"].as_str().unwrap_or("INPUT");
+    let outputs = if action == "GUARDRAIL_INTERVENED" {
+        let msg = if source == "INPUT" {
+            &temp_guardrail.blocked_input_messaging
+        } else {
+            &temp_guardrail.blocked_outputs_messaging
+        };
+        vec![json!({"text": msg})]
+    } else {
+        content_blocks
+            .map(|blocks| {
+                blocks
+                    .iter()
+                    .filter_map(|b| b["text"].as_str().map(|t| json!({"text": t})))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+
+    let resp = json!({
+        "usage": {
+            "topicPolicyUnits": 1,
+            "contentPolicyUnits": 1,
+            "wordPolicyUnits": 1,
+            "sensitiveInformationPolicyUnits": 1,
+            "sensitiveInformationPolicyFreeUnits": 0
+        },
+        "action": action,
+        "outputs": outputs,
+        "assessments": assessments,
+    });
+
+    Ok(AwsResponse::ok_json(resp))
 }
 
 // ── Content evaluation ─────────────────────────────────────────────

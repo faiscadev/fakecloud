@@ -16,32 +16,7 @@ impl BedrockService {
         Self { state }
     }
 
-    /// Determine the action from the HTTP method and path segments.
-    /// Bedrock control plane uses REST-JSON routing:
-    ///   GET    /foundation-models                                  -> ListFoundationModels
-    ///   GET    /foundation-models/{modelIdentifier}                -> GetFoundationModel
-    ///   POST   /guardrails                                         -> CreateGuardrail
-    ///   GET    /guardrails                                          -> ListGuardrails
-    ///   GET    /guardrails/{guardrailIdentifier}                   -> GetGuardrail
-    ///   PUT    /guardrails/{guardrailIdentifier}                   -> UpdateGuardrail
-    ///   DELETE /guardrails/{guardrailIdentifier}                   -> DeleteGuardrail
-    ///   POST   /guardrails/{guardrailIdentifier}                   -> CreateGuardrailVersion
-    ///   POST   /model-customization-jobs                           -> CreateModelCustomizationJob
-    ///   GET    /model-customization-jobs                            -> ListModelCustomizationJobs
-    ///   GET    /model-customization-jobs/{jobIdentifier}           -> GetModelCustomizationJob
-    ///   POST   /model-customization-jobs/{jobIdentifier}/stop      -> StopModelCustomizationJob
-    ///   POST   /provisioned-model-throughput                       -> CreateProvisionedModelThroughput
-    ///   GET    /provisioned-model-throughputs                       -> ListProvisionedModelThroughputs
-    ///   GET    /provisioned-model-throughput/{provisionedModelId}  -> GetProvisionedModelThroughput
-    ///   PATCH  /provisioned-model-throughput/{provisionedModelId}  -> UpdateProvisionedModelThroughput
-    ///   DELETE /provisioned-model-throughput/{provisionedModelId}  -> DeleteProvisionedModelThroughput
-    ///   PUT    /logging/modelinvocations                            -> PutModelInvocationLoggingConfiguration
-    ///   GET    /logging/modelinvocations                            -> GetModelInvocationLoggingConfiguration
-    ///   DELETE /logging/modelinvocations                            -> DeleteModelInvocationLoggingConfiguration
-    ///   POST   /tagResource                                          -> TagResource
-    ///   POST   /untagResource                                        -> UntagResource
-    ///   POST   /listTagsForResource                                  -> ListTagsForResource
-    fn resolve_action(req: &AwsRequest) -> Option<(&str, Option<String>)> {
+    fn resolve_action(req: &AwsRequest) -> Option<(&str, Option<String>, Option<String>)> {
         let segs = &req.path_segments;
         if segs.is_empty() {
             return None;
@@ -56,89 +31,131 @@ impl BedrockService {
         match (req.method.clone(), segs.len()) {
             // Foundation models
             (Method::GET, 1) if segs[0] == "foundation-models" => {
-                Some(("ListFoundationModels", None))
+                Some(("ListFoundationModels", None, None))
             }
             (Method::GET, 2) if segs[0] == "foundation-models" => {
-                Some(("GetFoundationModel", Some(decode(&segs[1]))))
+                Some(("GetFoundationModel", Some(decode(&segs[1])), None))
             }
 
             // Guardrails
-            (Method::POST, 1) if segs[0] == "guardrails" => Some(("CreateGuardrail", None)),
-            (Method::GET, 1) if segs[0] == "guardrails" => Some(("ListGuardrails", None)),
+            (Method::POST, 1) if segs[0] == "guardrails" => Some(("CreateGuardrail", None, None)),
+            (Method::GET, 1) if segs[0] == "guardrails" => Some(("ListGuardrails", None, None)),
             (Method::GET, 2) if segs[0] == "guardrails" => {
-                Some(("GetGuardrail", Some(decode(&segs[1]))))
+                Some(("GetGuardrail", Some(decode(&segs[1])), None))
             }
             (Method::PUT, 2) if segs[0] == "guardrails" => {
-                Some(("UpdateGuardrail", Some(decode(&segs[1]))))
+                Some(("UpdateGuardrail", Some(decode(&segs[1])), None))
             }
             (Method::DELETE, 2) if segs[0] == "guardrails" => {
-                Some(("DeleteGuardrail", Some(decode(&segs[1]))))
+                Some(("DeleteGuardrail", Some(decode(&segs[1])), None))
             }
-            // POST /guardrails/{id} -> CreateGuardrailVersion (distinguished from CreateGuardrail by path length)
             (Method::POST, 2) if segs[0] == "guardrails" => {
-                Some(("CreateGuardrailVersion", Some(decode(&segs[1]))))
+                Some(("CreateGuardrailVersion", Some(decode(&segs[1])), None))
             }
+
             // Model customization jobs
             (Method::POST, 1) if segs[0] == "model-customization-jobs" => {
-                Some(("CreateModelCustomizationJob", None))
+                Some(("CreateModelCustomizationJob", None, None))
             }
             (Method::GET, 1) if segs[0] == "model-customization-jobs" => {
-                Some(("ListModelCustomizationJobs", None))
+                Some(("ListModelCustomizationJobs", None, None))
             }
             (Method::GET, 2) if segs[0] == "model-customization-jobs" => {
-                Some(("GetModelCustomizationJob", Some(decode(&segs[1]))))
+                Some(("GetModelCustomizationJob", Some(decode(&segs[1])), None))
             }
             (Method::POST, 3) if segs[0] == "model-customization-jobs" && segs[2] == "stop" => {
-                Some(("StopModelCustomizationJob", Some(decode(&segs[1]))))
+                Some(("StopModelCustomizationJob", Some(decode(&segs[1])), None))
             }
 
             // Provisioned model throughput
             (Method::POST, 1) if segs[0] == "provisioned-model-throughput" => {
-                Some(("CreateProvisionedModelThroughput", None))
+                Some(("CreateProvisionedModelThroughput", None, None))
             }
             (Method::GET, 1) if segs[0] == "provisioned-model-throughputs" => {
-                Some(("ListProvisionedModelThroughputs", None))
+                Some(("ListProvisionedModelThroughputs", None, None))
             }
-            (Method::GET, 2) if segs[0] == "provisioned-model-throughput" => {
-                Some(("GetProvisionedModelThroughput", Some(decode(&segs[1]))))
-            }
-            (Method::PATCH, 2) if segs[0] == "provisioned-model-throughput" => {
-                Some(("UpdateProvisionedModelThroughput", Some(decode(&segs[1]))))
-            }
-            (Method::DELETE, 2) if segs[0] == "provisioned-model-throughput" => {
-                Some(("DeleteProvisionedModelThroughput", Some(decode(&segs[1]))))
-            }
+            (Method::GET, 2) if segs[0] == "provisioned-model-throughput" => Some((
+                "GetProvisionedModelThroughput",
+                Some(decode(&segs[1])),
+                None,
+            )),
+            (Method::PATCH, 2) if segs[0] == "provisioned-model-throughput" => Some((
+                "UpdateProvisionedModelThroughput",
+                Some(decode(&segs[1])),
+                None,
+            )),
+            (Method::DELETE, 2) if segs[0] == "provisioned-model-throughput" => Some((
+                "DeleteProvisionedModelThroughput",
+                Some(decode(&segs[1])),
+                None,
+            )),
 
             // Logging configuration
             (Method::PUT, 2) if segs[0] == "logging" && segs[1] == "modelinvocations" => {
-                Some(("PutModelInvocationLoggingConfiguration", None))
+                Some(("PutModelInvocationLoggingConfiguration", None, None))
             }
             (Method::GET, 2) if segs[0] == "logging" && segs[1] == "modelinvocations" => {
-                Some(("GetModelInvocationLoggingConfiguration", None))
+                Some(("GetModelInvocationLoggingConfiguration", None, None))
             }
             (Method::DELETE, 2) if segs[0] == "logging" && segs[1] == "modelinvocations" => {
-                Some(("DeleteModelInvocationLoggingConfiguration", None))
+                Some(("DeleteModelInvocationLoggingConfiguration", None, None))
             }
 
-            // Runtime operations (same SigV4 service name "bedrock")
+            // Runtime: ApplyGuardrail — POST /guardrail/{id}/version/{version}/apply
+            (Method::POST, 5)
+                if segs[0] == "guardrail" && segs[2] == "version" && segs[4] == "apply" =>
+            {
+                Some((
+                    "ApplyGuardrail",
+                    Some(decode(&segs[1])),
+                    Some(decode(&segs[3])),
+                ))
+            }
+
+            // Runtime: model operations
             (Method::POST, 3) if segs[0] == "model" && segs[2] == "invoke" => {
-                Some(("InvokeModel", Some(decode(&segs[1]))))
+                Some(("InvokeModel", Some(decode(&segs[1])), None))
             }
             (Method::POST, 3) if segs[0] == "model" && segs[2] == "invoke-with-response-stream" => {
-                Some(("InvokeModelWithResponseStream", Some(decode(&segs[1]))))
+                Some((
+                    "InvokeModelWithResponseStream",
+                    Some(decode(&segs[1])),
+                    None,
+                ))
+            }
+            (Method::POST, 3)
+                if segs[0] == "model" && segs[2] == "invoke-with-bidirectional-stream" =>
+            {
+                Some((
+                    "InvokeModelWithBidirectionalStream",
+                    Some(decode(&segs[1])),
+                    None,
+                ))
             }
             (Method::POST, 3) if segs[0] == "model" && segs[2] == "converse" => {
-                Some(("Converse", Some(decode(&segs[1]))))
+                Some(("Converse", Some(decode(&segs[1])), None))
             }
             (Method::POST, 3) if segs[0] == "model" && segs[2] == "converse-stream" => {
-                Some(("ConverseStream", Some(decode(&segs[1]))))
+                Some(("ConverseStream", Some(decode(&segs[1])), None))
+            }
+            (Method::POST, 3) if segs[0] == "model" && segs[2] == "count-tokens" => {
+                Some(("CountTokens", Some(decode(&segs[1])), None))
+            }
+
+            // Runtime: async invoke
+            (Method::POST, 1) if segs[0] == "async-invoke" => {
+                Some(("StartAsyncInvoke", None, None))
+            }
+            (Method::GET, 1) if segs[0] == "async-invoke" => Some(("ListAsyncInvokes", None, None)),
+            (Method::GET, 2) if segs[0] == "async-invoke" => {
+                Some(("GetAsyncInvoke", Some(decode(&segs[1])), None))
             }
 
             // Tags — all POST with ARN in body
-            (Method::POST, 1) if segs[0] == "tagResource" => Some(("TagResource", None)),
-            (Method::POST, 1) if segs[0] == "untagResource" => Some(("UntagResource", None)),
+            (Method::POST, 1) if segs[0] == "tagResource" => Some(("TagResource", None, None)),
+            (Method::POST, 1) if segs[0] == "untagResource" => Some(("UntagResource", None, None)),
             (Method::POST, 1) if segs[0] == "listTagsForResource" => {
-                Some(("ListTagsForResource", None))
+                Some(("ListTagsForResource", None, None))
             }
 
             _ => None,
@@ -148,7 +165,6 @@ impl BedrockService {
     fn list_foundation_models(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let mut model_summaries: Vec<Value> = Vec::new();
 
-        // Optional filters from query parameters
         let by_provider = req.query_params.get("byProvider");
         let by_output_modality = req.query_params.get("byOutputModality");
         let by_input_modality = req.query_params.get("byInputModality");
@@ -288,7 +304,7 @@ impl AwsService for BedrockService {
     }
 
     async fn handle(&self, req: AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        let (action, resource_id) =
+        let (action, resource_id, extra_id) =
             Self::resolve_action(&req).ok_or_else(|| AwsServiceError::ActionNotImplemented {
                 service: "bedrock".to_string(),
                 action: format!("{} {}", req.method, req.raw_path),
@@ -331,7 +347,7 @@ impl AwsService for BedrockService {
                 &req,
                 &resource_id.unwrap_or_default(),
             ),
-            "ListGuardrails" => crate::guardrails::list_guardrails(&self.state),
+            "ListGuardrails" => crate::guardrails::list_guardrails(&self.state, &req),
             "UpdateGuardrail" => {
                 let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
                 crate::guardrails::update_guardrail(
@@ -351,6 +367,12 @@ impl AwsService for BedrockService {
                     &body,
                 )
             }
+            "ApplyGuardrail" => crate::guardrails::apply_guardrail(
+                &self.state,
+                &resource_id.unwrap_or_default(),
+                &extra_id.unwrap_or_default(),
+                &req.body,
+            ),
             // Model customization jobs
             "CreateModelCustomizationJob" => {
                 let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
@@ -362,7 +384,7 @@ impl AwsService for BedrockService {
                 &resource_id.unwrap_or_default(),
             ),
             "ListModelCustomizationJobs" => {
-                crate::customization::list_model_customization_jobs(&self.state)
+                crate::customization::list_model_customization_jobs(&self.state, &req)
             }
             "StopModelCustomizationJob" => crate::customization::stop_model_customization_job(
                 &self.state,
@@ -378,7 +400,7 @@ impl AwsService for BedrockService {
                 &resource_id.unwrap_or_default(),
             ),
             "ListProvisionedModelThroughputs" => {
-                crate::throughput::list_provisioned_model_throughputs(&self.state)
+                crate::throughput::list_provisioned_model_throughputs(&self.state, &req)
             }
             "UpdateProvisionedModelThroughput" => {
                 let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
@@ -411,10 +433,15 @@ impl AwsService for BedrockService {
                 &resource_id.unwrap_or_default(),
                 &req.body,
             ),
+            "CountTokens" => crate::invoke::count_tokens(
+                &self.state,
+                &resource_id.unwrap_or_default(),
+                &req.body,
+            ),
             "Converse" => {
                 crate::converse::converse(&self.state, &resource_id.unwrap_or_default(), &req.body)
             }
-            "InvokeModelWithResponseStream" => {
+            "InvokeModelWithResponseStream" | "InvokeModelWithBidirectionalStream" => {
                 let model_id = resource_id.unwrap_or_default();
                 let response_text = crate::streaming::get_response_text(&self.state, &model_id);
                 let body =
@@ -461,6 +488,16 @@ impl AwsService for BedrockService {
                     headers: http::HeaderMap::new(),
                 })
             }
+            // Async invoke
+            "StartAsyncInvoke" => {
+                let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
+                crate::async_invoke::start_async_invoke(&self.state, &req, &body)
+            }
+            "GetAsyncInvoke" => {
+                crate::async_invoke::get_async_invoke(&self.state, &resource_id.unwrap_or_default())
+            }
+            "ListAsyncInvokes" => crate::async_invoke::list_async_invokes(&self.state, &req),
+
             _ => Err(AwsServiceError::ActionNotImplemented {
                 service: "bedrock".to_string(),
                 action: action.to_string(),
@@ -481,6 +518,7 @@ impl AwsService for BedrockService {
             "UpdateGuardrail",
             "DeleteGuardrail",
             "CreateGuardrailVersion",
+            "ApplyGuardrail",
             "CreateModelCustomizationJob",
             "GetModelCustomizationJob",
             "ListModelCustomizationJobs",
@@ -495,8 +533,13 @@ impl AwsService for BedrockService {
             "DeleteModelInvocationLoggingConfiguration",
             "InvokeModel",
             "InvokeModelWithResponseStream",
+            "InvokeModelWithBidirectionalStream",
             "Converse",
             "ConverseStream",
+            "CountTokens",
+            "StartAsyncInvoke",
+            "GetAsyncInvoke",
+            "ListAsyncInvokes",
         ]
     }
 }

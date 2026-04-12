@@ -513,6 +513,198 @@ async fn bedrock_converse_conformance() {
 }
 
 // ---------------------------------------------------------------------------
+// ApplyGuardrail (Runtime)
+// ---------------------------------------------------------------------------
+
+#[test_action("bedrock-runtime", "ApplyGuardrail", checksum = "ab609d3b")]
+#[tokio::test]
+async fn bedrock_apply_guardrail_conformance() {
+    let server = TestServer::start().await;
+    let bedrock_client = server.bedrock_client().await;
+    let runtime_client = server.bedrock_runtime_client().await;
+
+    let resp = bedrock_client
+        .create_guardrail()
+        .name("apply-conf")
+        .blocked_input_messaging("blocked")
+        .blocked_outputs_messaging("blocked")
+        .word_policy_config(
+            aws_sdk_bedrock::types::GuardrailWordPolicyConfig::builder()
+                .words_config(
+                    aws_sdk_bedrock::types::GuardrailWordConfig::builder()
+                        .text("badword")
+                        .build()
+                        .unwrap(),
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let guardrail_id = resp.guardrail_id().to_string();
+
+    let version_resp = bedrock_client
+        .create_guardrail_version()
+        .guardrail_identifier(&guardrail_id)
+        .send()
+        .await
+        .unwrap();
+
+    let result = runtime_client
+        .apply_guardrail()
+        .guardrail_identifier(&guardrail_id)
+        .guardrail_version(version_resp.version())
+        .source(aws_sdk_bedrockruntime::types::GuardrailContentSource::Input)
+        .content(aws_sdk_bedrockruntime::types::GuardrailContentBlock::Text(
+            aws_sdk_bedrockruntime::types::GuardrailTextBlock::builder()
+                .text("this has badword in it")
+                .build()
+                .unwrap(),
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(result.action().as_str(), "GUARDRAIL_INTERVENED");
+}
+
+#[test_action("bedrock-runtime", "CountTokens", checksum = "6f28bb5c")]
+#[tokio::test]
+async fn bedrock_count_tokens_conformance() {
+    let server = TestServer::start().await;
+    let http_client = reqwest::Client::new();
+
+    let body = serde_json::json!({
+        "input": {
+            "converse": {
+                "messages": [
+                    {"role": "user", "content": [{"text": "Hello world"}]}
+                ]
+            }
+        }
+    });
+
+    let resp = http_client
+        .post(format!(
+            "{}/model/anthropic.claude-3-5-sonnet-20241022-v2:0/count-tokens",
+            server.endpoint()
+        ))
+        .header("content-type", "application/json")
+        .header(
+            "authorization",
+            "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20260411/us-east-1/bedrock/aws4_request, SignedHeaders=host, Signature=fake",
+        )
+        .body(serde_json::to_string(&body).unwrap())
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+    let result: serde_json::Value = resp.json().await.unwrap();
+    assert!(result["inputTokens"].as_i64().unwrap() > 0);
+}
+
+#[test_action("bedrock-runtime", "StartAsyncInvoke", checksum = "bee22eb2")]
+#[test_action("bedrock-runtime", "GetAsyncInvoke", checksum = "fa2624ed")]
+#[test_action("bedrock-runtime", "ListAsyncInvokes", checksum = "b76e6e1c")]
+#[tokio::test]
+async fn bedrock_async_invoke_conformance() {
+    let server = TestServer::start().await;
+    let http_client = reqwest::Client::new();
+
+    let body = serde_json::json!({
+        "modelId": "anthropic.claude-3-5-sonnet-20241022-v2:0",
+        "modelInput": {"messages": [{"role": "user", "content": "Hello"}]},
+        "outputDataConfig": {"s3OutputDataConfig": {"s3Uri": "s3://bucket/out/"}}
+    });
+
+    let resp = http_client
+        .post(format!("{}/async-invoke", server.endpoint()))
+        .header("content-type", "application/json")
+        .header(
+            "authorization",
+            "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20260411/us-east-1/bedrock/aws4_request, SignedHeaders=host, Signature=fake",
+        )
+        .body(serde_json::to_string(&body).unwrap())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let result: serde_json::Value = resp.json().await.unwrap();
+    let arn = result["invocationArn"].as_str().unwrap();
+    assert!(arn.contains("async-invoke/"));
+
+    // Get
+    let resp = http_client
+        .get(format!(
+            "{}/async-invoke/{}",
+            server.endpoint(),
+            arn.rsplit('/').next().unwrap()
+        ))
+        .header(
+            "authorization",
+            "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20260411/us-east-1/bedrock/aws4_request, SignedHeaders=host, Signature=fake",
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // List
+    let resp = http_client
+        .get(format!("{}/async-invoke", server.endpoint()))
+        .header(
+            "authorization",
+            "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20260411/us-east-1/bedrock/aws4_request, SignedHeaders=host, Signature=fake",
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let result: serde_json::Value = resp.json().await.unwrap();
+    assert!(!result["asyncInvokeSummaries"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+}
+
+#[test_action(
+    "bedrock-runtime",
+    "InvokeModelWithBidirectionalStream",
+    checksum = "6b0e9775"
+)]
+#[tokio::test]
+async fn bedrock_bidirectional_stream_conformance() {
+    let server = TestServer::start().await;
+    let http_client = reqwest::Client::new();
+
+    let body = serde_json::json!({"messages": [{"role": "user", "content": "Hello"}]});
+
+    let resp = http_client
+        .post(format!(
+            "{}/model/amazon.nova-sonic-v1:0/invoke-with-bidirectional-stream",
+            server.endpoint()
+        ))
+        .header("content-type", "application/json")
+        .header(
+            "authorization",
+            "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20260411/us-east-1/bedrock/aws4_request, SignedHeaders=host, Signature=fake",
+        )
+        .body(serde_json::to_string(&body).unwrap())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        resp.headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "application/vnd.amazon.eventstream"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Streaming (raw HTTP since SDK event stream parsing is complex)
 // ---------------------------------------------------------------------------
 

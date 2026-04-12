@@ -25,6 +25,8 @@ pub struct BedrockState {
     pub invocations: Vec<ModelInvocation>,
     /// Custom responses configured per model ID via simulation endpoint.
     pub custom_responses: HashMap<String, String>,
+    /// Async invocations keyed by invocation ARN.
+    pub async_invocations: HashMap<String, AsyncInvocation>,
 }
 
 impl BedrockState {
@@ -40,6 +42,7 @@ impl BedrockState {
             logging_config: None,
             invocations: Vec::new(),
             custom_responses: HashMap::new(),
+            async_invocations: HashMap::new(),
         }
     }
 
@@ -52,6 +55,7 @@ impl BedrockState {
         self.logging_config = None;
         self.invocations.clear();
         self.custom_responses.clear();
+        self.async_invocations.clear();
     }
 }
 
@@ -135,4 +139,17 @@ pub struct ModelInvocation {
     pub input: String,
     pub output: String,
     pub timestamp: DateTime<Utc>,
+}
+
+#[derive(Clone)]
+pub struct AsyncInvocation {
+    pub invocation_arn: String,
+    pub model_arn: String,
+    pub model_input: serde_json::Value,
+    pub output_data_config: serde_json::Value,
+    pub client_request_token: Option<String>,
+    pub status: String,
+    pub submit_time: DateTime<Utc>,
+    pub last_modified_time: DateTime<Utc>,
+    pub end_time: Option<DateTime<Utc>>,
 }
