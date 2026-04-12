@@ -193,10 +193,7 @@ fn parse_lambda_response(response: serde_json::Value) -> Result<AwsResponse, Aws
                 AwsServiceError::aws_error(
                     StatusCode::BAD_GATEWAY,
                     "BadGatewayException",
-                    format!(
-                        "Lambda response has invalid base64 body: {}",
-                        e
-                    ),
+                    format!("Lambda response has invalid base64 body: {}", e),
                 )
             })?)
         } else {

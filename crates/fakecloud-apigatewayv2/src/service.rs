@@ -1666,12 +1666,12 @@ impl ApiGatewayV2Service {
                 .collect();
             stage_entries.sort_by(|a, b| a.0.cmp(&b.0));
             let (api_id, _stage) = stage_entries.into_iter().next().ok_or_else(|| {
-                    AwsServiceError::aws_error(
-                        StatusCode::NOT_FOUND,
-                        "NotFoundException",
-                        format!("Stage not found: {}", stage_name),
-                    )
-                })?;
+                AwsServiceError::aws_error(
+                    StatusCode::NOT_FOUND,
+                    "NotFoundException",
+                    format!("Stage not found: {}", stage_name),
+                )
+            })?;
 
             // Get routes for this API
             let routes = state
@@ -1801,7 +1801,13 @@ impl ApiGatewayV2Service {
         }
 
         // Record this request to history
-        self.record_request(&req, &api_id, stage_name, &resource_path, response.status.as_u16());
+        self.record_request(
+            &req,
+            &api_id,
+            stage_name,
+            &resource_path,
+            response.status.as_u16(),
+        );
 
         Ok(response)
     }
