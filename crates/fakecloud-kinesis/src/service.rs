@@ -6,24 +6,33 @@ use md5::{Digest, Md5};
 use serde_json::{json, Value};
 
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
+use fakecloud_core::validation::{
+    validate_optional_json_range, validate_optional_string_length, validate_string_length,
+};
 
 use crate::state::{KinesisRecord, KinesisShard, KinesisStream, SharedKinesisState};
 
 const SUPPORTED_ACTIONS: &[&str] = &[
+    "AddTagsToStream",
     "CreateStream",
+    "DecreaseStreamRetentionPeriod",
+    "DeleteStream",
+    "DescribeAccountSettings",
+    "DescribeLimits",
     "DescribeStream",
     "DescribeStreamSummary",
-    "ListStreams",
-    "DeleteStream",
     "GetRecords",
     "GetShardIterator",
+    "IncreaseStreamRetentionPeriod",
+    "ListStreams",
+    "ListTagsForStream",
     "PutRecord",
     "PutRecords",
-    "AddTagsToStream",
-    "ListTagsForStream",
     "RemoveTagsFromStream",
-    "IncreaseStreamRetentionPeriod",
-    "DecreaseStreamRetentionPeriod",
+    "UpdateAccountSettings",
+    "UpdateMaxRecordSize",
+    "UpdateStreamMode",
+    "UpdateStreamWarmThroughput",
 ];
 
 pub struct KinesisService {
@@ -58,6 +67,12 @@ impl AwsService for KinesisService {
             "RemoveTagsFromStream" => self.remove_tags_from_stream(&request),
             "IncreaseStreamRetentionPeriod" => self.increase_stream_retention_period(&request),
             "DecreaseStreamRetentionPeriod" => self.decrease_stream_retention_period(&request),
+            "DescribeAccountSettings" => self.describe_account_settings(&request),
+            "UpdateAccountSettings" => self.update_account_settings(&request),
+            "DescribeLimits" => self.describe_limits(&request),
+            "UpdateStreamMode" => self.update_stream_mode(&request),
+            "UpdateStreamWarmThroughput" => self.update_stream_warm_throughput(&request),
+            "UpdateMaxRecordSize" => self.update_max_record_size(&request),
             _ => Err(AwsServiceError::action_not_implemented(
                 self.service_name(),
                 &request.action,
@@ -105,6 +120,8 @@ impl KinesisService {
             open_shard_count: shard_count,
             tags: std::collections::HashMap::new(),
             shards: build_stream_shards(shard_count),
+            warm_throughput_mibps: None,
+            max_record_size_kib: None,
         };
         state.streams.insert(stream_name.to_string(), stream);
 
@@ -466,6 +483,146 @@ impl KinesisService {
         stream.retention_period_hours = hours as i32;
         Ok(AwsResponse::ok_json(json!({})))
     }
+
+    fn describe_account_settings(
+        &self,
+        _request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let state = self.state.read();
+        Ok(AwsResponse::ok_json(json!({
+            "MinimumThroughputBillingCommitment": {
+                "Status": state.billing_commitment_status,
+            }
+        })))
+    }
+
+    fn update_account_settings(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        let commitment = &body["MinimumThroughputBillingCommitment"];
+        let status = commitment["Status"]
+            .as_str()
+            .ok_or_else(|| invalid_argument("MinimumThroughputBillingCommitment.Status is required"))?;
+        if status != "ENABLED" && status != "DISABLED" {
+            return Err(invalid_argument(format!(
+                "Invalid MinimumThroughputBillingCommitment status: {status}"
+            )));
+        }
+
+        let mut state = self.state.write();
+        state.billing_commitment_status = status.to_string();
+
+        Ok(AwsResponse::ok_json(json!({
+            "MinimumThroughputBillingCommitment": {
+                "Status": status,
+            }
+        })))
+    }
+
+    fn describe_limits(&self, _request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let state = self.state.read();
+        let open_shard_count: i32 = state.streams.values().map(|s| s.open_shard_count).sum();
+        let on_demand_count = state
+            .streams
+            .values()
+            .filter(|s| s.stream_mode == "ON_DEMAND")
+            .count() as i32;
+
+        Ok(AwsResponse::ok_json(json!({
+            "ShardLimit": state.shard_limit,
+            "OpenShardCount": open_shard_count,
+            "OnDemandStreamCount": on_demand_count,
+            "OnDemandStreamCountLimit": state.on_demand_stream_count_limit,
+        })))
+    }
+
+    fn update_stream_mode(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        validate_stream_id(&body)?;
+        let stream_arn = body["StreamARN"]
+            .as_str()
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| invalid_argument("StreamARN is required"))?;
+        validate_string_length("StreamARN", stream_arn, 1, 2048)?;
+
+        let stream_mode = body["StreamModeDetails"]["StreamMode"]
+            .as_str()
+            .ok_or_else(|| invalid_argument("StreamModeDetails.StreamMode is required"))?;
+        if stream_mode != "PROVISIONED" && stream_mode != "ON_DEMAND" {
+            return Err(invalid_argument(format!(
+                "Invalid StreamMode: {stream_mode}"
+            )));
+        }
+
+        let mut state = self.state.write();
+        let stream_name = state
+            .stream_name_from_arn(stream_arn)
+            .ok_or_else(|| resource_not_found_arn(stream_arn))?;
+        let stream = state.streams.get_mut(&stream_name).unwrap();
+        stream.stream_mode = stream_mode.to_string();
+
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    fn update_stream_warm_throughput(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        validate_stream_id(&body)?;
+        let warm_mibps = body["WarmThroughputMiBps"]
+            .as_i64()
+            .ok_or_else(|| invalid_argument("WarmThroughputMiBps is required"))?;
+        if warm_mibps < 0 {
+            return Err(invalid_argument("WarmThroughputMiBps must be >= 0"));
+        }
+
+        let mut state = self.state.write();
+        let stream_name = resolve_stream_name(&state, &body)?;
+        let account_id = state.account_id.clone();
+        let stream_arn = state.stream_arn(&stream_name);
+        let stream = state
+            .streams
+            .get_mut(&stream_name)
+            .ok_or_else(|| stream_not_found(&account_id, &stream_name))?;
+        stream.warm_throughput_mibps = Some(warm_mibps);
+
+        Ok(AwsResponse::ok_json(json!({
+            "StreamARN": stream_arn,
+            "StreamName": stream_name,
+            "WarmThroughput": {
+                "TargetMiBps": warm_mibps,
+                "CurrentMiBps": warm_mibps,
+            }
+        })))
+    }
+
+    fn update_max_record_size(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        validate_stream_id(&body)?;
+        validate_optional_json_range("MaxRecordSizeInKiB", &body["MaxRecordSizeInKiB"], 1024, 10240)?;
+        let max_size = body["MaxRecordSizeInKiB"]
+            .as_i64()
+            .ok_or_else(|| invalid_argument("MaxRecordSizeInKiB is required"))?;
+
+        let mut state = self.state.write();
+        let stream_arn = body["StreamARN"]
+            .as_str()
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| invalid_argument("StreamARN is required"))?;
+        let stream_name = state
+            .stream_name_from_arn(stream_arn)
+            .ok_or_else(|| resource_not_found_arn(stream_arn))?;
+        let stream = state.streams.get_mut(&stream_name).unwrap();
+        stream.max_record_size_kib = Some(max_size);
+
+        Ok(AwsResponse::ok_json(json!({})))
+    }
 }
 
 impl crate::state::KinesisState {
@@ -635,6 +792,18 @@ fn find_record_index_by_sequence_number(
         .iter()
         .position(|record| record.sequence_number == sequence_number)
         .ok_or_else(|| invalid_argument("StartingSequenceNumber is invalid"))
+}
+
+fn validate_stream_id(body: &Value) -> Result<(), AwsServiceError> {
+    validate_optional_string_length("StreamId", body["StreamId"].as_str(), 1, 24)
+}
+
+fn resource_not_found_arn(arn: &str) -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::BAD_REQUEST,
+        "ResourceNotFoundException",
+        format!("Resource {arn} not found."),
+    )
 }
 
 fn invalid_argument(message: impl Into<String>) -> AwsServiceError {

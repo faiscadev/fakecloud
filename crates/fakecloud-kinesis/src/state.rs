@@ -13,6 +13,9 @@ pub struct KinesisState {
     pub streams: HashMap<String, KinesisStream>,
     pub iterators: HashMap<String, ShardIteratorLease>,
     pub lambda_checkpoints: HashMap<String, usize>,
+    pub shard_limit: i32,
+    pub on_demand_stream_count_limit: i32,
+    pub billing_commitment_status: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -28,6 +31,8 @@ pub struct KinesisStream {
     pub open_shard_count: i32,
     pub tags: HashMap<String, String>,
     pub shards: Vec<KinesisShard>,
+    pub warm_throughput_mibps: Option<i64>,
+    pub max_record_size_kib: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -62,6 +67,9 @@ impl KinesisState {
             streams: HashMap::new(),
             iterators: HashMap::new(),
             lambda_checkpoints: HashMap::new(),
+            shard_limit: 500,
+            on_demand_stream_count_limit: 50,
+            billing_commitment_status: "DISABLED".to_string(),
         }
     }
 
@@ -69,6 +77,14 @@ impl KinesisState {
         self.streams.clear();
         self.iterators.clear();
         self.lambda_checkpoints.clear();
+        self.billing_commitment_status = "DISABLED".to_string();
+    }
+
+    pub fn stream_name_from_arn(&self, arn: &str) -> Option<String> {
+        arn.rsplit('/')
+            .next()
+            .filter(|name| self.streams.contains_key(*name))
+            .map(|name| name.to_string())
     }
 
     pub fn stream_arn(&self, stream_name: &str) -> String {
