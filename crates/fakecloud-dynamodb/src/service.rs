@@ -3913,13 +3913,16 @@ fn evaluate_condition(
 }
 
 fn extract_function_arg<'a>(expr: &'a str, func_name: &str) -> Option<&'a str> {
-    let prefix = format!("{func_name}(");
-    if let Some(rest) = expr.strip_prefix(&prefix) {
-        if let Some(inner) = rest.strip_suffix(')') {
-            return Some(inner.trim());
-        }
-    }
-    None
+    // aws-sdk-go v2's expression builder emits function calls with a space
+    // between the name and the opening paren (`attribute_exists (#0)`),
+    // while hand-written expressions usually don't — accept both.
+    let with_paren = format!("{func_name}(");
+    let with_space = format!("{func_name} (");
+    let rest = expr
+        .strip_prefix(&with_paren)
+        .or_else(|| expr.strip_prefix(&with_space))?;
+    let inner = rest.strip_suffix(')')?;
+    Some(inner.trim())
 }
 
 fn evaluate_key_condition(
@@ -7066,6 +7069,73 @@ mod tests {
         assert!(
             !evaluate_filter_expression("(#s IN (:a, :pe)) AND (#p = :h)", &item2, &names, &values,),
             "(complete IN (active, pending)) AND (high = high) should not match"
+        );
+    }
+
+    #[test]
+    fn test_evaluate_condition_attribute_exists_with_space() {
+        // aws-sdk-go v2's expression.NewBuilder emits function calls with a
+        // space between the name and the opening paren:
+        //     "(attribute_exists (#0)) AND ((attribute_not_exists (#1)) OR (#1 = :0))"
+        // Before fix: extract_function_arg used strip_prefix("attribute_exists(")
+        // with no space, so these fell through the filter leaf entirely and
+        // hit evaluate_single_key_condition's silent-true fallthrough —
+        // every conditional write was silently accepted.
+        let item = cond_item(&[("store_id", "s-1")]);
+        let names = cond_names(&[("#0", "store_id"), ("#1", "active_viewer_tab_id")]);
+        let values = cond_values(&[(":0", "tab-A")]);
+
+        // On an existing item without active_viewer_tab_id: exists(store_id)
+        // is true, not_exists(active_viewer_tab_id) is true → OK.
+        assert!(
+            evaluate_condition(
+                "(attribute_exists (#0)) AND ((attribute_not_exists (#1)) OR (#1 = :0))",
+                Some(&item),
+                &names,
+                &values,
+            )
+            .is_ok(),
+            "claim-lease compound on free item should succeed"
+        );
+
+        // On a missing item: exists(store_id) is false → whole AND false → Err.
+        assert!(
+            evaluate_condition(
+                "(attribute_exists (#0)) AND ((attribute_not_exists (#1)) OR (#1 = :0))",
+                None,
+                &names,
+                &values,
+            )
+            .is_err(),
+            "claim-lease compound on missing item must fail attribute_exists branch"
+        );
+
+        // On an item already held by tab-B: exists ✓, not_exists ✗, #1 = :0 ✗
+        // → (✓) AND ((✗) OR (✗)) → false → Err.
+        let held = cond_item(&[("store_id", "s-1"), ("active_viewer_tab_id", "tab-B")]);
+        assert!(
+            evaluate_condition(
+                "(attribute_exists (#0)) AND ((attribute_not_exists (#1)) OR (#1 = :0))",
+                Some(&held),
+                &names,
+                &values,
+            )
+            .is_err(),
+            "claim-lease compound on item held by another tab must fail"
+        );
+
+        // Same tab re-claiming: exists ✓, not_exists ✗, #1 = :0 ✓
+        // → (✓) AND ((✗) OR (✓)) → true → Ok.
+        let self_held = cond_item(&[("store_id", "s-1"), ("active_viewer_tab_id", "tab-A")]);
+        assert!(
+            evaluate_condition(
+                "(attribute_exists (#0)) AND ((attribute_not_exists (#1)) OR (#1 = :0))",
+                Some(&self_held),
+                &names,
+                &values,
+            )
+            .is_ok(),
+            "same-tab re-claim must succeed"
         );
     }
 
