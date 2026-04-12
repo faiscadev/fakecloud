@@ -6,24 +6,33 @@ use md5::{Digest, Md5};
 use serde_json::{json, Value};
 
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
+use fakecloud_core::validation::{
+    validate_optional_json_range, validate_optional_string_length, validate_string_length,
+};
 
-use crate::state::{KinesisRecord, KinesisShard, KinesisStream, SharedKinesisState};
+use crate::state::{
+    KinesisConsumer, KinesisRecord, KinesisShard, KinesisStream, SharedKinesisState,
+};
 
 const SUPPORTED_ACTIONS: &[&str] = &[
+    "AddTagsToStream",
     "CreateStream",
-    "DescribeStream",
-    "DescribeStreamSummary",
-    "ListStreams",
+    "DecreaseStreamRetentionPeriod",
     "DeleteStream",
+    "DeregisterStreamConsumer",
+    "DescribeStream",
+    "DescribeStreamConsumer",
+    "DescribeStreamSummary",
     "GetRecords",
     "GetShardIterator",
+    "IncreaseStreamRetentionPeriod",
+    "ListStreamConsumers",
+    "ListStreams",
+    "ListTagsForStream",
     "PutRecord",
     "PutRecords",
-    "AddTagsToStream",
-    "ListTagsForStream",
+    "RegisterStreamConsumer",
     "RemoveTagsFromStream",
-    "IncreaseStreamRetentionPeriod",
-    "DecreaseStreamRetentionPeriod",
 ];
 
 pub struct KinesisService {
@@ -58,6 +67,10 @@ impl AwsService for KinesisService {
             "RemoveTagsFromStream" => self.remove_tags_from_stream(&request),
             "IncreaseStreamRetentionPeriod" => self.increase_stream_retention_period(&request),
             "DecreaseStreamRetentionPeriod" => self.decrease_stream_retention_period(&request),
+            "RegisterStreamConsumer" => self.register_stream_consumer(&request),
+            "DeregisterStreamConsumer" => self.deregister_stream_consumer(&request),
+            "DescribeStreamConsumer" => self.describe_stream_consumer(&request),
+            "ListStreamConsumers" => self.list_stream_consumers(&request),
             _ => Err(AwsServiceError::action_not_implemented(
                 self.service_name(),
                 &request.action,
@@ -466,6 +479,207 @@ impl KinesisService {
         stream.retention_period_hours = hours as i32;
         Ok(AwsResponse::ok_json(json!({})))
     }
+
+    fn register_stream_consumer(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        validate_stream_id(&body)?;
+        let stream_arn = body["StreamARN"]
+            .as_str()
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| invalid_argument("StreamARN is required"))?;
+        validate_string_length("StreamARN", stream_arn, 1, 2048)?;
+        let consumer_name = body["ConsumerName"]
+            .as_str()
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| invalid_argument("ConsumerName is required"))?;
+        validate_string_length("ConsumerName", consumer_name, 1, 128)?;
+
+        let mut state = self.state.write();
+        let _stream_name = state
+            .stream_name_from_arn(stream_arn)
+            .ok_or_else(|| resource_not_found_arn(stream_arn))?;
+
+        let now = Utc::now();
+        let consumer_arn = format!(
+            "{}/consumer/{}:{}",
+            stream_arn,
+            consumer_name,
+            now.timestamp()
+        );
+
+        // Check for duplicate consumer name on this stream
+        let exists = state.consumers.values().any(|c| {
+            c.stream_arn == stream_arn && c.consumer_name == consumer_name
+        });
+        if exists {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceInUseException",
+                format!("Consumer {consumer_name} already exists on stream."),
+            ));
+        }
+
+        let consumer = KinesisConsumer {
+            consumer_name: consumer_name.to_string(),
+            consumer_arn: consumer_arn.clone(),
+            consumer_status: "ACTIVE".to_string(),
+            consumer_creation_timestamp: now,
+            stream_arn: stream_arn.to_string(),
+        };
+        state.consumers.insert(consumer_arn.clone(), consumer);
+
+        Ok(AwsResponse::ok_json(json!({
+            "Consumer": {
+                "ConsumerName": consumer_name,
+                "ConsumerARN": consumer_arn,
+                "ConsumerStatus": "ACTIVE",
+                "ConsumerCreationTimestamp": now.timestamp_millis() as f64 / 1000.0,
+            }
+        })))
+    }
+
+    fn deregister_stream_consumer(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        validate_stream_id(&body)?;
+        let mut state = self.state.write();
+
+        let consumer_arn = if let Some(arn) = body["ConsumerARN"]
+            .as_str()
+            .filter(|v| !v.is_empty())
+        {
+            validate_string_length("ConsumerARN", arn, 1, 2048)?;
+            arn.to_string()
+        } else {
+            let stream_arn = body["StreamARN"]
+                .as_str()
+                .filter(|v| !v.is_empty())
+                .ok_or_else(|| {
+                    invalid_argument("Either ConsumerARN or StreamARN+ConsumerName is required")
+                })?;
+            let consumer_name = body["ConsumerName"]
+                .as_str()
+                .filter(|v| !v.is_empty())
+                .ok_or_else(|| invalid_argument("ConsumerName is required with StreamARN"))?;
+            state
+                .consumers
+                .values()
+                .find(|c| c.stream_arn == stream_arn && c.consumer_name == consumer_name)
+                .map(|c| c.consumer_arn.clone())
+                .ok_or_else(|| {
+                    AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "ResourceNotFoundException",
+                        format!("Consumer {consumer_name} not found."),
+                    )
+                })?
+        };
+
+        state
+            .consumers
+            .remove(&consumer_arn)
+            .ok_or_else(|| resource_not_found_arn(&consumer_arn))?;
+
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    fn describe_stream_consumer(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        validate_stream_id(&body)?;
+        let state = self.state.read();
+
+        let consumer = if let Some(arn) = body["ConsumerARN"]
+            .as_str()
+            .filter(|v| !v.is_empty())
+        {
+            validate_string_length("ConsumerARN", arn, 1, 2048)?;
+            state
+                .consumers
+                .get(arn)
+                .ok_or_else(|| resource_not_found_arn(arn))?
+        } else {
+            let stream_arn = body["StreamARN"]
+                .as_str()
+                .filter(|v| !v.is_empty())
+                .ok_or_else(|| {
+                    invalid_argument("Either ConsumerARN or StreamARN+ConsumerName is required")
+                })?;
+            let consumer_name = body["ConsumerName"]
+                .as_str()
+                .filter(|v| !v.is_empty())
+                .ok_or_else(|| invalid_argument("ConsumerName is required with StreamARN"))?;
+            state
+                .consumers
+                .values()
+                .find(|c| c.stream_arn == stream_arn && c.consumer_name == consumer_name)
+                .ok_or_else(|| {
+                    AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "ResourceNotFoundException",
+                        format!("Consumer {consumer_name} not found."),
+                    )
+                })?
+        };
+
+        Ok(AwsResponse::ok_json(json!({
+            "ConsumerDescription": {
+                "ConsumerName": consumer.consumer_name,
+                "ConsumerARN": consumer.consumer_arn,
+                "ConsumerStatus": consumer.consumer_status,
+                "ConsumerCreationTimestamp": consumer.consumer_creation_timestamp.timestamp_millis() as f64 / 1000.0,
+                "StreamARN": consumer.stream_arn,
+            }
+        })))
+    }
+
+    fn list_stream_consumers(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        validate_stream_id(&body)?;
+        let stream_arn = body["StreamARN"]
+            .as_str()
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| invalid_argument("StreamARN is required"))?;
+        validate_string_length("StreamARN", stream_arn, 1, 2048)?;
+        validate_optional_string_length("NextToken", body["NextToken"].as_str(), 1, 1048576)?;
+        validate_optional_json_range("MaxResults", &body["MaxResults"], 1, 10000)?;
+        let max_results = body["MaxResults"].as_i64().unwrap_or(100) as usize;
+
+        let state = self.state.read();
+        let mut consumers: Vec<Value> = state
+            .consumers
+            .values()
+            .filter(|c| c.stream_arn == stream_arn)
+            .map(|c| {
+                json!({
+                    "ConsumerName": c.consumer_name,
+                    "ConsumerARN": c.consumer_arn,
+                    "ConsumerStatus": c.consumer_status,
+                    "ConsumerCreationTimestamp": c.consumer_creation_timestamp.timestamp_millis() as f64 / 1000.0,
+                })
+            })
+            .collect();
+        consumers.sort_by(|a, b| {
+            a["ConsumerName"]
+                .as_str()
+                .cmp(&b["ConsumerName"].as_str())
+        });
+        consumers.truncate(max_results);
+
+        Ok(AwsResponse::ok_json(json!({
+            "Consumers": consumers,
+        })))
+    }
 }
 
 impl crate::state::KinesisState {
@@ -635,6 +849,18 @@ fn find_record_index_by_sequence_number(
         .iter()
         .position(|record| record.sequence_number == sequence_number)
         .ok_or_else(|| invalid_argument("StartingSequenceNumber is invalid"))
+}
+
+fn validate_stream_id(body: &Value) -> Result<(), AwsServiceError> {
+    validate_optional_string_length("StreamId", body["StreamId"].as_str(), 1, 24)
+}
+
+fn resource_not_found_arn(arn: &str) -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::BAD_REQUEST,
+        "ResourceNotFoundException",
+        format!("Resource {arn} not found."),
+    )
 }
 
 fn invalid_argument(message: impl Into<String>) -> AwsServiceError {
