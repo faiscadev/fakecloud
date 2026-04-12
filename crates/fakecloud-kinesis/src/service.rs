@@ -206,9 +206,15 @@ impl KinesisService {
         let stream_name = resolve_stream_name(&self.state.read(), &body)?;
 
         let mut state = self.state.write();
-        if state.streams.remove(&stream_name).is_none() {
+        let stream = state.streams.remove(&stream_name);
+        if stream.is_none() {
             return Err(stream_not_found(&state.account_id, &stream_name));
         }
+        // Clean up consumers associated with this stream
+        let stream_arn = state.stream_arn(&stream_name);
+        state
+            .consumers
+            .retain(|_, c| c.stream_arn != stream_arn);
 
         Ok(AwsResponse::ok_json(json!({})))
     }
@@ -674,11 +680,35 @@ impl KinesisService {
                 .as_str()
                 .cmp(&b["ConsumerName"].as_str())
         });
-        consumers.truncate(max_results);
 
-        Ok(AwsResponse::ok_json(json!({
-            "Consumers": consumers,
-        })))
+        // Handle NextToken-based pagination
+        let next_token = body["NextToken"].as_str();
+        if let Some(token) = next_token {
+            if let Some(pos) = consumers
+                .iter()
+                .position(|c| c["ConsumerName"].as_str() == Some(token))
+            {
+                consumers = consumers.split_off(pos + 1);
+            }
+        }
+
+        let has_more = consumers.len() > max_results;
+        consumers.truncate(max_results);
+        let response_token = if has_more {
+            consumers
+                .last()
+                .and_then(|c| c["ConsumerName"].as_str())
+                .map(|s| json!(s))
+        } else {
+            None
+        };
+
+        let mut resp = json!({ "Consumers": consumers });
+        if let Some(token) = response_token {
+            resp["NextToken"] = token;
+        }
+
+        Ok(AwsResponse::ok_json(resp))
     }
 }
 
