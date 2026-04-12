@@ -47,6 +47,14 @@ pub struct BedrockState {
     pub prompt_routers: HashMap<String, PromptRouter>,
     /// Resource policies keyed by resource ARN.
     pub resource_policies: HashMap<String, String>,
+    /// Marketplace model endpoints keyed by endpoint ARN.
+    pub marketplace_endpoints: HashMap<String, MarketplaceModelEndpoint>,
+    /// Foundation model agreements keyed by agreement ID.
+    pub foundation_model_agreements: HashMap<String, FoundationModelAgreement>,
+    /// Use case for model access.
+    pub use_case_for_model_access: Option<serde_json::Value>,
+    /// Enforced guardrail configurations keyed by config ID.
+    pub enforced_guardrail_configs: HashMap<String, serde_json::Value>,
 }
 
 impl BedrockState {
@@ -73,6 +81,10 @@ impl BedrockState {
             inference_profiles: HashMap::new(),
             prompt_routers: HashMap::new(),
             resource_policies: HashMap::new(),
+            marketplace_endpoints: HashMap::new(),
+            foundation_model_agreements: HashMap::new(),
+            use_case_for_model_access: None,
+            enforced_guardrail_configs: HashMap::new(),
         }
     }
 
@@ -96,6 +108,10 @@ impl BedrockState {
         self.inference_profiles.clear();
         self.prompt_routers.clear();
         self.resource_policies.clear();
+        self.marketplace_endpoints.clear();
+        self.foundation_model_agreements.clear();
+        self.use_case_for_model_access = None;
+        self.enforced_guardrail_configs.clear();
     }
 }
 
@@ -301,4 +317,22 @@ pub struct PromptRouter {
     pub prompt_router_type: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Clone)]
+pub struct MarketplaceModelEndpoint {
+    pub endpoint_arn: String,
+    pub endpoint_name: String,
+    pub model_source_identifier: String,
+    pub status: String,
+    pub endpoint_config: serde_json::Value,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Clone)]
+pub struct FoundationModelAgreement {
+    pub agreement_id: String,
+    pub model_id: String,
+    pub created_at: DateTime<Utc>,
 }

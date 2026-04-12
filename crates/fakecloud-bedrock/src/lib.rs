@@ -4,12 +4,15 @@ pub mod custom_model_deployments;
 pub mod custom_models;
 pub mod customization;
 
+pub mod enforced_guardrails;
 pub mod evaluation;
+pub mod foundation_model_agreements;
 pub mod guardrails;
 pub mod inference_profiles;
 pub mod invocation_jobs;
 pub mod invoke;
 pub mod logging;
+pub mod marketplace;
 pub mod model_copy;
 pub mod model_import;
 pub mod models;

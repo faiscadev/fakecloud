@@ -705,6 +705,262 @@ async fn bedrock_bidirectional_stream_conformance() {
 }
 
 // ---------------------------------------------------------------------------
+// Marketplace + Agreements + Enforced Guardrails + Misc
+// ---------------------------------------------------------------------------
+
+#[test_action("bedrock", "CreateMarketplaceModelEndpoint", checksum = "04141127")]
+#[test_action("bedrock", "GetMarketplaceModelEndpoint", checksum = "2c3c9e3a")]
+#[test_action("bedrock", "ListMarketplaceModelEndpoints", checksum = "38615071")]
+#[test_action("bedrock", "UpdateMarketplaceModelEndpoint", checksum = "f27ced48")]
+#[test_action("bedrock", "DeleteMarketplaceModelEndpoint", checksum = "f9674669")]
+#[test_action("bedrock", "RegisterMarketplaceModelEndpoint", checksum = "12b80572")]
+#[test_action("bedrock", "DeregisterMarketplaceModelEndpoint", checksum = "3abacdc6")]
+#[tokio::test]
+async fn bedrock_marketplace_endpoint_lifecycle() {
+    let server = TestServer::start().await;
+    let h = reqwest::Client::new();
+    let a = "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20260411/us-east-1/bedrock/aws4_request, SignedHeaders=host, Signature=fake";
+    let b = serde_json::json!({"endpointName": "conf-ep", "modelSourceIdentifier": "model-1"});
+    let r = h
+        .post(format!("{}/marketplace-model/endpoints", server.endpoint()))
+        .header("content-type", "application/json")
+        .header("authorization", a)
+        .body(serde_json::to_string(&b).unwrap())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 201);
+    let v: serde_json::Value = r.json().await.unwrap();
+    let arn = v["marketplaceModelEndpointArn"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let id = arn.rsplit('/').next().unwrap();
+    assert_eq!(
+        h.get(format!(
+            "{}/marketplace-model/endpoints/{}",
+            server.endpoint(),
+            id
+        ))
+        .header("authorization", a)
+        .send()
+        .await
+        .unwrap()
+        .status(),
+        200
+    );
+    assert_eq!(
+        h.get(format!("{}/marketplace-model/endpoints", server.endpoint()))
+            .header("authorization", a)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        200
+    );
+    let b = serde_json::json!({"endpointConfig": {"sageMakerEndpoint": {}}});
+    assert_eq!(
+        h.patch(format!(
+            "{}/marketplace-model/endpoints/{}",
+            server.endpoint(),
+            id
+        ))
+        .header("content-type", "application/json")
+        .header("authorization", a)
+        .body(serde_json::to_string(&b).unwrap())
+        .send()
+        .await
+        .unwrap()
+        .status(),
+        200
+    );
+    assert_eq!(
+        h.post(format!(
+            "{}/marketplace-model/endpoints/{}/registration",
+            server.endpoint(),
+            id
+        ))
+        .header("authorization", a)
+        .send()
+        .await
+        .unwrap()
+        .status(),
+        200
+    );
+    assert_eq!(
+        h.delete(format!(
+            "{}/marketplace-model/endpoints/{}/registration",
+            server.endpoint(),
+            id
+        ))
+        .header("authorization", a)
+        .send()
+        .await
+        .unwrap()
+        .status(),
+        200
+    );
+    assert_eq!(
+        h.delete(format!(
+            "{}/marketplace-model/endpoints/{}",
+            server.endpoint(),
+            id
+        ))
+        .header("authorization", a)
+        .send()
+        .await
+        .unwrap()
+        .status(),
+        200
+    );
+}
+
+#[test_action("bedrock", "CreateFoundationModelAgreement", checksum = "73bee202")]
+#[test_action("bedrock", "DeleteFoundationModelAgreement", checksum = "4e58b5fc")]
+#[test_action("bedrock", "ListFoundationModelAgreementOffers", checksum = "452337b9")]
+#[test_action("bedrock", "GetFoundationModelAvailability", checksum = "f22978bc")]
+#[test_action("bedrock", "GetUseCaseForModelAccess", checksum = "4bb00bb9")]
+#[test_action("bedrock", "PutUseCaseForModelAccess", checksum = "4c020e02")]
+#[tokio::test]
+async fn bedrock_agreements_and_misc() {
+    let server = TestServer::start().await;
+    let h = reqwest::Client::new();
+    let a = "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20260411/us-east-1/bedrock/aws4_request, SignedHeaders=host, Signature=fake";
+    let b = serde_json::json!({"modelId": "anthropic.claude-3-5-sonnet-20241022-v2:0"});
+    assert_eq!(
+        h.post(format!(
+            "{}/create-foundation-model-agreement",
+            server.endpoint()
+        ))
+        .header("content-type", "application/json")
+        .header("authorization", a)
+        .body(serde_json::to_string(&b).unwrap())
+        .send()
+        .await
+        .unwrap()
+        .status(),
+        200
+    );
+    assert_eq!(
+        h.post(format!(
+            "{}/delete-foundation-model-agreement",
+            server.endpoint()
+        ))
+        .header("content-type", "application/json")
+        .header("authorization", a)
+        .body(serde_json::to_string(&b).unwrap())
+        .send()
+        .await
+        .unwrap()
+        .status(),
+        200
+    );
+    assert_eq!(
+        h.get(format!(
+            "{}/list-foundation-model-agreement-offers/anthropic.claude-3-5-sonnet-20241022-v2:0",
+            server.endpoint()
+        ))
+        .header("authorization", a)
+        .send()
+        .await
+        .unwrap()
+        .status(),
+        200
+    );
+    assert_eq!(
+        h.get(format!(
+            "{}/foundation-model-availability/anthropic.claude-3-5-sonnet-20241022-v2:0",
+            server.endpoint()
+        ))
+        .header("authorization", a)
+        .send()
+        .await
+        .unwrap()
+        .status(),
+        200
+    );
+    let b = serde_json::json!({"useCase": "testing"});
+    assert_eq!(
+        h.post(format!("{}/use-case-for-model-access", server.endpoint()))
+            .header("content-type", "application/json")
+            .header("authorization", a)
+            .body(serde_json::to_string(&b).unwrap())
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        200
+    );
+    assert_eq!(
+        h.get(format!("{}/use-case-for-model-access", server.endpoint()))
+            .header("authorization", a)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        200
+    );
+}
+
+#[test_action("bedrock", "PutEnforcedGuardrailConfiguration", checksum = "c1a65cc8")]
+#[test_action(
+    "bedrock",
+    "ListEnforcedGuardrailsConfiguration",
+    checksum = "897cb129"
+)]
+#[test_action(
+    "bedrock",
+    "DeleteEnforcedGuardrailConfiguration",
+    checksum = "28e115e4"
+)]
+#[tokio::test]
+async fn bedrock_enforced_guardrails() {
+    let server = TestServer::start().await;
+    let h = reqwest::Client::new();
+    let a = "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20260411/us-east-1/bedrock/aws4_request, SignedHeaders=host, Signature=fake";
+    let b = serde_json::json!({"guardrailIdentifier": "test-guard", "guardrailVersion": "1"});
+    let r = h
+        .put(format!(
+            "{}/enforcedGuardrailsConfiguration",
+            server.endpoint()
+        ))
+        .header("content-type", "application/json")
+        .header("authorization", a)
+        .body(serde_json::to_string(&b).unwrap())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let v: serde_json::Value = r.json().await.unwrap();
+    let config_id = v["configId"].as_str().unwrap();
+    assert_eq!(
+        h.get(format!(
+            "{}/enforcedGuardrailsConfiguration",
+            server.endpoint()
+        ))
+        .header("authorization", a)
+        .send()
+        .await
+        .unwrap()
+        .status(),
+        200
+    );
+    assert_eq!(
+        h.delete(format!(
+            "{}/enforcedGuardrailsConfiguration/{}",
+            server.endpoint(),
+            config_id
+        ))
+        .header("authorization", a)
+        .send()
+        .await
+        .unwrap()
+        .status(),
+        200
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Inference Profiles + Prompt Routers + Resource Policies
 // ---------------------------------------------------------------------------
 

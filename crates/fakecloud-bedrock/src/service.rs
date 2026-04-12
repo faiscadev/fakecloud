@@ -197,6 +197,90 @@ impl BedrockService {
                 Some(("DeleteResourcePolicy", Some(decode(&segs[1])), None))
             }
 
+            // Marketplace model endpoints
+            (Method::POST, 2) if segs[0] == "marketplace-model" && segs[1] == "endpoints" => {
+                Some(("CreateMarketplaceModelEndpoint", None, None))
+            }
+            (Method::GET, 2) if segs[0] == "marketplace-model" && segs[1] == "endpoints" => {
+                Some(("ListMarketplaceModelEndpoints", None, None))
+            }
+            (Method::GET, 3) if segs[0] == "marketplace-model" && segs[1] == "endpoints" => {
+                Some(("GetMarketplaceModelEndpoint", Some(decode(&segs[2])), None))
+            }
+            (Method::PATCH, 3) if segs[0] == "marketplace-model" && segs[1] == "endpoints" => {
+                Some((
+                    "UpdateMarketplaceModelEndpoint",
+                    Some(decode(&segs[2])),
+                    None,
+                ))
+            }
+            (Method::DELETE, 3) if segs[0] == "marketplace-model" && segs[1] == "endpoints" => {
+                Some((
+                    "DeleteMarketplaceModelEndpoint",
+                    Some(decode(&segs[2])),
+                    None,
+                ))
+            }
+            (Method::POST, 4)
+                if segs[0] == "marketplace-model"
+                    && segs[1] == "endpoints"
+                    && segs[3] == "registration" =>
+            {
+                Some((
+                    "RegisterMarketplaceModelEndpoint",
+                    Some(decode(&segs[2])),
+                    None,
+                ))
+            }
+            (Method::DELETE, 4)
+                if segs[0] == "marketplace-model"
+                    && segs[1] == "endpoints"
+                    && segs[3] == "registration" =>
+            {
+                Some((
+                    "DeregisterMarketplaceModelEndpoint",
+                    Some(decode(&segs[2])),
+                    None,
+                ))
+            }
+
+            // Foundation model agreements
+            (Method::POST, 1) if segs[0] == "create-foundation-model-agreement" => {
+                Some(("CreateFoundationModelAgreement", None, None))
+            }
+            (Method::POST, 1) if segs[0] == "delete-foundation-model-agreement" => {
+                Some(("DeleteFoundationModelAgreement", None, None))
+            }
+            (Method::GET, 2) if segs[0] == "list-foundation-model-agreement-offers" => Some((
+                "ListFoundationModelAgreementOffers",
+                Some(decode(&segs[1])),
+                None,
+            )),
+            (Method::GET, 2) if segs[0] == "foundation-model-availability" => Some((
+                "GetFoundationModelAvailability",
+                Some(decode(&segs[1])),
+                None,
+            )),
+            (Method::GET, 1) if segs[0] == "use-case-for-model-access" => {
+                Some(("GetUseCaseForModelAccess", None, None))
+            }
+            (Method::POST, 1) if segs[0] == "use-case-for-model-access" => {
+                Some(("PutUseCaseForModelAccess", None, None))
+            }
+
+            // Enforced guardrails
+            (Method::PUT, 1) if segs[0] == "enforcedGuardrailsConfiguration" => {
+                Some(("PutEnforcedGuardrailConfiguration", None, None))
+            }
+            (Method::GET, 1) if segs[0] == "enforcedGuardrailsConfiguration" => {
+                Some(("ListEnforcedGuardrailsConfiguration", None, None))
+            }
+            (Method::DELETE, 2) if segs[0] == "enforcedGuardrailsConfiguration" => Some((
+                "DeleteEnforcedGuardrailConfiguration",
+                Some(decode(&segs[1])),
+                None,
+            )),
+
             // Model customization jobs
             (Method::POST, 1) if segs[0] == "model-customization-jobs" => {
                 Some(("CreateModelCustomizationJob", None, None))
@@ -667,6 +751,99 @@ impl AwsService for BedrockService {
                 &self.state,
                 &resource_id.unwrap_or_default(),
             ),
+            // Marketplace model endpoints
+            "CreateMarketplaceModelEndpoint" => {
+                let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
+                crate::marketplace::create_marketplace_model_endpoint(&self.state, &req, &body)
+            }
+            "GetMarketplaceModelEndpoint" => crate::marketplace::get_marketplace_model_endpoint(
+                &self.state,
+                &resource_id.unwrap_or_default(),
+            ),
+            "ListMarketplaceModelEndpoints" => {
+                crate::marketplace::list_marketplace_model_endpoints(&self.state, &req)
+            }
+            "UpdateMarketplaceModelEndpoint" => {
+                let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
+                crate::marketplace::update_marketplace_model_endpoint(
+                    &self.state,
+                    &resource_id.unwrap_or_default(),
+                    &body,
+                )
+            }
+            "DeleteMarketplaceModelEndpoint" => {
+                crate::marketplace::delete_marketplace_model_endpoint(
+                    &self.state,
+                    &resource_id.unwrap_or_default(),
+                )
+            }
+            "RegisterMarketplaceModelEndpoint" => {
+                crate::marketplace::register_marketplace_model_endpoint(
+                    &self.state,
+                    &resource_id.unwrap_or_default(),
+                )
+            }
+            "DeregisterMarketplaceModelEndpoint" => {
+                crate::marketplace::deregister_marketplace_model_endpoint(
+                    &self.state,
+                    &resource_id.unwrap_or_default(),
+                )
+            }
+            // Foundation model agreements
+            "CreateFoundationModelAgreement" => {
+                let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
+                crate::foundation_model_agreements::create_foundation_model_agreement(
+                    &self.state,
+                    &req,
+                    &body,
+                )
+            }
+            "DeleteFoundationModelAgreement" => {
+                let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
+                crate::foundation_model_agreements::delete_foundation_model_agreement(
+                    &self.state,
+                    &body,
+                )
+            }
+            "ListFoundationModelAgreementOffers" => {
+                crate::foundation_model_agreements::list_foundation_model_agreement_offers(
+                    &self.state,
+                    &resource_id.unwrap_or_default(),
+                )
+            }
+            "GetFoundationModelAvailability" => {
+                crate::foundation_model_agreements::get_foundation_model_availability(
+                    &self.state,
+                    &resource_id.unwrap_or_default(),
+                )
+            }
+            "GetUseCaseForModelAccess" => {
+                crate::foundation_model_agreements::get_use_case_for_model_access(&self.state)
+            }
+            "PutUseCaseForModelAccess" => {
+                let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
+                crate::foundation_model_agreements::put_use_case_for_model_access(
+                    &self.state,
+                    &body,
+                )
+            }
+            // Enforced guardrails
+            "PutEnforcedGuardrailConfiguration" => {
+                let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
+                crate::enforced_guardrails::put_enforced_guardrail_configuration(&self.state, &body)
+            }
+            "ListEnforcedGuardrailsConfiguration" => {
+                crate::enforced_guardrails::list_enforced_guardrails_configuration(
+                    &self.state,
+                    &req,
+                )
+            }
+            "DeleteEnforcedGuardrailConfiguration" => {
+                crate::enforced_guardrails::delete_enforced_guardrail_configuration(
+                    &self.state,
+                    &resource_id.unwrap_or_default(),
+                )
+            }
             // Model customization jobs
             "CreateModelCustomizationJob" => {
                 let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
@@ -851,6 +1028,22 @@ impl AwsService for BedrockService {
             "PutResourcePolicy",
             "GetResourcePolicy",
             "DeleteResourcePolicy",
+            "CreateMarketplaceModelEndpoint",
+            "GetMarketplaceModelEndpoint",
+            "ListMarketplaceModelEndpoints",
+            "UpdateMarketplaceModelEndpoint",
+            "DeleteMarketplaceModelEndpoint",
+            "RegisterMarketplaceModelEndpoint",
+            "DeregisterMarketplaceModelEndpoint",
+            "CreateFoundationModelAgreement",
+            "DeleteFoundationModelAgreement",
+            "ListFoundationModelAgreementOffers",
+            "GetFoundationModelAvailability",
+            "GetUseCaseForModelAccess",
+            "PutUseCaseForModelAccess",
+            "PutEnforcedGuardrailConfiguration",
+            "ListEnforcedGuardrailsConfiguration",
+            "DeleteEnforcedGuardrailConfiguration",
             "CreateModelCustomizationJob",
             "GetModelCustomizationJob",
             "ListModelCustomizationJobs",
