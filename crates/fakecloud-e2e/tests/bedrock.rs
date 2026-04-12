@@ -1676,3 +1676,184 @@ async fn bedrock_evaluation_job_lifecycle() {
         .unwrap();
     assert_eq!(resp.status(), 404);
 }
+
+// ---------------------------------------------------------------------------
+// Inference Profiles
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn bedrock_inference_profile_crud() {
+    let server = TestServer::start().await;
+    let h = reqwest::Client::new();
+    let a = "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20260411/us-east-1/bedrock/aws4_request, SignedHeaders=host, Signature=fake";
+
+    let b = serde_json::json!({"inferenceProfileName": "my-profile", "description": "Test", "modelSource": {"copyFrom": "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-5-sonnet-20241022-v2:0"}});
+    let r = h
+        .post(format!("{}/inference-profiles", server.endpoint()))
+        .header("content-type", "application/json")
+        .header("authorization", a)
+        .body(serde_json::to_string(&b).unwrap())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 201);
+    let v: serde_json::Value = r.json().await.unwrap();
+    let id = v["inferenceProfileArn"]
+        .as_str()
+        .unwrap()
+        .rsplit('/')
+        .next()
+        .unwrap()
+        .to_string();
+
+    let r = h
+        .get(format!("{}/inference-profiles/{}", server.endpoint(), id))
+        .header("authorization", a)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let v: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(v["inferenceProfileName"], "my-profile");
+
+    let r = h
+        .get(format!("{}/inference-profiles", server.endpoint()))
+        .header("authorization", a)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+
+    let r = h
+        .delete(format!("{}/inference-profiles/{}", server.endpoint(), id))
+        .header("authorization", a)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+
+    let r = h
+        .get(format!("{}/inference-profiles/{}", server.endpoint(), id))
+        .header("authorization", a)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 404);
+}
+
+// ---------------------------------------------------------------------------
+// Prompt Routers
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn bedrock_prompt_router_crud() {
+    let server = TestServer::start().await;
+    let h = reqwest::Client::new();
+    let a = "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20260411/us-east-1/bedrock/aws4_request, SignedHeaders=host, Signature=fake";
+
+    let b = serde_json::json!({"promptRouterName": "my-router", "models": [], "routingCriteria": {}, "fallbackModel": {"modelIdentifier": "anthropic.claude-3-haiku-20240307-v1:0"}});
+    let r = h
+        .post(format!("{}/prompt-routers", server.endpoint()))
+        .header("content-type", "application/json")
+        .header("authorization", a)
+        .body(serde_json::to_string(&b).unwrap())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 201);
+    let v: serde_json::Value = r.json().await.unwrap();
+    let id = v["promptRouterArn"]
+        .as_str()
+        .unwrap()
+        .rsplit('/')
+        .next()
+        .unwrap()
+        .to_string();
+
+    let r = h
+        .get(format!("{}/prompt-routers/{}", server.endpoint(), id))
+        .header("authorization", a)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+
+    let r = h
+        .get(format!("{}/prompt-routers", server.endpoint()))
+        .header("authorization", a)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+
+    let r = h
+        .delete(format!("{}/prompt-routers/{}", server.endpoint(), id))
+        .header("authorization", a)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+}
+
+// ---------------------------------------------------------------------------
+// Resource Policies
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn bedrock_resource_policy_crud() {
+    let server = TestServer::start().await;
+    let h = reqwest::Client::new();
+    let a = "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20260411/us-east-1/bedrock/aws4_request, SignedHeaders=host, Signature=fake";
+    let arn = "arn:aws:bedrock:us-east-1:123456789012:custom-model/test-res-policy";
+
+    let b =
+        serde_json::json!({"resourceArn": arn, "resourcePolicy": "{\"Version\":\"2012-10-17\"}"});
+    let r = h
+        .post(format!("{}/resource-policy", server.endpoint()))
+        .header("content-type", "application/json")
+        .header("authorization", a)
+        .body(serde_json::to_string(&b).unwrap())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+
+    let encoded_arn = arn.replace(':', "%3A").replace('/', "%2F");
+    let r = h
+        .get(format!(
+            "{}/resource-policy/{}",
+            server.endpoint(),
+            encoded_arn
+        ))
+        .header("authorization", a)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let v: serde_json::Value = r.json().await.unwrap();
+    assert!(v["resourcePolicy"].as_str().is_some());
+
+    let r = h
+        .delete(format!(
+            "{}/resource-policy/{}",
+            server.endpoint(),
+            encoded_arn
+        ))
+        .header("authorization", a)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+
+    let r = h
+        .get(format!(
+            "{}/resource-policy/{}",
+            server.endpoint(),
+            encoded_arn
+        ))
+        .header("authorization", a)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 404);
+}

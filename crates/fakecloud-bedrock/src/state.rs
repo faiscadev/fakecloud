@@ -41,6 +41,12 @@ pub struct BedrockState {
     pub model_invocation_jobs: HashMap<String, ModelInvocationJob>,
     /// Evaluation jobs keyed by job ARN.
     pub evaluation_jobs: HashMap<String, EvaluationJob>,
+    /// Inference profiles keyed by ARN.
+    pub inference_profiles: HashMap<String, InferenceProfile>,
+    /// Prompt routers keyed by ARN.
+    pub prompt_routers: HashMap<String, PromptRouter>,
+    /// Resource policies keyed by resource ARN.
+    pub resource_policies: HashMap<String, String>,
 }
 
 impl BedrockState {
@@ -64,6 +70,9 @@ impl BedrockState {
             model_copy_jobs: HashMap::new(),
             model_invocation_jobs: HashMap::new(),
             evaluation_jobs: HashMap::new(),
+            inference_profiles: HashMap::new(),
+            prompt_routers: HashMap::new(),
+            resource_policies: HashMap::new(),
         }
     }
 
@@ -84,6 +93,9 @@ impl BedrockState {
         self.model_copy_jobs.clear();
         self.model_invocation_jobs.clear();
         self.evaluation_jobs.clear();
+        self.inference_profiles.clear();
+        self.prompt_routers.clear();
+        self.resource_policies.clear();
     }
 }
 
@@ -263,4 +275,30 @@ pub struct EvaluationJob {
     pub output_data_config: serde_json::Value,
     pub creation_time: DateTime<Utc>,
     pub last_modified_time: DateTime<Utc>,
+}
+
+#[derive(Clone)]
+pub struct InferenceProfile {
+    pub inference_profile_arn: String,
+    pub inference_profile_name: String,
+    pub description: Option<String>,
+    pub model_source: serde_json::Value,
+    pub status: String,
+    pub inference_profile_type: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Clone)]
+pub struct PromptRouter {
+    pub prompt_router_arn: String,
+    pub prompt_router_name: String,
+    pub description: Option<String>,
+    pub models: serde_json::Value,
+    pub routing_criteria: serde_json::Value,
+    pub fallback_model: serde_json::Value,
+    pub status: String,
+    pub prompt_router_type: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
