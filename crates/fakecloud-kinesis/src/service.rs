@@ -529,12 +529,16 @@ impl KinesisService {
             .shards
             .iter()
             .position(|s| s.shard_id == shard_to_merge && s.is_open)
-            .ok_or_else(|| invalid_argument(format!("Shard {shard_to_merge} not found or not open")))?;
+            .ok_or_else(|| {
+                invalid_argument(format!("Shard {shard_to_merge} not found or not open"))
+            })?;
         let shard2_idx = stream
             .shards
             .iter()
             .position(|s| s.shard_id == adjacent_shard && s.is_open)
-            .ok_or_else(|| invalid_argument(format!("Shard {adjacent_shard} not found or not open")))?;
+            .ok_or_else(|| {
+                invalid_argument(format!("Shard {adjacent_shard} not found or not open"))
+            })?;
 
         // Determine new range from the two shards
         let starting = stream.shards[shard1_idx]
@@ -606,7 +610,9 @@ impl KinesisService {
             .shards
             .iter()
             .position(|s| s.shard_id == shard_to_split && s.is_open)
-            .ok_or_else(|| invalid_argument(format!("Shard {shard_to_split} not found or not open")))?;
+            .ok_or_else(|| {
+                invalid_argument(format!("Shard {shard_to_split} not found or not open"))
+            })?;
 
         let old_starting: u128 = stream.shards[shard_idx]
             .starting_hash_key
@@ -792,8 +798,10 @@ fn shard_to_json(shard: &KinesisShard) -> Value {
         obj["AdjacentParentShardId"] = json!(adj);
     }
     if !shard.is_open {
-        obj["SequenceNumberRange"]["EndingSequenceNumber"] =
-            json!(format!("{:020}", shard.next_sequence_number.saturating_sub(1).max(1)));
+        obj["SequenceNumberRange"]["EndingSequenceNumber"] = json!(format!(
+            "{:020}",
+            shard.next_sequence_number.saturating_sub(1).max(1)
+        ));
     }
     obj
 }
