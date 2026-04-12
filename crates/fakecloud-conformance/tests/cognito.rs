@@ -3067,3 +3067,289 @@ async fn cognito_get_csv_header() {
     assert_eq!(resp.user_pool_id().unwrap(), pool_id);
     assert!(!resp.csv_header().is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// Custom Attributes
+// ---------------------------------------------------------------------------
+
+#[test_action("cognito-idp", "AddCustomAttributes", checksum = "01878c7f")]
+#[tokio::test]
+async fn cognito_add_custom_attributes() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("custom-attr-pool")
+        .send()
+        .await
+        .unwrap();
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    client
+        .add_custom_attributes()
+        .user_pool_id(&pool_id)
+        .custom_attributes(
+            aws_sdk_cognitoidentityprovider::types::SchemaAttributeType::builder()
+                .name("custom:favorite_color")
+                .attribute_data_type(
+                    aws_sdk_cognitoidentityprovider::types::AttributeDataType::String,
+                )
+                .mutable(true)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let desc = client
+        .describe_user_pool()
+        .user_pool_id(&pool_id)
+        .send()
+        .await
+        .unwrap();
+    let attrs = desc.user_pool().unwrap().schema_attributes();
+    assert!(attrs
+        .iter()
+        .any(|a| a.name() == Some("custom:favorite_color")));
+}
+
+// ---------------------------------------------------------------------------
+// Client Secrets
+// ---------------------------------------------------------------------------
+
+#[test_action("cognito-idp", "AddUserPoolClientSecret", checksum = "12841f07")]
+#[test_action("cognito-idp", "DeleteUserPoolClientSecret", checksum = "37b816e9")]
+#[test_action("cognito-idp", "ListUserPoolClientSecrets", checksum = "ef0fe44f")]
+#[tokio::test]
+async fn cognito_client_secrets() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("secrets-pool")
+        .send()
+        .await
+        .unwrap();
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    let upc = client
+        .create_user_pool_client()
+        .user_pool_id(&pool_id)
+        .client_name("secrets-client")
+        .send()
+        .await
+        .unwrap();
+    let client_id = upc
+        .user_pool_client()
+        .unwrap()
+        .client_id()
+        .unwrap()
+        .to_string();
+
+    // Add a secret
+    let added = client
+        .add_user_pool_client_secret()
+        .user_pool_id(&pool_id)
+        .client_id(&client_id)
+        .send()
+        .await
+        .unwrap();
+    let secret = added.client_secret_descriptor().unwrap();
+    let secret_id = secret.client_secret_id().unwrap().to_string();
+
+    // List secrets
+    let list = client
+        .list_user_pool_client_secrets()
+        .user_pool_id(&pool_id)
+        .client_id(&client_id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(list.client_secrets().len(), 1);
+
+    // Delete secret
+    client
+        .delete_user_pool_client_secret()
+        .user_pool_id(&pool_id)
+        .client_id(&client_id)
+        .client_secret_id(&secret_id)
+        .send()
+        .await
+        .unwrap();
+
+    let list = client
+        .list_user_pool_client_secrets()
+        .user_pool_id(&pool_id)
+        .client_id(&client_id)
+        .send()
+        .await
+        .unwrap();
+    assert!(list.client_secrets().is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// GetIdentityProviderByIdentifier
+// ---------------------------------------------------------------------------
+
+#[test_action(
+    "cognito-idp",
+    "GetIdentityProviderByIdentifier",
+    checksum = "02bc980a"
+)]
+#[tokio::test]
+async fn cognito_get_idp_by_identifier() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("idp-identifier-pool")
+        .send()
+        .await
+        .unwrap();
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    client
+        .create_identity_provider()
+        .user_pool_id(&pool_id)
+        .provider_name("MyOIDC")
+        .provider_type(aws_sdk_cognitoidentityprovider::types::IdentityProviderTypeType::Oidc)
+        .provider_details("client_id", "test-client")
+        .provider_details("client_secret", "test-secret")
+        .provider_details("authorize_scopes", "openid")
+        .provider_details("oidc_issuer", "https://example.com")
+        .provider_details("attributes_request_method", "GET")
+        .idp_identifiers("my-oidc-id")
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .get_identity_provider_by_identifier()
+        .user_pool_id(&pool_id)
+        .idp_identifier("my-oidc-id")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.identity_provider().unwrap().provider_name().unwrap(),
+        "MyOIDC"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Import Job State Transitions
+// ---------------------------------------------------------------------------
+
+#[test_action("cognito-idp", "StartUserImportJob", checksum = "3f2ac87b")]
+#[test_action("cognito-idp", "StopUserImportJob", checksum = "07546a5b")]
+#[tokio::test]
+async fn cognito_start_stop_import_job() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("job-state-pool")
+        .send()
+        .await
+        .unwrap();
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    let job = client
+        .create_user_import_job()
+        .user_pool_id(&pool_id)
+        .job_name("state-test")
+        .cloud_watch_logs_role_arn("arn:aws:iam::123456789012:role/CognitoRole")
+        .send()
+        .await
+        .unwrap();
+    let job_id = job.user_import_job().unwrap().job_id().unwrap().to_string();
+
+    // Start
+    let started = client
+        .start_user_import_job()
+        .user_pool_id(&pool_id)
+        .job_id(&job_id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        started
+            .user_import_job()
+            .unwrap()
+            .status()
+            .unwrap()
+            .as_str(),
+        "InProgress"
+    );
+
+    // Stop
+    let stopped = client
+        .stop_user_import_job()
+        .user_pool_id(&pool_id)
+        .job_id(&job_id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        stopped
+            .user_import_job()
+            .unwrap()
+            .status()
+            .unwrap()
+            .as_str(),
+        "Stopped"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// GetUserAuthFactors
+// ---------------------------------------------------------------------------
+
+#[test_action("cognito-idp", "GetUserAuthFactors", checksum = "958af3b1")]
+#[tokio::test]
+async fn cognito_get_user_auth_factors() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+    let (_pool_id, _client_id, access_token) =
+        setup_authenticated_user(&client, "authfactors-pool").await;
+
+    let resp = client
+        .get_user_auth_factors()
+        .access_token(&access_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.username(), "selfuser");
+    assert!(!resp.configured_user_auth_factors().is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// GetSigningCertificate
+// ---------------------------------------------------------------------------
+
+#[test_action("cognito-idp", "GetSigningCertificate", checksum = "03a117ae")]
+#[tokio::test]
+async fn cognito_get_signing_certificate() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("cert-pool")
+        .send()
+        .await
+        .unwrap();
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    let resp = client
+        .get_signing_certificate()
+        .user_pool_id(&pool_id)
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.certificate().is_some());
+}

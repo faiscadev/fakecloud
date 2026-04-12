@@ -275,6 +275,15 @@ pub struct UserPoolClient {
     pub last_modified_date: DateTime<Utc>,
     pub enable_token_revocation: bool,
     pub auth_session_validity: Option<i64>,
+    /// Additional client secrets (beyond the primary client_secret)
+    pub client_secrets: Vec<ClientSecretDescriptor>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ClientSecretDescriptor {
+    pub client_secret_id: String,
+    pub client_secret_value: String,
+    pub client_secret_create_date: DateTime<Utc>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

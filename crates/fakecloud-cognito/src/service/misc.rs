@@ -930,4 +930,87 @@ impl CognitoService {
 
         Ok(AwsResponse::ok_json(result))
     }
+
+    pub(super) fn start_user_import_job(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let pool_id = require_str(&body, "UserPoolId")?;
+        let job_id = require_str(&body, "JobId")?;
+
+        let mut state = self.state.write();
+
+        let job = state
+            .import_jobs
+            .get_mut(pool_id)
+            .and_then(|jobs| jobs.get_mut(job_id))
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ResourceNotFoundException",
+                    format!("Import job {job_id} does not exist."),
+                )
+            })?;
+
+        // Can only start from Created or Stopped status
+        if job.status != "Created" && job.status != "Stopped" {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterException",
+                format!("Import job cannot be started from status {}.", job.status),
+            ));
+        }
+
+        let now = Utc::now();
+        job.status = "InProgress".to_string();
+        job.start_date = Some(now);
+
+        let resp = import_job_to_json(job);
+
+        Ok(AwsResponse::ok_json(json!({
+            "UserImportJob": resp
+        })))
+    }
+
+    pub(super) fn stop_user_import_job(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let pool_id = require_str(&body, "UserPoolId")?;
+        let job_id = require_str(&body, "JobId")?;
+
+        let mut state = self.state.write();
+
+        let job = state
+            .import_jobs
+            .get_mut(pool_id)
+            .and_then(|jobs| jobs.get_mut(job_id))
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ResourceNotFoundException",
+                    format!("Import job {job_id} does not exist."),
+                )
+            })?;
+
+        if job.status != "InProgress" {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterException",
+                format!("Import job cannot be stopped from status {}.", job.status),
+            ));
+        }
+
+        let now = Utc::now();
+        job.status = "Stopped".to_string();
+        job.completion_date = Some(now);
+
+        let resp = import_job_to_json(job);
+
+        Ok(AwsResponse::ok_json(json!({
+            "UserImportJob": resp
+        })))
+    }
 }

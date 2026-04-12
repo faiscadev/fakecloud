@@ -8,6 +8,7 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 use crate::state::{
     MfaPreferences, SmsConfiguration, SmsMfaConfiguration, SoftwareTokenMfaConfiguration,
 };
+// AccessTokenData is used via state.access_tokens.get()
 
 use super::{generate_totp_secret, require_str, CognitoService};
 
@@ -390,5 +391,74 @@ impl CognitoService {
         Ok(AwsResponse::ok_json(json!({
             "Status": "SUCCESS",
         })))
+    }
+
+    pub(super) fn get_user_auth_factors(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let access_token = require_str(&body, "AccessToken")?;
+
+        let state = self.state.read();
+
+        let token_data = state.access_tokens.get(access_token).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "NotAuthorizedException",
+                "Invalid access token.",
+            )
+        })?;
+        let pool_id = &token_data.user_pool_id;
+        let username = &token_data.username;
+
+        let user = state
+            .users
+            .get(pool_id.as_str())
+            .and_then(|users| users.get(username.as_str()))
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ResourceNotFoundException",
+                    "User not found.",
+                )
+            })?;
+
+        // Build configured auth factors
+        let mut factors = vec!["PASSWORD"];
+        if user.totp_verified {
+            factors.push("SMS_OTP");
+        }
+
+        // Build MFA settings
+        let mut mfa_settings = Vec::new();
+        let mut preferred = None;
+        if let Some(ref prefs) = user.mfa_preferences {
+            if prefs.sms_enabled {
+                mfa_settings.push("SMS_MFA");
+                if prefs.sms_preferred {
+                    preferred = Some("SMS_MFA");
+                }
+            }
+            if prefs.software_token_enabled {
+                mfa_settings.push("SOFTWARE_TOKEN_MFA");
+                if prefs.software_token_preferred {
+                    preferred = Some("SOFTWARE_TOKEN_MFA");
+                }
+            }
+        }
+
+        let mut resp = json!({
+            "Username": username,
+            "ConfiguredUserAuthFactors": factors,
+        });
+        if !mfa_settings.is_empty() {
+            resp["UserMFASettingList"] = json!(mfa_settings);
+        }
+        if let Some(pref) = preferred {
+            resp["PreferredMfaSetting"] = json!(pref);
+        }
+
+        Ok(AwsResponse::ok_json(resp))
     }
 }
