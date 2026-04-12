@@ -4010,7 +4010,7 @@ fn evaluate_single_key_condition(
 ) -> bool {
     let part = part.trim();
 
-    // begins_with(attr, :val)
+    // begins_with(attr, :val) — S type only
     if let Some(rest) = part
         .strip_prefix("begins_with(")
         .or_else(|| part.strip_prefix("begins_with ("))
@@ -4024,9 +4024,9 @@ fn evaluate_single_key_condition(
                 let actual = item.get(&attr_name);
                 return match (actual, expected) {
                     (Some(a), Some(e)) => {
-                        let a_str = extract_string_value(a);
-                        let e_str = extract_string_value(e);
-                        matches!((a_str, e_str), (Some(a), Some(e)) if a.starts_with(&e))
+                        let a_str = a.get("S").and_then(|v| v.as_str());
+                        let e_str = e.get("S").and_then(|v| v.as_str());
+                        matches!((a_str, e_str), (Some(a), Some(e)) if a.starts_with(e))
                     }
                     _ => false,
                 };
@@ -4086,11 +4086,88 @@ fn evaluate_single_key_condition(
     false
 }
 
-fn extract_string_value(val: &Value) -> Option<String> {
-    val.get("S")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .or_else(|| val.get("N").and_then(|v| v.as_str()).map(|n| n.to_string()))
+/// Returns the "size" of a DynamoDB attribute value per AWS docs:
+/// S → character count, N → always 0 (AWS returns size of internal representation, we approximate),
+/// B → byte count, SS/NS/BS → element count, L → element count, M → element count,
+/// BOOL/NULL → 1.
+fn attribute_size(val: &Value) -> Option<usize> {
+    if let Some(s) = val.get("S").and_then(|v| v.as_str()) {
+        return Some(s.len());
+    }
+    if let Some(b) = val.get("B").and_then(|v| v.as_str()) {
+        // B is base64-encoded, decode length = raw bytes
+        return Some(b.len()); // approximate with encoded length
+    }
+    if let Some(arr) = val.get("SS").and_then(|v| v.as_array()) {
+        return Some(arr.len());
+    }
+    if let Some(arr) = val.get("NS").and_then(|v| v.as_array()) {
+        return Some(arr.len());
+    }
+    if let Some(arr) = val.get("BS").and_then(|v| v.as_array()) {
+        return Some(arr.len());
+    }
+    if let Some(arr) = val.get("L").and_then(|v| v.as_array()) {
+        return Some(arr.len());
+    }
+    if let Some(obj) = val.get("M").and_then(|v| v.as_object()) {
+        return Some(obj.len());
+    }
+    if val.get("N").is_some() {
+        // AWS returns numeric representation size; approximate with string length
+        return val.get("N").and_then(|v| v.as_str()).map(|s| s.len());
+    }
+    if val.get("BOOL").is_some() || val.get("NULL").is_some() {
+        return Some(1);
+    }
+    None
+}
+
+/// Evaluate a `size(path) op :val` comparison expression.
+fn evaluate_size_comparison(
+    part: &str,
+    item: &HashMap<String, AttributeValue>,
+    expr_attr_names: &HashMap<String, String>,
+    expr_attr_values: &HashMap<String, Value>,
+) -> Option<bool> {
+    // Find the closing paren of size(...)
+    let open = part.find('(')?;
+    let close = part[open..].find(')')? + open;
+    let path = part[open + 1..close].trim();
+    let remainder = part[close + 1..].trim();
+
+    // Parse operator and value ref
+    let (op, val_ref) = if let Some(rest) = remainder.strip_prefix("<=") {
+        ("<=", rest.trim())
+    } else if let Some(rest) = remainder.strip_prefix(">=") {
+        (">=", rest.trim())
+    } else if let Some(rest) = remainder.strip_prefix("<>") {
+        ("<>", rest.trim())
+    } else if let Some(rest) = remainder.strip_prefix('<') {
+        ("<", rest.trim())
+    } else if let Some(rest) = remainder.strip_prefix('>') {
+        (">", rest.trim())
+    } else if let Some(rest) = remainder.strip_prefix('=') {
+        ("=", rest.trim())
+    } else {
+        return None;
+    };
+
+    let attr_name = resolve_attr_name(path, expr_attr_names);
+    let actual = item.get(&attr_name)?;
+    let size = attribute_size(actual)? as f64;
+
+    let expected = extract_number(&expr_attr_values.get(val_ref).cloned())?;
+
+    Some(match op {
+        "=" => (size - expected).abs() < f64::EPSILON,
+        "<>" => (size - expected).abs() >= f64::EPSILON,
+        "<" => size < expected,
+        ">" => size > expected,
+        "<=" => size <= expected,
+        ">=" => size >= expected,
+        _ => false,
+    })
 }
 
 fn compare_attribute_values(a: Option<&Value>, b: Option<&Value>) -> std::cmp::Ordering {
@@ -4207,6 +4284,7 @@ fn evaluate_single_filter_condition(
         return !item.contains_key(&attr);
     }
 
+    // begins_with only works on S (string) type — not N
     if let Some(rest) = part
         .strip_prefix("begins_with(")
         .or_else(|| part.strip_prefix("begins_with ("))
@@ -4219,9 +4297,9 @@ fn evaluate_single_filter_condition(
                 let actual = item.get(&attr_name);
                 return match (actual, expected) {
                     (Some(a), Some(e)) => {
-                        let a_str = extract_string_value(a);
-                        let e_str = extract_string_value(e);
-                        matches!((a_str, e_str), (Some(a), Some(e)) if a.starts_with(&e))
+                        let a_str = a.get("S").and_then(|v| v.as_str());
+                        let e_str = e.get("S").and_then(|v| v.as_str());
+                        matches!((a_str, e_str), (Some(a), Some(e)) if a.starts_with(e))
                     }
                     _ => false,
                 };
@@ -4229,6 +4307,7 @@ fn evaluate_single_filter_condition(
         }
     }
 
+    // contains: works on S (substring), SS/NS/BS/L (set membership)
     if let Some(rest) = part
         .strip_prefix("contains(")
         .or_else(|| part.strip_prefix("contains ("))
@@ -4241,12 +4320,81 @@ fn evaluate_single_filter_condition(
                 let actual = item.get(&attr_name);
                 return match (actual, expected) {
                     (Some(a), Some(e)) => {
-                        let a_str = extract_string_value(a);
-                        let e_str = extract_string_value(e);
-                        matches!((a_str, e_str), (Some(a), Some(e)) if a.contains(&e))
+                        // String substring check (S type only)
+                        if let (Some(a_s), Some(e_s)) = (
+                            a.get("S").and_then(|v| v.as_str()),
+                            e.get("S").and_then(|v| v.as_str()),
+                        ) {
+                            return a_s.contains(e_s);
+                        }
+                        // Set/list membership
+                        if let Some(set) = a.get("SS").and_then(|v| v.as_array()) {
+                            if let Some(val) = e.get("S") {
+                                return set.contains(val);
+                            }
+                        }
+                        if let Some(set) = a.get("NS").and_then(|v| v.as_array()) {
+                            if let Some(val) = e.get("N") {
+                                return set.contains(val);
+                            }
+                        }
+                        if let Some(set) = a.get("BS").and_then(|v| v.as_array()) {
+                            if let Some(val) = e.get("B") {
+                                return set.contains(val);
+                            }
+                        }
+                        if let Some(list) = a.get("L").and_then(|v| v.as_array()) {
+                            return list.contains(e);
+                        }
+                        false
                     }
                     _ => false,
                 };
+            }
+        }
+    }
+
+    // size(path) op :val — attribute size comparison
+    if part.starts_with("size(") || part.starts_with("size (") {
+        if let Some(result) =
+            evaluate_size_comparison(part, item, expr_attr_names, expr_attr_values)
+        {
+            return result;
+        }
+    }
+
+    // attribute_type(path, :type)
+    if part.starts_with("attribute_type(") || part.starts_with("attribute_type (") {
+        if let Some(rest) = part
+            .strip_prefix("attribute_type(")
+            .or_else(|| part.strip_prefix("attribute_type ("))
+        {
+            if let Some(inner) = rest.strip_suffix(')') {
+                let mut split = inner.splitn(2, ',');
+                if let (Some(attr_ref), Some(val_ref)) = (split.next(), split.next()) {
+                    let attr_name = resolve_attr_name(attr_ref.trim(), expr_attr_names);
+                    let expected_type = expr_attr_values
+                        .get(val_ref.trim())
+                        .and_then(|v| v.get("S"))
+                        .and_then(|v| v.as_str());
+                    let actual = item.get(&attr_name);
+                    return match (actual, expected_type) {
+                        (Some(val), Some(t)) => match t {
+                            "S" => val.get("S").is_some(),
+                            "N" => val.get("N").is_some(),
+                            "B" => val.get("B").is_some(),
+                            "BOOL" => val.get("BOOL").is_some(),
+                            "NULL" => val.get("NULL").is_some(),
+                            "SS" => val.get("SS").is_some(),
+                            "NS" => val.get("NS").is_some(),
+                            "BS" => val.get("BS").is_some(),
+                            "L" => val.get("L").is_some(),
+                            "M" => val.get("M").is_some(),
+                            _ => false,
+                        },
+                        _ => false,
+                    };
+                }
             }
         }
     }
@@ -4462,8 +4610,28 @@ fn apply_set_assignment(
         let left_val = resolve_value(arith_left.trim(), item, expr_attr_names, expr_attr_values);
         let right_val = resolve_value(arith_right.trim(), item, expr_attr_names, expr_attr_values);
 
-        let left_num = extract_number(&left_val).unwrap_or(0.0);
-        let right_num = extract_number(&right_val).unwrap_or(0.0);
+        // Both operands must be numeric (N type)
+        let left_num = match extract_number(&left_val) {
+            Some(n) => n,
+            None if left_val.is_some() => {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationException",
+                    "An operand in the update expression has an incorrect data type",
+                ));
+            }
+            None => 0.0, // attribute doesn't exist yet — treat as 0
+        };
+        let right_num = match extract_number(&right_val) {
+            Some(n) => n,
+            None => {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationException",
+                    "An operand in the update expression has an incorrect data type",
+                ));
+            }
+        };
 
         let result = if is_add {
             left_num + right_num
@@ -4642,6 +4810,16 @@ fn apply_add_assignment(
                     }
                     item.insert(attr, json!({"NS": merged}));
                 }
+            } else if let Some(existing_set) = existing.get("BS").and_then(|v| v.as_array()) {
+                if let Some(add_set) = add_val.get("BS").and_then(|v| v.as_array()) {
+                    let mut merged: Vec<Value> = existing_set.clone();
+                    for v in add_set {
+                        if !merged.contains(v) {
+                            merged.push(v.clone());
+                        }
+                    }
+                    item.insert(attr, json!({"BS": merged}));
+                }
             }
         } else {
             item.insert(attr, add_val.clone());
@@ -4694,6 +4872,20 @@ fn apply_delete_assignment(
                 item.remove(&attr);
             } else {
                 item.insert(attr, json!({"NS": filtered}));
+            }
+        } else if let (Some(existing_set), Some(del_set)) = (
+            existing.get("BS").and_then(|v| v.as_array()),
+            del_val.get("BS").and_then(|v| v.as_array()),
+        ) {
+            let filtered: Vec<Value> = existing_set
+                .iter()
+                .filter(|v| !del_set.contains(v))
+                .cloned()
+                .collect();
+            if filtered.is_empty() {
+                item.remove(&attr);
+            } else {
+                item.insert(attr, json!({"BS": filtered}));
             }
         }
     }
@@ -7378,6 +7570,346 @@ mod tests {
         assert!(
             err_msg.contains("Invalid UpdateExpression") || err_msg.contains("Syntax error"),
             "error should mention Invalid UpdateExpression, got: {err_msg}"
+        );
+    }
+
+    // ── size() function tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_size_string() {
+        let mut item = HashMap::new();
+        item.insert("name".to_string(), json!({"S": "hello"}));
+        let names = HashMap::new();
+        let mut values = HashMap::new();
+        values.insert(":limit".to_string(), json!({"N": "5"}));
+
+        assert!(evaluate_single_filter_condition(
+            "size(name) = :limit",
+            &item,
+            &names,
+            &values,
+        ));
+        values.insert(":limit".to_string(), json!({"N": "4"}));
+        assert!(evaluate_single_filter_condition(
+            "size(name) > :limit",
+            &item,
+            &names,
+            &values,
+        ));
+    }
+
+    #[test]
+    fn test_size_list() {
+        let mut item = HashMap::new();
+        item.insert(
+            "items".to_string(),
+            json!({"L": [{"S": "a"}, {"S": "b"}, {"S": "c"}]}),
+        );
+        let names = HashMap::new();
+        let mut values = HashMap::new();
+        values.insert(":limit".to_string(), json!({"N": "3"}));
+
+        assert!(evaluate_single_filter_condition(
+            "size(items) = :limit",
+            &item,
+            &names,
+            &values,
+        ));
+    }
+
+    #[test]
+    fn test_size_map() {
+        let mut item = HashMap::new();
+        item.insert(
+            "data".to_string(),
+            json!({"M": {"a": {"S": "1"}, "b": {"S": "2"}}}),
+        );
+        let names = HashMap::new();
+        let mut values = HashMap::new();
+        values.insert(":limit".to_string(), json!({"N": "2"}));
+
+        assert!(evaluate_single_filter_condition(
+            "size(data) = :limit",
+            &item,
+            &names,
+            &values,
+        ));
+    }
+
+    #[test]
+    fn test_size_set() {
+        let mut item = HashMap::new();
+        item.insert("tags".to_string(), json!({"SS": ["a", "b", "c", "d"]}));
+        let names = HashMap::new();
+        let mut values = HashMap::new();
+        values.insert(":limit".to_string(), json!({"N": "3"}));
+
+        assert!(evaluate_single_filter_condition(
+            "size(tags) > :limit",
+            &item,
+            &names,
+            &values,
+        ));
+    }
+
+    // ── attribute_type() function tests ────────────────────────────────
+
+    #[test]
+    fn test_attribute_type_string() {
+        let mut item = HashMap::new();
+        item.insert("name".to_string(), json!({"S": "hello"}));
+        let names = HashMap::new();
+        let mut values = HashMap::new();
+        values.insert(":t".to_string(), json!({"S": "S"}));
+
+        assert!(evaluate_single_filter_condition(
+            "attribute_type(name, :t)",
+            &item,
+            &names,
+            &values,
+        ));
+
+        values.insert(":t".to_string(), json!({"S": "N"}));
+        assert!(!evaluate_single_filter_condition(
+            "attribute_type(name, :t)",
+            &item,
+            &names,
+            &values,
+        ));
+    }
+
+    #[test]
+    fn test_attribute_type_number() {
+        let mut item = HashMap::new();
+        item.insert("age".to_string(), json!({"N": "42"}));
+        let names = HashMap::new();
+        let mut values = HashMap::new();
+        values.insert(":t".to_string(), json!({"S": "N"}));
+
+        assert!(evaluate_single_filter_condition(
+            "attribute_type(age, :t)",
+            &item,
+            &names,
+            &values,
+        ));
+    }
+
+    #[test]
+    fn test_attribute_type_list() {
+        let mut item = HashMap::new();
+        item.insert("items".to_string(), json!({"L": [{"S": "a"}]}));
+        let names = HashMap::new();
+        let mut values = HashMap::new();
+        values.insert(":t".to_string(), json!({"S": "L"}));
+
+        assert!(evaluate_single_filter_condition(
+            "attribute_type(items, :t)",
+            &item,
+            &names,
+            &values,
+        ));
+    }
+
+    #[test]
+    fn test_attribute_type_map() {
+        let mut item = HashMap::new();
+        item.insert("data".to_string(), json!({"M": {"key": {"S": "val"}}}));
+        let names = HashMap::new();
+        let mut values = HashMap::new();
+        values.insert(":t".to_string(), json!({"S": "M"}));
+
+        assert!(evaluate_single_filter_condition(
+            "attribute_type(data, :t)",
+            &item,
+            &names,
+            &values,
+        ));
+    }
+
+    #[test]
+    fn test_attribute_type_bool() {
+        let mut item = HashMap::new();
+        item.insert("active".to_string(), json!({"BOOL": true}));
+        let names = HashMap::new();
+        let mut values = HashMap::new();
+        values.insert(":t".to_string(), json!({"S": "BOOL"}));
+
+        assert!(evaluate_single_filter_condition(
+            "attribute_type(active, :t)",
+            &item,
+            &names,
+            &values,
+        ));
+    }
+
+    // ── begins_with rejects non-string types ───────────────────────────
+
+    #[test]
+    fn test_begins_with_rejects_number_type() {
+        let mut item = HashMap::new();
+        item.insert("code".to_string(), json!({"N": "12345"}));
+        let names = HashMap::new();
+        let mut values = HashMap::new();
+        values.insert(":prefix".to_string(), json!({"S": "123"}));
+
+        assert!(
+            !evaluate_single_filter_condition("begins_with(code, :prefix)", &item, &names, &values,),
+            "begins_with must return false for N-type attributes"
+        );
+    }
+
+    #[test]
+    fn test_begins_with_works_on_string_type() {
+        let mut item = HashMap::new();
+        item.insert("code".to_string(), json!({"S": "abc123"}));
+        let names = HashMap::new();
+        let mut values = HashMap::new();
+        values.insert(":prefix".to_string(), json!({"S": "abc"}));
+
+        assert!(evaluate_single_filter_condition(
+            "begins_with(code, :prefix)",
+            &item,
+            &names,
+            &values,
+        ));
+    }
+
+    // ── contains on sets ───────────────────────────────────────────────
+
+    #[test]
+    fn test_contains_string_set() {
+        let mut item = HashMap::new();
+        item.insert("tags".to_string(), json!({"SS": ["red", "blue", "green"]}));
+        let names = HashMap::new();
+        let mut values = HashMap::new();
+        values.insert(":val".to_string(), json!({"S": "blue"}));
+
+        assert!(evaluate_single_filter_condition(
+            "contains(tags, :val)",
+            &item,
+            &names,
+            &values,
+        ));
+
+        values.insert(":val".to_string(), json!({"S": "yellow"}));
+        assert!(!evaluate_single_filter_condition(
+            "contains(tags, :val)",
+            &item,
+            &names,
+            &values,
+        ));
+    }
+
+    #[test]
+    fn test_contains_number_set() {
+        let mut item = HashMap::new();
+        item.insert("scores".to_string(), json!({"NS": ["1", "2", "3"]}));
+        let names = HashMap::new();
+        let mut values = HashMap::new();
+        values.insert(":val".to_string(), json!({"N": "2"}));
+
+        assert!(evaluate_single_filter_condition(
+            "contains(scores, :val)",
+            &item,
+            &names,
+            &values,
+        ));
+    }
+
+    // ── SET arithmetic type validation ─────────────────────────────────
+
+    #[test]
+    fn test_set_arithmetic_rejects_string_operand() {
+        let mut item = HashMap::new();
+        item.insert("name".to_string(), json!({"S": "hello"}));
+        let names = HashMap::new();
+        let mut values = HashMap::new();
+        values.insert(":val".to_string(), json!({"N": "1"}));
+
+        let result = apply_update_expression(&mut item, "SET name = name + :val", &names, &values);
+        assert!(
+            result.is_err(),
+            "arithmetic on S-type attribute must return a ValidationException"
+        );
+    }
+
+    #[test]
+    fn test_set_arithmetic_rejects_string_value() {
+        let mut item = HashMap::new();
+        item.insert("count".to_string(), json!({"N": "5"}));
+        let names = HashMap::new();
+        let mut values = HashMap::new();
+        values.insert(":val".to_string(), json!({"S": "notanumber"}));
+
+        let result =
+            apply_update_expression(&mut item, "SET count = count + :val", &names, &values);
+        assert!(
+            result.is_err(),
+            "arithmetic with S-type value must return a ValidationException"
+        );
+    }
+
+    #[test]
+    fn test_set_arithmetic_valid_numbers() {
+        let mut item = HashMap::new();
+        item.insert("count".to_string(), json!({"N": "10"}));
+        let names = HashMap::new();
+        let mut values = HashMap::new();
+        values.insert(":val".to_string(), json!({"N": "3"}));
+
+        let result =
+            apply_update_expression(&mut item, "SET count = count + :val", &names, &values);
+        assert!(result.is_ok());
+        assert_eq!(item["count"], json!({"N": "13"}));
+    }
+
+    // ── Binary Set (BS) support in ADD/DELETE ──────────────────────────
+
+    #[test]
+    fn test_add_binary_set() {
+        let mut item = HashMap::new();
+        item.insert("data".to_string(), json!({"BS": ["YQ==", "Yg=="]}));
+        let names = HashMap::new();
+        let mut values = HashMap::new();
+        values.insert(":val".to_string(), json!({"BS": ["Yw==", "YQ=="]}));
+
+        let result = apply_update_expression(&mut item, "ADD data :val", &names, &values);
+        assert!(result.is_ok());
+        let bs = item["data"]["BS"].as_array().unwrap();
+        assert_eq!(bs.len(), 3, "should merge sets without duplicates");
+        assert!(bs.contains(&json!("YQ==")));
+        assert!(bs.contains(&json!("Yg==")));
+        assert!(bs.contains(&json!("Yw==")));
+    }
+
+    #[test]
+    fn test_delete_binary_set() {
+        let mut item = HashMap::new();
+        item.insert("data".to_string(), json!({"BS": ["YQ==", "Yg==", "Yw=="]}));
+        let names = HashMap::new();
+        let mut values = HashMap::new();
+        values.insert(":val".to_string(), json!({"BS": ["Yg=="]}));
+
+        let result = apply_update_expression(&mut item, "DELETE data :val", &names, &values);
+        assert!(result.is_ok());
+        let bs = item["data"]["BS"].as_array().unwrap();
+        assert_eq!(bs.len(), 2);
+        assert!(!bs.contains(&json!("Yg==")));
+    }
+
+    #[test]
+    fn test_delete_binary_set_removes_attr_when_empty() {
+        let mut item = HashMap::new();
+        item.insert("data".to_string(), json!({"BS": ["YQ=="]}));
+        let names = HashMap::new();
+        let mut values = HashMap::new();
+        values.insert(":val".to_string(), json!({"BS": ["YQ=="]}));
+
+        let result = apply_update_expression(&mut item, "DELETE data :val", &names, &values);
+        assert!(result.is_ok());
+        assert!(
+            !item.contains_key("data"),
+            "attribute should be removed when set becomes empty"
         );
     }
 }
