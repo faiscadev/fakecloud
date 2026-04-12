@@ -4101,8 +4101,12 @@ fn attribute_size(val: &Value) -> Option<usize> {
         return Some(s.len());
     }
     if let Some(b) = val.get("B").and_then(|v| v.as_str()) {
-        // B is base64-encoded, decode length = raw bytes
-        return Some(b.len()); // approximate with encoded length
+        // B is base64-encoded — return decoded byte count
+        let decoded_len = base64::engine::general_purpose::STANDARD
+            .decode(b)
+            .map(|v| v.len())
+            .unwrap_or(b.len());
+        return Some(decoded_len);
     }
     if let Some(arr) = val.get("SS").and_then(|v| v.as_array()) {
         return Some(arr.len());

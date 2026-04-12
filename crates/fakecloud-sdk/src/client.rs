@@ -534,10 +534,9 @@ impl CognitoClient<'_> {
             .json(req)
             .send()
             .await?;
-        // This endpoint returns 404 for missing users but still has a JSON body
         let status = resp.status().as_u16();
         let body: ConfirmUserResponse = resp.json().await?;
-        if status == 404 {
+        if status >= 400 {
             return Err(Error::Api {
                 status,
                 body: body.error.unwrap_or_default(),

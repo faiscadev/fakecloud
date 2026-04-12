@@ -630,11 +630,41 @@ impl ResourceProvisioner {
             }
         };
 
+        // Parse StreamSpecification from CloudFormation properties
+        let (stream_enabled, stream_view_type) =
+            if let Some(stream_spec) = props.get("StreamSpecification") {
+                let enabled = stream_spec
+                    .get("StreamEnabled")
+                    .and_then(|v| v.as_bool().or_else(|| v.as_str().map(|s| s == "true")))
+                    .unwrap_or(false);
+                let view_type = if enabled {
+                    stream_spec
+                        .get("StreamViewType")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                } else {
+                    None
+                };
+                (enabled, view_type)
+            } else {
+                (false, None)
+            };
+
         let mut state = self.dynamodb_state.write();
         let arn = format!(
             "arn:aws:dynamodb:{}:{}:table/{}",
             state.region, state.account_id, table_name
         );
+
+        let stream_arn = if stream_enabled {
+            Some(format!(
+                "{}/stream/{}",
+                arn,
+                Utc::now().format("%Y-%m-%dT%H:%M:%S.%3f")
+            ))
+        } else {
+            None
+        };
 
         let table = DynamoTable {
             name: table_name.to_string(),
@@ -658,9 +688,9 @@ impl ResourceProvisioner {
             kinesis_destinations: Vec::new(),
             contributor_insights_status: "DISABLED".to_string(),
             contributor_insights_counters: HashMap::new(),
-            stream_enabled: false,
-            stream_view_type: None,
-            stream_arn: None,
+            stream_enabled,
+            stream_view_type,
+            stream_arn,
             stream_records: Arc::new(RwLock::new(Vec::new())),
             sse_type: None,
             sse_kms_key_arn: None,

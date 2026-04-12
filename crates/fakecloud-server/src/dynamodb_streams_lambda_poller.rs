@@ -54,7 +54,11 @@ impl DynamoDbStreamsLambdaPoller {
             lambda
                 .event_source_mappings
                 .values()
-                .filter(|m| m.enabled && m.event_source_arn.contains(":dynamodb:"))
+                .filter(|m| {
+                    m.enabled
+                        && m.event_source_arn.contains(":dynamodb:")
+                        && m.event_source_arn.contains("/stream/")
+                })
                 .map(|m| {
                     (
                         m.uuid.clone(),

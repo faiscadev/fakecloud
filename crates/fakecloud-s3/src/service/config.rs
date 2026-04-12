@@ -282,8 +282,8 @@ impl S3Service {
             .buckets
             .get_mut(bucket)
             .ok_or_else(|| no_such_bucket(bucket))?;
-        // Check if EventBridgeConfiguration is present (any tag, even empty/self-closing)
-        b.eventbridge_enabled = body_str.contains("EventBridgeConfiguration");
+        // Check if EventBridgeConfiguration XML element is present (opening tag or self-closing)
+        b.eventbridge_enabled = body_str.contains("<EventBridgeConfiguration");
         // Auto-generate Id for each configuration element if missing
         let normalized = normalize_notification_ids(&body_str);
         b.notification_config = Some(normalized);

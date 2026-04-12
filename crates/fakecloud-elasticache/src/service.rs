@@ -1170,8 +1170,7 @@ impl ElastiCacheService {
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let global_replication_group_id = required_param(request, "GlobalReplicationGroupId")?;
-        let _retain_primary_replication_group =
-            parse_required_bool(request, "RetainPrimaryReplicationGroup")?;
+        let retain_primary = parse_required_bool(request, "RetainPrimaryReplicationGroup")?;
 
         let mut state = self.state.write();
         let mut group = state
@@ -1186,7 +1185,15 @@ impl ElastiCacheService {
             })?;
 
         for member in &group.members {
-            if let Some(replication_group) = state
+            if !retain_primary && member.role == "PRIMARY" {
+                // Delete the primary replication group when RetainPrimaryReplicationGroup=false
+                if let Some(rg) = state
+                    .replication_groups
+                    .remove(&member.replication_group_id)
+                {
+                    state.tags.remove(&rg.arn);
+                }
+            } else if let Some(replication_group) = state
                 .replication_groups
                 .get_mut(&member.replication_group_id)
             {
@@ -1264,7 +1271,7 @@ impl ElastiCacheService {
         let cache_usage_limits = parse_cache_usage_limits(request)?;
         let security_group_ids =
             parse_query_list_param(request, "SecurityGroupIds", "SecurityGroupId");
-        let subnet_ids = parse_member_list(&request.query_params, "SubnetIds", "SubnetId");
+        let subnet_ids = parse_query_list_param(request, "SubnetIds", "SubnetId");
         let kms_key_id = optional_param(request, "KmsKeyId");
         let user_group_id = optional_param(request, "UserGroupId");
         let snapshot_retention_limit =
