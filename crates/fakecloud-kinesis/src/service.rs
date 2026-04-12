@@ -10,23 +10,50 @@ use fakecloud_core::validation::{
     validate_optional_json_range, validate_optional_string_length, validate_string_length,
 };
 
-use crate::state::{KinesisRecord, KinesisShard, KinesisStream, SharedKinesisState};
+use crate::state::{
+    KinesisConsumer, KinesisRecord, KinesisShard, KinesisStream, SharedKinesisState,
+};
 
 const SUPPORTED_ACTIONS: &[&str] = &[
+    "AddTagsToStream",
     "CreateStream",
-    "DescribeStream",
-    "DescribeStreamSummary",
-    "ListStreams",
+    "DecreaseStreamRetentionPeriod",
+    "DeleteResourcePolicy",
     "DeleteStream",
+    "DeregisterStreamConsumer",
+    "DescribeAccountSettings",
+    "DescribeLimits",
+    "DescribeStream",
+    "DescribeStreamConsumer",
+    "DescribeStreamSummary",
+    "DisableEnhancedMonitoring",
+    "EnableEnhancedMonitoring",
     "GetRecords",
+    "GetResourcePolicy",
     "GetShardIterator",
+    "IncreaseStreamRetentionPeriod",
+    "ListShards",
+    "ListStreamConsumers",
+    "ListStreams",
+    "ListTagsForResource",
+    "ListTagsForStream",
+    "MergeShards",
     "PutRecord",
     "PutRecords",
-    "AddTagsToStream",
-    "ListTagsForStream",
+    "PutResourcePolicy",
+    "RegisterStreamConsumer",
     "RemoveTagsFromStream",
-    "IncreaseStreamRetentionPeriod",
-    "DecreaseStreamRetentionPeriod",
+    "SplitShard",
+    "StartStreamEncryption",
+    "StopStreamEncryption",
+    "SubscribeToShard",
+    "TagResource",
+    "UntagResource",
+    "UpdateAccountSettings",
+    "UpdateMaxRecordSize",
+    "UpdateShardCount",
+    "UpdateStreamMode",
+    "UpdateStreamWarmThroughput",
 ];
 
 pub struct KinesisService {
@@ -61,6 +88,31 @@ impl AwsService for KinesisService {
             "RemoveTagsFromStream" => self.remove_tags_from_stream(&request),
             "IncreaseStreamRetentionPeriod" => self.increase_stream_retention_period(&request),
             "DecreaseStreamRetentionPeriod" => self.decrease_stream_retention_period(&request),
+            "TagResource" => self.tag_resource(&request),
+            "UntagResource" => self.untag_resource(&request),
+            "ListTagsForResource" => self.list_tags_for_resource(&request),
+            "GetResourcePolicy" => self.get_resource_policy(&request),
+            "PutResourcePolicy" => self.put_resource_policy(&request),
+            "DeleteResourcePolicy" => self.delete_resource_policy(&request),
+            "StartStreamEncryption" => self.start_stream_encryption(&request),
+            "StopStreamEncryption" => self.stop_stream_encryption(&request),
+            "EnableEnhancedMonitoring" => self.enable_enhanced_monitoring(&request),
+            "DisableEnhancedMonitoring" => self.disable_enhanced_monitoring(&request),
+            "DescribeAccountSettings" => self.describe_account_settings(&request),
+            "UpdateAccountSettings" => self.update_account_settings(&request),
+            "DescribeLimits" => self.describe_limits(&request),
+            "UpdateStreamMode" => self.update_stream_mode(&request),
+            "UpdateStreamWarmThroughput" => self.update_stream_warm_throughput(&request),
+            "UpdateMaxRecordSize" => self.update_max_record_size(&request),
+            "RegisterStreamConsumer" => self.register_stream_consumer(&request),
+            "DeregisterStreamConsumer" => self.deregister_stream_consumer(&request),
+            "DescribeStreamConsumer" => self.describe_stream_consumer(&request),
+            "ListStreamConsumers" => self.list_stream_consumers(&request),
+            "ListShards" => self.list_shards(&request),
+            "MergeShards" => self.merge_shards(&request),
+            "SplitShard" => self.split_shard(&request),
+            "UpdateShardCount" => self.update_shard_count(&request),
+            "SubscribeToShard" => self.subscribe_to_shard(&request),
             _ => Err(AwsServiceError::action_not_implemented(
                 self.service_name(),
                 &request.action,
@@ -72,6 +124,8 @@ impl AwsService for KinesisService {
         SUPPORTED_ACTIONS
     }
 }
+
+// --- Original operations (CreateStream through DecreaseStreamRetentionPeriod) ---
 
 impl KinesisService {
     fn create_stream(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
@@ -104,10 +158,15 @@ impl KinesisService {
             retention_period_hours: 24,
             stream_mode: "PROVISIONED".to_string(),
             encryption_type: "NONE".to_string(),
+            key_id: None,
             shard_count,
             open_shard_count: shard_count,
             tags: std::collections::HashMap::new(),
             shards: build_stream_shards(shard_count),
+            next_shard_index: shard_count,
+            enhanced_metrics: Vec::new(),
+            warm_throughput_mibps: None,
+            max_record_size_kib: None,
         };
         state.streams.insert(stream_name.to_string(), stream);
 
@@ -124,7 +183,7 @@ impl KinesisService {
                 "EncryptionType": stream.encryption_type,
                 "HasMoreShards": false,
                 "RetentionPeriodHours": stream.retention_period_hours,
-                "Shards": build_shards(stream.shard_count),
+                "Shards": stream.shards.iter().map(shard_to_json).collect::<Vec<_>>(),
                 "StreamARN": stream.stream_arn,
                 "StreamCreationTimestamp": stream.stream_creation_timestamp.timestamp_millis() as f64 / 1000.0,
                 "StreamName": stream.stream_name,
@@ -140,12 +199,17 @@ impl KinesisService {
         let body = request.json_body();
         let state = self.state.read();
         let stream = state.lookup_stream(&body)?;
+        let consumer_count = state
+            .consumers
+            .values()
+            .filter(|c| c.stream_arn == stream.stream_arn)
+            .count();
 
         Ok(AwsResponse::ok_json(json!({
             "StreamDescriptionSummary": {
-                "ConsumerCount": 0,
+                "ConsumerCount": consumer_count,
                 "EncryptionType": stream.encryption_type,
-                "KeyId": Value::Null,
+                "KeyId": stream.key_id.as_deref().unwrap_or_default(),
                 "OpenShardCount": stream.open_shard_count,
                 "RetentionPeriodHours": stream.retention_period_hours,
                 "StreamARN": stream.stream_arn,
@@ -196,9 +260,12 @@ impl KinesisService {
         let stream_name = resolve_stream_name(&self.state.read(), &body)?;
 
         let mut state = self.state.write();
-        if state.streams.remove(&stream_name).is_none() {
+        let stream = state.streams.remove(&stream_name);
+        if stream.is_none() {
             return Err(stream_not_found(&state.account_id, &stream_name));
         }
+        let stream_arn = state.stream_arn(&stream_name);
+        state.consumers.retain(|_, c| c.stream_arn != stream_arn);
 
         Ok(AwsResponse::ok_json(json!({})))
     }
@@ -469,7 +536,965 @@ impl KinesisService {
         stream.retention_period_hours = hours as i32;
         Ok(AwsResponse::ok_json(json!({})))
     }
+
+    // --- Batch 1: Tags v2 + Resource Policy ---
+
+    fn tag_resource(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        validate_stream_id(&body)?;
+        let resource_arn = require_resource_arn(&body)?;
+        let tags = body["Tags"]
+            .as_object()
+            .ok_or_else(|| invalid_argument("Tags must be a map"))?;
+
+        let mut state = self.state.write();
+        let stream_name = state
+            .stream_name_from_arn(resource_arn)
+            .ok_or_else(|| resource_not_found_arn(resource_arn))?;
+        let stream = state.streams.get_mut(&stream_name).unwrap();
+        for (key, value) in tags {
+            if let Some(value) = value.as_str() {
+                stream.tags.insert(key.clone(), value.to_string());
+            }
+        }
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    fn untag_resource(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        validate_stream_id(&body)?;
+        let resource_arn = require_resource_arn(&body)?;
+        let tag_keys = body["TagKeys"]
+            .as_array()
+            .ok_or_else(|| invalid_argument("TagKeys must be a list"))?;
+
+        let mut state = self.state.write();
+        let stream_name = state
+            .stream_name_from_arn(resource_arn)
+            .ok_or_else(|| resource_not_found_arn(resource_arn))?;
+        let stream = state.streams.get_mut(&stream_name).unwrap();
+        for key in tag_keys.iter().filter_map(|v| v.as_str()) {
+            stream.tags.remove(key);
+        }
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    fn list_tags_for_resource(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        validate_stream_id(&body)?;
+        let resource_arn = require_resource_arn(&body)?;
+
+        let state = self.state.read();
+        let stream_name = state
+            .stream_name_from_arn(resource_arn)
+            .ok_or_else(|| resource_not_found_arn(resource_arn))?;
+        let stream = state.streams.get(&stream_name).unwrap();
+        let tags: Vec<Value> = stream
+            .tags
+            .iter()
+            .map(|(key, value)| json!({ "Key": key, "Value": value }))
+            .collect();
+
+        Ok(AwsResponse::ok_json(json!({ "Tags": tags })))
+    }
+
+    fn get_resource_policy(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        validate_stream_id(&body)?;
+        let resource_arn = require_resource_arn(&body)?;
+
+        let state = self.state.read();
+        state
+            .stream_name_from_arn(resource_arn)
+            .ok_or_else(|| resource_not_found_arn(resource_arn))?;
+        let policy = state
+            .resource_policies
+            .get(resource_arn)
+            .cloned()
+            .unwrap_or_default();
+
+        Ok(AwsResponse::ok_json(json!({ "Policy": policy })))
+    }
+
+    fn put_resource_policy(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        validate_stream_id(&body)?;
+        let resource_arn = require_resource_arn(&body)?;
+        let policy = body["Policy"]
+            .as_str()
+            .ok_or_else(|| invalid_argument("Policy is required"))?;
+
+        let mut state = self.state.write();
+        state
+            .stream_name_from_arn(resource_arn)
+            .ok_or_else(|| resource_not_found_arn(resource_arn))?;
+        state
+            .resource_policies
+            .insert(resource_arn.to_string(), policy.to_string());
+
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    fn delete_resource_policy(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        validate_stream_id(&body)?;
+        let resource_arn = require_resource_arn(&body)?;
+
+        let mut state = self.state.write();
+        state
+            .stream_name_from_arn(resource_arn)
+            .ok_or_else(|| resource_not_found_arn(resource_arn))?;
+        state.resource_policies.remove(resource_arn);
+
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    // --- Batch 2: Encryption + Enhanced Monitoring ---
+
+    fn start_stream_encryption(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        validate_stream_id(&body)?;
+        let encryption_type = body["EncryptionType"]
+            .as_str()
+            .ok_or_else(|| invalid_argument("EncryptionType is required"))?;
+        if encryption_type != "KMS" {
+            return Err(invalid_argument(format!(
+                "EncryptionType must be KMS for StartStreamEncryption, got {encryption_type}"
+            )));
+        }
+        let key_id = body["KeyId"]
+            .as_str()
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| invalid_argument("KeyId is required"))?;
+        validate_optional_string_length("KeyId", Some(key_id), 1, 2048)?;
+
+        let mut state = self.state.write();
+        let stream_name = resolve_stream_name(&state, &body)?;
+        let account_id = state.account_id.clone();
+        let stream = state
+            .streams
+            .get_mut(&stream_name)
+            .ok_or_else(|| stream_not_found(&account_id, &stream_name))?;
+        stream.encryption_type = encryption_type.to_string();
+        stream.key_id = Some(key_id.to_string());
+
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    fn stop_stream_encryption(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        validate_stream_id(&body)?;
+        let _encryption_type = body["EncryptionType"]
+            .as_str()
+            .ok_or_else(|| invalid_argument("EncryptionType is required"))?;
+        let _key_id = body["KeyId"]
+            .as_str()
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| invalid_argument("KeyId is required"))?;
+        validate_optional_string_length("KeyId", body["KeyId"].as_str(), 1, 2048)?;
+
+        let mut state = self.state.write();
+        let stream_name = resolve_stream_name(&state, &body)?;
+        let account_id = state.account_id.clone();
+        let stream = state
+            .streams
+            .get_mut(&stream_name)
+            .ok_or_else(|| stream_not_found(&account_id, &stream_name))?;
+        stream.encryption_type = "NONE".to_string();
+        stream.key_id = None;
+
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    fn enable_enhanced_monitoring(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        validate_stream_id(&body)?;
+        let metrics = body["ShardLevelMetrics"]
+            .as_array()
+            .ok_or_else(|| invalid_argument("ShardLevelMetrics is required"))?;
+
+        let mut state = self.state.write();
+        let stream_name = resolve_stream_name(&state, &body)?;
+        let account_id = state.account_id.clone();
+        let stream_arn = state.stream_arn(&stream_name);
+        let stream = state
+            .streams
+            .get_mut(&stream_name)
+            .ok_or_else(|| stream_not_found(&account_id, &stream_name))?;
+
+        let current: Vec<String> = stream.enhanced_metrics.clone();
+        let desired: Vec<String> = metrics
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect();
+        for metric in &desired {
+            if !SHARD_LEVEL_METRICS.contains(&metric.as_str()) {
+                return Err(invalid_argument(format!(
+                    "Invalid ShardLevelMetrics value: {metric}"
+                )));
+            }
+        }
+
+        if desired.contains(&"ALL".to_string()) {
+            stream.enhanced_metrics = SHARD_LEVEL_METRICS
+                .iter()
+                .filter(|m| **m != "ALL")
+                .map(|s| s.to_string())
+                .collect();
+        } else {
+            for metric in &desired {
+                if !stream.enhanced_metrics.contains(metric) {
+                    stream.enhanced_metrics.push(metric.clone());
+                }
+            }
+        }
+
+        Ok(AwsResponse::ok_json(json!({
+            "StreamName": stream_name,
+            "StreamARN": stream_arn,
+            "CurrentShardLevelMetrics": current,
+            "DesiredShardLevelMetrics": desired,
+        })))
+    }
+
+    fn disable_enhanced_monitoring(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        validate_stream_id(&body)?;
+        let metrics = body["ShardLevelMetrics"]
+            .as_array()
+            .ok_or_else(|| invalid_argument("ShardLevelMetrics is required"))?;
+
+        let mut state = self.state.write();
+        let stream_name = resolve_stream_name(&state, &body)?;
+        let account_id = state.account_id.clone();
+        let stream_arn = state.stream_arn(&stream_name);
+        let stream = state
+            .streams
+            .get_mut(&stream_name)
+            .ok_or_else(|| stream_not_found(&account_id, &stream_name))?;
+
+        let current: Vec<String> = stream.enhanced_metrics.clone();
+        let desired: Vec<String> = metrics
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect();
+        for metric in &desired {
+            if !SHARD_LEVEL_METRICS.contains(&metric.as_str()) {
+                return Err(invalid_argument(format!(
+                    "Invalid ShardLevelMetrics value: {metric}"
+                )));
+            }
+        }
+
+        if desired.contains(&"ALL".to_string()) {
+            stream.enhanced_metrics.clear();
+        } else {
+            stream.enhanced_metrics.retain(|m| !desired.contains(m));
+        }
+
+        Ok(AwsResponse::ok_json(json!({
+            "StreamName": stream_name,
+            "StreamARN": stream_arn,
+            "CurrentShardLevelMetrics": current,
+            "DesiredShardLevelMetrics": desired,
+        })))
+    }
+
+    // --- Batch 3: Account/Limits + Stream Config ---
+
+    fn describe_account_settings(
+        &self,
+        _request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let state = self.state.read();
+        Ok(AwsResponse::ok_json(json!({
+            "MinimumThroughputBillingCommitment": {
+                "Status": state.billing_commitment_status,
+            }
+        })))
+    }
+
+    fn update_account_settings(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        let commitment = &body["MinimumThroughputBillingCommitment"];
+        let status = commitment["Status"].as_str().ok_or_else(|| {
+            invalid_argument("MinimumThroughputBillingCommitment.Status is required")
+        })?;
+        if status != "ENABLED" && status != "DISABLED" {
+            return Err(invalid_argument(format!(
+                "Invalid MinimumThroughputBillingCommitment status: {status}"
+            )));
+        }
+
+        let mut state = self.state.write();
+        state.billing_commitment_status = status.to_string();
+
+        Ok(AwsResponse::ok_json(json!({
+            "MinimumThroughputBillingCommitment": {
+                "Status": status,
+            }
+        })))
+    }
+
+    fn describe_limits(&self, _request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let state = self.state.read();
+        let open_shard_count: i32 = state.streams.values().map(|s| s.open_shard_count).sum();
+        let on_demand_count = state
+            .streams
+            .values()
+            .filter(|s| s.stream_mode == "ON_DEMAND")
+            .count() as i32;
+
+        Ok(AwsResponse::ok_json(json!({
+            "ShardLimit": state.shard_limit,
+            "OpenShardCount": open_shard_count,
+            "OnDemandStreamCount": on_demand_count,
+            "OnDemandStreamCountLimit": state.on_demand_stream_count_limit,
+        })))
+    }
+
+    fn update_stream_mode(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        validate_stream_id(&body)?;
+        let stream_arn = body["StreamARN"]
+            .as_str()
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| invalid_argument("StreamARN is required"))?;
+        validate_string_length("StreamARN", stream_arn, 1, 2048)?;
+
+        let stream_mode = body["StreamModeDetails"]["StreamMode"]
+            .as_str()
+            .ok_or_else(|| invalid_argument("StreamModeDetails.StreamMode is required"))?;
+        if stream_mode != "PROVISIONED" && stream_mode != "ON_DEMAND" {
+            return Err(invalid_argument(format!(
+                "Invalid StreamMode: {stream_mode}"
+            )));
+        }
+
+        let mut state = self.state.write();
+        let stream_name = state
+            .stream_name_from_arn(stream_arn)
+            .ok_or_else(|| resource_not_found_arn(stream_arn))?;
+        let stream = state.streams.get_mut(&stream_name).unwrap();
+        stream.stream_mode = stream_mode.to_string();
+
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    fn update_stream_warm_throughput(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        validate_stream_id(&body)?;
+        let warm_mibps = body["WarmThroughputMiBps"]
+            .as_i64()
+            .ok_or_else(|| invalid_argument("WarmThroughputMiBps is required"))?;
+        if warm_mibps < 0 {
+            return Err(invalid_argument("WarmThroughputMiBps must be >= 0"));
+        }
+
+        let mut state = self.state.write();
+        let stream_name = resolve_stream_name(&state, &body)?;
+        let account_id = state.account_id.clone();
+        let stream_arn = state.stream_arn(&stream_name);
+        let stream = state
+            .streams
+            .get_mut(&stream_name)
+            .ok_or_else(|| stream_not_found(&account_id, &stream_name))?;
+        stream.warm_throughput_mibps = Some(warm_mibps);
+
+        Ok(AwsResponse::ok_json(json!({
+            "StreamARN": stream_arn,
+            "StreamName": stream_name,
+            "WarmThroughput": {
+                "TargetMiBps": warm_mibps,
+                "CurrentMiBps": warm_mibps,
+            }
+        })))
+    }
+
+    fn update_max_record_size(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        validate_stream_id(&body)?;
+        validate_optional_json_range(
+            "MaxRecordSizeInKiB",
+            &body["MaxRecordSizeInKiB"],
+            1024,
+            10240,
+        )?;
+        let max_size = body["MaxRecordSizeInKiB"]
+            .as_i64()
+            .ok_or_else(|| invalid_argument("MaxRecordSizeInKiB is required"))?;
+
+        let mut state = self.state.write();
+        let stream_arn = body["StreamARN"]
+            .as_str()
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| invalid_argument("StreamARN is required"))?;
+        let stream_name = state
+            .stream_name_from_arn(stream_arn)
+            .ok_or_else(|| resource_not_found_arn(stream_arn))?;
+        let stream = state.streams.get_mut(&stream_name).unwrap();
+        stream.max_record_size_kib = Some(max_size);
+
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    // --- Batch 4: Consumer Management ---
+
+    fn register_stream_consumer(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        validate_stream_id(&body)?;
+        let stream_arn = body["StreamARN"]
+            .as_str()
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| invalid_argument("StreamARN is required"))?;
+        validate_string_length("StreamARN", stream_arn, 1, 2048)?;
+        let consumer_name = body["ConsumerName"]
+            .as_str()
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| invalid_argument("ConsumerName is required"))?;
+        validate_string_length("ConsumerName", consumer_name, 1, 128)?;
+
+        let mut state = self.state.write();
+        let _stream_name = state
+            .stream_name_from_arn(stream_arn)
+            .ok_or_else(|| resource_not_found_arn(stream_arn))?;
+
+        let now = Utc::now();
+        let consumer_arn = format!(
+            "{}/consumer/{}:{}",
+            stream_arn,
+            consumer_name,
+            now.timestamp()
+        );
+
+        let exists = state
+            .consumers
+            .values()
+            .any(|c| c.stream_arn == stream_arn && c.consumer_name == consumer_name);
+        if exists {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceInUseException",
+                format!("Consumer {consumer_name} already exists on stream."),
+            ));
+        }
+
+        let consumer = KinesisConsumer {
+            consumer_name: consumer_name.to_string(),
+            consumer_arn: consumer_arn.clone(),
+            consumer_status: "ACTIVE".to_string(),
+            consumer_creation_timestamp: now,
+            stream_arn: stream_arn.to_string(),
+        };
+        state.consumers.insert(consumer_arn.clone(), consumer);
+
+        Ok(AwsResponse::ok_json(json!({
+            "Consumer": {
+                "ConsumerName": consumer_name,
+                "ConsumerARN": consumer_arn,
+                "ConsumerStatus": "ACTIVE",
+                "ConsumerCreationTimestamp": now.timestamp_millis() as f64 / 1000.0,
+            }
+        })))
+    }
+
+    fn deregister_stream_consumer(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        validate_stream_id(&body)?;
+        let mut state = self.state.write();
+
+        let consumer_arn = if let Some(arn) = body["ConsumerARN"].as_str().filter(|v| !v.is_empty())
+        {
+            validate_string_length("ConsumerARN", arn, 1, 2048)?;
+            arn.to_string()
+        } else {
+            let stream_arn = body["StreamARN"]
+                .as_str()
+                .filter(|v| !v.is_empty())
+                .ok_or_else(|| {
+                    invalid_argument("Either ConsumerARN or StreamARN+ConsumerName is required")
+                })?;
+            let consumer_name = body["ConsumerName"]
+                .as_str()
+                .filter(|v| !v.is_empty())
+                .ok_or_else(|| invalid_argument("ConsumerName is required with StreamARN"))?;
+            state
+                .consumers
+                .values()
+                .find(|c| c.stream_arn == stream_arn && c.consumer_name == consumer_name)
+                .map(|c| c.consumer_arn.clone())
+                .ok_or_else(|| {
+                    AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "ResourceNotFoundException",
+                        format!("Consumer {consumer_name} not found."),
+                    )
+                })?
+        };
+
+        state
+            .consumers
+            .remove(&consumer_arn)
+            .ok_or_else(|| resource_not_found_arn(&consumer_arn))?;
+
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    fn describe_stream_consumer(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        validate_stream_id(&body)?;
+        let state = self.state.read();
+
+        let consumer = if let Some(arn) = body["ConsumerARN"].as_str().filter(|v| !v.is_empty()) {
+            validate_string_length("ConsumerARN", arn, 1, 2048)?;
+            state
+                .consumers
+                .get(arn)
+                .ok_or_else(|| resource_not_found_arn(arn))?
+        } else {
+            let stream_arn = body["StreamARN"]
+                .as_str()
+                .filter(|v| !v.is_empty())
+                .ok_or_else(|| {
+                    invalid_argument("Either ConsumerARN or StreamARN+ConsumerName is required")
+                })?;
+            let consumer_name = body["ConsumerName"]
+                .as_str()
+                .filter(|v| !v.is_empty())
+                .ok_or_else(|| invalid_argument("ConsumerName is required with StreamARN"))?;
+            state
+                .consumers
+                .values()
+                .find(|c| c.stream_arn == stream_arn && c.consumer_name == consumer_name)
+                .ok_or_else(|| {
+                    AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "ResourceNotFoundException",
+                        format!("Consumer {consumer_name} not found."),
+                    )
+                })?
+        };
+
+        Ok(AwsResponse::ok_json(json!({
+            "ConsumerDescription": {
+                "ConsumerName": consumer.consumer_name,
+                "ConsumerARN": consumer.consumer_arn,
+                "ConsumerStatus": consumer.consumer_status,
+                "ConsumerCreationTimestamp": consumer.consumer_creation_timestamp.timestamp_millis() as f64 / 1000.0,
+                "StreamARN": consumer.stream_arn,
+            }
+        })))
+    }
+
+    fn list_stream_consumers(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        validate_stream_id(&body)?;
+        let stream_arn = body["StreamARN"]
+            .as_str()
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| invalid_argument("StreamARN is required"))?;
+        validate_string_length("StreamARN", stream_arn, 1, 2048)?;
+        validate_optional_string_length("NextToken", body["NextToken"].as_str(), 1, 1048576)?;
+        validate_optional_json_range("MaxResults", &body["MaxResults"], 1, 10000)?;
+        let max_results = body["MaxResults"].as_i64().unwrap_or(100) as usize;
+
+        let state = self.state.read();
+        let mut consumers: Vec<Value> = state
+            .consumers
+            .values()
+            .filter(|c| c.stream_arn == stream_arn)
+            .map(|c| {
+                json!({
+                    "ConsumerName": c.consumer_name,
+                    "ConsumerARN": c.consumer_arn,
+                    "ConsumerStatus": c.consumer_status,
+                    "ConsumerCreationTimestamp": c.consumer_creation_timestamp.timestamp_millis() as f64 / 1000.0,
+                })
+            })
+            .collect();
+        consumers.sort_by(|a, b| a["ConsumerName"].as_str().cmp(&b["ConsumerName"].as_str()));
+
+        let next_token = body["NextToken"].as_str();
+        if let Some(token) = next_token {
+            if let Some(pos) = consumers
+                .iter()
+                .position(|c| c["ConsumerName"].as_str() == Some(token))
+            {
+                consumers = consumers.split_off(pos + 1);
+            }
+        }
+
+        let has_more = consumers.len() > max_results;
+        consumers.truncate(max_results);
+        let response_token = if has_more {
+            consumers
+                .last()
+                .and_then(|c| c["ConsumerName"].as_str())
+                .map(|s| json!(s))
+        } else {
+            None
+        };
+
+        let mut resp = json!({ "Consumers": consumers });
+        if let Some(token) = response_token {
+            resp["NextToken"] = token;
+        }
+
+        Ok(AwsResponse::ok_json(resp))
+    }
+
+    // --- Batch 5: Shard Management ---
+
+    fn list_shards(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        validate_stream_id(&body)?;
+        validate_optional_string_length("NextToken", body["NextToken"].as_str(), 1, 1048576)?;
+        validate_optional_json_range("MaxResults", &body["MaxResults"], 1, 10000)?;
+        let max_results = body["MaxResults"].as_i64().unwrap_or(10000) as usize;
+
+        let state = self.state.read();
+        let stream = state.lookup_stream(&body)?;
+
+        let exclusive_start = body["ExclusiveStartShardId"].as_str();
+        let mut shards: Vec<Value> = stream
+            .shards
+            .iter()
+            .filter(|s| {
+                if let Some(start_id) = exclusive_start {
+                    s.shard_id.as_str() > start_id
+                } else {
+                    true
+                }
+            })
+            .take(max_results + 1)
+            .map(shard_to_json)
+            .collect();
+
+        let has_more = shards.len() > max_results;
+        shards.truncate(max_results);
+
+        let mut resp = json!({ "Shards": shards });
+        if has_more {
+            if let Some(last) = shards.last() {
+                resp["NextToken"] = last["ShardId"].clone();
+            }
+        }
+
+        Ok(AwsResponse::ok_json(resp))
+    }
+
+    fn merge_shards(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        validate_stream_id(&body)?;
+        let shard_to_merge = body["ShardToMerge"]
+            .as_str()
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| invalid_argument("ShardToMerge is required"))?;
+        let adjacent_shard = body["AdjacentShardToMerge"]
+            .as_str()
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| invalid_argument("AdjacentShardToMerge is required"))?;
+
+        let mut state = self.state.write();
+        let stream_name = resolve_stream_name(&state, &body)?;
+        let account_id = state.account_id.clone();
+        let stream = state
+            .streams
+            .get_mut(&stream_name)
+            .ok_or_else(|| stream_not_found(&account_id, &stream_name))?;
+
+        if shard_to_merge == adjacent_shard {
+            return Err(invalid_argument(
+                "ShardToMerge and AdjacentShardToMerge must be different shards",
+            ));
+        }
+        let shard1_idx = stream
+            .shards
+            .iter()
+            .position(|s| s.shard_id == shard_to_merge && s.is_open)
+            .ok_or_else(|| {
+                invalid_argument(format!("Shard {shard_to_merge} not found or not open"))
+            })?;
+        let shard2_idx = stream
+            .shards
+            .iter()
+            .position(|s| s.shard_id == adjacent_shard && s.is_open)
+            .ok_or_else(|| {
+                invalid_argument(format!("Shard {adjacent_shard} not found or not open"))
+            })?;
+
+        // Verify shards are adjacent
+        let end1: u128 = stream.shards[shard1_idx]
+            .ending_hash_key
+            .parse()
+            .unwrap_or(0);
+        let start2: u128 = stream.shards[shard2_idx]
+            .starting_hash_key
+            .parse()
+            .unwrap_or(0);
+        let end2: u128 = stream.shards[shard2_idx]
+            .ending_hash_key
+            .parse()
+            .unwrap_or(0);
+        let start1: u128 = stream.shards[shard1_idx]
+            .starting_hash_key
+            .parse()
+            .unwrap_or(0);
+        let adj1 = end1.checked_add(1) == Some(start2);
+        let adj2 = end2.checked_add(1) == Some(start1);
+        if !adj1 && !adj2 {
+            return Err(invalid_argument(
+                "ShardToMerge and AdjacentShardToMerge must be adjacent shards",
+            ));
+        }
+
+        let starting = start1.min(start2);
+        let ending = end1.max(end2);
+
+        stream.shards[shard1_idx].is_open = false;
+        stream.shards[shard2_idx].is_open = false;
+
+        let new_id = format!("shardId-{:012}", stream.next_shard_index);
+        stream.next_shard_index += 1;
+        stream.shards.push(KinesisShard {
+            shard_id: new_id,
+            starting_hash_key: starting.to_string(),
+            ending_hash_key: ending.to_string(),
+            parent_shard_id: Some(shard_to_merge.to_string()),
+            adjacent_parent_shard_id: Some(adjacent_shard.to_string()),
+            is_open: true,
+            next_sequence_number: 1,
+            records: Vec::new(),
+        });
+
+        stream.shard_count = stream.shards.len() as i32;
+        stream.open_shard_count = stream.shards.iter().filter(|s| s.is_open).count() as i32;
+
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    fn split_shard(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        validate_stream_id(&body)?;
+        let shard_to_split = body["ShardToSplit"]
+            .as_str()
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| invalid_argument("ShardToSplit is required"))?;
+        let new_starting_hash_key = body["NewStartingHashKey"]
+            .as_str()
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| invalid_argument("NewStartingHashKey is required"))?;
+
+        let mut state = self.state.write();
+        let stream_name = resolve_stream_name(&state, &body)?;
+        let account_id = state.account_id.clone();
+        let stream = state
+            .streams
+            .get_mut(&stream_name)
+            .ok_or_else(|| stream_not_found(&account_id, &stream_name))?;
+
+        let shard_idx = stream
+            .shards
+            .iter()
+            .position(|s| s.shard_id == shard_to_split && s.is_open)
+            .ok_or_else(|| {
+                invalid_argument(format!("Shard {shard_to_split} not found or not open"))
+            })?;
+
+        let old_starting: u128 = stream.shards[shard_idx]
+            .starting_hash_key
+            .parse()
+            .unwrap_or(0);
+        let old_ending: u128 = stream.shards[shard_idx]
+            .ending_hash_key
+            .parse()
+            .unwrap_or(MAX_HASH_KEY);
+        let split_point: u128 = new_starting_hash_key
+            .parse()
+            .map_err(|_| invalid_argument("NewStartingHashKey must be a valid number"))?;
+
+        if split_point <= old_starting || split_point > old_ending {
+            return Err(invalid_argument(
+                "NewStartingHashKey must be within the shard's hash key range",
+            ));
+        }
+
+        stream.shards[shard_idx].is_open = false;
+
+        let id1 = format!("shardId-{:012}", stream.next_shard_index);
+        stream.next_shard_index += 1;
+        let id2 = format!("shardId-{:012}", stream.next_shard_index);
+        stream.next_shard_index += 1;
+
+        stream.shards.push(KinesisShard {
+            shard_id: id1,
+            starting_hash_key: old_starting.to_string(),
+            ending_hash_key: (split_point - 1).to_string(),
+            parent_shard_id: Some(shard_to_split.to_string()),
+            adjacent_parent_shard_id: None,
+            is_open: true,
+            next_sequence_number: 1,
+            records: Vec::new(),
+        });
+        stream.shards.push(KinesisShard {
+            shard_id: id2,
+            starting_hash_key: split_point.to_string(),
+            ending_hash_key: old_ending.to_string(),
+            parent_shard_id: Some(shard_to_split.to_string()),
+            adjacent_parent_shard_id: None,
+            is_open: true,
+            next_sequence_number: 1,
+            records: Vec::new(),
+        });
+
+        stream.shard_count = stream.shards.len() as i32;
+        stream.open_shard_count = stream.shards.iter().filter(|s| s.is_open).count() as i32;
+
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    fn update_shard_count(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        validate_stream_id(&body)?;
+        let target = body["TargetShardCount"]
+            .as_i64()
+            .ok_or_else(|| invalid_argument("TargetShardCount is required"))?;
+        if target <= 0 || target > 10000 {
+            return Err(invalid_argument(
+                "TargetShardCount must be between 1 and 10000",
+            ));
+        }
+        let _scaling_type = body["ScalingType"]
+            .as_str()
+            .ok_or_else(|| invalid_argument("ScalingType is required"))?;
+
+        let mut state = self.state.write();
+        let stream_name = resolve_stream_name(&state, &body)?;
+        let account_id = state.account_id.clone();
+        let stream_arn = state.stream_arn(&stream_name);
+        let stream = state
+            .streams
+            .get_mut(&stream_name)
+            .ok_or_else(|| stream_not_found(&account_id, &stream_name))?;
+
+        let current = stream.open_shard_count;
+
+        for shard in &mut stream.shards {
+            if shard.is_open {
+                shard.is_open = false;
+            }
+        }
+
+        let count = target as u128;
+        for i in 0..target {
+            let idx = i as u128;
+            let starting = if idx == 0 {
+                0u128
+            } else {
+                (MAX_HASH_KEY / count) * idx + 1
+            };
+            let ending = if idx == count - 1 {
+                MAX_HASH_KEY
+            } else {
+                (MAX_HASH_KEY / count) * (idx + 1)
+            };
+            let new_id = format!("shardId-{:012}", stream.next_shard_index);
+            stream.next_shard_index += 1;
+            stream.shards.push(KinesisShard {
+                shard_id: new_id,
+                starting_hash_key: starting.to_string(),
+                ending_hash_key: ending.to_string(),
+                parent_shard_id: None,
+                adjacent_parent_shard_id: None,
+                is_open: true,
+                next_sequence_number: 1,
+                records: Vec::new(),
+            });
+        }
+
+        stream.shard_count = stream.shards.len() as i32;
+        stream.open_shard_count = target as i32;
+
+        Ok(AwsResponse::ok_json(json!({
+            "StreamName": stream_name,
+            "StreamARN": stream_arn,
+            "CurrentShardCount": current,
+            "TargetShardCount": target,
+        })))
+    }
+
+    // --- Batch 6: SubscribeToShard ---
+
+    fn subscribe_to_shard(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        validate_stream_id(&body)?;
+        let consumer_arn = body["ConsumerARN"]
+            .as_str()
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| invalid_argument("ConsumerARN is required"))?;
+        validate_string_length("ConsumerARN", consumer_arn, 1, 2048)?;
+        let shard_id = body["ShardId"]
+            .as_str()
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| invalid_argument("ShardId is required"))?;
+
+        let starting_position = &body["StartingPosition"];
+        if starting_position.is_null() {
+            return Err(invalid_argument("StartingPosition is required"));
+        }
+        let position_type = starting_position["Type"]
+            .as_str()
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| invalid_argument("StartingPosition.Type is required"))?;
+        const VALID_TYPES: &[&str] = &[
+            "AT_SEQUENCE_NUMBER",
+            "AFTER_SEQUENCE_NUMBER",
+            "TRIM_HORIZON",
+            "LATEST",
+            "AT_TIMESTAMP",
+        ];
+        if !VALID_TYPES.contains(&position_type) {
+            return Err(invalid_argument(format!(
+                "Invalid StartingPosition.Type: {position_type}"
+            )));
+        }
+
+        Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "ResourceNotFoundException",
+            format!(
+                "Consumer {} for shard {} not found.",
+                consumer_arn, shard_id
+            ),
+        ))
+    }
 }
+
+// --- State helper ---
 
 impl crate::state::KinesisState {
     fn lookup_stream(&self, body: &Value) -> Result<&KinesisStream, AwsServiceError> {
@@ -479,6 +1504,8 @@ impl crate::state::KinesisState {
             .ok_or_else(|| stream_not_found(&self.account_id, &stream_name))
     }
 }
+
+// --- Free functions ---
 
 fn require_stream_name(body: &Value) -> Result<&str, AwsServiceError> {
     let name = body["StreamName"]
@@ -513,30 +1540,71 @@ fn resolve_stream_name(
     Err(invalid_argument("StreamName or StreamARN is required"))
 }
 
-fn build_shards(shard_count: i32) -> Vec<Value> {
-    build_stream_shards(shard_count)
-        .into_iter()
-        .map(|shard| {
-            json!({
-                "HashKeyRange": {
-                    "EndingHashKey": "340282366920938463463374607431768211455",
-                    "StartingHashKey": "0"
-                },
-                "SequenceNumberRange": {
-                    "StartingSequenceNumber": format!("{}0000000000000000000", 1)
-                },
-                "ShardId": shard.shard_id
-            })
-        })
-        .collect()
+/// The maximum hash key value (2^128 - 1).
+const MAX_HASH_KEY: u128 = u128::MAX;
+
+const SHARD_LEVEL_METRICS: &[&str] = &[
+    "IncomingBytes",
+    "IncomingRecords",
+    "OutgoingBytes",
+    "OutgoingRecords",
+    "WriteProvisionedThroughputExceeded",
+    "ReadProvisionedThroughputExceeded",
+    "IteratorAgeMilliseconds",
+    "ALL",
+];
+
+fn shard_to_json(shard: &KinesisShard) -> Value {
+    let mut obj = json!({
+        "ShardId": shard.shard_id,
+        "HashKeyRange": {
+            "StartingHashKey": shard.starting_hash_key,
+            "EndingHashKey": shard.ending_hash_key,
+        },
+        "SequenceNumberRange": {
+            "StartingSequenceNumber": format!("{:020}", 1),
+        },
+    });
+    if let Some(ref parent) = shard.parent_shard_id {
+        obj["ParentShardId"] = json!(parent);
+    }
+    if let Some(ref adj) = shard.adjacent_parent_shard_id {
+        obj["AdjacentParentShardId"] = json!(adj);
+    }
+    if !shard.is_open {
+        obj["SequenceNumberRange"]["EndingSequenceNumber"] = json!(format!(
+            "{:020}",
+            shard.next_sequence_number.saturating_sub(1).max(1)
+        ));
+    }
+    obj
 }
 
 fn build_stream_shards(shard_count: i32) -> Vec<KinesisShard> {
+    let count = shard_count as u128;
     (0..shard_count)
-        .map(|index| KinesisShard {
-            shard_id: format!("shardId-{:012}", index),
-            next_sequence_number: 1,
-            records: Vec::new(),
+        .map(|index| {
+            let i = index as u128;
+            let starting = if i == 0 {
+                0u128
+            } else {
+                (MAX_HASH_KEY / count) * i + 1
+            };
+            let ending = if i == count - 1 {
+                MAX_HASH_KEY
+            } else {
+                (MAX_HASH_KEY / count) * (i + 1)
+            };
+            KinesisShard {
+                shard_id: format!("shardId-{:012}", index),
+                starting_hash_key: starting.to_string(),
+                ending_hash_key: ending.to_string(),
+                parent_shard_id: None,
+                adjacent_parent_shard_id: None,
+                is_open: true,
+                next_sequence_number: 1,
+                records: Vec::new(),
+            }
         })
         .collect()
 }
@@ -555,6 +1623,13 @@ fn require_shard_id(body: &Value) -> Result<&str, AwsServiceError> {
         .ok_or_else(|| invalid_argument("ShardId is required"))
 }
 
+fn require_resource_arn(body: &Value) -> Result<&str, AwsServiceError> {
+    body["ResourceARN"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| invalid_argument("ResourceARN is required"))
+}
+
 fn decode_record_data(value: &Value) -> Result<Vec<u8>, AwsServiceError> {
     let encoded = value
         .as_str()
@@ -568,8 +1643,19 @@ fn select_shard_mut<'a>(
     stream: &'a mut KinesisStream,
     partition_key: &str,
 ) -> &'a mut KinesisShard {
-    let shard_index = partition_key_to_shard_index(partition_key, stream.shards.len());
-    &mut stream.shards[shard_index]
+    let open_indices: Vec<usize> = stream
+        .shards
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| s.is_open)
+        .map(|(i, _)| i)
+        .collect();
+    if open_indices.is_empty() {
+        let idx = partition_key_to_shard_index(partition_key, stream.shards.len());
+        return &mut stream.shards[idx];
+    }
+    let idx = partition_key_to_shard_index(partition_key, open_indices.len());
+    &mut stream.shards[open_indices[idx]]
 }
 
 fn partition_key_to_shard_index(partition_key: &str, shard_count: usize) -> usize {
@@ -643,6 +1729,18 @@ fn find_record_index_by_sequence_number(
         .ok_or_else(|| invalid_argument("StartingSequenceNumber is invalid"))
 }
 
+fn validate_stream_id(body: &Value) -> Result<(), AwsServiceError> {
+    validate_optional_string_length("StreamId", body["StreamId"].as_str(), 1, 24)
+}
+
+fn resource_not_found_arn(arn: &str) -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::BAD_REQUEST,
+        "ResourceNotFoundException",
+        format!("Resource {arn} not found."),
+    )
+}
+
 fn invalid_argument(message: impl Into<String>) -> AwsServiceError {
     AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "InvalidArgumentException", message)
 }
@@ -691,6 +1789,19 @@ mod tests {
             method: Method::POST,
             is_query_protocol: false,
             access_key_id: None,
+        }
+    }
+
+    fn test_shard() -> KinesisShard {
+        KinesisShard {
+            shard_id: "shardId-000000000000".to_string(),
+            starting_hash_key: "0".to_string(),
+            ending_hash_key: MAX_HASH_KEY.to_string(),
+            parent_shard_id: None,
+            adjacent_parent_shard_id: None,
+            is_open: true,
+            next_sequence_number: 1,
+            records: Vec::new(),
         }
     }
 
@@ -770,11 +1881,7 @@ mod tests {
 
     #[test]
     fn append_record_advances_sequence_numbers() {
-        let mut shard = KinesisShard {
-            shard_id: "shardId-000000000000".to_string(),
-            next_sequence_number: 1,
-            records: Vec::new(),
-        };
+        let mut shard = test_shard();
 
         let first = append_record(&mut shard, "key", b"first".to_vec());
         let second = append_record(&mut shard, "key", b"second".to_vec());
@@ -786,11 +1893,7 @@ mod tests {
 
     #[test]
     fn trim_horizon_iterator_starts_at_zero() {
-        let mut shard = KinesisShard {
-            shard_id: "shardId-000000000000".to_string(),
-            next_sequence_number: 1,
-            records: Vec::new(),
-        };
+        let mut shard = test_shard();
         append_record(&mut shard, "key", b"first".to_vec());
 
         let index = shard_iterator_start_index(&shard, "TRIM_HORIZON", &json!({})).unwrap();
@@ -799,11 +1902,7 @@ mod tests {
 
     #[test]
     fn latest_iterator_starts_after_existing_records() {
-        let mut shard = KinesisShard {
-            shard_id: "shardId-000000000000".to_string(),
-            next_sequence_number: 1,
-            records: Vec::new(),
-        };
+        let mut shard = test_shard();
         append_record(&mut shard, "key", b"first".to_vec());
         append_record(&mut shard, "key", b"second".to_vec());
 
