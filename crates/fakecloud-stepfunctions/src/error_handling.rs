@@ -14,7 +14,10 @@ pub fn find_catcher(catchers: &[Value], error: &str) -> Option<(String, Option<S
         });
 
         if matches {
-            let next = catcher["Next"].as_str()?.to_string();
+            let next = match catcher["Next"].as_str() {
+                Some(s) => s.to_string(),
+                None => continue, // skip malformed catcher, try next one
+            };
             // Distinguish between absent ResultPath (None) and JSON null ResultPath
             let result_path = if catcher.get("ResultPath").is_some_and(|v| v.is_null()) {
                 Some("null".to_string())
@@ -107,6 +110,23 @@ mod tests {
             result,
             Some(("Handle".to_string(), Some("$.error".to_string())))
         );
+    }
+
+    #[test]
+    fn test_find_catcher_skips_malformed_and_finds_next() {
+        // First catcher matches but has no Next field — should skip to second catcher
+        let catchers = vec![
+            json!({
+                "ErrorEquals": ["States.ALL"]
+                // missing "Next"
+            }),
+            json!({
+                "ErrorEquals": ["States.ALL"],
+                "Next": "FallbackHandler"
+            }),
+        ];
+        let result = find_catcher(&catchers, "AnyError");
+        assert_eq!(result, Some(("FallbackHandler".to_string(), None)));
     }
 
     #[test]

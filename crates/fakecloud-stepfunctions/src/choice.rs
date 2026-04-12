@@ -39,7 +39,10 @@ fn evaluate_rule(rule: &Value, input: &Value) -> bool {
 
     // Presence/type checks
     if let Some(expected) = rule.get("IsPresent") {
-        let is_present = !value.is_null();
+        // Check if the field exists in the input (including explicit null).
+        // resolve_path returns Value::Null for both missing and null fields,
+        // so we need to check the parent object directly.
+        let is_present = field_exists_in_input(input, variable);
         return expected.as_bool().unwrap_or(false) == is_present;
     }
     if let Some(expected) = rule.get("IsNull") {
@@ -231,6 +234,34 @@ fn string_matches(value: &str, pattern: &str) -> bool {
     dp[m][n]
 }
 
+/// Check if a field referenced by a JsonPath expression actually exists in the input,
+/// including fields explicitly set to null. This is different from resolve_path which
+/// returns Value::Null for both missing and null fields.
+fn field_exists_in_input(root: &Value, path: &str) -> bool {
+    if path == "$" {
+        return true;
+    }
+    let path = path.strip_prefix("$.").unwrap_or(path);
+    let segments: Vec<&str> = path.split('.').collect();
+    let mut current = root;
+
+    for (i, segment) in segments.iter().enumerate() {
+        if i == segments.len() - 1 {
+            // Last segment — check if it exists (even if null)
+            return match current.as_object() {
+                Some(obj) => obj.contains_key(*segment),
+                None => false,
+            };
+        } else {
+            match current.get(*segment) {
+                Some(v) => current = v,
+                None => return false,
+            }
+        }
+    }
+    false
+}
+
 enum PatternSegment {
     Literal(String),
     Wildcard,
@@ -343,6 +374,18 @@ mod tests {
 
         let input = json!({"other": "value"});
         assert!(!evaluate_rule(&rule, &input));
+    }
+
+    #[test]
+    fn test_is_present_with_null_value() {
+        // A field that is explicitly set to null should be considered "present"
+        let rule = json!({
+            "Variable": "$.optional",
+            "IsPresent": true,
+            "Next": "HasField"
+        });
+        let input = json!({"optional": null});
+        assert!(evaluate_rule(&rule, &input));
     }
 
     #[test]

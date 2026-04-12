@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use serde_json::{json, Value};
-use tracing::debug;
+use tracing::{debug, warn};
 
 use fakecloud_core::delivery::DeliveryBus;
 use fakecloud_dynamodb::state::SharedDynamoDbState;
@@ -571,7 +571,12 @@ async fn execute_wait_state(state_def: &Value, input: &Value) {
                 }
             }
         }
+        return;
     }
+
+    warn!(
+        "Wait state has no valid Seconds, SecondsPath, Timestamp, or TimestampPath — skipping wait"
+    );
 }
 
 /// Execute a Pass state: apply InputPath, use Result if present, apply ResultPath and OutputPath.
@@ -1530,6 +1535,10 @@ fn succeed_execution(state: &SharedStepFunctionsState, execution_arn: &str, outp
 
     let mut s = state.write();
     if let Some(exec) = s.executions.get_mut(execution_arn) {
+        // Don't overwrite terminal states (e.g. ABORTED by StopExecution)
+        if exec.status != ExecutionStatus::Running {
+            return;
+        }
         exec.status = ExecutionStatus::Succeeded;
         exec.output = Some(output_str);
         exec.stop_date = Some(Utc::now());
@@ -1547,6 +1556,10 @@ fn fail_execution(state: &SharedStepFunctionsState, execution_arn: &str, error: 
 
     let mut s = state.write();
     if let Some(exec) = s.executions.get_mut(execution_arn) {
+        // Don't overwrite terminal states (e.g. ABORTED by StopExecution)
+        if exec.status != ExecutionStatus::Running {
+            return;
+        }
         exec.status = ExecutionStatus::Failed;
         exec.error = Some(error.to_string());
         exec.cause = Some(cause.to_string());
