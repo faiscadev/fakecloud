@@ -158,6 +158,45 @@ impl BedrockService {
                 Some(("BatchDeleteEvaluationJob", None, None))
             }
 
+            // Inference profiles
+            (Method::POST, 1) if segs[0] == "inference-profiles" => {
+                Some(("CreateInferenceProfile", None, None))
+            }
+            (Method::GET, 1) if segs[0] == "inference-profiles" => {
+                Some(("ListInferenceProfiles", None, None))
+            }
+            (Method::GET, 2) if segs[0] == "inference-profiles" => {
+                Some(("GetInferenceProfile", Some(decode(&segs[1])), None))
+            }
+            (Method::DELETE, 2) if segs[0] == "inference-profiles" => {
+                Some(("DeleteInferenceProfile", Some(decode(&segs[1])), None))
+            }
+
+            // Prompt routers
+            (Method::POST, 1) if segs[0] == "prompt-routers" => {
+                Some(("CreatePromptRouter", None, None))
+            }
+            (Method::GET, 1) if segs[0] == "prompt-routers" => {
+                Some(("ListPromptRouters", None, None))
+            }
+            (Method::GET, 2) if segs[0] == "prompt-routers" => {
+                Some(("GetPromptRouter", Some(decode(&segs[1])), None))
+            }
+            (Method::DELETE, 2) if segs[0] == "prompt-routers" => {
+                Some(("DeletePromptRouter", Some(decode(&segs[1])), None))
+            }
+
+            // Resource policies
+            (Method::POST, 1) if segs[0] == "resource-policy" => {
+                Some(("PutResourcePolicy", None, None))
+            }
+            (Method::GET, 2) if segs[0] == "resource-policy" => {
+                Some(("GetResourcePolicy", Some(decode(&segs[1])), None))
+            }
+            (Method::DELETE, 2) if segs[0] == "resource-policy" => {
+                Some(("DeleteResourcePolicy", Some(decode(&segs[1])), None))
+            }
+
             // Model customization jobs
             (Method::POST, 1) if segs[0] == "model-customization-jobs" => {
                 Some(("CreateModelCustomizationJob", None, None))
@@ -585,6 +624,49 @@ impl AwsService for BedrockService {
                 let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
                 crate::evaluation::batch_delete_evaluation_job(&self.state, &body)
             }
+            // Inference profiles
+            "CreateInferenceProfile" => {
+                let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
+                crate::inference_profiles::create_inference_profile(&self.state, &req, &body)
+            }
+            "GetInferenceProfile" => crate::inference_profiles::get_inference_profile(
+                &self.state,
+                &resource_id.unwrap_or_default(),
+            ),
+            "ListInferenceProfiles" => {
+                crate::inference_profiles::list_inference_profiles(&self.state, &req)
+            }
+            "DeleteInferenceProfile" => crate::inference_profiles::delete_inference_profile(
+                &self.state,
+                &resource_id.unwrap_or_default(),
+            ),
+            // Prompt routers
+            "CreatePromptRouter" => {
+                let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
+                crate::prompt_routers::create_prompt_router(&self.state, &req, &body)
+            }
+            "GetPromptRouter" => crate::prompt_routers::get_prompt_router(
+                &self.state,
+                &resource_id.unwrap_or_default(),
+            ),
+            "ListPromptRouters" => crate::prompt_routers::list_prompt_routers(&self.state, &req),
+            "DeletePromptRouter" => crate::prompt_routers::delete_prompt_router(
+                &self.state,
+                &resource_id.unwrap_or_default(),
+            ),
+            // Resource policies
+            "PutResourcePolicy" => {
+                let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
+                crate::resource_policies::put_resource_policy(&self.state, &body)
+            }
+            "GetResourcePolicy" => crate::resource_policies::get_resource_policy(
+                &self.state,
+                &resource_id.unwrap_or_default(),
+            ),
+            "DeleteResourcePolicy" => crate::resource_policies::delete_resource_policy(
+                &self.state,
+                &resource_id.unwrap_or_default(),
+            ),
             // Model customization jobs
             "CreateModelCustomizationJob" => {
                 let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
@@ -758,6 +840,17 @@ impl AwsService for BedrockService {
             "ListEvaluationJobs",
             "StopEvaluationJob",
             "BatchDeleteEvaluationJob",
+            "CreateInferenceProfile",
+            "GetInferenceProfile",
+            "ListInferenceProfiles",
+            "DeleteInferenceProfile",
+            "CreatePromptRouter",
+            "GetPromptRouter",
+            "ListPromptRouters",
+            "DeletePromptRouter",
+            "PutResourcePolicy",
+            "GetResourcePolicy",
+            "DeleteResourcePolicy",
             "CreateModelCustomizationJob",
             "GetModelCustomizationJob",
             "ListModelCustomizationJobs",
