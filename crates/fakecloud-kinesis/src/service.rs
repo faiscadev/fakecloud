@@ -487,9 +487,22 @@ impl KinesisService {
         if starting_position.is_null() {
             return Err(invalid_argument("StartingPosition is required"));
         }
-        let _position_type = starting_position["Type"]
+        let position_type = starting_position["Type"]
             .as_str()
+            .filter(|v| !v.is_empty())
             .ok_or_else(|| invalid_argument("StartingPosition.Type is required"))?;
+        const VALID_TYPES: &[&str] = &[
+            "AT_SEQUENCE_NUMBER",
+            "AFTER_SEQUENCE_NUMBER",
+            "TRIM_HORIZON",
+            "LATEST",
+            "AT_TIMESTAMP",
+        ];
+        if !VALID_TYPES.contains(&position_type) {
+            return Err(invalid_argument(format!(
+                "Invalid StartingPosition.Type: {position_type}"
+            )));
+        }
 
         // SubscribeToShard uses HTTP/2 event-stream protocol which can't be
         // served over a standard JSON response. Return ResourceNotFoundException
