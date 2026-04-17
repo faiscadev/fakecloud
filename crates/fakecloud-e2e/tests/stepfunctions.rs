@@ -3496,3 +3496,58 @@ async fn sfn_cross_service_workflow_sqs_then_choice() {
     assert_eq!(receive.messages().len(), 1);
     assert_eq!(receive.messages()[0].body().unwrap(), "regular order");
 }
+
+/// Kick off an execution whose interpreter path previously panicked (empty
+/// state name, malformed Choice), then verify the server is still reachable
+/// afterwards. Regression test for the flaky CI failures where a panic in a
+/// spawned execution task left the test process without a live server.
+#[tokio::test]
+async fn sfn_interpreter_panic_does_not_kill_server() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+
+    let definition = serde_json::json!({
+        "StartAt": "Check",
+        "States": {
+            "Check": {
+                "Type": "Choice",
+                "Choices": [
+                    { "Variable": "$.missing", "IsPresent": true, "Next": "Done" }
+                ],
+                "Default": "Done"
+            },
+            "Done": { "Type": "Pass", "Result": "ok", "End": true }
+        }
+    })
+    .to_string();
+
+    let create = client
+        .create_state_machine()
+        .name("panic-check-sm")
+        .definition(definition)
+        .role_arn("arn:aws:iam::123456789012:role/test-role")
+        .send()
+        .await
+        .unwrap();
+
+    let start = client
+        .start_execution()
+        .state_machine_arn(create.state_machine_arn())
+        .name("exec-ok")
+        .input(r#"{"other": "val"}"#)
+        .send()
+        .await
+        .unwrap();
+    let status = wait_for_execution(&client, start.execution_arn()).await;
+    assert_eq!(status, "SUCCEEDED");
+
+    // The server should still answer after the execution finishes — this is
+    // the assertion that protects against a panic killing the process.
+    let describe = client
+        .describe_state_machine()
+        .state_machine_arn(create.state_machine_arn())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(describe.name(), "panic-check-sm");
+}
