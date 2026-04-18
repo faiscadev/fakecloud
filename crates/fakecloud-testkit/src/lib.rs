@@ -9,6 +9,25 @@
 //! Per-service AWS SDK client factories are available behind the optional
 //! `sdk-clients` feature. Lifecycle-only consumers (e.g. `fakecloud-tfacc`)
 //! can keep the feature off and avoid compiling the `aws-sdk-*` crates.
+//!
+//! # No shared-server pool (yet)
+//!
+//! Each `TestServer::start()` spawns a fresh fakecloud process. A pool
+//! that reuses one server across many tests would cut wall-clock further
+//! but is deferred for three reasons rooted in current test shape:
+//! 1. Several tests pass `FAKECLOUD_IAM=soft|strict` / `FAKECLOUD_VERIFY_SIGV4=true`
+//!    via `start_with_env`. These flags are parsed once at boot and
+//!    cannot be toggled per-request, so every config variant needs its
+//!    own process.
+//! 2. `TestServer::restart()` is called inside tests that exercise
+//!    persistence reload; pool members would need an on-demand reset
+//!    endpoint rather than `restart()`'s process-recycle semantics.
+//! 3. Persistent-mode tests use `start_persistent(&temp_dir)` and
+//!    cannot share a data dir with siblings.
+//!
+//! A proper shared pool therefore requires a per-request config
+//! override API and a reset endpoint — worth doing later but not the
+//! right shape for a single PR.
 
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
@@ -278,7 +297,15 @@ fn graceful_kill(child: &mut Child) {
 /// Belt-and-braces: after the server process exits, sweep any containers
 /// still tagged with its instance label. Runs regardless of graceful vs.
 /// forced shutdown so a hung stop_all() or a SIGKILL fallback can't leak.
+///
+/// Skips the `docker ps` subprocess when the caller disabled container
+/// support entirely (`FAKECLOUD_CONTAINER_CLI=false`). Most e2e tests
+/// never touch the lambda/rds/elasticache runtimes, so the sweep is
+/// pure overhead on the drop path for those.
 fn sweep_instance_containers(cli: &str, pid: u32) {
+    if cli.is_empty() || cli == "false" {
+        return;
+    }
     let label = format!("fakecloud-instance=fakecloud-{pid}");
     let Ok(output) = Command::new(cli)
         .args(["ps", "-aq", "--filter", &format!("label={label}")])
@@ -433,6 +460,11 @@ async fn wait_for_port(child: &mut Child, port: u16) -> bool {
     // not prove axum has reached `serve().await` and installed request
     // handlers. Tests that hit the server immediately after a bare TCP
     // connect occasionally saw ConnectionRefused / EOF mid-flight.
+    //
+    // Poll every 20ms rather than 100ms: axum typically binds within
+    // ~20-40ms, so a 100ms tick wastes a full tick after the bind
+    // already landed. At 20ms the tail tracks the real bind latency
+    // and ~300-400 spawns in an e2e partition save ~50ms each.
     let loopback = format!("127.0.0.1:{port}");
     let wildcard = format!("0.0.0.0:{port}");
     let health_url = format!("http://127.0.0.1:{port}/");
@@ -441,7 +473,12 @@ async fn wait_for_port(child: &mut Child, port: u16) -> bool {
         .build()
         .expect("build reqwest client");
 
-    for _ in 0..300 {
+    // Use a wall-clock deadline rather than a fixed iteration count:
+    // each health-check request has its own 500ms timeout, so a naive
+    // loop of N iterations × (500ms + 20ms) would delay failure well
+    // past the intended budget when the server never binds.
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while std::time::Instant::now() < deadline {
         if child.try_wait().ok().flatten().is_some() {
             return false;
         }
@@ -450,7 +487,7 @@ async fn wait_for_port(child: &mut Child, port: u16) -> bool {
         if tcp_ok && client.get(&health_url).send().await.is_ok() {
             return true;
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
     }
     false
 }
