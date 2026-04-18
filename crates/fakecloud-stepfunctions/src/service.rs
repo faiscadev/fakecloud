@@ -827,15 +827,17 @@ fn validate_definition(definition: &str) -> Result<(), AwsServiceError> {
         ));
     }
 
-    let states = parsed.get("States").and_then(|v| v.as_object());
-    if states.is_none() {
-        return Err(AwsServiceError::aws_error(
-            StatusCode::BAD_REQUEST,
-            "InvalidDefinition",
-            "Invalid State Machine Definition: 'MISSING_STATES' (States field is required)"
-                .to_string(),
-        ));
-    }
+    let states_obj = parsed
+        .get("States")
+        .and_then(|v| v.as_object())
+        .ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidDefinition",
+                "Invalid State Machine Definition: 'MISSING_STATES' (States field is required)"
+                    .to_string(),
+            )
+        })?;
 
     let start_at = parsed["StartAt"].as_str().ok_or_else(|| {
         AwsServiceError::aws_error(
@@ -845,7 +847,6 @@ fn validate_definition(definition: &str) -> Result<(), AwsServiceError> {
                 .to_string(),
         )
     })?;
-    let states_obj = states.unwrap();
     if !states_obj.contains_key(start_at) {
         return Err(AwsServiceError::aws_error(
             StatusCode::BAD_REQUEST,

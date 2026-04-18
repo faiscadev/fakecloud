@@ -66,6 +66,8 @@ async fn main() {
         .with_writer(std::io::stderr)
         .init();
 
+    install_panic_hook();
+
     let persistence_config = match cli.persistence_config() {
         Ok(cfg) => cfg,
         Err(err) => fatal_exit(format_args!("invalid persistence configuration: {err}")),
@@ -3377,4 +3379,27 @@ fn fatal_exit(args: std::fmt::Arguments<'_>) -> ! {
     tracing::error!("{args}");
     let _ = std::io::stderr().flush();
     std::process::exit(1);
+}
+
+/// Route panics through `tracing::error!` so they show up in CI logs with
+/// the same formatting as regular errors. Runs the default hook afterwards
+/// so the process keeps its usual backtrace behaviour for developers
+/// running locally with `RUST_BACKTRACE=1`.
+fn install_panic_hook() {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_else(|| "<unknown>".to_string());
+        let payload = info
+            .payload()
+            .downcast_ref::<&'static str>()
+            .copied()
+            .map(|s| s.to_string())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "<non-string panic>".to_string());
+        tracing::error!(location = %location, payload = %payload, "panic");
+        default(info);
+    }));
 }

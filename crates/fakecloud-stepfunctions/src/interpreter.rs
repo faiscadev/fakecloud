@@ -54,21 +54,54 @@ pub async fn execute_state_machine(
         }),
     );
 
-    match run_states(
-        &def,
-        raw_input,
-        &delivery,
-        &dynamodb_state,
-        &state,
-        &execution_arn,
-    )
-    .await
-    {
-        Ok(output) => {
+    // Run the state machine inside an inner tokio::spawn so that any panic
+    // bubbles up as a JoinError instead of tearing down the caller. Without
+    // this the panic propagates through the outer spawn in `start_execution`
+    // which leaves the execution stuck in Running and leaks the panic to
+    // tokio's default hook.
+    let def_owned = def;
+    let state_clone = state.clone();
+    let execution_arn_clone = execution_arn.clone();
+    let delivery_clone = delivery.clone();
+    let dynamodb_state_clone = dynamodb_state.clone();
+    let handle = tokio::spawn(async move {
+        run_states(
+            &def_owned,
+            raw_input,
+            &delivery_clone,
+            &dynamodb_state_clone,
+            &state_clone,
+            &execution_arn_clone,
+        )
+        .await
+    });
+
+    match handle.await {
+        Ok(Ok(output)) => {
             succeed_execution(&state, &execution_arn, &output);
         }
-        Err((error, cause)) => {
+        Ok(Err((error, cause))) => {
             fail_execution(&state, &execution_arn, &error, &cause);
+        }
+        Err(join_err) => {
+            let msg = if join_err.is_panic() {
+                let payload = join_err.into_panic();
+                if let Some(s) = payload.downcast_ref::<String>() {
+                    s.clone()
+                } else if let Some(s) = payload.downcast_ref::<&'static str>() {
+                    (*s).to_string()
+                } else {
+                    "execution task panicked".to_string()
+                }
+            } else {
+                format!("execution task cancelled: {join_err}")
+            };
+            tracing::error!(
+                execution_arn = %execution_arn,
+                panic = %msg,
+                "Step Functions execution panicked"
+            );
+            fail_execution(&state, &execution_arn, "States.Runtime", &msg);
         }
     }
 }
