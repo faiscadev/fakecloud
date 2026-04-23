@@ -1,50 +1,14 @@
 {
-  "variants_passed": 58712,
+  "variants_passed": 59293,
   "total_variants": 59954,
   "per_service": {
-    "apigateway": {
-      "passed": 1527,
-      "total": 2769
-    },
-    "events": {
-      "passed": 2108,
-      "total": 2108
-    },
-    "iam": {
-      "passed": 5962,
-      "total": 5962
-    },
-    "bedrock": {
-      "passed": 3591,
-      "total": 3591
-    },
-    "kms": {
-      "passed": 2196,
-      "total": 2196
+    "scheduler": {
+      "passed": 491,
+      "total": 491
     },
     "elasticache": {
       "passed": 2219,
       "total": 2219
-    },
-    "bedrock-runtime": {
-      "passed": 412,
-      "total": 412
-    },
-    "ses": {
-      "passed": 2858,
-      "total": 2858
-    },
-    "lambda": {
-      "passed": 3347,
-      "total": 3347
-    },
-    "rds": {
-      "passed": 5376,
-      "total": 5376
-    },
-    "logs": {
-      "passed": 3911,
-      "total": 3911
     },
     "dynamodb": {
       "passed": 2123,
@@ -58,25 +22,65 @@
       "passed": 1027,
       "total": 1027
     },
-    "scheduler": {
-      "passed": 491,
-      "total": 491
-    },
     "sqs": {
       "passed": 549,
       "total": 549
     },
-    "states": {
-      "passed": 1292,
-      "total": 1292
+    "events": {
+      "passed": 2108,
+      "total": 2108
+    },
+    "ssm": {
+      "passed": 5303,
+      "total": 5303
     },
     "sts": {
       "passed": 438,
       "total": 438
     },
+    "bedrock": {
+      "passed": 3591,
+      "total": 3591
+    },
+    "kinesis": {
+      "passed": 1611,
+      "total": 1611
+    },
+    "states": {
+      "passed": 1292,
+      "total": 1292
+    },
+    "apigateway": {
+      "passed": 2108,
+      "total": 2769
+    },
+    "lambda": {
+      "passed": 3347,
+      "total": 3347
+    },
     "cloudformation": {
       "passed": 3420,
       "total": 3420
+    },
+    "bedrock-runtime": {
+      "passed": 412,
+      "total": 412
+    },
+    "logs": {
+      "passed": 3911,
+      "total": 3911
+    },
+    "iam": {
+      "passed": 5962,
+      "total": 5962
+    },
+    "kms": {
+      "passed": 2196,
+      "total": 2196
+    },
+    "ses": {
+      "passed": 2858,
+      "total": 2858
     },
     "cognito-idp": {
       "passed": 4479,
@@ -86,13 +90,9 @@
       "passed": 852,
       "total": 852
     },
-    "ssm": {
-      "passed": 5303,
-      "total": 5303
-    },
-    "kinesis": {
-      "passed": 1611,
-      "total": 1611
+    "rds": {
+      "passed": 5376,
+      "total": 5376
     }
   }
 }
