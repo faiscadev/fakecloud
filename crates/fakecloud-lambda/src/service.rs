@@ -186,14 +186,30 @@ pub(crate) fn resolve_function_name(input: &str) -> String {
     {
         return head[2].to_string();
     }
-    // Plain name with optional qualifier. AWS function names are
-    // `[a-zA-Z0-9-_]+`, so any colon means a qualifier suffix.
-    if let Some((name, _qualifier)) = s.split_once(':') {
-        if !name.is_empty() {
-            return name.to_string();
+    // Plain name with optional qualifier (`my-fn` or `my-fn:PROD`).
+    // Lambda qualifiers can't contain `:` (`$LATEST | [a-zA-Z0-9-_]+ |
+    // [0-9]+`), so a well-formed qualified name has at most one colon.
+    // Multi-colon inputs (foreign ARNs, garbage) pass through so the
+    // caller surfaces a 404 with the original identifier instead of a
+    // silently truncated prefix.
+    if s.matches(':').count() == 1 {
+        if let Some((name, _qualifier)) = s.split_once(':') {
+            if is_valid_function_name(name) {
+                return name.to_string();
+            }
         }
     }
     s.to_string()
+}
+
+/// Lambda's `FunctionName` parameter regex: `[a-zA-Z0-9-_]+`. Used to
+/// gate the qualifier-stripping fallback in [`resolve_function_name`]
+/// so unrelated identifiers (other-service ARNs, garbage) pass through
+/// unchanged instead of being silently truncated.
+fn is_valid_function_name(s: &str) -> bool {
+    !s.is_empty()
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
 /// True when the action's path-derived resource is a Lambda
@@ -2808,9 +2824,35 @@ mod tests {
 
     #[test]
     fn resolve_function_name_partial_arn_requires_12_digit_account() {
-        // Not a real partial ARN — first segment isn't 12 digits, so the
-        // colon is treated as a qualifier separator on a plain name.
-        assert_eq!(resolve_function_name("acct:function:my-fn"), "acct");
+        // First segment isn't 12 digits so it doesn't match the partial
+        // ARN shape. With multiple colons the qualifier-stripping
+        // fallback declines (a qualified name has exactly one colon),
+        // so the input passes through and the caller 404s with the
+        // original identifier — not a silently truncated `acct`.
+        assert_eq!(
+            resolve_function_name("acct:function:my-fn"),
+            "acct:function:my-fn"
+        );
+    }
+
+    #[test]
+    fn resolve_function_name_foreign_arn_passthrough() {
+        // ARNs from other services don't match Lambda's ARN shape and
+        // contain colons that must NOT be treated as qualifier
+        // separators (`arn` isn't a valid function name, so the
+        // fallback declines to truncate).
+        assert_eq!(
+            resolve_function_name("arn:aws:s3:::my-bucket"),
+            "arn:aws:s3:::my-bucket"
+        );
+        assert_eq!(
+            resolve_function_name("arn:aws:sns:us-east-1:123456789012:my-topic"),
+            "arn:aws:sns:us-east-1:123456789012:my-topic"
+        );
+        assert_eq!(
+            resolve_function_name("arn:aws:iam::123456789012:role/my-role"),
+            "arn:aws:iam::123456789012:role/my-role"
+        );
     }
 
     #[test]
