@@ -67,6 +67,98 @@ async fn lambda_create_get_delete_function() {
     assert!(result.is_err());
 }
 
+/// Issue #817: AWS Lambda accepts `FunctionName` in four forms (plain
+/// name, qualified name, full ARN, partial ARN). The AWS Toolkit for
+/// VS Code calls `GetFunction` with the full ARN, which previously
+/// returned 404. Cover every shape end-to-end.
+#[tokio::test]
+async fn lambda_function_name_accepts_all_arn_forms() {
+    let server = TestServer::start().await;
+    let client = server.lambda_client().await;
+
+    client
+        .create_function()
+        .function_name("toolkit-fn")
+        .runtime(aws_sdk_lambda::types::Runtime::Python312)
+        .role("arn:aws:iam::123456789012:role/test-role")
+        .handler("index.handler")
+        .code(
+            aws_sdk_lambda::types::FunctionCode::builder()
+                .zip_file(Blob::new(make_python_zip()))
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    // Full ARN — the form the AWS Toolkit for VS Code sends.
+    let resp = client
+        .get_function()
+        .function_name("arn:aws:lambda:us-east-1:123456789012:function:toolkit-fn")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.configuration().unwrap().function_name().unwrap(),
+        "toolkit-fn"
+    );
+
+    // Partial ARN.
+    let resp = client
+        .get_function()
+        .function_name("123456789012:function:toolkit-fn")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.configuration().unwrap().function_name().unwrap(),
+        "toolkit-fn"
+    );
+
+    // Qualified full ARN.
+    let resp = client
+        .get_function()
+        .function_name("arn:aws:lambda:us-east-1:123456789012:function:toolkit-fn:$LATEST")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.configuration().unwrap().function_name().unwrap(),
+        "toolkit-fn"
+    );
+
+    // Plain name with qualifier.
+    let resp = client
+        .get_function()
+        .function_name("toolkit-fn:$LATEST")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.configuration().unwrap().function_name().unwrap(),
+        "toolkit-fn"
+    );
+
+    // DeleteFunction must accept the same forms — using the full ARN
+    // here proves the resolver applies to mutating ops too.
+    client
+        .delete_function()
+        .function_name("arn:aws:lambda:us-east-1:123456789012:function:toolkit-fn")
+        .send()
+        .await
+        .unwrap();
+
+    let err = client
+        .get_function()
+        .function_name("toolkit-fn")
+        .send()
+        .await;
+    assert!(
+        err.is_err(),
+        "function should be gone after ARN-form delete"
+    );
+}
+
 #[tokio::test]
 async fn lambda_list_functions() {
     let server = TestServer::start().await;

@@ -39,16 +39,14 @@ struct CreateFunctionInput {
 
 impl CreateFunctionInput {
     fn from_body(body: &Value) -> Result<Self, AwsServiceError> {
-        let function_name = body["FunctionName"]
-            .as_str()
-            .ok_or_else(|| {
-                AwsServiceError::aws_error(
-                    StatusCode::BAD_REQUEST,
-                    "InvalidParameterValueException",
-                    "FunctionName is required",
-                )
-            })?
-            .to_string();
+        let raw_function_name = body["FunctionName"].as_str().ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterValueException",
+                "FunctionName is required",
+            )
+        })?;
+        let function_name = resolve_function_name(raw_function_name);
 
         let tags: HashMap<String, String> = body["Tags"]
             .as_object()
@@ -136,6 +134,120 @@ impl CreateFunctionInput {
             image_uri,
         })
     }
+}
+
+/// Resolve a Lambda `FunctionName` parameter to the bare function name
+/// used as the `state.functions` map key.
+///
+/// AWS Lambda accepts four equivalent forms wherever `FunctionName` is
+/// taken:
+///   - plain name: `my-fn`
+///   - plain name with qualifier: `my-fn:PROD` or `my-fn:7`
+///   - full ARN: `arn:aws:lambda:REGION:ACCOUNT:function:my-fn[:QUALIFIER]`
+///   - partial ARN: `ACCOUNT:function:my-fn[:QUALIFIER]`
+///
+/// AWS SDKs URL-encode the colons in ARN-form path components
+/// (`arn%3Aaws%3Alambda%3A...`), so the input is percent-decoded first.
+///
+/// Internally fakecloud only ever stores the unqualified name, so each
+/// caller must collapse these forms before doing a map lookup. Inputs
+/// that don't match any known shape pass through unchanged so
+/// downstream `not found` errors keep their original identifier.
+pub(crate) fn resolve_function_name(input: &str) -> String {
+    let decoded: std::borrow::Cow<'_, str> = if input.contains('%') {
+        percent_encoding::percent_decode_str(input)
+            .decode_utf8()
+            .unwrap_or(std::borrow::Cow::Borrowed(input))
+    } else {
+        std::borrow::Cow::Borrowed(input)
+    };
+    let s: &str = decoded.as_ref();
+
+    // Full ARN: arn:aws:lambda:REGION:ACCOUNT:function:NAME[:QUALIFIER]
+    if let Some(rest) = s.strip_prefix("arn:aws:lambda:") {
+        let parts: Vec<&str> = rest.splitn(5, ':').collect();
+        if parts.len() >= 4
+            && !parts[0].is_empty()
+            && !parts[1].is_empty()
+            && parts[2] == "function"
+            && !parts[3].is_empty()
+        {
+            return parts[3].to_string();
+        }
+        return s.to_string();
+    }
+    // Partial ARN: ACCOUNT:function:NAME[:QUALIFIER] (account is 12 digits).
+    let head: Vec<&str> = s.splitn(4, ':').collect();
+    if head.len() >= 3
+        && head[0].len() == 12
+        && head[0].bytes().all(|b| b.is_ascii_digit())
+        && head[1] == "function"
+        && !head[2].is_empty()
+    {
+        return head[2].to_string();
+    }
+    // Plain name with optional qualifier. AWS function names are
+    // `[a-zA-Z0-9-_]+`, so any colon means a qualifier suffix.
+    if let Some((name, _qualifier)) = s.split_once(':') {
+        if !name.is_empty() {
+            return name.to_string();
+        }
+    }
+    s.to_string()
+}
+
+/// True when the action's path-derived resource is a Lambda
+/// `FunctionName` (versus a layer name, code-signing-config id, event-
+/// source-mapping uuid, capacity-provider name, durable-execution id,
+/// or a tag-resource ARN). Drives whether `handle()` collapses ARN /
+/// partial-ARN / qualified forms to the bare function name.
+fn is_function_name_action(action: &str) -> bool {
+    matches!(
+        action,
+        "GetFunction"
+            | "DeleteFunction"
+            | "Invoke"
+            | "InvokeAsync"
+            | "InvokeWithResponseStream"
+            | "PublishVersion"
+            | "AddPermission"
+            | "GetPolicy"
+            | "RemovePermission"
+            | "GetFunctionConfiguration"
+            | "UpdateFunctionConfiguration"
+            | "UpdateFunctionCode"
+            | "ListVersionsByFunction"
+            | "CreateAlias"
+            | "GetAlias"
+            | "ListAliases"
+            | "UpdateAlias"
+            | "DeleteAlias"
+            | "CreateFunctionUrlConfig"
+            | "GetFunctionUrlConfig"
+            | "UpdateFunctionUrlConfig"
+            | "DeleteFunctionUrlConfig"
+            | "PutFunctionConcurrency"
+            | "GetFunctionConcurrency"
+            | "DeleteFunctionConcurrency"
+            | "PutProvisionedConcurrencyConfig"
+            | "GetProvisionedConcurrencyConfig"
+            | "DeleteProvisionedConcurrencyConfig"
+            | "ListProvisionedConcurrencyConfigs"
+            | "PutFunctionEventInvokeConfig"
+            | "UpdateFunctionEventInvokeConfig"
+            | "GetFunctionEventInvokeConfig"
+            | "DeleteFunctionEventInvokeConfig"
+            | "ListFunctionEventInvokeConfigs"
+            | "PutRuntimeManagementConfig"
+            | "GetRuntimeManagementConfig"
+            | "PutFunctionScalingConfig"
+            | "GetFunctionScalingConfig"
+            | "PutFunctionRecursionConfig"
+            | "GetFunctionRecursionConfig"
+            | "PutFunctionCodeSigningConfig"
+            | "GetFunctionCodeSigningConfig"
+            | "DeleteFunctionCodeSigningConfig"
+    )
 }
 
 /// AWS Lambda's InvocationType: synchronous, async (event), or dry-run.
@@ -1104,17 +1216,18 @@ impl LambdaService {
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
 
-        // Resolve function name to ARN
-        let function_arn = if function_name.starts_with("arn:") {
-            function_name.clone()
-        } else {
-            let func = state.functions.get(&function_name).ok_or_else(|| {
+        // Resolve to a canonical function ARN. Accept name, qualified
+        // name, partial ARN, or full ARN — collapse to the bare name,
+        // then look up the stored ARN. Mirrors AWS's flexibility.
+        let bare_name = resolve_function_name(&function_name);
+        let function_arn = {
+            let func = state.functions.get(&bare_name).ok_or_else(|| {
                 AwsServiceError::aws_error(
                     StatusCode::NOT_FOUND,
                     "ResourceNotFoundException",
                     format!(
                         "Function not found: arn:aws:lambda:{}:{}:function:{}",
-                        state.region, state.account_id, function_name
+                        state.region, state.account_id, bare_name
                     ),
                 )
             })?;
@@ -1617,6 +1730,19 @@ impl AwsService for LambdaService {
             )
         })?;
 
+        // For actions where path[2] is a FunctionName, accept all four
+        // AWS-supported forms (plain name, qualified name, full ARN,
+        // partial ARN) by collapsing to the bare function name before
+        // hitting any state.functions lookup. Tag/EventSourceMapping/
+        // Layer/CodeSigningConfig/CapacityProvider/DurableExecution
+        // resources keep their original identifier — they're not
+        // FunctionName-keyed.
+        let resource_name = if is_function_name_action(action) {
+            resource_name.map(|s| resolve_function_name(&s))
+        } else {
+            resource_name
+        };
+
         let mutates = matches!(
             action,
             "CreateFunction"
@@ -1853,7 +1979,8 @@ impl AwsService for LambdaService {
         let resource = match action {
             "GetFunction" | "DeleteFunction" | "InvokeFunction" | "PublishVersion"
             | "AddPermission" | "RemovePermission" | "GetPolicy" => {
-                let name = resource_name.unwrap_or_default();
+                let raw = resource_name.unwrap_or_default();
+                let name = resolve_function_name(&raw);
                 if name.is_empty() {
                     "*".to_string()
                 } else {
@@ -1874,7 +2001,9 @@ impl AwsService for LambdaService {
                         v.get("FunctionName").and_then(|f| f.as_str()).map(|n| {
                             format!(
                                 "arn:aws:lambda:{}:{}:function:{}",
-                                state.region, state.account_id, n
+                                state.region,
+                                state.account_id,
+                                resolve_function_name(n)
                             )
                         })
                     })
@@ -2614,5 +2743,171 @@ mod tests {
         let svc = LambdaService::new(make_state());
         let resp = svc.list_event_source_mappings("123456789012").unwrap();
         assert_eq!(resp.status, http::StatusCode::OK);
+    }
+
+    #[test]
+    fn resolve_function_name_plain() {
+        assert_eq!(resolve_function_name("my-fn"), "my-fn");
+    }
+
+    #[test]
+    fn resolve_function_name_qualified_plain() {
+        assert_eq!(resolve_function_name("my-fn:PROD"), "my-fn");
+        assert_eq!(resolve_function_name("my-fn:7"), "my-fn");
+        assert_eq!(resolve_function_name("my-fn:$LATEST"), "my-fn");
+    }
+
+    #[test]
+    fn resolve_function_name_full_arn() {
+        assert_eq!(
+            resolve_function_name("arn:aws:lambda:us-east-1:123456789012:function:my-fn"),
+            "my-fn"
+        );
+    }
+
+    #[test]
+    fn resolve_function_name_qualified_full_arn() {
+        assert_eq!(
+            resolve_function_name("arn:aws:lambda:us-east-1:123456789012:function:my-fn:PROD"),
+            "my-fn"
+        );
+        assert_eq!(
+            resolve_function_name("arn:aws:lambda:us-east-1:123456789012:function:my-fn:7"),
+            "my-fn"
+        );
+        assert_eq!(
+            resolve_function_name("arn:aws:lambda:us-east-1:123456789012:function:my-fn:$LATEST"),
+            "my-fn"
+        );
+    }
+
+    #[test]
+    fn resolve_function_name_partial_arn() {
+        assert_eq!(
+            resolve_function_name("123456789012:function:my-fn"),
+            "my-fn"
+        );
+    }
+
+    #[test]
+    fn resolve_function_name_qualified_partial_arn() {
+        assert_eq!(
+            resolve_function_name("123456789012:function:my-fn:7"),
+            "my-fn"
+        );
+        assert_eq!(
+            resolve_function_name("123456789012:function:my-fn:PROD"),
+            "my-fn"
+        );
+    }
+
+    #[test]
+    fn resolve_function_name_empty() {
+        assert_eq!(resolve_function_name(""), "");
+    }
+
+    #[test]
+    fn resolve_function_name_partial_arn_requires_12_digit_account() {
+        // Not a real partial ARN — first segment isn't 12 digits, so the
+        // colon is treated as a qualifier separator on a plain name.
+        assert_eq!(resolve_function_name("acct:function:my-fn"), "acct");
+    }
+
+    #[test]
+    fn resolve_function_name_percent_encoded_arn() {
+        // AWS SDKs URL-encode the colons in ARN-form path segments;
+        // `arn%3Aaws%3Alambda%3A...` must collapse to the bare name.
+        assert_eq!(
+            resolve_function_name(
+                "arn%3Aaws%3Alambda%3Aus-east-1%3A123456789012%3Afunction%3Atoolkit-fn"
+            ),
+            "toolkit-fn"
+        );
+        assert_eq!(
+            resolve_function_name(
+                "arn%3aaws%3alambda%3aus-east-1%3a123456789012%3afunction%3atoolkit-fn%3a%24LATEST"
+            ),
+            "toolkit-fn"
+        );
+    }
+
+    #[test]
+    fn resolve_function_name_unknown_arn_passthrough() {
+        // An ARN we don't recognise (wrong service / wrong shape) is
+        // returned unchanged so the caller surfaces a 404 with the
+        // original identifier instead of silently truncating it.
+        assert_eq!(
+            resolve_function_name("arn:aws:lambda:us-east-1:123456789012:layer:my-layer"),
+            "arn:aws:lambda:us-east-1:123456789012:layer:my-layer"
+        );
+        assert_eq!(
+            resolve_function_name("arn:aws:lambda:::function:my-fn"),
+            "arn:aws:lambda:::function:my-fn"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_function_accepts_full_arn_in_path() {
+        let svc = LambdaService::new(make_state());
+        seed_function(&svc, "toolkit-fn").await;
+
+        let req = make_request(
+            Method::GET,
+            "/2015-03-31/functions/arn:aws:lambda:us-east-1:123456789012:function:toolkit-fn",
+            "",
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(body["Configuration"]["FunctionName"], "toolkit-fn");
+    }
+
+    #[tokio::test]
+    async fn get_function_accepts_partial_arn_in_path() {
+        let svc = LambdaService::new(make_state());
+        seed_function(&svc, "toolkit-fn").await;
+
+        let req = make_request(
+            Method::GET,
+            "/2015-03-31/functions/123456789012:function:toolkit-fn",
+            "",
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(body["Configuration"]["FunctionName"], "toolkit-fn");
+    }
+
+    #[tokio::test]
+    async fn get_function_accepts_qualified_arn_in_path() {
+        let svc = LambdaService::new(make_state());
+        seed_function(&svc, "toolkit-fn").await;
+
+        let req = make_request(
+            Method::GET,
+            "/2015-03-31/functions/arn:aws:lambda:us-east-1:123456789012:function:toolkit-fn:$LATEST",
+            "",
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn delete_function_accepts_full_arn_in_path() {
+        let svc = LambdaService::new(make_state());
+        seed_function(&svc, "toolkit-fn").await;
+
+        let req = make_request(
+            Method::DELETE,
+            "/2015-03-31/functions/arn:aws:lambda:us-east-1:123456789012:function:toolkit-fn",
+            "",
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::NO_CONTENT);
+
+        // Confirm the function is actually gone.
+        let req = make_request(Method::GET, "/2015-03-31/functions/toolkit-fn", "");
+        let resp = svc.handle(req).await;
+        assert!(resp.is_err());
     }
 }
