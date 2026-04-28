@@ -91,6 +91,8 @@ async fn rds_describe_db_instances() {
         .await
         .unwrap();
 
+    wait_for_db_instance_available(&client, "conf-rds-db").await;
+
     let response = client
         .describe_db_instances()
         .db_instance_identifier("conf-rds-db")
@@ -540,7 +542,7 @@ async fn create_instance_with_deletion_protection(
     db_instance_identifier: &str,
     deletion_protection: bool,
 ) -> aws_sdk_rds::operation::create_db_instance::CreateDbInstanceOutput {
-    client
+    let response = client
         .create_db_instance()
         .db_instance_identifier(db_instance_identifier)
         .allocated_storage(20)
@@ -553,7 +555,52 @@ async fn create_instance_with_deletion_protection(
         .db_name("appdb")
         .send()
         .await
-        .unwrap()
+        .unwrap();
+    wait_for_db_instance_available(client, db_instance_identifier).await;
+    response
+}
+
+/// CreateDBInstance returns immediately with status="creating" and the
+/// real postgres container starts in a background task. Tests that
+/// chain operations on the instance (snapshot, modify, reboot, etc.)
+/// need it to reach "available" first or the followup either errors or
+/// observes intermediate state. Polls DescribeDBInstances every 250ms
+/// for up to 60s.
+async fn wait_for_db_instance_available(
+    client: &aws_sdk_rds::Client,
+    db_instance_identifier: &str,
+) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        let response = client
+            .describe_db_instances()
+            .db_instance_identifier(db_instance_identifier)
+            .send()
+            .await
+            .unwrap_or_else(|err| {
+                panic!("describe_db_instances during wait failed: {err:?}");
+            });
+        let status = response
+            .db_instances()
+            .first()
+            .and_then(|i| i.db_instance_status())
+            .unwrap_or("")
+            .to_string();
+        if status == "available" {
+            return;
+        }
+        if status == "failed" {
+            panic!(
+                "db instance {db_instance_identifier} entered status `failed` while waiting for available"
+            );
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!(
+                "timed out waiting for db instance {db_instance_identifier} to reach available (last status: {status})"
+            );
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
 }
 
 #[test_action("rds", "CreateDBSubnetGroup", checksum = "1b1b06a3")]
@@ -873,6 +920,8 @@ async fn rds_delete_db_instance_with_final_snapshot() {
         .await
         .unwrap();
 
+    wait_for_db_instance_available(&client, "conf-rds-final").await;
+
     // Delete with final snapshot
     let response = client
         .delete_db_instance()
@@ -981,6 +1030,8 @@ async fn rds_describe_db_snapshots_pagination() {
         .send()
         .await
         .unwrap();
+
+    wait_for_db_instance_available(&client, "conf-snap-paginate").await;
 
     // Create 3 snapshots
     for i in 1..=3 {
