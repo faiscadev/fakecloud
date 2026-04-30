@@ -499,6 +499,17 @@ impl KmsService {
             .policy
             .unwrap_or_else(|| default_key_policy(&state.account_id));
 
+        let (asym_priv, asym_pub) = asym::generate_keypair(&input.key_spec)
+            .map_err(|e| {
+                AwsServiceError::aws_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "KMSInternalException",
+                    format!("failed to generate asymmetric key: {e}"),
+                )
+            })?
+            .map(|(p, k)| (Some(p), Some(k)))
+            .unwrap_or((None, None));
+
         let key = KmsKey {
             key_id: key_id.clone(),
             arn: arn.clone(),
@@ -524,6 +535,8 @@ impl KmsService {
             imported_material_bytes: None,
             private_key_seed: rand_bytes(32),
             primary_region: None,
+            asymmetric_private_key_der: asym_priv,
+            asymmetric_public_key_der: asym_pub,
         };
 
         let metadata = key_metadata_json(&key, &state.account_id);
@@ -1271,6 +1284,8 @@ impl KmsService {
     }
 }
 
+#[path = "asym.rs"]
+pub(crate) mod asym;
 #[path = "service_aliases.rs"]
 mod service_aliases;
 #[path = "service_crypto.rs"]

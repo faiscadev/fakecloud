@@ -330,6 +330,8 @@ fn provision_aws_managed_key(
         imported_material_bytes: None,
         private_key_seed: Vec::new(),
         primary_region: None,
+        asymmetric_private_key_der: None,
+        asymmetric_public_key_der: None,
     };
     state.keys.insert(key_id.clone(), key);
     let alias_full = format!("alias/{alias}");

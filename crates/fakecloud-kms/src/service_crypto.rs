@@ -370,12 +370,35 @@ impl KmsService {
             ));
         }
 
-        // Generate a fake signature
-        let sig_data = format!(
-            "fakecloud-sig:{}:{}:{}",
-            key.key_id, signing_algorithm, message_b64
-        );
-        let signature_b64 = base64::engine::general_purpose::STANDARD.encode(sig_data.as_bytes());
+        let message_is_digest = body["MessageType"].as_str() == Some("DIGEST");
+
+        let signature_bytes = if let Some(priv_der) = &key.asymmetric_private_key_der {
+            super::asym::rsa_sign(
+                priv_der,
+                signing_algorithm,
+                &message_bytes,
+                message_is_digest,
+            )
+            .map_err(|e| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationException",
+                    format!("Sign failed: {e}"),
+                )
+            })?
+        } else {
+            // Legacy fake-bytes path for specs whose real-crypto branch
+            // hasn't landed yet (ECDSA in G2, etc.). Keeps the rest of
+            // the surface working until the per-spec branches replace
+            // this with `super::asym::*` paths.
+            let sig_data = format!(
+                "fakecloud-sig:{}:{}:{}",
+                key.key_id, signing_algorithm, message_b64
+            );
+            sig_data.into_bytes()
+        };
+
+        let signature_b64 = base64::engine::general_purpose::STANDARD.encode(&signature_bytes);
 
         Ok(AwsResponse::json(
             StatusCode::OK,
@@ -422,15 +445,43 @@ impl KmsService {
         validate_key_usage_signing(key, &resolved)?;
         validate_signing_algorithm(key, signing_algorithm)?;
 
-        // Check if signature matches the deterministic fakecloud signature.
-        let expected_sig_data = format!(
-            "fakecloud-sig:{}:{}:{}",
-            key.key_id, signing_algorithm, message_b64
-        );
-        let expected_signature_b64 =
-            base64::engine::general_purpose::STANDARD.encode(expected_sig_data.as_bytes());
+        let message_bytes = base64::engine::general_purpose::STANDARD
+            .decode(message_b64)
+            .unwrap_or_default();
+        let signature_bytes = base64::engine::general_purpose::STANDARD
+            .decode(signature_b64)
+            .unwrap_or_default();
+        let message_is_digest = body["MessageType"].as_str() == Some("DIGEST");
 
-        let signature_valid = signature_b64 == expected_signature_b64;
+        let signature_valid = if let Some(priv_der) = &key.asymmetric_private_key_der {
+            super::asym::rsa_verify(
+                priv_der,
+                signing_algorithm,
+                &message_bytes,
+                &signature_bytes,
+                message_is_digest,
+            )
+            .unwrap_or(false)
+        } else {
+            // Legacy fake-bytes verify (paired with the legacy Sign
+            // path above). Replaced spec-by-spec as later G batches
+            // ship real crypto for ECDSA / ECDH-derived specs.
+            let expected_sig_data = format!(
+                "fakecloud-sig:{}:{}:{}",
+                key.key_id, signing_algorithm, message_b64
+            );
+            let expected_signature_b64 =
+                base64::engine::general_purpose::STANDARD.encode(expected_sig_data.as_bytes());
+            signature_b64 == expected_signature_b64
+        };
+
+        if !signature_valid {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "KMSInvalidSignatureException",
+                "The signature is not valid",
+            ));
+        }
 
         Ok(AwsResponse::json(
             StatusCode::OK,
@@ -468,9 +519,16 @@ impl KmsService {
             )
         })?;
 
-        // Generate a fake DER-encoded public key
-        let fake_public_key = generate_fake_public_key(&key.key_spec);
-        let public_key_b64 = base64::engine::general_purpose::STANDARD.encode(&fake_public_key);
+        // For specs whose keypair was generated at CreateKey time
+        // (RSA_*), return the real SubjectPublicKeyInfo DER. For
+        // specs we don't yet generate (ECDSA / SM2 in later G batches),
+        // fall back to the structurally-valid placeholder so existing
+        // round-trip tests still pass.
+        let public_key_bytes = key
+            .asymmetric_public_key_der
+            .clone()
+            .unwrap_or_else(|| generate_fake_public_key(&key.key_spec));
+        let public_key_b64 = base64::engine::general_purpose::STANDARD.encode(&public_key_bytes);
 
         let mut response = json!({
             "KeyId": key.arn,

@@ -1133,7 +1133,7 @@ fn sign_verify_roundtrip() {
     let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
     assert!(body["SignatureValid"].as_bool().unwrap());
 
-    // Verify with wrong signature should return false
+    // Verify with wrong signature should fail with KMSInvalidSignatureException
     let wrong_sig = base64::engine::general_purpose::STANDARD.encode(b"wrong-signature-data");
     let req = make_request(
         "Verify",
@@ -1144,9 +1144,7 @@ fn sign_verify_roundtrip() {
             "SigningAlgorithm": "RSASSA_PKCS1_V1_5_SHA_256"
         }),
     );
-    let resp = svc.verify(&req).unwrap();
-    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
-    assert!(!body["SignatureValid"].as_bool().unwrap());
+    assert!(svc.verify(&req).is_err());
 }
 
 #[test]
@@ -1455,6 +1453,75 @@ fn get_public_key_for_asymmetric_key() {
     let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
     assert!(body["PublicKey"].as_str().is_some());
     assert_eq!(body["KeySpec"].as_str().unwrap(), "ECC_NIST_P256");
+}
+
+#[test]
+fn rsa_get_public_key_is_real_parseable_spki() {
+    use base64::Engine;
+    use rsa::pkcs8::DecodePublicKey;
+    let svc = make_service();
+    let key_id = create_key_with_opts(
+        &svc,
+        json!({ "KeyUsage": "SIGN_VERIFY", "KeySpec": "RSA_2048" }),
+    );
+    let req = make_request("GetPublicKey", json!({ "KeyId": key_id }));
+    let resp = svc.get_public_key(&req).unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let der = base64::engine::general_purpose::STANDARD
+        .decode(body["PublicKey"].as_str().unwrap())
+        .unwrap();
+    let parsed = rsa::RsaPublicKey::from_public_key_der(&der);
+    assert!(
+        parsed.is_ok(),
+        "GetPublicKey for RSA_2048 must return real parseable SPKI DER"
+    );
+}
+
+#[test]
+fn rsa_sign_verify_round_trips_against_get_public_key() {
+    // Sanity-check the full external loop: client signs via Sign,
+    // pulls the public key via GetPublicKey, verifies locally with
+    // a real RSA library. If our Sign output isn't a real RSA
+    // signature this test fails.
+    use base64::Engine;
+    use rsa::pkcs8::DecodePublicKey;
+    use rsa::sha2::Sha256;
+    use signature::Verifier as _;
+
+    let svc = make_service();
+    let key_id = create_key_with_opts(
+        &svc,
+        json!({ "KeyUsage": "SIGN_VERIFY", "KeySpec": "RSA_2048" }),
+    );
+    let message = b"sign me";
+    let message_b64 = base64::engine::general_purpose::STANDARD.encode(message);
+
+    let resp = svc
+        .sign(&make_request(
+            "Sign",
+            json!({
+                "KeyId": key_id,
+                "Message": message_b64,
+                "SigningAlgorithm": "RSASSA_PKCS1_V1_5_SHA_256"
+            }),
+        ))
+        .unwrap();
+    let sig_body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let signature_bytes = base64::engine::general_purpose::STANDARD
+        .decode(sig_body["Signature"].as_str().unwrap())
+        .unwrap();
+
+    let resp = svc
+        .get_public_key(&make_request("GetPublicKey", json!({ "KeyId": key_id })))
+        .unwrap();
+    let pub_body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let pub_der = base64::engine::general_purpose::STANDARD
+        .decode(pub_body["PublicKey"].as_str().unwrap())
+        .unwrap();
+    let public = rsa::RsaPublicKey::from_public_key_der(&pub_der).unwrap();
+    let vk: rsa::pkcs1v15::VerifyingKey<Sha256> = rsa::pkcs1v15::VerifyingKey::new(public);
+    let parsed_sig = rsa::pkcs1v15::Signature::try_from(signature_bytes.as_slice()).unwrap();
+    assert!(vk.verify(message, &parsed_sig).is_ok());
 }
 
 // ── Batch 8 additions: key lifecycle, alias, policy handlers ─────

@@ -86,6 +86,15 @@ pub struct KmsKey {
     /// Deterministic seed for the key (used for DeriveSharedSecret).
     pub private_key_seed: Vec<u8>,
     pub primary_region: Option<String>,
+    /// PKCS#8 DER-encoded private key, populated for asymmetric specs
+    /// (RSA_2048/3072/4096, ECC_*) at CreateKey time. None for
+    /// symmetric / HMAC specs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asymmetric_private_key_der: Option<Vec<u8>>,
+    /// SubjectPublicKeyInfo DER-encoded public key. Returned by
+    /// GetPublicKey verbatim.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asymmetric_public_key_der: Option<Vec<u8>>,
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]

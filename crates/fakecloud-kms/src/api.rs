@@ -237,6 +237,8 @@ mod tests {
                     imported_material_bytes: None,
                     private_key_seed: vec![7; 32],
                     primary_region: None,
+                    asymmetric_private_key_der: None,
+                    asymmetric_public_key_der: None,
                 },
             );
         }
