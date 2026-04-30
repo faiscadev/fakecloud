@@ -499,16 +499,27 @@ impl KmsService {
             .policy
             .unwrap_or_else(|| default_key_policy(&state.account_id));
 
-        let (asym_priv, asym_pub) = asym::generate_keypair(&input.key_spec)
-            .map_err(|e| {
-                AwsServiceError::aws_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "KMSInternalException",
-                    format!("failed to generate asymmetric key: {e}"),
-                )
-            })?
-            .map(|(p, k)| (Some(p), Some(k)))
-            .unwrap_or((None, None));
+        let mut asym_priv: Option<Vec<u8>> = None;
+        let mut asym_pub: Option<Vec<u8>> = None;
+        if let Some((p, k)) = asym::generate_keypair(&input.key_spec).map_err(|e| {
+            AwsServiceError::aws_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "KMSInternalException",
+                format!("failed to generate asymmetric key: {e}"),
+            )
+        })? {
+            asym_priv = Some(p);
+            asym_pub = Some(k);
+        } else if let Some((p, k)) = asym_ecdsa::generate_keypair(&input.key_spec).map_err(|e| {
+            AwsServiceError::aws_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "KMSInternalException",
+                format!("failed to generate ecdsa key: {e}"),
+            )
+        })? {
+            asym_priv = Some(p);
+            asym_pub = Some(k);
+        }
 
         let key = KmsKey {
             key_id: key_id.clone(),
@@ -1286,6 +1297,8 @@ impl KmsService {
 
 #[path = "asym.rs"]
 pub(crate) mod asym;
+#[path = "asym_ecdsa.rs"]
+pub(crate) mod asym_ecdsa;
 #[path = "service_aliases.rs"]
 mod service_aliases;
 #[path = "service_crypto.rs"]

@@ -373,24 +373,41 @@ impl KmsService {
         let message_is_digest = body["MessageType"].as_str() == Some("DIGEST");
 
         let signature_bytes = if let Some(priv_der) = &key.asymmetric_private_key_der {
-            super::asym::rsa_sign(
-                priv_der,
-                signing_algorithm,
-                &message_bytes,
-                message_is_digest,
-            )
-            .map_err(|e| {
-                AwsServiceError::aws_error(
-                    StatusCode::BAD_REQUEST,
-                    "ValidationException",
-                    format!("Sign failed: {e}"),
+            if signing_algorithm.starts_with("ECDSA") {
+                super::asym_ecdsa::sign(
+                    &key.key_spec,
+                    priv_der,
+                    signing_algorithm,
+                    &message_bytes,
+                    message_is_digest,
                 )
-            })?
+                .map_err(|e| {
+                    AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "ValidationException",
+                        format!("Sign failed: {e}"),
+                    )
+                })?
+            } else {
+                super::asym::rsa_sign(
+                    priv_der,
+                    signing_algorithm,
+                    &message_bytes,
+                    message_is_digest,
+                )
+                .map_err(|e| {
+                    AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "ValidationException",
+                        format!("Sign failed: {e}"),
+                    )
+                })?
+            }
         } else {
             // Legacy fake-bytes path for specs whose real-crypto branch
-            // hasn't landed yet (ECDSA in G2, etc.). Keeps the rest of
-            // the surface working until the per-spec branches replace
-            // this with `super::asym::*` paths.
+            // hasn't landed yet (P-521, SM2). Keeps the rest of the
+            // surface working until later G batches replace this with
+            // real-crypto paths.
             let sig_data = format!(
                 "fakecloud-sig:{}:{}:{}",
                 key.key_id, signing_algorithm, message_b64
@@ -454,14 +471,26 @@ impl KmsService {
         let message_is_digest = body["MessageType"].as_str() == Some("DIGEST");
 
         let signature_valid = if let Some(priv_der) = &key.asymmetric_private_key_der {
-            super::asym::rsa_verify(
-                priv_der,
-                signing_algorithm,
-                &message_bytes,
-                &signature_bytes,
-                message_is_digest,
-            )
-            .unwrap_or(false)
+            if signing_algorithm.starts_with("ECDSA") {
+                super::asym_ecdsa::verify(
+                    &key.key_spec,
+                    priv_der,
+                    signing_algorithm,
+                    &message_bytes,
+                    &signature_bytes,
+                    message_is_digest,
+                )
+                .unwrap_or(false)
+            } else {
+                super::asym::rsa_verify(
+                    priv_der,
+                    signing_algorithm,
+                    &message_bytes,
+                    &signature_bytes,
+                    message_is_digest,
+                )
+                .unwrap_or(false)
+            }
         } else {
             // Legacy fake-bytes verify (paired with the legacy Sign
             // path above). Replaced spec-by-spec as later G batches

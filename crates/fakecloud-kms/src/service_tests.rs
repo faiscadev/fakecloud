@@ -1171,6 +1171,117 @@ fn sign_with_ecc_key() {
 }
 
 #[test]
+fn ecdsa_p256_sign_verify_round_trips_with_real_signature() {
+    let svc = make_service();
+    let key_id = create_key_with_opts(
+        &svc,
+        json!({ "KeyUsage": "SIGN_VERIFY", "KeySpec": "ECC_NIST_P256" }),
+    );
+    let message = b"ecc roundtrip";
+    let message_b64 = base64::engine::general_purpose::STANDARD.encode(message);
+
+    let resp = svc
+        .sign(&make_request(
+            "Sign",
+            json!({
+                "KeyId": key_id,
+                "Message": message_b64,
+                "SigningAlgorithm": "ECDSA_SHA_256",
+            }),
+        ))
+        .unwrap();
+    let sig_body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let signature = sig_body["Signature"].as_str().unwrap().to_string();
+
+    let resp = svc
+        .verify(&make_request(
+            "Verify",
+            json!({
+                "KeyId": key_id,
+                "Message": message_b64,
+                "Signature": signature,
+                "SigningAlgorithm": "ECDSA_SHA_256",
+            }),
+        ))
+        .unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert!(body["SignatureValid"].as_bool().unwrap());
+
+    // Tampered message must fail.
+    let bad_b64 = base64::engine::general_purpose::STANDARD.encode(b"different");
+    assert!(svc
+        .verify(&make_request(
+            "Verify",
+            json!({
+                "KeyId": key_id,
+                "Message": bad_b64,
+                "Signature": signature,
+                "SigningAlgorithm": "ECDSA_SHA_256",
+            }),
+        ))
+        .is_err());
+}
+
+#[test]
+fn ecdsa_p256_get_public_key_is_real_parseable_spki() {
+    use base64::Engine;
+    use p256::pkcs8::DecodePublicKey;
+    let svc = make_service();
+    let key_id = create_key_with_opts(
+        &svc,
+        json!({ "KeyUsage": "SIGN_VERIFY", "KeySpec": "ECC_NIST_P256" }),
+    );
+    let resp = svc
+        .get_public_key(&make_request("GetPublicKey", json!({ "KeyId": key_id })))
+        .unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let der = base64::engine::general_purpose::STANDARD
+        .decode(body["PublicKey"].as_str().unwrap())
+        .unwrap();
+    assert!(p256::PublicKey::from_public_key_der(&der).is_ok());
+}
+
+#[test]
+fn ecdsa_p384_sign_verify_round_trips() {
+    let svc = make_service();
+    let key_id = create_key_with_opts(
+        &svc,
+        json!({ "KeyUsage": "SIGN_VERIFY", "KeySpec": "ECC_NIST_P384" }),
+    );
+    let message_b64 = base64::engine::general_purpose::STANDARD.encode(b"p384");
+    let resp = svc
+        .sign(&make_request(
+            "Sign",
+            json!({
+                "KeyId": key_id,
+                "Message": message_b64,
+                "SigningAlgorithm": "ECDSA_SHA_384",
+            }),
+        ))
+        .unwrap();
+    let sig = serde_json::from_slice::<Value>(resp.body.expect_bytes()).unwrap()["Signature"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let resp = svc
+        .verify(&make_request(
+            "Verify",
+            json!({
+                "KeyId": key_id,
+                "Message": message_b64,
+                "Signature": sig,
+                "SigningAlgorithm": "ECDSA_SHA_384",
+            }),
+        ))
+        .unwrap();
+    assert!(
+        serde_json::from_slice::<Value>(resp.body.expect_bytes()).unwrap()["SignatureValid"]
+            .as_bool()
+            .unwrap()
+    );
+}
+
+#[test]
 fn sign_wrong_key_usage_fails() {
     let svc = make_service();
     let key_id = create_key(&svc); // ENCRYPT_DECRYPT

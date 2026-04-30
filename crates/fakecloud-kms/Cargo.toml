@@ -27,3 +27,6 @@ aes-gcm = "0.10"
 rsa = { workspace = true }
 rand = "0.8"
 signature = "2"
+p256 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
+p384 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
+k256 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
