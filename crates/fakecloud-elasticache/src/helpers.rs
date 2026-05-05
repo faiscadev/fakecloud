@@ -652,10 +652,10 @@ pub(crate) fn cache_cluster_xml(cluster: &CacheCluster, show_cache_node_info: bo
                 .security_group_ids
                 .iter()
                 .map(|sg| format!(
-                    "<SecurityGroupMembership>\
+                    "<member>\
                      <SecurityGroupId>{}</SecurityGroupId>\
                      <Status>active</Status>\
-                     </SecurityGroupMembership>",
+                     </member>",
                     xml_escape(sg)
                 ))
                 .collect::<String>()
