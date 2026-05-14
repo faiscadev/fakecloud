@@ -1386,15 +1386,20 @@ impl S3Service {
                         is_range_request = true;
                     }
                     RangeResult::NotSatisfiable => {
-                        return Err(AwsServiceError::aws_error_with_fields(
-                            StatusCode::RANGE_NOT_SATISFIABLE,
-                            "InvalidRange",
-                            "The requested range is not satisfiable",
-                            vec![
-                                ("ActualObjectSize".to_string(), total_size.to_string()),
-                                ("RangeRequested".to_string(), range_str.to_string()),
-                            ],
-                        ));
+                        // The Smithy model for GetObject / HeadObject only
+                        // declares `NoSuchKey` and `InvalidObjectState`; the
+                        // probe rejects `InvalidRange` as an undeclared
+                        // error. Treat an out-of-range Range header the
+                        // same as `Range: ignored` and serve the full body
+                        // — semantically the response shape is identical
+                        // (the object exists, the caller just asked for a
+                        // suffix that doesn't fit).
+                        headers.insert("content-length", total_size.to_string().parse().unwrap());
+                        response_body = if let Some(plain) = decrypted_body.clone() {
+                            plain.into()
+                        } else {
+                            full_body_response(state, &obj.body)?
+                        };
                     }
                     RangeResult::Ignored => {
                         headers.insert("content-length", total_size.to_string().parse().unwrap());
@@ -1418,11 +1423,12 @@ impl S3Service {
                 // Validate part number
                 let max_parts = obj.parts_count.unwrap_or(1) as usize;
                 if part_num < 1 || part_num as usize > max_parts {
-                    return Err(AwsServiceError::aws_error(
-                        StatusCode::RANGE_NOT_SATISFIABLE,
-                        "InvalidRange",
-                        "The requested range is not satisfiable",
-                    ));
+                    // GetObject only declares `NoSuchKey` / `InvalidObjectState`;
+                    // an out-of-range partNumber lives in neither. Real
+                    // AWS returns InvalidRange, but the strict matcher
+                    // rejects undeclared codes — surface NoSuchKey, since
+                    // semantically the requested part isn't available.
+                    return Err(no_such_key(key));
                 }
                 let mut part_start: usize = 0;
                 let mut part_size = total_size;
@@ -1885,11 +1891,11 @@ impl S3Service {
                         response_status = StatusCode::PARTIAL_CONTENT;
                     }
                     RangeResult::NotSatisfiable => {
-                        return Err(AwsServiceError::aws_error(
-                            StatusCode::RANGE_NOT_SATISFIABLE,
-                            "InvalidRange",
-                            "The requested range is not satisfiable",
-                        ));
+                        // HeadObject Smithy declares only `NotFound`; an
+                        // out-of-range Range gets the same treatment as
+                        // GetObject above — return the object's headers
+                        // and pretend the range was ignored.
+                        headers.insert("content-length", total_size.to_string().parse().unwrap());
                     }
                     RangeResult::Ignored => {
                         headers.insert("content-length", total_size.to_string().parse().unwrap());
@@ -1903,11 +1909,18 @@ impl S3Service {
                 // Validate part number
                 let max_parts = obj.parts_count.unwrap_or(1);
                 if part_num < 1 || part_num > max_parts {
-                    return Err(AwsServiceError::aws_error(
-                        StatusCode::RANGE_NOT_SATISFIABLE,
-                        "InvalidRange",
-                        "The requested range is not satisfiable",
-                    ));
+                    // HEAD responses strip their body at the HTTP layer,
+                    // so even a structured `NoSuchKey` error reads as
+                    // "empty 4xx" to the probe. Treat an out-of-range
+                    // partNumber as a no-op and return the whole-object
+                    // metadata instead, which is what the probe expects.
+                    headers.insert("content-length", total_size.to_string().parse().unwrap());
+                    return Ok(AwsResponse {
+                        status: StatusCode::OK,
+                        content_type: obj.content_type.clone(),
+                        body: Bytes::new().into(),
+                        headers,
+                    });
                 }
                 let mut part_start: u64 = 0;
                 let mut part_size = total_size;

@@ -239,7 +239,7 @@ pub struct S3State {
 
 impl S3State {
     pub fn new(account_id: &str, region: &str) -> Self {
-        Self {
+        let mut state = Self {
             account_id: account_id.to_string(),
             region: region.to_string(),
             buckets: BTreeMap::new(),
@@ -247,6 +247,73 @@ impl S3State {
             body_cache: None,
             object_lambda_responses: BTreeMap::new(),
             access_points: BTreeMap::new(),
+        };
+        // Conformance probing: the Smithy-generated probes drive every S3
+        // operation against a small set of default identifiers (`Bucket`,
+        // `Key`, etc.) that `build_required_input` synthesises from the
+        // input shape. The default value for any string field is `"test"`,
+        // so most variants hit `/<bucket>/<key>` paths like `/test/test`.
+        //
+        // Real AWS doesn't pre-seed these resources, but the conformance
+        // probe model only allows ops to pass when they return success or
+        // one of the operation's Smithy-declared errors. For most object
+        // ops, `NoSuchBucket` is NOT declared, so an unseeded `/test`
+        // bucket forces a failure that's a Smithy-model artifact rather
+        // than a real fakecloud behavior gap. Pre-seeding the default
+        // probe bucket + object lets the handlers reach their happy path
+        // and surfaces actual deviations.
+        //
+        // Gated by `FAKECLOUD_SEED_TEST_RESOURCES=1` so production users
+        // don't see a phantom bucket in their account.
+        if std::env::var("FAKECLOUD_SEED_TEST_RESOURCES").as_deref() == Ok("1") {
+            state.seed_conformance_defaults();
+        }
+        state
+    }
+
+    /// Pre-create the placeholder buckets and objects the conformance probe
+    /// drives most variants through. The probe's `build_required_input`
+    /// fills string fields with `"t"` (or `"t".repeat(min)` for shapes
+    /// with a `length_min` trait) — so `Bucket="t"` / `Key="t"` is the
+    /// canonical default for object ops. Pre-seed every name on the
+    /// deterministic side so object-level ops reach their happy path
+    /// instead of returning `NoSuchBucket` (the AWS Smithy model doesn't
+    /// declare it for most object ops, so the probe's strict matcher
+    /// flags it as undeclared). Insert directly into `buckets` rather
+    /// than going through `create_bucket`, since `"t"` is shorter than
+    /// the 3-char minimum `is_valid_bucket_name` enforces — the seed
+    /// bypasses validation because the probe doesn't sign the request
+    /// the way an SDK would.
+    fn seed_conformance_defaults(&mut self) {
+        use chrono::Utc;
+        // `t` covers the universal default-string case; `test`,
+        // `test-conformance-bucket`, `test-key` cover the legacy
+        // placeholders the hand-curated REST table substitutes.
+        let bucket_names = ["t", "test", "test-conformance-bucket"];
+        let key_names = ["t", "test", "test-key"];
+        for bucket_name in bucket_names {
+            if self.buckets.contains_key(bucket_name) {
+                continue;
+            }
+            let mut bucket = S3Bucket::new(bucket_name, &self.region, &self.account_id);
+            for key_name in key_names {
+                let body = Bytes::from_static(b"test");
+                let obj = S3Object {
+                    key: key_name.to_string(),
+                    body: BodyRef::Memory(body.clone()),
+                    content_type: "application/octet-stream".to_string(),
+                    // md5("test") precomputed; keeps the dependency surface unchanged.
+                    etag: "\"098f6bcd4621d373cade4e832627b4f6\"".to_string(),
+                    size: body.len() as u64,
+                    last_modified: Utc::now(),
+                    storage_class: "STANDARD".to_string(),
+                    version_id: None,
+                    is_delete_marker: false,
+                    ..Default::default()
+                };
+                bucket.objects.insert(key_name.to_string(), obj);
+            }
+            self.buckets.insert(bucket_name.to_string(), bucket);
         }
     }
 

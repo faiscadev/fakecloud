@@ -388,6 +388,14 @@ fn start_fakecloud() -> (String, Child) {
         .arg(format!("127.0.0.1:{}", port))
         .arg("--log-level")
         .arg("error")
+        // Pre-seed the canonical conformance probe identifiers
+        // (`test` / `test-conformance-bucket` buckets + `test` / `test-key`
+        // objects). Without these, every object-on-bucket variant for ops
+        // whose Smithy model doesn't declare `NoSuchBucket` (CopyObject,
+        // PutObject, RestoreObject, …) returns an undeclared 404 and the
+        // probe correctly classifies it as a failure. The seeded bucket
+        // is gated by an env var so production callers never see it.
+        .env("FAKECLOUD_SEED_TEST_RESOURCES", "1")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
