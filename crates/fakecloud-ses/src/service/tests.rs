@@ -651,6 +651,7 @@ async fn test_send_email_rejects_when_config_set_paused() {
                 reputation_metrics_enabled: false,
                 vdm_options: None,
                 archive_arn: None,
+                archiving_options_present: false,
             },
         );
     }
@@ -4307,6 +4308,7 @@ async fn send_email_v2_rejects_when_config_set_sending_paused() {
                 reputation_metrics_enabled: false,
                 vdm_options: None,
                 archive_arn: None,
+                archiving_options_present: false,
             },
         );
     }

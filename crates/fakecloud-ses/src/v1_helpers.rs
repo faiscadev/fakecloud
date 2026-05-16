@@ -1892,6 +1892,7 @@ pub(crate) fn create_configuration_set(
             reputation_metrics_enabled: false,
             vdm_options: None,
             archive_arn: None,
+            archiving_options_present: false,
         },
     );
     Ok(xml_metadata_only("CreateConfigurationSet", &req.request_id))

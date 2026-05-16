@@ -1651,6 +1651,7 @@ fn send_email_v1_config_set_pause() {
                 reputation_metrics_enabled: false,
                 vdm_options: None,
                 archive_arn: None,
+                archiving_options_present: false,
             },
         );
     }

@@ -63,6 +63,14 @@ pub struct ConfigurationSet {
     pub vdm_options: Option<serde_json::Value>,
     // Archiving options
     pub archive_arn: Option<String>,
+    /// Tracks whether `ArchivingOptions` was set on the configuration set
+    /// (via Create or PutConfigurationSetArchivingOptions). AWS surfaces
+    /// the structure on GetConfigurationSet even when only `ArchiveArn`
+    /// is empty, so a missing field on Create round-trips would be a
+    /// silent input drop. Defaults to `false` for snapshots created
+    /// before the field existed.
+    #[serde(default)]
+    pub archiving_options_present: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

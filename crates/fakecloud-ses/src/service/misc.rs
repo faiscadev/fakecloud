@@ -222,7 +222,7 @@ impl SesV2Service {
         state.custom_verification_email_templates.insert(
             template_name.clone(),
             CustomVerificationEmailTemplate {
-                template_name,
+                template_name: template_name.clone(),
                 from_email_address: from_email,
                 template_subject: subject,
                 template_content: content,
@@ -231,6 +231,28 @@ impl SesV2Service {
                 created_at: Utc::now(),
             },
         );
+
+        // Persist Tags via the per-ARN tag map. The Smithy
+        // `GetCustomVerificationEmailTemplateResponse` round-trips Tags,
+        // so dropping them on Create is a real input-drop bug. Replace
+        // rather than merge so a Create after Delete (or a Create that
+        // omits Tags) doesn't inherit stale entries from a previous
+        // incarnation of the ARN.
+        let arn = format!(
+            "arn:aws:ses:{}:{}:custom-verification-email-template/{}",
+            req.region, req.account_id, template_name
+        );
+        if let Some(tags_arr) = body["Tags"].as_array() {
+            let mut tag_map = std::collections::BTreeMap::new();
+            for tag in tags_arr {
+                if let (Some(k), Some(v)) = (tag["Key"].as_str(), tag["Value"].as_str()) {
+                    tag_map.insert(k.to_string(), v.to_string());
+                }
+            }
+            state.tags.insert(arn, tag_map);
+        } else {
+            state.tags.remove(&arn);
+        }
 
         Ok(AwsResponse::json(StatusCode::OK, "{}"))
     }
@@ -254,7 +276,7 @@ impl SesV2Service {
             }
         };
 
-        let response = json!({
+        let mut response = json!({
             "TemplateName": tmpl.template_name,
             "FromEmailAddress": tmpl.from_email_address,
             "TemplateSubject": tmpl.template_subject,
@@ -262,6 +284,15 @@ impl SesV2Service {
             "SuccessRedirectionURL": tmpl.success_redirection_url,
             "FailureRedirectionURL": tmpl.failure_redirection_url,
         });
+
+        let arn = format!(
+            "arn:aws:ses:{}:{}:custom-verification-email-template/{}",
+            req.region, req.account_id, name
+        );
+        if let Some(tag_map) = state.tags.get(&arn) {
+            response["Tags"] =
+                Value::Array(fakecloud_core::tags::tags_to_json(tag_map, "Key", "Value"));
+        }
 
         Ok(AwsResponse::json(StatusCode::OK, response.to_string()))
     }
@@ -381,6 +412,12 @@ impl SesV2Service {
                 &format!("Custom verification email template {} does not exist", name),
             ));
         }
+
+        let arn = format!(
+            "arn:aws:ses:{}:{}:custom-verification-email-template/{}",
+            req.region, req.account_id, name
+        );
+        state.tags.remove(&arn);
 
         Ok(AwsResponse::json(StatusCode::OK, "{}"))
     }

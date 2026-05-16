@@ -766,6 +766,7 @@ mod tests {
                     reputation_metrics_enabled: false,
                     vdm_options: None,
                     archive_arn: None,
+                    archiving_options_present: false,
                 },
             );
         }
@@ -807,6 +808,7 @@ mod tests {
                     reputation_metrics_enabled: false,
                     vdm_options: None,
                     archive_arn: None,
+                    archiving_options_present: false,
                 },
             );
         }
