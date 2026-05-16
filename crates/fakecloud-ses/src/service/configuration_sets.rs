@@ -99,18 +99,23 @@ impl SesV2Service {
 
         // Persist Tags via the same per-ARN map TagResource uses, so
         // ListTagsForResource on the new configuration-set ARN returns
-        // what the caller sent.
+        // what the caller sent. Replace rather than merge so a Create
+        // after Delete (or a Create that omits Tags) doesn't inherit
+        // stale entries from a previous incarnation of the ARN.
+        let arn = format!(
+            "arn:aws:ses:{}:{}:configuration-set/{}",
+            req.region, req.account_id, name
+        );
         if let Some(tags_arr) = body["Tags"].as_array() {
-            let arn = format!(
-                "arn:aws:ses:{}:{}:configuration-set/{}",
-                req.region, req.account_id, name
-            );
-            let tag_map = state.tags.entry(arn).or_default();
+            let mut tag_map = std::collections::BTreeMap::new();
             for tag in tags_arr {
                 if let (Some(k), Some(v)) = (tag["Key"].as_str(), tag["Value"].as_str()) {
                     tag_map.insert(k.to_string(), v.to_string());
                 }
             }
+            state.tags.insert(arn, tag_map);
+        } else {
+            state.tags.remove(&arn);
         }
 
         Ok(AwsResponse::json(StatusCode::OK, "{}"))

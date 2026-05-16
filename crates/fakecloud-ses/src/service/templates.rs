@@ -64,18 +64,23 @@ impl SesV2Service {
 
         // Persist Tags via the per-ARN tag map. The Smithy
         // `GetEmailTemplateResponse` round-trips Tags, so dropping them
-        // on Create is a real input-drop bug.
+        // on Create is a real input-drop bug. Replace rather than merge
+        // so a Create after Delete (or a Create that omits Tags) doesn't
+        // inherit stale entries from a previous incarnation of the ARN.
+        let arn = format!(
+            "arn:aws:ses:{}:{}:template/{}",
+            req.region, req.account_id, template_name
+        );
         if let Some(tags_arr) = body["Tags"].as_array() {
-            let arn = format!(
-                "arn:aws:ses:{}:{}:template/{}",
-                req.region, req.account_id, template_name
-            );
-            let tag_map = state.tags.entry(arn).or_default();
+            let mut tag_map = std::collections::BTreeMap::new();
             for tag in tags_arr {
                 if let (Some(k), Some(v)) = (tag["Key"].as_str(), tag["Value"].as_str()) {
                     tag_map.insert(k.to_string(), v.to_string());
                 }
             }
+            state.tags.insert(arn, tag_map);
+        } else {
+            state.tags.remove(&arn);
         }
 
         Ok(AwsResponse::json(StatusCode::OK, "{}"))
@@ -194,6 +199,12 @@ impl SesV2Service {
                 &format!("Template {} does not exist", name),
             ));
         }
+
+        let arn = format!(
+            "arn:aws:ses:{}:{}:template/{}",
+            req.region, req.account_id, name
+        );
+        state.tags.remove(&arn);
 
         Ok(AwsResponse::json(StatusCode::OK, "{}"))
     }
