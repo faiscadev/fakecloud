@@ -50,16 +50,42 @@ pub fn generate(
     // on the reader's output. That's the field whose round-trip we'll
     // assert. Skip the identifier itself — it's already being validated
     // by virtue of the followup Get succeeding.
-    let echo_field = match writer_input_members.iter().find(|wm| {
-        !wm.required
-            && wm.name != pair.id_source_field
-            && reader_output_members
-                .iter()
-                .any(|rm| rm.name == wm.name && primitive_compatible(model, &rm.target, &wm.target))
+    let (echo_field, echo_output_member) = match writer_input_members.iter().find_map(|wm| {
+        if wm.required || wm.name == pair.id_source_field {
+            return None;
+        }
+        let rm = reader_output_members
+            .iter()
+            .find(|rm| rm.name == wm.name && primitive_compatible(model, &rm.target, &wm.target))?;
+        // Structure / union echo only makes sense when the writer's input
+        // shape is identical to the reader's output shape — services often
+        // declare distinct request/response shapes for the same field
+        // (e.g. apigatewayv2's `EndpointDisplayContent` input vs.
+        // `EndpointDisplayContentResponse` output). Skip those: the
+        // strategy can't honestly assert echo across shape transforms.
+        let same_struct = matches!(
+            effective_shape_type(model, &wm.target),
+            Some(
+                crate::smithy::ShapeType::Structure { .. } | crate::smithy::ShapeType::Union { .. }
+            )
+        );
+        if same_struct && wm.target != rm.target {
+            return None;
+        }
+        Some((wm, rm))
     }) {
-        Some(m) => m,
+        Some(pair) => pair,
         None => return Vec::new(),
     };
+    // Reader output's wire key. restJson1 services (notably apigatewayv2)
+    // declare PascalCase member names with `@jsonName("camelCase")` so the
+    // actual response key on the wire is camelCase. Use the resolved wire
+    // name when fetching the echoed value out of the Get response.
+    let echo_output_wire = echo_output_member
+        .traits
+        .json_name
+        .clone()
+        .unwrap_or_else(|| echo_output_member.name.clone());
 
     let mut input = build_required_input(model, writer_input_id, overrides);
     if let Value::Object(ref mut obj) = input {
@@ -113,7 +139,7 @@ pub fn generate(
         get_operation: pair.reader.name.clone(),
         id_field: pair.id_source_field.clone(),
         id_fields,
-        echo_fields: vec![(echo_field.name.clone(), echo_field.name.clone())],
+        echo_fields: vec![(echo_field.name.clone(), echo_output_wire)],
     };
 
     vec![TestVariant {

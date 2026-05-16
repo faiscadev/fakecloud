@@ -1778,6 +1778,36 @@ fn reader_required_inputs(model: &ServiceModel, operation_name: &str) -> Vec<Str
     }
 }
 
+/// Look up a JSON field tolerating PascalCase vs camelCase first-letter
+/// differences. restJson1 services with `@jsonName` (apigatewayv2) declare
+/// PascalCase member names but serialise camelCase on the wire — so the
+/// probe needs to find values under either casing when crossing between
+/// model-derived names and observed wire keys.
+pub(crate) fn lookup_field_any_case<'a>(
+    obj: &'a serde_json::Map<String, serde_json::Value>,
+    member: &str,
+) -> Option<&'a serde_json::Value> {
+    if let Some(v) = obj.get(member) {
+        return Some(v);
+    }
+    let mut chars = member.chars();
+    let first = chars.next()?;
+    let alt = if first.is_ascii_uppercase() {
+        let mut s = String::with_capacity(member.len());
+        s.push(first.to_ascii_lowercase());
+        s.extend(chars);
+        s
+    } else if first.is_ascii_lowercase() {
+        let mut s = String::with_capacity(member.len());
+        s.push(first.to_ascii_uppercase());
+        s.extend(chars);
+        s
+    } else {
+        return None;
+    };
+    obj.get(&alt)
+}
+
 fn run_round_trip_followup(
     client: &reqwest::blocking::Client,
     endpoint: &str,
@@ -1837,7 +1867,12 @@ fn run_round_trip_followup(
             if get_input.contains_key(&member) {
                 continue;
             }
-            if let Some(v) = create_response_obj.get(&member) {
+            // Look up the reader-input member name in the writer's response.
+            // restJson1 services with `@jsonName` (apigatewayv2 in particular)
+            // declare PascalCase member names but serialise camelCase on the
+            // wire. Try the raw member name first, then the lowercase-first
+            // alias, so the followup id-fill works under either casing.
+            if let Some(v) = lookup_field_any_case(create_response_obj, &member) {
                 if !v.is_null() {
                     get_input.insert(member.clone(), v.clone());
                     continue;
@@ -1846,7 +1881,7 @@ fn run_round_trip_followup(
             // `modelName` -> Create response `name`; same for other
             // <Resource>Name patterns where the response carries `name`.
             if member.ends_with("Name") {
-                if let Some(v) = create_response_obj.get("name") {
+                if let Some(v) = lookup_field_any_case(create_response_obj, "Name") {
                     if !v.is_null() {
                         get_input.insert(member.clone(), v.clone());
                         continue;
@@ -1855,7 +1890,7 @@ fn run_round_trip_followup(
             }
             // `authorizerId`, `vpcLinkId`, ... -> Create response `id`.
             if member.ends_with("Id") {
-                if let Some(v) = create_response_obj.get("id") {
+                if let Some(v) = lookup_field_any_case(create_response_obj, "Id") {
                     if !v.is_null() {
                         get_input.insert(member.clone(), v.clone());
                     }

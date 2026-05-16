@@ -120,7 +120,7 @@ pub fn echo_check(
     output: &serde_json::Value,
 ) -> Option<ShapeViolation> {
     let received = match output {
-        serde_json::Value::Object(map) => map.get(field),
+        serde_json::Value::Object(map) => crate::probe::lookup_field_any_case(map, field),
         _ => None,
     };
     match received {
@@ -129,12 +129,42 @@ pub fn echo_check(
             sent: sent.clone(),
             received: None,
         }),
-        Some(v) if v == sent => None,
+        Some(v) if values_match_ignoring_key_case(v, sent) => None,
         Some(v) => Some(ShapeViolation::RoundTripFieldNotEchoed {
             field: field.to_string(),
             sent: sent.clone(),
             received: Some(v.clone()),
         }),
+    }
+}
+
+/// Compare two JSON values for equality while tolerating first-letter
+/// case differences on object keys. restJson1 services with `@jsonName`
+/// (apigatewayv2) emit camelCase keys on the wire while the probe input
+/// is keyed under the Smithy member names (PascalCase). The structural
+/// payload is identical — only the first letter of each key differs.
+fn values_match_ignoring_key_case(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Object(am), Value::Object(bm)) => {
+            if am.len() != bm.len() {
+                return false;
+            }
+            for (k, v) in am {
+                match crate::probe::lookup_field_any_case(bm, k) {
+                    Some(bv) if values_match_ignoring_key_case(v, bv) => continue,
+                    _ => return false,
+                }
+            }
+            true
+        }
+        (Value::Array(aa), Value::Array(bb)) => {
+            aa.len() == bb.len()
+                && aa
+                    .iter()
+                    .zip(bb.iter())
+                    .all(|(x, y)| values_match_ignoring_key_case(x, y))
+        }
+        _ => a == b,
     }
 }
 

@@ -985,10 +985,28 @@ impl ApiGatewayV2Service {
             "UpdateDeployment" => {
                 let api = api_id.ok_or_else(|| missing("ApiId"))?;
                 let dep = resource_id.ok_or_else(|| missing("DeploymentId"))?;
-                let _ = api;
+                let body = body(req);
+                let mut accounts = self.state.write();
+                let state = accounts.get_or_create(aid);
+                // Real AWS validates both the API and the deployment exist
+                // before applying the patch. Returning success on a fake
+                // identifier here would mask drift the round-trip probe
+                // explicitly looks for.
+                let deployments = state
+                    .deployments
+                    .get_mut(api)
+                    .ok_or_else(|| not_found("Deployment", dep))?;
+                let entry = deployments
+                    .get_mut(dep)
+                    .ok_or_else(|| not_found("Deployment", dep))?;
+                if let Some(desc) = body.get("Description").and_then(|v| v.as_str()) {
+                    entry.description = Some(desc.to_string());
+                }
                 ok(json!({
-                    "DeploymentId": dep,
+                    "DeploymentId": entry.deployment_id,
                     "DeploymentStatus": "DEPLOYED",
+                    "Description": entry.description.clone().unwrap_or_default(),
+                    "CreatedDate": entry.created_date.to_rfc3339(),
                 }))
             }
             "ResetAuthorizersCache" => {
@@ -2019,13 +2037,36 @@ mod tests {
             Some("a1"),
             Some("d1"),
         );
-        ok(
-            "UpdateDeployment",
-            "{}",
-            &["v2", "apis", "a1", "deployments", "d1"],
-            Some("a1"),
-            Some("d1"),
-        );
+        // UpdateDeployment now validates the deployment exists. Seed one
+        // into a fresh service and exercise the patch on the real entry.
+        {
+            let s = svc();
+            {
+                let mut accounts = s.state.write();
+                let state = accounts.get_or_create("000000000000");
+                state
+                    .deployments
+                    .entry("a1".to_string())
+                    .or_default()
+                    .insert(
+                        "d1".to_string(),
+                        crate::state::Deployment {
+                            deployment_id: "d1".to_string(),
+                            description: None,
+                            created_date: chrono::Utc::now(),
+                            auto_deployed: false,
+                        },
+                    );
+            }
+            run(
+                &s,
+                "UpdateDeployment",
+                "{}",
+                &["v2", "apis", "a1", "deployments", "d1"],
+                Some("a1"),
+                Some("d1"),
+            );
+        }
         ok(
             "ResetAuthorizersCache",
             "",
