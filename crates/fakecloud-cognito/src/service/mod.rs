@@ -331,7 +331,7 @@ impl AwsService for CognitoService {
     async fn handle(&self, req: AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let mutates = is_mutating_action(req.action.as_str());
         let result = match req.action.as_str() {
-            "CreateUserPool" => self.create_user_pool(&req),
+            "CreateUserPool" => self.create_user_pool(&req).await,
             "DescribeUserPool" => self.describe_user_pool(&req),
             "UpdateUserPool" => self.update_user_pool(&req),
             "DeleteUserPool" => self.delete_user_pool(&req),
@@ -1280,6 +1280,30 @@ fn user_pool_to_json(pool: &UserPool) -> Value {
         }).collect::<Vec<Value>>(),
     });
 
+    if let Some(ref v) = pool.email_verification_message {
+        obj["EmailVerificationMessage"] = json!(v);
+    }
+    if let Some(ref v) = pool.email_verification_subject {
+        obj["EmailVerificationSubject"] = json!(v);
+    }
+    if let Some(ref v) = pool.sms_verification_message {
+        obj["SmsVerificationMessage"] = json!(v);
+    }
+    if let Some(ref v) = pool.sms_authentication_message {
+        obj["SmsAuthenticationMessage"] = json!(v);
+    }
+    if let Some(ref v) = pool.device_configuration {
+        obj["DeviceConfiguration"] = v.clone();
+    }
+    if let Some(ref v) = pool.user_attribute_update_settings {
+        obj["UserAttributeUpdateSettings"] = v.clone();
+    }
+    if let Some(ref v) = pool.user_pool_add_ons {
+        obj["UserPoolAddOns"] = v.clone();
+    }
+    if let Some(ref v) = pool.username_configuration {
+        obj["UsernameConfiguration"] = v.clone();
+    }
     if let Some(ref ua) = pool.username_attributes {
         obj["UsernameAttributes"] = json!(ua);
     }
@@ -1320,14 +1344,25 @@ fn user_pool_to_json(pool: &UserPool) -> Value {
         if let Some(ref v) = sc.external_id {
             sms["ExternalId"] = json!(v);
         }
-        if let Some(ref v) = sc.sns_region {
-            sms["SnsRegion"] = json!(v);
-        }
+        // Real Cognito always emits SnsRegion, defaulting to the pool's
+        // home region when the caller doesn't override it.
+        let region = sc.sns_region.clone().unwrap_or_else(|| {
+            pool.arn
+                .split(':')
+                .nth(3)
+                .unwrap_or("us-east-1")
+                .to_string()
+        });
+        sms["SnsRegion"] = json!(region);
         obj["SmsConfiguration"] = sms;
     }
     {
+        // Real Cognito always emits AdminCreateUserConfig with
+        // AllowAdminCreateUserOnly=false and UnusedAccountValidityDays=7
+        // as documented defaults; honour caller-provided values.
         let mut admin = json!({
             "AllowAdminCreateUserOnly": false,
+            "UnusedAccountValidityDays": 7,
         });
         if let Some(ref ac) = pool.admin_create_user_config {
             if let Some(v) = ac.allow_admin_create_user_only {

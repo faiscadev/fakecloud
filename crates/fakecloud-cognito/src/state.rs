@@ -368,6 +368,30 @@ pub struct UserPool {
     /// Stable `kid` exposed in the JWT header and JWKS document.
     #[serde(default)]
     pub signing_kid: Option<String>,
+    /// Legacy email-verification message template (echoed back on describe).
+    #[serde(default)]
+    pub email_verification_message: Option<String>,
+    /// Legacy email-verification subject (echoed back on describe).
+    #[serde(default)]
+    pub email_verification_subject: Option<String>,
+    /// Legacy SMS-verification message template.
+    #[serde(default)]
+    pub sms_verification_message: Option<String>,
+    /// Legacy SMS-based MFA challenge message.
+    #[serde(default)]
+    pub sms_authentication_message: Option<String>,
+    /// Device-tracking configuration (challenge-on-new-device / remember).
+    #[serde(default)]
+    pub device_configuration: Option<serde_json::Value>,
+    /// Per-attribute verification-on-update settings.
+    #[serde(default)]
+    pub user_attribute_update_settings: Option<serde_json::Value>,
+    /// Advanced security / threat protection add-on settings.
+    #[serde(default)]
+    pub user_pool_add_ons: Option<serde_json::Value>,
+    /// Username case-sensitivity preference.
+    #[serde(default)]
+    pub username_configuration: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

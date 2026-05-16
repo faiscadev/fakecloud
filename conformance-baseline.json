@@ -1,5 +1,5 @@
 {
-  "variants_passed": 85159,
+  "variants_passed": 85160,
   "total_variants": 86315,
   "per_service": {
     "acm": {
@@ -31,7 +31,7 @@
       "total": 541
     },
     "cognito-idp": {
-      "passed": 4468,
+      "passed": 4469,
       "total": 4469
     },
     "ecs": {

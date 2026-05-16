@@ -110,7 +110,7 @@ fn create_user_pool_missing_name() {
         access_key_id: None,
         principal: None,
     };
-    match svc.create_user_pool(&req) {
+    match block_on(svc.create_user_pool(&req)) {
         Err(e) => assert_eq!(e.code(), "InvalidParameterException"),
         Ok(_) => panic!("Expected InvalidParameterException error"),
     }
@@ -178,7 +178,7 @@ fn client_secret_not_generated_by_default() {
         access_key_id: None,
         principal: None,
     };
-    let pool_resp = svc.create_user_pool(&create_pool_req).unwrap();
+    let pool_resp = block_on(svc.create_user_pool(&create_pool_req)).unwrap();
     let pool_json: Value =
         serde_json::from_str(core::str::from_utf8(pool_resp.body.expect_bytes()).unwrap()).unwrap();
     let pool_id = pool_json["UserPool"]["Id"].as_str().unwrap();
@@ -244,7 +244,7 @@ fn client_secret_generated_when_requested() {
         access_key_id: None,
         principal: None,
     };
-    let pool_resp = svc.create_user_pool(&create_pool_req).unwrap();
+    let pool_resp = block_on(svc.create_user_pool(&create_pool_req)).unwrap();
     let pool_json: Value =
         serde_json::from_str(core::str::from_utf8(pool_resp.body.expect_bytes()).unwrap()).unwrap();
     let pool_id = pool_json["UserPool"]["Id"].as_str().unwrap();
@@ -315,7 +315,7 @@ fn client_belongs_to_correct_pool() {
             access_key_id: None,
             principal: None,
         };
-        svc.create_user_pool(&req).unwrap();
+        block_on(svc.create_user_pool(&req)).unwrap();
     }
 
     let _mas = state.read();
@@ -548,7 +548,7 @@ fn user_default_status_is_force_change_password() {
         access_key_id: None,
         principal: None,
     };
-    let pool_resp = svc.create_user_pool(&req).unwrap();
+    let pool_resp = block_on(svc.create_user_pool(&req)).unwrap();
     let pool_json: Value =
         serde_json::from_str(core::str::from_utf8(pool_resp.body.expect_bytes()).unwrap()).unwrap();
     let pool_id = pool_json["UserPool"]["Id"].as_str().unwrap();
@@ -867,7 +867,7 @@ fn group_name_uniqueness() {
         access_key_id: None,
         principal: None,
     };
-    let resp = svc.create_user_pool(&create_pool_req).unwrap();
+    let resp = block_on(svc.create_user_pool(&create_pool_req)).unwrap();
     let resp_json: Value =
         serde_json::from_str(core::str::from_utf8(resp.body.expect_bytes()).unwrap()).unwrap();
     let pool_id = resp_json["UserPool"]["Id"].as_str().unwrap().to_string();
@@ -946,7 +946,7 @@ fn user_group_association() {
         access_key_id: None,
         principal: None,
     };
-    let resp = svc.create_user_pool(&create_pool_req).unwrap();
+    let resp = block_on(svc.create_user_pool(&create_pool_req)).unwrap();
     let resp_json: Value =
         serde_json::from_str(core::str::from_utf8(resp.body.expect_bytes()).unwrap()).unwrap();
     let pool_id = resp_json["UserPool"]["Id"].as_str().unwrap().to_string();
@@ -1110,7 +1110,7 @@ fn self_service_get_user_via_access_token() {
         access_key_id: None,
         principal: None,
     };
-    let pool_resp = svc.create_user_pool(&req).unwrap();
+    let pool_resp = block_on(svc.create_user_pool(&req)).unwrap();
     let pool_json: Value =
         serde_json::from_str(core::str::from_utf8(pool_resp.body.expect_bytes()).unwrap()).unwrap();
     let pool_id = pool_json["UserPool"]["Id"].as_str().unwrap().to_string();
@@ -1243,7 +1243,7 @@ fn self_service_delete_user_cleans_up_tokens() {
         access_key_id: None,
         principal: None,
     };
-    let pool_resp = svc.create_user_pool(&req).unwrap();
+    let pool_resp = block_on(svc.create_user_pool(&req)).unwrap();
     let pool_json: Value =
         serde_json::from_str(core::str::from_utf8(pool_resp.body.expect_bytes()).unwrap()).unwrap();
     let pool_id = pool_json["UserPool"]["Id"].as_str().unwrap().to_string();
@@ -1364,7 +1364,7 @@ fn verify_user_attribute_with_correct_code() {
         access_key_id: None,
         principal: None,
     };
-    let pool_resp = svc.create_user_pool(&req).unwrap();
+    let pool_resp = block_on(svc.create_user_pool(&req)).unwrap();
     let pool_json: Value =
         serde_json::from_str(core::str::from_utf8(pool_resp.body.expect_bytes()).unwrap()).unwrap();
     let pool_id = pool_json["UserPool"]["Id"].as_str().unwrap().to_string();
@@ -1606,7 +1606,7 @@ fn mfa_preference_storage() {
         access_key_id: None,
         principal: None,
     };
-    let pool_resp = svc.create_user_pool(&create_pool_req).unwrap();
+    let pool_resp = block_on(svc.create_user_pool(&create_pool_req)).unwrap();
     let pool_body: Value = serde_json::from_slice(pool_resp.body.expect_bytes()).unwrap();
     let pool_id = pool_body["UserPool"]["Id"].as_str().unwrap().to_string();
 
@@ -1713,7 +1713,7 @@ fn setup_svc_with_pool() -> (CognitoService, String) {
     ));
     let svc = CognitoService::new(state);
     let req = make_req("CreateUserPool", r#"{"PoolName":"test"}"#);
-    let resp = svc.create_user_pool(&req).unwrap();
+    let resp = block_on(svc.create_user_pool(&req)).unwrap();
     let resp_body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
     let pool_id = resp_body["UserPool"]["Id"].as_str().unwrap().to_string();
     (svc, pool_id)
@@ -2089,7 +2089,7 @@ fn auth_events_recorded_on_sign_up() {
 
     // Create pool and client
     let req = make_req("CreateUserPool", r#"{"PoolName": "evpool"}"#);
-    let resp = svc.create_user_pool(&req).unwrap();
+    let resp = block_on(svc.create_user_pool(&req)).unwrap();
     let resp_body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
     let pool_id = resp_body["UserPool"]["Id"].as_str().unwrap().to_string();
 
@@ -2140,7 +2140,7 @@ fn auth_events_recorded_on_sign_in_and_failure() {
 
     // Create pool, client, user
     let req = make_req("CreateUserPool", r#"{"PoolName": "authpool"}"#);
-    let resp = svc.create_user_pool(&req).unwrap();
+    let resp = block_on(svc.create_user_pool(&req)).unwrap();
     let resp_body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
     let pool_id = resp_body["UserPool"]["Id"].as_str().unwrap().to_string();
 
@@ -2247,7 +2247,7 @@ fn custom_auth_rejected_when_not_in_explicit_auth_flows() {
 
     // Create pool
     let req = make_req("CreateUserPool", r#"{"PoolName": "capool"}"#);
-    let resp = svc.create_user_pool(&req).unwrap();
+    let resp = block_on(svc.create_user_pool(&req)).unwrap();
     let resp_body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
     let pool_id = resp_body["UserPool"]["Id"].as_str().unwrap().to_string();
 
@@ -2297,7 +2297,7 @@ fn custom_auth_fails_without_delivery_context() {
 
     // Create pool and client
     let req = make_req("CreateUserPool", r#"{"PoolName": "capool2"}"#);
-    let resp = svc.create_user_pool(&req).unwrap();
+    let resp = block_on(svc.create_user_pool(&req)).unwrap();
     let resp_body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
     let pool_id = resp_body["UserPool"]["Id"].as_str().unwrap().to_string();
 
@@ -2369,7 +2369,7 @@ fn custom_auth_fails_without_define_trigger_configured() {
 
     // Create pool WITHOUT DefineAuthChallenge Lambda configured
     let req = make_req("CreateUserPool", r#"{"PoolName": "capool3"}"#);
-    let resp = svc.create_user_pool(&req).unwrap();
+    let resp = block_on(svc.create_user_pool(&req)).unwrap();
     let resp_body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
     let pool_id = resp_body["UserPool"]["Id"].as_str().unwrap().to_string();
 
@@ -2438,7 +2438,7 @@ fn custom_challenge_response_fails_without_delivery_context() {
 
     // Create pool, client, and user so we get past user lookup
     let req = make_req("CreateUserPool", r#"{"PoolName": "ccpool"}"#);
-    let resp = svc.create_user_pool(&req).unwrap();
+    let resp = block_on(svc.create_user_pool(&req)).unwrap();
     let resp_body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
     let pool_id = resp_body["UserPool"]["Id"].as_str().unwrap().to_string();
 
@@ -2525,7 +2525,7 @@ fn custom_challenge_response_requires_answer() {
 
     // Create pool and client so we have valid IDs
     let req = make_req("CreateUserPool", r#"{"PoolName": "anspool"}"#);
-    let resp = svc.create_user_pool(&req).unwrap();
+    let resp = block_on(svc.create_user_pool(&req)).unwrap();
     let resp_body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
     let pool_id = resp_body["UserPool"]["Id"].as_str().unwrap().to_string();
 
@@ -2627,7 +2627,7 @@ fn resp_json(resp: &AwsResponse) -> Value {
 /// Create a user pool and return the pool ID.
 fn create_pool(svc: &CognitoService) -> String {
     let req = make_req("CreateUserPool", r#"{"PoolName":"test-pool"}"#);
-    let resp = svc.create_user_pool(&req).unwrap();
+    let resp = block_on(svc.create_user_pool(&req)).unwrap();
     let b = resp_json(&resp);
     b["UserPool"]["Id"].as_str().unwrap().to_string()
 }

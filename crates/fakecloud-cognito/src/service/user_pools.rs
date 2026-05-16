@@ -20,7 +20,7 @@ use super::{
 };
 
 impl CognitoService {
-    pub(super) fn create_user_pool(
+    pub(super) async fn create_user_pool(
         &self,
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
@@ -66,6 +66,30 @@ impl CognitoService {
         if let Some(msg) = body["SmsVerificationMessage"].as_str() {
             validate_string_length(msg, "smsVerificationMessage", 6, 140)?;
         }
+
+        // Generate the per-pool RSA-2048 keypair eagerly so every
+        // token-issuing path (InitiateAuth, RespondToAuthChallenge,
+        // AdminInitiateAuth, GetTokensFromRefreshToken, OAuth2 token
+        // grant) signs with a real RS256 signature out of the box.
+        // Real AWS Cognito assigns the keypair at pool creation time
+        // and derives the JWKS `kid` from a hash of the public half so
+        // it stays stable across snapshots.
+        //
+        // RSA-2048 keygen is CPU-bound and costs 100-500 ms — run it on
+        // a blocking thread before touching any locks so the async
+        // runtime stays responsive under bursty CreateUserPool
+        // workloads (conformance probes, integration tests).
+        let signing = tokio::task::spawn_blocking(crate::jwt::generate_pool_signing_key)
+            .await
+            .map_err(|e| {
+                AwsServiceError::aws_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "InternalErrorException",
+                    format!("keygen task failed: {e}"),
+                )
+            })?;
+        let signing_key_pem = signing.private_key_pem;
+        let signing_kid = signing.kid;
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
@@ -141,16 +165,6 @@ impl CognitoService {
         let verification_message_template =
             parse_verification_message_template(&body["VerificationMessageTemplate"]);
 
-        // Generate the per-pool RSA-2048 keypair eagerly so every
-        // token-issuing path (InitiateAuth, RespondToAuthChallenge,
-        // AdminInitiateAuth, GetTokensFromRefreshToken, OAuth2 token
-        // grant) signs with a real RS256 signature out of the box.
-        // Real AWS Cognito assigns the keypair at pool creation time
-        // and derives the JWKS `kid` from a hash of the public half so
-        // it stays stable across snapshots.
-        let signing = crate::jwt::generate_pool_signing_key();
-        let signing_key_pem = signing.private_key_pem;
-        let signing_kid = signing.kid;
         let pool = UserPool {
             id: pool_id.clone(),
             name: pool_name.to_string(),
@@ -181,6 +195,38 @@ impl CognitoService {
             verification_message_template,
             signing_key_pem: Some(signing_key_pem),
             signing_kid: Some(signing_kid),
+            email_verification_message: body["EmailVerificationMessage"]
+                .as_str()
+                .map(|s| s.to_string()),
+            email_verification_subject: body["EmailVerificationSubject"]
+                .as_str()
+                .map(|s| s.to_string()),
+            sms_verification_message: body["SmsVerificationMessage"]
+                .as_str()
+                .map(|s| s.to_string()),
+            sms_authentication_message: body["SmsAuthenticationMessage"]
+                .as_str()
+                .map(|s| s.to_string()),
+            device_configuration: if body["DeviceConfiguration"].is_object() {
+                Some(body["DeviceConfiguration"].clone())
+            } else {
+                None
+            },
+            user_attribute_update_settings: if body["UserAttributeUpdateSettings"].is_object() {
+                Some(body["UserAttributeUpdateSettings"].clone())
+            } else {
+                None
+            },
+            user_pool_add_ons: if body["UserPoolAddOns"].is_object() {
+                Some(body["UserPoolAddOns"].clone())
+            } else {
+                None
+            },
+            username_configuration: if body["UsernameConfiguration"].is_object() {
+                Some(body["UsernameConfiguration"].clone())
+            } else {
+                None
+            },
         };
 
         let response = user_pool_to_json(&pool);

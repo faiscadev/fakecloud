@@ -8806,6 +8806,14 @@ impl ResourceProvisioner {
             verification_message_template: None,
             signing_key_pem: Some(signing_key_pem),
             signing_kid: Some(signing_kid),
+            email_verification_message: None,
+            email_verification_subject: None,
+            sms_verification_message: None,
+            sms_authentication_message: None,
+            device_configuration: None,
+            user_attribute_update_settings: None,
+            user_pool_add_ons: None,
+            username_configuration: None,
         };
 
         let mut accounts = self.cognito_state.write();
