@@ -1,5 +1,5 @@
 {
-  "variants_passed": 82123,
+  "variants_passed": 82655,
   "total_variants": 86327,
   "per_service": {
     "logs": {
@@ -47,7 +47,7 @@
       "total": 446
     },
     "iam": {
-      "passed": 5438,
+      "passed": 5970,
       "total": 5970
     },
     "apigatewayv1": {
