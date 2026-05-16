@@ -274,6 +274,19 @@ fn diff_at(actual: &Value, documented: &Value, path: &str, out: &mut Vec<ShapeVi
     }
 }
 
+/// Members bound via REST HTTP traits (`@httpHeader`, `@httpQuery`,
+/// `@httpLabel`, `@httpPayload`) are serialised somewhere other than the
+/// JSON document, so they must be filtered out before checking which
+/// structure members must appear in the body. We keep `@httpPayload` here
+/// because the body validator routes payload members separately via
+/// `validate_json_response`.
+fn is_json_body_member(m: &crate::smithy::Member) -> bool {
+    !(m.traits.http_header.is_some()
+        || m.traits.http_query.is_some()
+        || m.traits.http_label
+        || m.traits.http_payload)
+}
+
 /// Validate a response body against the expected output shape from the Smithy model.
 ///
 /// Returns a list of violations. An empty list means the response conforms to the model.
@@ -284,10 +297,32 @@ pub fn validate_response(
     protocol: Protocol,
 ) -> Vec<ShapeViolation> {
     if response_body.is_empty() {
-        // An empty body is valid if the output shape is Unit or has no required members.
+        // An empty body is valid if the output shape is Unit or has no
+        // required members. Members bound to HTTP headers / query / labels
+        // are not expected to appear in the JSON body, so they don't count
+        // as "missing" here. A required `@httpPayload` member is a special
+        // case: when its target is Blob or String the wire body can
+        // legitimately be empty (an empty blob, an empty string), so it's
+        // not a violation; but when the target is a structure / list /
+        // map, an empty body means the required payload is genuinely
+        // absent and must be reported.
         if let Some(ShapeType::Structure { members }) = effective_shape_type(model, output_shape_id)
         {
-            let required: Vec<_> = members.iter().filter(|m| m.required).collect();
+            let required: Vec<_> = members
+                .iter()
+                .filter(|m| {
+                    if !m.required {
+                        return false;
+                    }
+                    if m.traits.http_payload {
+                        return !matches!(
+                            effective_shape_type(model, &m.target),
+                            Some(ShapeType::Blob) | Some(ShapeType::String { .. })
+                        );
+                    }
+                    is_json_body_member(m)
+                })
+                .collect();
             if !required.is_empty() {
                 return required
                     .iter()
@@ -328,6 +363,33 @@ fn validate_json_response(
         return Vec::new();
     }
 
+    // `@httpPayload` redirects body validation to the payload member's target
+    // shape, not the parent structure. Bedrock `InvokeModel` is the canonical
+    // example: the response body IS the provider-specific blob declared on
+    // member `body`, while `contentType` rides on the Content-Type header
+    // and `performanceConfigLatency` / `serviceTier` ride on response
+    // headers. Without this redirect we'd flag a perfectly-formed Bedrock
+    // payload as "missing required field 'body'" because no JSON envelope
+    // wraps it.
+    //
+    // When the payload's target is a Blob or String, the body is raw bytes
+    // (e.g. a provider-specific JSON blob, a binary upload, an arbitrary
+    // string). We can't validate it structurally — AWS returns whatever
+    // the underlying model/object produced — so accept it as opaque.
+    let effective_shape_id = match effective_shape_type(model, output_shape_id) {
+        Some(ShapeType::Structure { members }) => {
+            if let Some(payload) = members.iter().find(|m| m.traits.http_payload) {
+                match effective_shape_type(model, &payload.target) {
+                    Some(ShapeType::Blob) | Some(ShapeType::String { .. }) => return Vec::new(),
+                    _ => payload.target.clone(),
+                }
+            } else {
+                output_shape_id.to_string()
+            }
+        }
+        _ => output_shape_id.to_string(),
+    };
+
     let value: Value = match serde_json::from_str(response_body) {
         Ok(v) => v,
         Err(e) => {
@@ -338,7 +400,7 @@ fn validate_json_response(
     };
 
     let mut violations = Vec::new();
-    validate_shape(model, output_shape_id, &value, "$", 0, &mut violations);
+    validate_shape(model, &effective_shape_id, &value, "$", 0, &mut violations);
     violations
 }
 
@@ -537,6 +599,9 @@ fn validate_shape(
                 });
             }
         }
+        // `smithy.api#Document` is an arbitrary JSON value — any type
+        // (object, array, string, number, bool, null) is acceptable.
+        ShapeType::Document => {}
         // Service, Operation, Resource shapes are not value types
         ShapeType::Service | ShapeType::Operation | ShapeType::Resource => {}
     }
@@ -578,8 +643,14 @@ fn validate_structure(
         m.name.clone()
     };
 
-    // Check required fields are present
+    // Check required fields are present. Members bound to HTTP headers,
+    // query strings, labels, or the response status code don't appear in
+    // the JSON body, so skip them here — the probe asserts those bindings
+    // elsewhere (header presence, status code classification).
     for member in members {
+        if !is_json_body_member(member) {
+            continue;
+        }
         let key = member_key(member);
         if member.required && !obj.contains_key(&key) {
             violations.push(ShapeViolation::MissingField {
@@ -1147,6 +1218,215 @@ mod tests {
             "expected an UnexpectedField(Items) violation, got {:?}",
             violations
         );
+    }
+
+    /// Model where the output has a `@httpPayload` member targeting a
+    /// blob (Bedrock `InvokeModelResponse.body` pattern) plus a header
+    /// member (`contentType`) that must NOT be required-in-body.
+    fn http_payload_blob_model() -> ServiceModel {
+        let mut shapes = HashMap::new();
+
+        shapes.insert(
+            "test#InvokeOutput".to_string(),
+            Shape {
+                shape_id: "test#InvokeOutput".to_string(),
+                shape_type: ShapeType::Structure {
+                    members: vec![
+                        Member {
+                            name: "body".to_string(),
+                            target: "test#Body".to_string(),
+                            required: true,
+                            traits: ShapeTraits {
+                                http_payload: true,
+                                ..ShapeTraits::default()
+                            },
+                        },
+                        Member {
+                            name: "contentType".to_string(),
+                            target: "smithy.api#String".to_string(),
+                            required: true,
+                            traits: ShapeTraits {
+                                http_header: Some("Content-Type".to_string()),
+                                ..ShapeTraits::default()
+                            },
+                        },
+                    ],
+                },
+                traits: ShapeTraits::default(),
+            },
+        );
+        shapes.insert(
+            "test#Body".to_string(),
+            Shape {
+                shape_id: "test#Body".to_string(),
+                shape_type: ShapeType::Blob,
+                traits: ShapeTraits::default(),
+            },
+        );
+
+        ServiceModel {
+            service_name: "test".to_string(),
+            operations: Vec::new(),
+            shapes,
+        }
+    }
+
+    #[test]
+    fn http_payload_blob_body_is_opaque() {
+        // Bedrock InvokeModel: the wire body IS the blob (a provider JSON
+        // payload). The validator must not look up `body` / `contentType`
+        // as structure fields and must not flag unknown keys inside the
+        // provider JSON.
+        let model = http_payload_blob_model();
+        let body = r#"{"completion": "hello", "stop_reason": "end_turn"}"#;
+        let violations = validate_response(&model, "test#InvokeOutput", body, Protocol::Rest);
+        assert!(
+            violations.is_empty(),
+            "expected no violations (httpPayload Blob is opaque), got {:?}",
+            violations
+        );
+    }
+
+    /// Model where the output has a `@httpPayload` member targeting a
+    /// structure (not Blob/String). Empty wire body must still report
+    /// the payload as missing.
+    fn http_payload_struct_model() -> ServiceModel {
+        let mut shapes = HashMap::new();
+
+        shapes.insert(
+            "test#GetThingOutput".to_string(),
+            Shape {
+                shape_id: "test#GetThingOutput".to_string(),
+                shape_type: ShapeType::Structure {
+                    members: vec![Member {
+                        name: "thing".to_string(),
+                        target: "test#Thing".to_string(),
+                        required: true,
+                        traits: ShapeTraits {
+                            http_payload: true,
+                            ..ShapeTraits::default()
+                        },
+                    }],
+                },
+                traits: ShapeTraits::default(),
+            },
+        );
+        shapes.insert(
+            "test#Thing".to_string(),
+            Shape {
+                shape_id: "test#Thing".to_string(),
+                shape_type: ShapeType::Structure {
+                    members: vec![Member {
+                        name: "id".to_string(),
+                        target: "smithy.api#String".to_string(),
+                        required: true,
+                        traits: ShapeTraits::default(),
+                    }],
+                },
+                traits: ShapeTraits::default(),
+            },
+        );
+
+        ServiceModel {
+            service_name: "test".to_string(),
+            operations: Vec::new(),
+            shapes,
+        }
+    }
+
+    #[test]
+    fn empty_body_flags_required_struct_payload() {
+        // Required `@httpPayload` targeting a structure: empty wire body
+        // genuinely means the payload is missing — must report.
+        let model = http_payload_struct_model();
+        let v = validate_response(&model, "test#GetThingOutput", "", Protocol::Rest);
+        assert!(
+            v.iter().any(
+                |x| matches!(x, ShapeViolation::MissingField { field, .. } if field == "thing")
+            ),
+            "expected MissingField(thing) for empty body, got {:?}",
+            v
+        );
+    }
+
+    #[test]
+    fn empty_body_skips_http_bound_required_members() {
+        // An empty body must not be reported as missing `contentType` —
+        // that member rides on a response header. Same for `body` because
+        // it's `@httpPayload` (we drop both via `is_json_body_member`).
+        let model = http_payload_blob_model();
+        let violations = validate_response(&model, "test#InvokeOutput", "", Protocol::Rest);
+        assert!(
+            violations.is_empty(),
+            "empty body shouldn't flag header-bound required members, got {:?}",
+            violations
+        );
+    }
+
+    /// Model where a structure member targets `smithy.api#Document`. A
+    /// Document accepts any JSON value, not just strings.
+    fn document_model() -> ServiceModel {
+        let mut shapes = HashMap::new();
+        shapes.insert(
+            "test#ToolUseBlock".to_string(),
+            Shape {
+                shape_id: "test#ToolUseBlock".to_string(),
+                shape_type: ShapeType::Structure {
+                    members: vec![Member {
+                        name: "input".to_string(),
+                        target: "smithy.api#Document".to_string(),
+                        required: true,
+                        traits: ShapeTraits::default(),
+                    }],
+                },
+                traits: ShapeTraits::default(),
+            },
+        );
+        ServiceModel {
+            service_name: "test".to_string(),
+            operations: Vec::new(),
+            shapes,
+        }
+    }
+
+    #[test]
+    fn document_member_accepts_arbitrary_json() {
+        let model = document_model();
+        // Object Document.
+        let body = r#"{"input": {"location": "Seattle"}}"#;
+        let v = validate_response(
+            &model,
+            "test#ToolUseBlock",
+            body,
+            Protocol::Json {
+                target_prefix: "Test",
+            },
+        );
+        assert!(v.is_empty(), "object Document should pass, got {:?}", v);
+
+        // String Document.
+        let body = r#"{"input": "raw"}"#;
+        let v = validate_response(
+            &model,
+            "test#ToolUseBlock",
+            body,
+            Protocol::Json {
+                target_prefix: "Test",
+            },
+        );
+        assert!(v.is_empty(), "string Document should pass, got {:?}", v);
+
+        // Array Document.
+        let body = r#"{"input": [1, 2, 3]}"#;
+        let v = validate_response(
+            &model,
+            "test#ToolUseBlock",
+            body,
+            Protocol::Json {
+                target_prefix: "Test",
+            },
+        );
+        assert!(v.is_empty(), "array Document should pass, got {:?}", v);
     }
 
     // ----- diff_against_example -----

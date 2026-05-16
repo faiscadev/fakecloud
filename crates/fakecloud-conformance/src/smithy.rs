@@ -72,6 +72,10 @@ pub enum ShapeType {
     Boolean,
     Blob,
     Timestamp,
+    /// `smithy.api#Document` — an arbitrary JSON value (object, array,
+    /// string, number, bool, null). Used by Bedrock `ToolUseBlock.input`
+    /// and similar dynamic payloads.
+    Document,
     /// Service, operation, resource — not directly useful for value generation.
     Service,
     Operation,
@@ -419,6 +423,7 @@ fn parse_shape(shape_id: &str, def: &Value) -> Option<Shape> {
         "boolean" => ShapeType::Boolean,
         "blob" => ShapeType::Blob,
         "timestamp" => ShapeType::Timestamp,
+        "document" => ShapeType::Document,
         "service" => ShapeType::Service,
         "operation" => ShapeType::Operation,
         "resource" => ShapeType::Resource,
@@ -587,7 +592,7 @@ pub fn prelude_shape_type(shape_id: &str) -> Option<ShapeType> {
         "smithy.api#Timestamp" => Some(ShapeType::Timestamp),
         "smithy.api#BigInteger" => Some(ShapeType::Long),
         "smithy.api#BigDecimal" => Some(ShapeType::Double),
-        "smithy.api#Document" => Some(ShapeType::String { enum_values: None }),
+        "smithy.api#Document" => Some(ShapeType::Document),
         "smithy.api#Unit" => Some(ShapeType::Structure {
             members: Vec::new(),
         }),

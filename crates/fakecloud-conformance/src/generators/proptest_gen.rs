@@ -272,6 +272,10 @@ fn random_value_for_shape_def(
                 year, month, day, hour, minute, second
             ))
         }
+        // `smithy.api#Document` accepts any JSON; emit a small object so
+        // downstream validation sees a non-null value but doesn't impose
+        // any structural expectation.
+        ShapeType::Document => Value::Object(serde_json::Map::new()),
         _ => Value::Null,
     }
 }

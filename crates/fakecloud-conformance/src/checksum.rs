@@ -203,6 +203,7 @@ fn shape_type_name(st: &ShapeType) -> String {
         ShapeType::Boolean => "boolean".to_string(),
         ShapeType::Blob => "blob".to_string(),
         ShapeType::Timestamp => "timestamp".to_string(),
+        ShapeType::Document => "document".to_string(),
         ShapeType::Service => "service".to_string(),
         ShapeType::Operation => "operation".to_string(),
         ShapeType::Resource => "resource".to_string(),
