@@ -1,5 +1,5 @@
 {
-  "variants_passed": 83362,
+  "variants_passed": 83403,
   "total_variants": 86327,
   "per_service": {
     "logs": {
@@ -131,7 +131,7 @@
       "total": 3834
     },
     "scheduler": {
-      "passed": 465,
+      "passed": 506,
       "total": 506
     },
     "kms": {
