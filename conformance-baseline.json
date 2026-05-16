@@ -1,5 +1,5 @@
 {
-  "variants_passed": 83564,
+  "variants_passed": 83694,
   "total_variants": 86327,
   "per_service": {
     "logs": {
@@ -87,7 +87,7 @@
       "total": 5265
     },
     "athena": {
-      "passed": 2180,
+      "passed": 2310,
       "total": 2310
     },
     "events": {
