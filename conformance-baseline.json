@@ -1,5 +1,5 @@
 {
-  "variants_passed": 83881,
+  "variants_passed": 84416,
   "total_variants": 86327,
   "per_service": {
     "logs": {
@@ -59,7 +59,7 @@
       "total": 1569
     },
     "s3": {
-      "passed": 3133,
+      "passed": 3668,
       "total": 3668
     },
     "kinesis": {

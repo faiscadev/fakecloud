@@ -931,11 +931,18 @@ fn build_error_response_with_fields(
         }
     };
 
+    // S3 (and other REST-XML services) place the error code in
+    // `x-amz-error-code` so HEAD responses — which HTTP forbids from
+    // carrying a body — still surface the code. AWS SDKs read this header
+    // when the body is empty. Emit it on every error response so HEAD,
+    // OPTIONS, and any client that strips the body still see the code.
     Response::builder()
         .status(status)
         .header("content-type", content_type)
         .header("x-amzn-requestid", request_id)
         .header("x-amz-request-id", request_id)
+        .header("x-amz-error-code", code)
+        .header("x-amz-error-message", message)
         .body(Body::from(body))
         .unwrap()
 }

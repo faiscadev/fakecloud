@@ -1462,9 +1462,13 @@ fn head_object_nonexistent_key() {
     let svc = make_service();
     seed_bucket(&svc, "b");
     let req = make_request(Method::HEAD, "/b/missing", &[], b"");
+    // HeadObject's Smithy model declares only `NotFound` as the error
+    // shape (com.amazonaws.s3#HeadObject -> errors: [NotFound]); HEAD
+    // responses carry no body so SDKs read the code from
+    // `x-amz-error-code`, which must match the declared shape.
     assert_aws_err(
         svc.head_object("123456789012", &req, "b", "missing"),
-        "NoSuchKey",
+        "NotFound",
     );
 }
 
@@ -1474,7 +1478,7 @@ fn head_object_nonexistent_bucket() {
     let req = make_request(Method::HEAD, "/nope/key", &[], b"");
     assert_aws_err(
         svc.head_object("123456789012", &req, "nope", "key"),
-        "NoSuchBucket",
+        "NotFound",
     );
 }
 
@@ -3108,8 +3112,11 @@ fn delete_bucket_empty_succeeds() {
 
 #[test]
 fn head_bucket_missing_errors() {
+    // HeadBucket's Smithy `errors:` list is just [NotFound]; the wire-
+    // level code lives in `x-amz-error-code` because HEAD has no body.
+    // Use the model-declared code instead of `NoSuchBucket`.
     let svc = make_service();
-    assert_aws_err(svc.head_bucket("123456789012", "nope"), "NoSuchBucket");
+    assert_aws_err(svc.head_bucket("123456789012", "nope"), "NotFound");
 }
 
 #[tokio::test]
