@@ -188,6 +188,7 @@ fn default_value_for_shape_def(model: &ServiceModel, shape: &Shape, depth: usize
         ShapeType::Boolean => Value::Bool(true),
         ShapeType::Blob => Value::String("dGVzdA==".to_string()), // base64("test")
         ShapeType::Timestamp => Value::String("2024-01-01T00:00:00Z".to_string()),
+        ShapeType::Document => Value::Object(serde_json::Map::new()),
         _ => Value::Null,
     }
 }
