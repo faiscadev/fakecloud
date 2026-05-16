@@ -851,18 +851,29 @@ async fn create_serverless_cache_rejects_memcached() {
 }
 
 #[tokio::test]
-async fn create_cache_cluster_without_runtime_cancels_reservation() {
+async fn create_cache_cluster_without_runtime_falls_back_to_metadata_only() {
+    // No container runtime is configured. The Smithy model has no
+    // "Docker missing" error shape, so refusing the call would emit an
+    // undeclared wire code. Instead the handler creates a metadata-only
+    // cluster (no backing container, host_port=0) and returns success.
     let shared = std::sync::Arc::new(parking_lot::RwLock::new(
         fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
     ));
     let service = ElastiCacheService::new(shared.clone());
 
     let req = request("CreateCacheCluster", &[("CacheClusterId", "no-runtime")]);
-    assert!(service.create_cache_cluster(&req).await.is_err());
+    let resp = service
+        .create_cache_cluster(&req)
+        .await
+        .expect("metadata-only create");
+    let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
+    assert!(body.contains("<CacheClusterId>no-runtime</CacheClusterId>"));
 
-    let mut __a = shared.write();
-    let state = __a.default_mut();
-    assert!(state.begin_cache_cluster_creation("no-runtime"));
+    let __a = shared.read();
+    let state = __a.get("123456789012").expect("account state");
+    let cluster = state.cache_clusters.get("no-runtime").expect("persisted");
+    assert!(cluster.container_id.is_empty());
+    assert_eq!(cluster.host_port, 0);
 }
 
 #[test]
@@ -4564,8 +4575,11 @@ fn create_cache_cluster_through_handler_persists_tags_and_extended_fields() {
 
 // ── snapshot restore paths ──
 
+// SnapshotNotFoundFault is not in CreateCacheCluster / CreateReplicationGroup's
+// declared `errors:` list per `aws-models/elasticache.json`. An unknown
+// SnapshotName is therefore treated as "no restore" and the create succeeds.
 #[tokio::test]
-async fn create_cache_cluster_with_missing_snapshot_errors() {
+async fn create_cache_cluster_with_missing_snapshot_creates_without_restore() {
     let shared = std::sync::Arc::new(parking_lot::RwLock::new(
         fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
     ));
@@ -4577,15 +4591,16 @@ async fn create_cache_cluster_with_missing_snapshot_errors() {
             ("SnapshotName", "no-such-snap"),
         ],
     );
-    let err = match svc.create_cache_cluster(&req).await {
-        Err(e) => e,
-        Ok(_) => panic!("expected error"),
-    };
-    assert_eq!(err.code(), "SnapshotNotFoundFault");
+    let resp = svc
+        .create_cache_cluster(&req)
+        .await
+        .expect("create succeeds without snapshot");
+    let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
+    assert!(body.contains("<CacheClusterId>cc-restore</CacheClusterId>"));
 }
 
 #[tokio::test]
-async fn create_replication_group_with_missing_snapshot_errors() {
+async fn create_replication_group_with_missing_snapshot_creates_without_restore() {
     let shared = std::sync::Arc::new(parking_lot::RwLock::new(
         fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
     ));
@@ -4598,19 +4613,23 @@ async fn create_replication_group_with_missing_snapshot_errors() {
             ("SnapshotName", "no-such-snap"),
         ],
     );
-    let err = match svc.create_replication_group(&req).await {
-        Err(e) => e,
-        Ok(_) => panic!("expected error"),
-    };
-    assert_eq!(err.code(), "SnapshotNotFoundFault");
+    let resp = svc
+        .create_replication_group(&req)
+        .await
+        .expect("create succeeds without snapshot");
+    let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
+    assert!(body.contains("<ReplicationGroupId>rg-restore</ReplicationGroupId>"));
 }
 
 #[tokio::test]
-async fn create_cache_cluster_with_existing_snapshot_skips_to_runtime() {
+async fn create_cache_cluster_with_existing_snapshot_creates_metadata_only() {
+    // With no container runtime, the create still succeeds (degraded to
+    // metadata-only). The rdb restore would happen if a runtime were
+    // available; the snapshot lookup itself doesn't fail the call.
     let shared = std::sync::Arc::new(parking_lot::RwLock::new(
         fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
     ));
-    let svc = ElastiCacheService::new(shared);
+    let svc = ElastiCacheService::new(shared.clone());
     {
         let mut accounts = svc.state.write();
         let state = accounts.get_or_create("123456789012");
@@ -4639,20 +4658,21 @@ async fn create_cache_cluster_with_existing_snapshot_skips_to_runtime() {
             ("SnapshotName", "my-snap"),
         ],
     );
-    let err = match svc.create_cache_cluster(&req).await {
-        Err(e) => e,
-        Ok(_) => panic!("expected error"),
-    };
-    assert_eq!(err.code(), "InvalidParameterValue");
-    assert_eq!(err.status(), http::StatusCode::SERVICE_UNAVAILABLE);
+    svc.create_cache_cluster(&req)
+        .await
+        .expect("create succeeds with known snapshot, no runtime");
+    let accounts = shared.read();
+    let state = accounts.get("123456789012").unwrap();
+    let cluster = state.cache_clusters.get("cc-restore").unwrap();
+    assert!(cluster.container_id.is_empty());
 }
 
 #[tokio::test]
-async fn create_replication_group_with_existing_snapshot_skips_to_runtime() {
+async fn create_replication_group_with_existing_snapshot_creates_metadata_only() {
     let shared = std::sync::Arc::new(parking_lot::RwLock::new(
         fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
     ));
-    let svc = ElastiCacheService::new(shared);
+    let svc = ElastiCacheService::new(shared.clone());
     {
         let mut accounts = svc.state.write();
         let state = accounts.get_or_create("123456789012");
@@ -4682,10 +4702,11 @@ async fn create_replication_group_with_existing_snapshot_skips_to_runtime() {
             ("SnapshotName", "my-snap"),
         ],
     );
-    let err = match svc.create_replication_group(&req).await {
-        Err(e) => e,
-        Ok(_) => panic!("expected error"),
-    };
-    assert_eq!(err.code(), "InvalidParameterValue");
-    assert_eq!(err.status(), http::StatusCode::SERVICE_UNAVAILABLE);
+    svc.create_replication_group(&req)
+        .await
+        .expect("create succeeds with known snapshot, no runtime");
+    let accounts = shared.read();
+    let state = accounts.get("123456789012").unwrap();
+    let group = state.replication_groups.get("rg-restore").unwrap();
+    assert!(group.container_id.is_empty());
 }

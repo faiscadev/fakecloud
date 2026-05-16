@@ -1,5 +1,5 @@
 {
-  "variants_passed": 83403,
+  "variants_passed": 83564,
   "total_variants": 86327,
   "per_service": {
     "logs": {
@@ -111,7 +111,7 @@
       "total": 4112
     },
     "elasticache": {
-      "passed": 2090,
+      "passed": 2251,
       "total": 2251
     },
     "secretsmanager": {
