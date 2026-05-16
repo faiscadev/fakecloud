@@ -268,6 +268,12 @@ fn run_probes(
         };
 
         for op in &model.operations {
+            // Re-seed before every op so destructive ops (DeleteBucket /
+            // DeleteObject) don't leave later ops staring at a missing
+            // resource. Cheap: each call is a single keep-alive request
+            // against the in-process server.
+            seed_service_resources(&client, &endpoint, service_name);
+
             let overrides = HashMap::new();
             let variants = generators::generate_all_variants(model, &op.name, &overrides);
 
@@ -368,6 +374,39 @@ fn cmd_run(
         "json" => report::print_json_report(&report_data),
         _ => report::print_text_report(&report_data),
     }
+}
+
+/// Seed any resources the probe driver assumes exist before sending success
+/// expectations. Today only S3 needs this: the REST request builder
+/// hard-codes `test-conformance-bucket` and `test-key` into every operation
+/// URL (see `probe::rest_request_config`), so ops like HeadBucket /
+/// GetObjectAcl / ListObjects can't return 2xx unless the bucket and a
+/// stub object actually exist on the server before the run starts.
+///
+/// Other services either generate per-op resources inside the variant input
+/// (Lambda's `test-conformance-function`, ECR's `test-conformance-repository`,
+/// etc. are typically created by their own Create* probe before later ops
+/// reach them) or don't depend on pre-existing state at all (Query/Json
+/// services where every probe is self-contained). Calling this for those
+/// service names is a no-op.
+fn seed_service_resources(client: &reqwest::blocking::Client, endpoint: &str, service_name: &str) {
+    if service_name != "s3" {
+        return;
+    }
+    let auth = "AWS4-HMAC-SHA256 Credential=test/20240101/us-east-1/s3/aws4_request, \
+                SignedHeaders=host;x-amz-date, Signature=00";
+    // Best-effort: ignore conflicts (bucket/object may already exist if the
+    // server preserved state across runs) and network errors (the harness
+    // will surface those as crashes during probing anyway).
+    let bucket_url = format!("{}/test-conformance-bucket", endpoint);
+    let _ = client.put(&bucket_url).header("Authorization", auth).send();
+    let object_url = format!("{}/test-conformance-bucket/test-key", endpoint);
+    let _ = client
+        .put(&object_url)
+        .header("Authorization", auth)
+        .header("Content-Type", "application/octet-stream")
+        .body("conformance-seed")
+        .send();
 }
 
 fn load_models(models_dir: &std::path::Path) -> Vec<(String, smithy::ServiceModel)> {

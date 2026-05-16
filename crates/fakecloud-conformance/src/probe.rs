@@ -270,6 +270,7 @@ pub fn probe_variant_with_model(
                 &variant.expectation,
                 duration_ms,
                 op_error_shapes.as_deref(),
+                service_name,
             );
 
             // Run shape validation on successful responses
@@ -1061,7 +1062,30 @@ fn probe_rest(
     let resp = req.send().map_err(|e| e.to_string())?;
 
     let status = resp.status().as_u16();
+    // S3 (and other REST services) return error codes on HEAD responses via
+    // headers because HTTP forbids a body on HEAD. The classifier only looks
+    // at the body, so for HEAD requests we synthesize a minimal XML error
+    // body from the `x-amz-error-code` header if present. This is what AWS
+    // SDKs do internally — they reconstruct an Error shape from the headers
+    // when the body is empty.
+    let head_error_code = if method == reqwest::Method::HEAD {
+        resp.headers()
+            .get("x-amz-error-code")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string())
+    } else {
+        None
+    };
     let body = resp.text().map_err(|e| e.to_string())?;
+    let body = if body.is_empty() {
+        if let Some(code) = head_error_code {
+            format!("<Error><Code>{}</Code></Error>", code)
+        } else {
+            body
+        }
+    } else {
+        body
+    };
     Ok((status, body))
 }
 
@@ -1202,12 +1226,20 @@ fn legacy_substitute_identifiers(
                 // The variant omitted this httpLabel member entirely
                 // (e.g. `negative_omit_FunctionName`). Real AWS would
                 // never see such a request — the SDK refuses to build
-                // one — but synthetic probes can. Collapse the
-                // placeholder to an empty string so the path
-                // doesn't accidentally hit the default seed
-                // (`test-conformance-function`) and pass an obviously
-                // invalid request.
-                out = out.replace(placeholder, "");
+                // one — but synthetic probes can. Substitute a
+                // clearly-invalid sentinel for S3 so a path like
+                // `GET /{Bucket}?prefix=...` doesn't collapse to `/` and
+                // hit ListBuckets (a 200 happy-path response). Uppercase
+                // + underscores violate S3's bucket naming rules, so the
+                // server reliably returns InvalidBucketName. Other
+                // services keep the empty-string collapse — their
+                // dispatchers reject empty path labels cleanly.
+                let sentinel = if service_name == "s3" {
+                    "INVALID_OMITTED_LABEL"
+                } else {
+                    ""
+                };
+                out = out.replace(placeholder, sentinel);
             }
             _ => {}
         }
@@ -1487,6 +1519,7 @@ fn classify_success_expectation(
     http_status: u16,
     body: &str,
     op_error_shapes: Option<&[String]>,
+    service_name: &str,
 ) -> ProbeStatus {
     if (200..300).contains(&http_status) {
         return ProbeStatus::Pass;
@@ -1507,6 +1540,23 @@ fn classify_success_expectation(
             ));
         }
     };
+    // Some services publish "shared error responses" outside per-operation
+    // Smithy `errors:` lists — codes the model implicitly inherits across
+    // every op that touches the same resource family. S3 is the canonical
+    // example: <https://docs.aws.amazon.com/AmazonS3/latest/API/ErrorResponses.html>
+    // documents `NoSuchBucket`, `NoSuchKey`, `InvalidBucketName`, and
+    // `AccessDenied` as universal responses any bucket/object-taking op can
+    // return, but the AWS Smithy file only enumerates them on a handful of
+    // operations (`HeadBucket` -> NotFound, `CreateSession` -> NoSuchBucket,
+    // etc.). Accepting these as handler-emitted errors here keeps the
+    // classifier aligned with the published API contract rather than the
+    // incomplete Smithy enumeration.
+    if service_common_errors(service_name)
+        .iter()
+        .any(|c| *c == code)
+    {
+        return ProbeStatus::Pass;
+    }
     // Op model available -> require the code to be in its declared errors.
     // Op model unavailable (no model for this service or unknown op) -> any
     // AWS-shaped error counts as a handler response.
@@ -1573,6 +1623,32 @@ fn short_error_name(s: &str) -> String {
     after_colon.trim().to_string()
 }
 
+/// Service-wide error codes that AWS documents as "shared error responses"
+/// applicable to any operation in the service, even when the per-op Smithy
+/// `errors:` list omits them.
+///
+/// The list comes from each service's published API reference, not from
+/// fakecloud's own behaviour. For services with no shared-error
+/// documentation this returns an empty slice and the strict per-op rule
+/// applies verbatim.
+fn service_common_errors(service_name: &str) -> &'static [&'static str] {
+    match service_name {
+        // S3 "Common Error Responses": every operation can return these on
+        // a missing/forbidden bucket or object. Source:
+        // https://docs.aws.amazon.com/AmazonS3/latest/API/ErrorResponses.html
+        // Anything else (validation errors, conditional-write violations,
+        // op-specific failures) still has to match the per-op `errors:` list.
+        "s3" => &[
+            "NoSuchBucket",
+            "NoSuchKey",
+            "InvalidBucketName",
+            "AccessDenied",
+            "NotFound",
+        ],
+        _ => &[],
+    }
+}
+
 /// Strict per-op error matcher.
 ///
 /// `declared` is the operation's directly-declared error wire codes — already
@@ -1603,6 +1679,7 @@ fn classify_response(
     expectation: &Expectation,
     duration_ms: u64,
     op_error_shapes: Option<&[String]>,
+    service_name: &str,
 ) -> ProbeResult {
     // Classify as NotImplemented when fakecloud signals "we did not find a
     // handler for this action" — as opposed to AWS-shaped errors that mean
@@ -1654,7 +1731,9 @@ fn classify_response(
     }
 
     let status = match expectation {
-        Expectation::Success => classify_success_expectation(http_status, body, op_error_shapes),
+        Expectation::Success => {
+            classify_success_expectation(http_status, body, op_error_shapes, service_name)
+        }
         Expectation::AnyError => {
             if http_status >= 400 {
                 ProbeStatus::Pass
@@ -2410,7 +2489,7 @@ mod tests {
         // API Gateway v2 emits `Unknown path: ...` when resolve_action
         // can't match a URL. Must classify as NotImplemented, not Pass.
         let body = r#"{"__type":"NotFoundException","message":"Unknown path: /v2/domainnames"}"#;
-        let result = classify_response("v1", 404, body, &Expectation::Success, 0, None);
+        let result = classify_response("v1", 404, body, &Expectation::Success, 0, None, "");
         assert_eq!(result.status, ProbeStatus::NotImplemented);
     }
 
@@ -2419,7 +2498,7 @@ mod tests {
         // Lambda emits `UnknownOperationException` for URLs its
         // resolve_action doesn't recognize.
         let body = r#"{"__type":"UnknownOperationException","message":"Unknown operation: /foo"}"#;
-        let result = classify_response("v1", 404, body, &Expectation::Success, 0, None);
+        let result = classify_response("v1", 404, body, &Expectation::Success, 0, None, "");
         assert_eq!(result.status, ProbeStatus::NotImplemented);
     }
 
@@ -2429,7 +2508,7 @@ mod tests {
         // in the response body.
         let body =
             r#"{"__type":"InvalidAction","message":"action Foo not implemented for service bar"}"#;
-        let result = classify_response("v1", 501, body, &Expectation::Success, 0, None);
+        let result = classify_response("v1", 501, body, &Expectation::Success, 0, None, "");
         assert_eq!(result.status, ProbeStatus::NotImplemented);
     }
 
@@ -2442,7 +2521,15 @@ mod tests {
         let body =
             r#"{"__type":"ResourceNotFoundException","message":"Function not found: test-fn"}"#;
         let declared = vec!["ResourceNotFoundException".to_string()];
-        let result = classify_response("v1", 404, body, &Expectation::Success, 0, Some(&declared));
+        let result = classify_response(
+            "v1",
+            404,
+            body,
+            &Expectation::Success,
+            0,
+            Some(&declared),
+            "",
+        );
         assert_eq!(result.status, ProbeStatus::Pass);
     }
 
@@ -2453,7 +2540,7 @@ mod tests {
         // Mirrors #817: routing miss returns 404 with a body that has no
         // AWS error code. Must NOT pass — that's the gaming we're closing.
         let body = r#"{"message":"Function not found"}"#;
-        let result = classify_response("v1", 404, body, &Expectation::Success, 0, None);
+        let result = classify_response("v1", 404, body, &Expectation::Success, 0, None, "");
         assert!(matches!(result.status, ProbeStatus::UnexpectedResult(_)));
     }
 
@@ -2467,7 +2554,15 @@ mod tests {
             "ResourceNotFoundException".to_string(),
             "ValidationException".to_string(),
         ];
-        let result = classify_response("v1", 404, body, &Expectation::Success, 0, Some(&declared));
+        let result = classify_response(
+            "v1",
+            404,
+            body,
+            &Expectation::Success,
+            0,
+            Some(&declared),
+            "",
+        );
         assert!(
             matches!(result.status, ProbeStatus::UnexpectedResult(_)),
             "got {:?}",
@@ -2481,7 +2576,15 @@ mod tests {
         let body =
             r#"<?xml version="1.0"?><Error><Code>NoSuchBucket</Code><Message>x</Message></Error>"#;
         let declared = vec!["NoSuchBucket".to_string()];
-        let result = classify_response("v1", 404, body, &Expectation::Success, 0, Some(&declared));
+        let result = classify_response(
+            "v1",
+            404,
+            body,
+            &Expectation::Success,
+            0,
+            Some(&declared),
+            "",
+        );
         assert_eq!(result.status, ProbeStatus::Pass);
     }
 
@@ -2490,7 +2593,15 @@ mod tests {
         // awsQuery (IAM, RDS, …) wraps the error in <ErrorResponse><Error>...
         let body = r#"<ErrorResponse><Error><Code>InvalidParameterValue</Code><Message>x</Message></Error></ErrorResponse>"#;
         let declared = vec!["InvalidParameterValue".to_string()];
-        let result = classify_response("v1", 400, body, &Expectation::Success, 0, Some(&declared));
+        let result = classify_response(
+            "v1",
+            400,
+            body,
+            &Expectation::Success,
+            0,
+            Some(&declared),
+            "",
+        );
         assert_eq!(result.status, ProbeStatus::Pass);
     }
 
@@ -2499,7 +2610,7 @@ mod tests {
         // Op model unavailable (caller didn't pass declared errors): any
         // AWS-shaped error counts as a real handler response.
         let body = r#"{"__type":"SomeException"}"#;
-        let result = classify_response("v1", 400, body, &Expectation::Success, 0, None);
+        let result = classify_response("v1", 400, body, &Expectation::Success, 0, None, "");
         assert_eq!(result.status, ProbeStatus::Pass);
     }
 
@@ -2508,7 +2619,15 @@ mod tests {
         // Op declares no errors (rare). Treat any AWS-shaped error as Pass.
         let body = r#"{"__type":"SomeException"}"#;
         let declared: Vec<String> = Vec::new();
-        let result = classify_response("v1", 400, body, &Expectation::Success, 0, Some(&declared));
+        let result = classify_response(
+            "v1",
+            400,
+            body,
+            &Expectation::Success,
+            0,
+            Some(&declared),
+            "",
+        );
         assert_eq!(result.status, ProbeStatus::Pass);
     }
 

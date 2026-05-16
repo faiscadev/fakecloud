@@ -1818,11 +1818,26 @@ impl S3Service {
         let accts = self.state.read();
         let __empty = crate::state::S3State::new(account_id, "us-east-1");
         let state = accts.get(account_id).unwrap_or(&__empty);
-        let b = state
-            .buckets
-            .get(bucket)
-            .ok_or_else(|| no_such_bucket(bucket))?;
-        let obj = resolve_object(b, key, req.query_params.get("versionId"))?;
+        // HeadObject's Smithy model declares only `NotFound` for any
+        // missing-target error (com.amazonaws.s3#HeadObject -> errors:
+        // [NotFound]). The body is stripped from HEAD responses, so the
+        // wire-level signal is the `x-amz-error-code` header. Use the
+        // declared code instead of the bucket/object-specific codes so the
+        // emitted error matches the model contract.
+        let b = state.buckets.get(bucket).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "NotFound",
+                format!("The specified bucket does not exist: {bucket}"),
+            )
+        })?;
+        let obj = resolve_object(b, key, req.query_params.get("versionId")).map_err(|err| {
+            if matches!(err.status(), StatusCode::NOT_FOUND) {
+                AwsServiceError::aws_error(StatusCode::NOT_FOUND, "NotFound", err.message())
+            } else {
+                err
+            }
+        })?;
         if obj.is_delete_marker {
             if req.query_params.contains_key("versionId") {
                 let mut headers = HeaderMap::new();

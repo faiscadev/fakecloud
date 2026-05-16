@@ -259,6 +259,20 @@ impl AwsService for S3Service {
         }
 
         // S3 REST routing: method + path segments + query params
+        //
+        // Reject paths that start with `//` (an empty bucket segment). The
+        // path-segment splitter further down filters empty segments out,
+        // which would otherwise let a malformed URL like `PUT //my-key`
+        // collapse to a valid `PUT /my-key` (CreateBucket) and silently
+        // succeed. Real S3 rejects empty bucket segments with
+        // InvalidBucketName, so mirror that.
+        if req.raw_path.starts_with("//") {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidBucketName",
+                "The specified bucket is not valid: bucket name cannot be empty",
+            ));
+        }
         let bucket = req.path_segments.first().map(|s| s.as_str());
         // Extract key from the raw path to preserve leading slashes and empty segments.
         // The raw path is like "/bucket/key/parts" — we strip the bucket prefix.
@@ -516,6 +530,15 @@ impl AwsService for S3Service {
             "uploads",
             "restore",
             "select",
+            // Bucket-required ops the earlier list missed: their query
+            // markers (e.g. `?location` for GetBucketLocation,
+            // `?delete` for DeleteObjects, `?list-type=2` for
+            // ListObjectsV2) signal a bucket op so a request with the
+            // marker but no bucket segment is malformed, not a service-
+            // level call.
+            "location",
+            "delete",
+            "list-type",
         ];
         if bucket.is_none()
             && bucket_subresources

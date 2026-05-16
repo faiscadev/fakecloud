@@ -353,10 +353,17 @@ impl S3Service {
         let accts = self.state.read();
         let __empty = crate::state::S3State::new(account_id, "us-east-1");
         let state = accts.get(account_id).unwrap_or(&__empty);
+        // HeadBucket's Smithy model declares `NotFound` as the missing-bucket
+        // error (com.amazonaws.s3#HeadBucket -> errors: [NotFound]). HEAD
+        // responses carry no body — clients read the error from
+        // `x-amz-error-code` — so the code emitted here is the only signal
+        // the SDK has. Use the model-declared code instead of the
+        // operation-agnostic `NoSuchBucket` to keep the wire format aligned
+        // with the contract.
         let b = state.buckets.get(bucket).ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::NOT_FOUND,
-                "NoSuchBucket",
+                "NotFound",
                 format!("The specified bucket does not exist: {bucket}"),
             )
         })?;
