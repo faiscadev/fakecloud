@@ -1,5 +1,5 @@
 {
-  "variants_passed": 83694,
+  "variants_passed": 83755,
   "total_variants": 86327,
   "per_service": {
     "logs": {
@@ -55,7 +55,7 @@
       "total": 3373
     },
     "elasticloadbalancing": {
-      "passed": 1508,
+      "passed": 1569,
       "total": 1569
     },
     "s3": {
