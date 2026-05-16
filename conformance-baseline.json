@@ -1,5 +1,5 @@
 {
-  "variants_passed": 83017,
+  "variants_passed": 83192,
   "total_variants": 86327,
   "per_service": {
     "logs": {
@@ -135,7 +135,7 @@
       "total": 506
     },
     "kms": {
-      "passed": 2052,
+      "passed": 2227,
       "total": 2227
     },
     "route53": {
