@@ -297,18 +297,31 @@ pub fn validate_response(
     protocol: Protocol,
 ) -> Vec<ShapeViolation> {
     if response_body.is_empty() {
-        // An empty body is valid if the output shape is Unit or has no required members.
-        // Members bound to HTTP headers / query / labels / response code are not
-        // expected to appear in the JSON body, so they don't count as "missing".
-        // A required `@httpPayload` member with an empty wire body is also OK
-        // when the payload's own target shape is structurally empty — but we
-        // don't try to be that clever here; an empty body with a required
-        // payload member is reported as MissingField like before.
+        // An empty body is valid if the output shape is Unit or has no
+        // required members. Members bound to HTTP headers / query / labels
+        // are not expected to appear in the JSON body, so they don't count
+        // as "missing" here. A required `@httpPayload` member is a special
+        // case: when its target is Blob or String the wire body can
+        // legitimately be empty (an empty blob, an empty string), so it's
+        // not a violation; but when the target is a structure / list /
+        // map, an empty body means the required payload is genuinely
+        // absent and must be reported.
         if let Some(ShapeType::Structure { members }) = effective_shape_type(model, output_shape_id)
         {
             let required: Vec<_> = members
                 .iter()
-                .filter(|m| m.required && is_json_body_member(m))
+                .filter(|m| {
+                    if !m.required {
+                        return false;
+                    }
+                    if m.traits.http_payload {
+                        return !matches!(
+                            effective_shape_type(model, &m.target),
+                            Some(ShapeType::Blob) | Some(ShapeType::String { .. })
+                        );
+                    }
+                    is_json_body_member(m)
+                })
                 .collect();
             if !required.is_empty() {
                 return required
@@ -1271,6 +1284,68 @@ mod tests {
             violations.is_empty(),
             "expected no violations (httpPayload Blob is opaque), got {:?}",
             violations
+        );
+    }
+
+    /// Model where the output has a `@httpPayload` member targeting a
+    /// structure (not Blob/String). Empty wire body must still report
+    /// the payload as missing.
+    fn http_payload_struct_model() -> ServiceModel {
+        let mut shapes = HashMap::new();
+
+        shapes.insert(
+            "test#GetThingOutput".to_string(),
+            Shape {
+                shape_id: "test#GetThingOutput".to_string(),
+                shape_type: ShapeType::Structure {
+                    members: vec![Member {
+                        name: "thing".to_string(),
+                        target: "test#Thing".to_string(),
+                        required: true,
+                        traits: ShapeTraits {
+                            http_payload: true,
+                            ..ShapeTraits::default()
+                        },
+                    }],
+                },
+                traits: ShapeTraits::default(),
+            },
+        );
+        shapes.insert(
+            "test#Thing".to_string(),
+            Shape {
+                shape_id: "test#Thing".to_string(),
+                shape_type: ShapeType::Structure {
+                    members: vec![Member {
+                        name: "id".to_string(),
+                        target: "smithy.api#String".to_string(),
+                        required: true,
+                        traits: ShapeTraits::default(),
+                    }],
+                },
+                traits: ShapeTraits::default(),
+            },
+        );
+
+        ServiceModel {
+            service_name: "test".to_string(),
+            operations: Vec::new(),
+            shapes,
+        }
+    }
+
+    #[test]
+    fn empty_body_flags_required_struct_payload() {
+        // Required `@httpPayload` targeting a structure: empty wire body
+        // genuinely means the payload is missing — must report.
+        let model = http_payload_struct_model();
+        let v = validate_response(&model, "test#GetThingOutput", "", Protocol::Rest);
+        assert!(
+            v.iter().any(
+                |x| matches!(x, ShapeViolation::MissingField { field, .. } if field == "thing")
+            ),
+            "expected MissingField(thing) for empty body, got {:?}",
+            v
         );
     }
 
