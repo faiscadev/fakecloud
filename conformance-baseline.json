@@ -1,5 +1,5 @@
 {
-  "variants_passed": 83755,
+  "variants_passed": 83881,
   "total_variants": 86327,
   "per_service": {
     "logs": {
@@ -23,7 +23,7 @@
       "total": 2378
     },
     "ses": {
-      "passed": 2738,
+      "passed": 2864,
       "total": 2864
     },
     "application-autoscaling": {

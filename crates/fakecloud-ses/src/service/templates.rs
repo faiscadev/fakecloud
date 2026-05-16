@@ -60,7 +60,23 @@ impl SesV2Service {
             created_at: Utc::now(),
         };
 
-        state.templates.insert(template_name, template);
+        state.templates.insert(template_name.clone(), template);
+
+        // Persist Tags via the per-ARN tag map. The Smithy
+        // `GetEmailTemplateResponse` round-trips Tags, so dropping them
+        // on Create is a real input-drop bug.
+        if let Some(tags_arr) = body["Tags"].as_array() {
+            let arn = format!(
+                "arn:aws:ses:{}:{}:template/{}",
+                req.region, req.account_id, template_name
+            );
+            let tag_map = state.tags.entry(arn).or_default();
+            for tag in tags_arr {
+                if let (Some(k), Some(v)) = (tag["Key"].as_str(), tag["Value"].as_str()) {
+                    tag_map.insert(k.to_string(), v.to_string());
+                }
+            }
+        }
 
         Ok(AwsResponse::json(StatusCode::OK, "{}"))
     }
@@ -109,7 +125,7 @@ impl SesV2Service {
             }
         };
 
-        let response = json!({
+        let mut response = json!({
             "TemplateName": template.template_name,
             "TemplateContent": {
                 "Subject": template.subject,
@@ -117,6 +133,15 @@ impl SesV2Service {
                 "Text": template.text_body,
             },
         });
+
+        let arn = format!(
+            "arn:aws:ses:{}:{}:template/{}",
+            req.region, req.account_id, name
+        );
+        if let Some(tag_map) = state.tags.get(&arn) {
+            response["Tags"] =
+                Value::Array(fakecloud_core::tags::tags_to_json(tag_map, "Key", "Value"));
+        }
 
         Ok(AwsResponse::json(StatusCode::OK, response.to_string()))
     }

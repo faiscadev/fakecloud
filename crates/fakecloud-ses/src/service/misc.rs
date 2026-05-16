@@ -222,7 +222,7 @@ impl SesV2Service {
         state.custom_verification_email_templates.insert(
             template_name.clone(),
             CustomVerificationEmailTemplate {
-                template_name,
+                template_name: template_name.clone(),
                 from_email_address: from_email,
                 template_subject: subject,
                 template_content: content,
@@ -231,6 +231,22 @@ impl SesV2Service {
                 created_at: Utc::now(),
             },
         );
+
+        // Persist Tags via the per-ARN tag map. The Smithy
+        // `GetCustomVerificationEmailTemplateResponse` round-trips Tags,
+        // so dropping them on Create is a real input-drop bug.
+        if let Some(tags_arr) = body["Tags"].as_array() {
+            let arn = format!(
+                "arn:aws:ses:{}:{}:custom-verification-email-template/{}",
+                req.region, req.account_id, template_name
+            );
+            let tag_map = state.tags.entry(arn).or_default();
+            for tag in tags_arr {
+                if let (Some(k), Some(v)) = (tag["Key"].as_str(), tag["Value"].as_str()) {
+                    tag_map.insert(k.to_string(), v.to_string());
+                }
+            }
+        }
 
         Ok(AwsResponse::json(StatusCode::OK, "{}"))
     }
@@ -254,7 +270,7 @@ impl SesV2Service {
             }
         };
 
-        let response = json!({
+        let mut response = json!({
             "TemplateName": tmpl.template_name,
             "FromEmailAddress": tmpl.from_email_address,
             "TemplateSubject": tmpl.template_subject,
@@ -262,6 +278,15 @@ impl SesV2Service {
             "SuccessRedirectionURL": tmpl.success_redirection_url,
             "FailureRedirectionURL": tmpl.failure_redirection_url,
         });
+
+        let arn = format!(
+            "arn:aws:ses:{}:{}:custom-verification-email-template/{}",
+            req.region, req.account_id, name
+        );
+        if let Some(tag_map) = state.tags.get(&arn) {
+            response["Tags"] =
+                Value::Array(fakecloud_core::tags::tags_to_json(tag_map, "Key", "Value"));
+        }
 
         Ok(AwsResponse::json(StatusCode::OK, response.to_string()))
     }

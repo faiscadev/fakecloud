@@ -71,6 +71,11 @@ impl SesV2Service {
             "DOMAIN"
         };
 
+        // Honor the optional `ConfigurationSetName` from the input — the
+        // Smithy model round-trips it on GetEmailIdentity, so dropping it
+        // here is a real input-drop bug.
+        let configuration_set_name = body["ConfigurationSetName"].as_str().map(|s| s.to_string());
+
         // Easy DKIM auto-provisions a fresh RSA-2048 keypair when the
         // identity is created so SendEmail can stamp DKIM-Signature
         // headers without a follow-up PutEmailIdentityDkimSigningAttributes.
@@ -90,10 +95,25 @@ impl SesV2Service {
             mail_from_domain: None,
             mail_from_behavior_on_mx_failure: "USE_DEFAULT_VALUE".to_string(),
             mail_from_domain_status: "NotStarted".to_string(),
-            configuration_set_name: None,
+            configuration_set_name,
         };
 
-        state.identities.insert(identity_name, identity);
+        state.identities.insert(identity_name.clone(), identity);
+
+        // Persist Tags via the per-ARN tag map TagResource/ListTagsForResource
+        // use, so the round-trip echo for Tags is honored end-to-end.
+        if let Some(tags_arr) = body["Tags"].as_array() {
+            let arn = format!(
+                "arn:aws:ses:{}:{}:identity/{}",
+                req.region, req.account_id, identity_name
+            );
+            let tag_map = state.tags.entry(arn).or_default();
+            for tag in tags_arr {
+                if let (Some(k), Some(v)) = (tag["Key"].as_str(), tag["Value"].as_str()) {
+                    tag_map.insert(k.to_string(), v.to_string());
+                }
+            }
+        }
 
         let response = json!({
             "IdentityType": identity_type,
@@ -205,8 +225,23 @@ impl SesV2Service {
             response["MailFromAttributes"]["MailFromDomainDnsRecords"] = json!(mail_from_dns);
         }
 
-        if let Some(ref cs) = identity.configuration_set_name {
+        let configuration_set_name = identity.configuration_set_name.clone();
+        // Release the &mut on `identity` before borrowing `state.tags`.
+        let _ = identity;
+        if let Some(cs) = configuration_set_name {
             response["ConfigurationSetName"] = json!(cs);
+        }
+
+        // Surface stored tags from the per-ARN tag map. Echoing keeps
+        // the round-trip honest: anything CreateEmailIdentity/TagResource
+        // wrote is visible on the read side.
+        let arn = format!(
+            "arn:aws:ses:{}:{}:identity/{}",
+            req.region, req.account_id, identity_name
+        );
+        if let Some(tag_map) = state.tags.get(&arn) {
+            response["Tags"] =
+                Value::Array(fakecloud_core::tags::tags_to_json(tag_map, "Key", "Value"));
         }
 
         Ok(AwsResponse::json(StatusCode::OK, response.to_string()))

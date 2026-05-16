@@ -39,21 +39,79 @@ impl SesV2Service {
             ));
         }
 
+        // Honor every optional sub-structure on the input — the Smithy
+        // model declares them all and the GetConfigurationSet reader
+        // round-trips them, so silently dropping any here is a real
+        // conformance gap (caught by the round_trip probe). Each block
+        // mirrors the field-by-field handling in the dedicated
+        // `PutConfigurationSet*Options` op.
+        let sending_enabled = body["SendingOptions"]["SendingEnabled"]
+            .as_bool()
+            .unwrap_or(true);
+        let tls_policy = body["DeliveryOptions"]["TlsPolicy"]
+            .as_str()
+            .unwrap_or("OPTIONAL")
+            .to_string();
+        let sending_pool_name = body["DeliveryOptions"]["SendingPoolName"]
+            .as_str()
+            .map(|s| s.to_string());
+        let custom_redirect_domain = body["TrackingOptions"]["CustomRedirectDomain"]
+            .as_str()
+            .map(|s| s.to_string());
+        let https_policy = body["TrackingOptions"]["HttpsPolicy"]
+            .as_str()
+            .map(|s| s.to_string());
+        let suppressed_reasons =
+            extract_string_array(&body["SuppressionOptions"]["SuppressedReasons"]);
+        let reputation_metrics_enabled = body["ReputationOptions"]["ReputationMetricsEnabled"]
+            .as_bool()
+            .unwrap_or(false);
+        let vdm_options = if body["VdmOptions"].is_object() {
+            Some(body["VdmOptions"].clone())
+        } else {
+            None
+        };
+        let archive_arn = body["ArchivingOptions"]["ArchiveArn"]
+            .as_str()
+            .map(|s| s.to_string());
+        // ArchivingOptions may be present as `{}` (no ArchiveArn). The
+        // Smithy round-trip echoes the structure itself, so track whether
+        // the caller sent it at all — that's what GetConfigurationSet
+        // needs to mirror back.
+        let archiving_options_present = body["ArchivingOptions"].is_object();
+
         state.configuration_sets.insert(
             name.clone(),
             ConfigurationSet {
-                name,
-                sending_enabled: true,
-                tls_policy: "OPTIONAL".to_string(),
-                sending_pool_name: None,
-                custom_redirect_domain: None,
-                https_policy: None,
-                suppressed_reasons: Vec::new(),
-                reputation_metrics_enabled: false,
-                vdm_options: None,
-                archive_arn: None,
+                name: name.clone(),
+                sending_enabled,
+                tls_policy,
+                sending_pool_name,
+                custom_redirect_domain,
+                https_policy,
+                suppressed_reasons,
+                reputation_metrics_enabled,
+                vdm_options,
+                archive_arn,
+                archiving_options_present,
             },
         );
+
+        // Persist Tags via the same per-ARN map TagResource uses, so
+        // ListTagsForResource on the new configuration-set ARN returns
+        // what the caller sent.
+        if let Some(tags_arr) = body["Tags"].as_array() {
+            let arn = format!(
+                "arn:aws:ses:{}:{}:configuration-set/{}",
+                req.region, req.account_id, name
+            );
+            let tag_map = state.tags.entry(arn).or_default();
+            for tag in tags_arr {
+                if let (Some(k), Some(v)) = (tag["Key"].as_str(), tag["Value"].as_str()) {
+                    tag_map.insert(k.to_string(), v.to_string());
+                }
+            }
+        }
 
         Ok(AwsResponse::json(StatusCode::OK, "{}"))
     }
@@ -136,10 +194,23 @@ impl SesV2Service {
             response["VdmOptions"] = vdm.clone();
         }
 
-        if let Some(ref arn) = cs.archive_arn {
-            response["ArchivingOptions"] = json!({
-                "ArchiveArn": arn,
-            });
+        if cs.archiving_options_present || cs.archive_arn.is_some() {
+            let mut archiving = serde_json::Map::new();
+            if let Some(ref arn) = cs.archive_arn {
+                archiving.insert("ArchiveArn".to_string(), json!(arn));
+            }
+            response["ArchivingOptions"] = Value::Object(archiving);
+        }
+
+        // Surface the per-ARN tag map on Get so the round-trip echo for
+        // Tags is honored end-to-end.
+        let arn = format!(
+            "arn:aws:ses:{}:{}:configuration-set/{}",
+            req.region, req.account_id, name
+        );
+        if let Some(tag_map) = state.tags.get(&arn) {
+            response["Tags"] =
+                Value::Array(fakecloud_core::tags::tags_to_json(tag_map, "Key", "Value"));
         }
 
         Ok(AwsResponse::json(StatusCode::OK, response.to_string()))
@@ -361,6 +432,7 @@ impl SesV2Service {
         };
 
         cs.archive_arn = body["ArchiveArn"].as_str().map(|s| s.to_string());
+        cs.archiving_options_present = true;
 
         Ok(AwsResponse::json(StatusCode::OK, "{}"))
     }
