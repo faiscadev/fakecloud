@@ -1,5 +1,5 @@
 {
-  "variants_passed": 83192,
+  "variants_passed": 83362,
   "total_variants": 86327,
   "per_service": {
     "logs": {
@@ -119,7 +119,7 @@
       "total": 864
     },
     "wafv2": {
-      "passed": 1963,
+      "passed": 2133,
       "total": 2133
     },
     "states": {
