@@ -1,5 +1,36 @@
 use super::*;
 
+/// Match the Smithy constraints on `com.amazonaws.elasticache#UserId`:
+/// `@length(min=1)` and `@pattern("^[a-zA-Z][a-zA-Z0-9\\-]*$")`. Returns
+/// false for an empty value or one whose shape violates the pattern.
+pub(crate) fn is_valid_user_id(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !first.is_ascii_alphabetic() {
+        return false;
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '-')
+}
+
+/// Match the Smithy `SourceType` enum on `DescribeEvents`. Returns false
+/// when the value is not one of the documented wire forms.
+pub(crate) fn is_valid_source_type(value: &str) -> bool {
+    matches!(
+        value,
+        "cache-cluster"
+            | "cache-parameter-group"
+            | "cache-security-group"
+            | "cache-subnet-group"
+            | "replication-group"
+            | "serverless-cache"
+            | "serverless-cache-snapshot"
+            | "user"
+            | "user-group"
+    )
+}
+
 pub(crate) fn parse_required_bool(req: &AwsRequest, name: &str) -> Result<bool, AwsServiceError> {
     parse_optional_bool(Some(&required_query_param(req, name)?))?.ok_or_else(|| {
         AwsServiceError::aws_error(

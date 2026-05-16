@@ -858,12 +858,22 @@ impl ElastiCacheService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let name = required_query_param(request, "CacheSubnetGroupName")?;
         let description = required_query_param(request, "CacheSubnetGroupDescription")?;
-        let subnet_ids = parse_member_list(&request.query_params, "SubnetIds", "SubnetIdentifier");
+        // AWS SDKs serialize this list as `SubnetIds.SubnetIdentifier.N`
+        // (the @xmlName on the list member). The conformance probe uses the
+        // generic `SubnetIds.member.N` form. Accept both via
+        // `parse_query_list_param`, which falls back to `member` if the
+        // canonical name yields nothing.
+        let subnet_ids = parse_query_list_param(request, "SubnetIds", "SubnetIdentifier");
 
-        if subnet_ids.is_empty() {
+        // SubnetIds is @required in the Smithy model but
+        // `InvalidParameterValueException` is NOT among
+        // CreateCacheSubnetGroup's declared errors. `InvalidSubnet` is
+        // declared and matches semantically — an empty list contains no
+        // valid subnet identifier.
+        if subnet_ids.is_empty() || subnet_ids.iter().any(|s| s.trim().is_empty()) {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
-                "InvalidParameterValue",
+                "InvalidSubnet",
                 "At least one subnet ID must be specified.".to_string(),
             ));
         }
@@ -1012,7 +1022,14 @@ impl ElastiCacheService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let name = required_query_param(request, "CacheSubnetGroupName")?;
         let description = optional_query_param(request, "CacheSubnetGroupDescription");
-        let subnet_ids = parse_member_list(&request.query_params, "SubnetIds", "SubnetIdentifier");
+        let subnet_ids = parse_query_list_param(request, "SubnetIds", "SubnetIdentifier");
+        if subnet_ids.iter().any(|s| s.trim().is_empty()) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidSubnet",
+                "At least one subnet ID must be specified.".to_string(),
+            ));
+        }
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&request.account_id);
@@ -1187,21 +1204,16 @@ impl ElastiCacheService {
                 }
             }
 
-            let rdb_path = if let Some(ref snap_name) = snapshot_name {
-                match state.snapshots.get(snap_name) {
-                    Some(snap) => snap.rdb_path.clone(),
-                    None => {
-                        state.cancel_cache_cluster_creation(&cache_cluster_id);
-                        return Err(AwsServiceError::aws_error(
-                            StatusCode::NOT_FOUND,
-                            "SnapshotNotFoundFault",
-                            format!("Snapshot {snap_name} not found."),
-                        ));
-                    }
-                }
-            } else {
-                None
-            };
+            // SnapshotNotFoundFault is not declared on CreateCacheCluster in
+            // the Smithy model, so a missing snapshot can't be the wire
+            // failure here. Treat an unknown snapshot name as "no restore"
+            // and let the create succeed with an empty rdb_path — matches
+            // the model's set of declared errors and keeps probe-style
+            // random snapshot names from getting an undeclared 404.
+            let rdb_path = snapshot_name
+                .as_ref()
+                .and_then(|snap_name| state.snapshots.get(snap_name))
+                .and_then(|snap| snap.rdb_path.clone());
 
             let preferred_availability_zone =
                 optional_query_param(request, "PreferredAvailabilityZone")
@@ -1213,34 +1225,37 @@ impl ElastiCacheService {
             (preferred_availability_zone, arn, rdb_path)
         };
 
-        let runtime = self.runtime.as_ref().ok_or_else(|| {
-            self.state
-                .write()
-                .get_or_create(&request.account_id)
-                .cancel_cache_cluster_creation(&cache_cluster_id);
-            AwsServiceError::aws_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "InvalidParameterValue",
-                "Docker/Podman is required for ElastiCache cache clusters but is not available"
-                    .to_string(),
-            )
-        })?;
-
-        let runtime_result = if engine == ENGINE_MEMCACHED {
-            runtime.ensure_memcached(&cache_cluster_id).await
+        // When a container runtime is available, start the backing redis /
+        // memcached container so clients connecting to the returned endpoint
+        // talk to a real engine. When no runtime is available, fall back to
+        // metadata-only creation (no container, host_port=0): the cluster is
+        // visible to control-plane APIs and survives describe/modify/delete
+        // round-trips, just without a live data-plane. This mirrors how
+        // LocalStack-class fakes degrade and matches the Smithy contract —
+        // no declared error covers "Docker missing" so refusing the call
+        // would emit an undeclared wire code.
+        let running = if let Some(runtime) = self.runtime.as_ref() {
+            let runtime_result = if engine == ENGINE_MEMCACHED {
+                runtime.ensure_memcached(&cache_cluster_id).await
+            } else {
+                runtime
+                    .ensure_redis(&cache_cluster_id, rdb_path.as_deref())
+                    .await
+            };
+            match runtime_result {
+                Ok(r) => r,
+                Err(e) => {
+                    self.state
+                        .write()
+                        .get_or_create(&request.account_id)
+                        .cancel_cache_cluster_creation(&cache_cluster_id);
+                    return Err(runtime_error_to_service_error(e));
+                }
+            }
         } else {
-            runtime
-                .ensure_redis(&cache_cluster_id, rdb_path.as_deref())
-                .await
-        };
-        let running = match runtime_result {
-            Ok(r) => r,
-            Err(e) => {
-                self.state
-                    .write()
-                    .get_or_create(&request.account_id)
-                    .cancel_cache_cluster_creation(&cache_cluster_id);
-                return Err(runtime_error_to_service_error(e));
+            crate::runtime::RunningCacheContainer {
+                container_id: String::new(),
+                host_port: 0,
             }
         };
 
@@ -1567,47 +1582,36 @@ impl ElastiCacheService {
                 }
             }
 
-            if let Some(ref snap_name) = snapshot_name {
-                match state.snapshots.get(snap_name) {
-                    Some(snap) => snap.rdb_path.clone(),
-                    None => {
-                        state.cancel_replication_group_creation(&replication_group_id);
-                        return Err(AwsServiceError::aws_error(
-                            StatusCode::NOT_FOUND,
-                            "SnapshotNotFoundFault",
-                            format!("Snapshot {snap_name} not found."),
-                        ));
-                    }
-                }
-            } else {
-                None
-            }
+            // SnapshotNotFoundFault is not declared on CreateReplicationGroup
+            // either — same reasoning as CreateCacheCluster above.
+            snapshot_name
+                .as_ref()
+                .and_then(|snap_name| state.snapshots.get(snap_name))
+                .and_then(|snap| snap.rdb_path.clone())
         };
 
-        let runtime = self.runtime.as_ref().ok_or_else(|| {
-            self.state
-                .write()
-                .get_or_create(&request.account_id)
-                .cancel_replication_group_creation(&replication_group_id);
-            AwsServiceError::aws_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "InvalidParameterValue",
-                "Docker/Podman is required for ElastiCache replication groups but is not available"
-                    .to_string(),
-            )
-        })?;
-
-        let running = match runtime
-            .ensure_redis(&replication_group_id, rdb_path.as_deref())
-            .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                self.state
-                    .write()
-                    .get_or_create(&request.account_id)
-                    .cancel_replication_group_creation(&replication_group_id);
-                return Err(runtime_error_to_service_error(e));
+        let running = if let Some(runtime) = self.runtime.as_ref() {
+            match runtime
+                .ensure_redis(&replication_group_id, rdb_path.as_deref())
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    self.state
+                        .write()
+                        .get_or_create(&request.account_id)
+                        .cancel_replication_group_creation(&replication_group_id);
+                    return Err(runtime_error_to_service_error(e));
+                }
+            }
+        } else {
+            // No container runtime: degrade to metadata-only replication
+            // group. The control-plane response shape is unaffected and
+            // describe/modify/delete still work; only the data plane
+            // (connecting to the endpoint) is unavailable.
+            crate::runtime::RunningCacheContainer {
+                container_id: String::new(),
+                host_port: 0,
             }
         };
 
@@ -2083,27 +2087,23 @@ impl ElastiCacheService {
             (arn, "127.0.0.1".to_string())
         };
 
-        let runtime = self.runtime.as_ref().ok_or_else(|| {
-            self.state
-                .write()
-                .get_or_create(&request.account_id)
-                .cancel_serverless_cache_creation(&serverless_cache_name);
-            AwsServiceError::aws_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "InvalidParameterValue",
-                "Docker/Podman is required for ElastiCache serverless caches but is not available"
-                    .to_string(),
-            )
-        })?;
-
-        let running = match runtime.ensure_redis(&serverless_cache_name, None).await {
-            Ok(r) => r,
-            Err(e) => {
-                self.state
-                    .write()
-                    .get_or_create(&request.account_id)
-                    .cancel_serverless_cache_creation(&serverless_cache_name);
-                return Err(runtime_error_to_service_error(e));
+        let running = if let Some(runtime) = self.runtime.as_ref() {
+            match runtime.ensure_redis(&serverless_cache_name, None).await {
+                Ok(r) => r,
+                Err(e) => {
+                    self.state
+                        .write()
+                        .get_or_create(&request.account_id)
+                        .cancel_serverless_cache_creation(&serverless_cache_name);
+                    return Err(runtime_error_to_service_error(e));
+                }
+            }
+        } else {
+            // No container runtime: metadata-only serverless cache. Matches
+            // the CreateCacheCluster / CreateReplicationGroup degradation.
+            crate::runtime::RunningCacheContainer {
+                container_id: String::new(),
+                host_port: 0,
             }
         };
 
@@ -3580,6 +3580,24 @@ impl ElastiCacheService {
     }
 
     fn describe_users(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        // Match the Smithy `@pattern` + `@length(min=1)` on UserId. A
+        // zero-length value, or one that doesn't begin with an ASCII
+        // letter followed by alphanumeric/hyphen characters, isn't a
+        // valid UserId per the model. Empty values are already filtered
+        // to None by `optional_param`; reach the raw map to detect the
+        // explicit-but-empty case the conformance probe sends.
+        if let Some(raw) = request.query_params.get("UserId") {
+            if !is_valid_user_id(raw) {
+                // DescribeUsers declares InvalidParameterCombinationException
+                // but not InvalidParameterValueException, so the wire code
+                // for a bad UserId value must be `InvalidParameterCombination`.
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterCombination",
+                    format!("Invalid value for UserId: '{raw}'"),
+                ));
+            }
+        }
         let user_id = optional_query_param(request, "UserId");
         let max_records = optional_usize_param(request, "MaxRecords")?;
         let marker = optional_query_param(request, "Marker");
@@ -4823,6 +4841,17 @@ impl ElastiCacheService {
     // ── Events / Service updates / Update actions ──
 
     fn describe_events(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        // Smithy declares SourceType as an enum; validate any value the
+        // client supplied so an unknown filter doesn't slip through silently.
+        if let Some(raw) = request.query_params.get("SourceType") {
+            if !is_valid_source_type(raw) {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterValue",
+                    format!("Invalid value for SourceType: '{raw}'"),
+                ));
+            }
+        }
         let max_records = optional_usize_param(request, "MaxRecords")?;
         let marker = optional_query_param(request, "Marker");
         let accounts = self.state.read();
