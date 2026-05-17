@@ -1,7 +1,7 @@
 +++
 title = "Benchmarking Local AWS Emulators: fakecloud vs LocalStack and Moto"
-date = "2026-05-17"
-description = "A comprehensive benchmark of local AWS emulators in 2026, comparing fakecloud, LocalStack, and Moto on performance and API conformance."
+date = 2026-05-17
+description = "A performance and feature comparison between fakecloud, LocalStack, and Moto, focusing on startup latency, binary overhead, and API conformance."
 
 [extra]
 author = "Lucas Vieira"
@@ -11,7 +11,7 @@ In modern backend engineering, the "inner loop"—the time between writing a lin
 
 As of May 13, 2026, the landscape for local AWS emulation has shifted. The incumbent, LocalStack, transitioned its Community Edition to a proprietary model in March 2026, now requiring an account and authentication token for all users. This change has introduced friction into CI/CD pipelines and local environments that previously relied on zero-config Docker pulls. 
 
-This benchmark evaluates [fakecloud](https://github.com/faiscadev/fakecloud) against LocalStack and Moto, focusing on the metrics that matter to engineers: startup latency, binary overhead, and API conformance.
+This benchmark evaluates fakecloud against LocalStack and Moto, focusing on the metrics that matter to engineers: startup latency, binary overhead, and API conformance.
 
 ## The Dev Loop Hurdle: Why Latency and Friction Matter
 
@@ -34,7 +34,7 @@ The following table compares the resource requirements and startup performance o
 
 ## API Conformance: 2,422 Operations and 59,000 Smithy Tests
 
-An emulator is only as good as its fidelity to the real AWS API. If `PutItem` works but `ConditionExpression` behaves differently than it does in us-east-1, your local tests are lying to you. 
+an emulator is only as good as its fidelity to the real AWS API. If `PutItem` works but `ConditionExpression` behaves differently than it does in us-east-1, your local tests are lying to you. 
 
 fakecloud achieves 100% conformance across its 33 supported services by using AWS's own Smithy models. On every commit, the fakecloud engine is validated against 59,000+ generated test variants. This ensures that field presence, waiter behavior, and error codes match the official AWS specification exactly.
 
@@ -71,9 +71,9 @@ fakecloud requires no account, no token, and no internet connection. You run the
 4. Run `docker pull` (requires auth).
 5. Run `localstack start`.
 
-### Using fakecloud with the AWS CLI
+**Using fakecloud with the AWS CLI:**
 
-```sh
+```bash
 # No configuration needed beyond the endpoint-url
 aws --endpoint-url http://localhost:4566 s3 mb s3://my-local-bucket
 ```
@@ -92,7 +92,7 @@ While LocalStack's Ultimate tier supports 4 Bedrock operations backed by Ollama,
 
 ### Bedrock Local Testing Example
 
-```sh
+```bash
 # Invoke a local model with fakecloud
 aws bedrock-runtime invoke-model \
     --endpoint-url http://localhost:4566 \
@@ -111,7 +111,7 @@ fakecloud provides first-party SDKs for TypeScript, Python, Go, PHP, Java, and R
 
 ### Example: Asserting on SES Emails in TypeScript
 
-```ts
+```typescript
 import { FakeCloud } from "fakecloud";
 const fc = new FakeCloud();
 
