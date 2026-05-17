@@ -1,5 +1,5 @@
 {
-  "variants_passed": 85944,
+  "variants_passed": 86028,
   "total_variants": 86327,
   "per_service": {
     "logs": {
@@ -31,7 +31,7 @@
       "total": 949
     },
     "bedrock-agent": {
-      "passed": 2425,
+      "passed": 2509,
       "total": 2509
     },
     "bedrock-agent-runtime": {
