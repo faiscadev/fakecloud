@@ -1,7 +1,7 @@
 +++
 title = "Local Generative AI: Implementing Bedrock with fakecloud"
 date = 2026-05-17
-description = "Learn how to use fakecloud to implement and test 111 AWS Bedrock operations locally, reducing costs and increasing development velocity with a high-fidelity emulator."
+description = "Learn how to implement and test 111 AWS Bedrock operations locally using fakecloud to reduce costs and latency while maintaining full API conformance."
 
 [extra]
 author = "Lucas Vieira"
@@ -9,7 +9,7 @@ author = "Lucas Vieira"
 
 Generative AI development on AWS Bedrock is governed by a single, inescapable metric: the cost of the feedback loop. As of May 2026, frontier models like Claude 4.7 Opus command $15 per million input tokens and $75 per million output tokens. Even the workhorse models, such as Claude 4.6 Sonnet, maintain a price point of $3 per million input tokens. When your integration tests run on every commit, and your local development environment calls live APIs for every prompt tweak, these costs scale linearly with your engineering velocity. 
 
-Testing generative AI on live infrastructure is inefficient. It introduces network latency, consumes production quotas, and generates line items on your AWS bill for code that hasn't even reached a staging environment. [fakecloud](https://github.com/faiscadev/fakecloud) eliminates this friction by providing a high-fidelity, zero-friction local AWS environment. It allows you to [test 111 Bedrock operations locally](/blog/bedrock-local-testing/) with a ~19MB binary that starts in ~500ms.
+Testing generative AI on live infrastructure is inefficient. It introduces network latency, consumes production quotas, and generates line items on your AWS bill for code that hasn't even reached a staging environment. [fakecloud](https://github.com/faiscadev/fakecloud) eliminates this friction by providing a high-fidelity, zero-friction local AWS environment. It allows you to implement and test 111 Bedrock operations locally with a ~19MB binary that starts in ~500ms.
 
 ## The Cost of Iteration: Why Live Infrastructure Fails Developers
 
@@ -44,7 +44,7 @@ Building AI applications often involves more than just calling an LLM. You need 
 | :--- | :--- | :--- |
 | **Agents** | `CreateAgent`, `InvokeAgent`, `CreateAgentAlias` | Full agentic loop emulation with action group triggers. |
 | **Knowledge Bases** | `CreateKnowledgeBase`, `IngestContent`, `Retrieve` | Local RAG workflows using integrated vector storage. |
-| **Guardrails** | `CreateGuardrail`, `UpdateGuardrail`, `ListGuardrails` | Policy-based content filtering and sensitive information masking. |
+| **Guardrails** | `CreateGuardrail`, `UpdateGuardrail`, `ListGuardrails"` | Policy-based content filtering and sensitive information masking. |
 | **Provisioned Throughput** | `CreateProvisionedModelThroughput` | Testing code that relies on dedicated capacity identifiers. |
 | **Custom Models** | `CreateModelImportJob`, `ListCustomModels` | Simulating the lifecycle of fine-tuned or imported weights. |
 
@@ -135,7 +135,7 @@ As of 2026, AI applications are moving beyond simple chat interfaces into comple
 
 ### Local Guardrail Testing
 
-You can create a Guardrail locally to test how your application handles blocked content. fakecloud's [Guardrail implementation](/blog/bedrock-guardrails-local/) actually evaluates the input against the configured sensitive information filters and denied topics.
+You can create a Guardrail locally to test how your application handles blocked content. fakecloud's implementation of `ApplyGuardrail` actually evaluates the input against the configured sensitive information filters and denied topics.
 
 ```bash
 # Create a guardrail via CLI
@@ -176,10 +176,10 @@ To maximize the utility of fakecloud in your organization, follow these three st
 
 1.  **Standardize the Endpoint**: Use an environment variable like `AWS_ENDPOINT_URL` in your application's configuration layer. Default it to `None` for production and `http://localhost:4566` for local development.
 2.  **CI Integration**: Add fakecloud to your GitHub Actions or GitLab CI pipeline as a service container. Because it is a single binary, it starts instantly, adding negligible time to your build.
-3.  **Deterministic Seeding**: Use the fakecloud SDK to seed your local environment with the necessary Bedrock Agents and Knowledge Bases before your tests run. This ensures every developer starts with a clean, known state.
+3.  **Deterministic Seeding**: Use the [fakecloud SDK](https://github.com/faiscadev/fakecloud) to seed your local environment with the necessary Bedrock Agents and Knowledge Bases before your tests run. This ensures every developer starts with a clean, known state.
 
 ## Next Steps
 
 fakecloud provides the most comprehensive local emulation of AWS Bedrock available today. By moving your generative AI testing to a local environment, you reduce costs, eliminate network dependencies, and tighten your development loop. 
 
-To begin implementing local Bedrock workflows, view the supported model list and detailed operation mapping in our documentation at fakecloud.dev/docs/services/bedrock.
+To begin implementing local Bedrock workflows, view the supported model list and detailed operation mapping in our documentation at [fakecloud.dev/docs/services/bedrock](https://fakecloud.dev/docs/services/bedrock).
