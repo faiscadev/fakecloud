@@ -1,7 +1,7 @@
 +++
 title = "CI/CD without Credentials: Using fakecloud in GitHub Actions"
 date = 2026-05-17
-description = "Eliminate the risk of credential leaks in CI/CD by using fakecloud, a zero-auth AWS API implementation that runs as a standalone binary in GitHub Actions."
+description = "Secure your CI/CD pipelines and speed up integration tests by using fakecloud, a zero-auth AWS environment that runs as a standalone binary in GitHub Actions."
 
 [extra]
 author = "Lucas Vieira"
@@ -11,7 +11,7 @@ Managing AWS IAM credentials in CI/CD pipelines is a high-stakes liability. As o
 
 For Site Reliability Engineers (SREs), the "Secret Management Tax" isn't just about security; it's about the friction of provisioning dedicated test accounts, managing service quotas, and handling the latency of remote API calls. 
 
-fakecloud eliminates this friction by providing a high-fidelity, zero-auth AWS environment that runs as a standalone binary directly within your GitHub Actions runner. No AWS account, no IAM tokens, and no internet connection required.
+[fakecloud](https://github.com/faiscadev/fakecloud) eliminates this friction by providing a high-fidelity, zero-auth AWS environment that runs as a standalone binary directly within your GitHub Actions runner. No AWS account, no IAM tokens, and no internet connection required.
 
 ## The Problem: The Credential Bottleneck
 
@@ -44,7 +44,7 @@ Integrating fakecloud into a GitHub Actions workflow requires no environment var
 
 ```bash
 # Download the binary (Linux x64 example)
-curl -L https://github.com/faiscadev/fakecloud/releases/latest/download/fakecloud-linux-amd64 -o fakecloud
+curl -L https://github.com/fakecloud/fakecloud/releases/latest/download/fakecloud-linux-amd64 -o fakecloud
 chmod +x fakecloud
 
 # Start the service in the background
@@ -145,4 +145,4 @@ Stop managing IAM secrets for your test suites. You can replace your current AWS
 curl -fsSL https://fakecloud.dev/install.sh | sh && fakecloud start
 ```
 
-For detailed implementation guides on specific services like [S3 triggers](/blog/aws-integration-tests-with-claude-code-cursor/) or [Bedrock local testing](/blog/bedrock-local-testing/), visit the [fakecloud documentation](https://github.com/faiscadev/fakecloud).
+For more advanced testing scenarios, see our guides on [CDK local testing](/blog/cdk-local-testing/) and [testing Bedrock models locally](/blog/bedrock-local-testing/). For detailed implementation guides on specific services like S3 triggers or DynamoDB Streams, visit the [fakecloud documentation](https://fakecloud.dev/docs).
