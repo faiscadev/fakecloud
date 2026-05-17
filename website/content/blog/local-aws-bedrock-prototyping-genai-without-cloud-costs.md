@@ -1,7 +1,7 @@
 +++
 title = "Local AWS Bedrock: Prototyping GenAI Without Cloud Costs"
 date = 2026-05-17
-description = "Discover how to prototype Generative AI applications using AWS Bedrock locally with fakecloud to eliminate token costs, latency, and cloud dependencies."
+description = "Learn how to use fakecloud to emulate AWS Bedrock locally, enabling high-fidelity GenAI prototyping without cloud costs, latency, or mandatory account registration."
 
 [extra]
 author = "Lucas Vieira"
@@ -29,7 +29,7 @@ When you add the overhead of managing IAM roles, VPC endpoints, and service quot
 
 ## Solution: `fakecloud start` with Bedrock Support
 
-[fakecloud](https://github.com/faiscadev/fakecloud) eliminates these hurdles by emulating the AWS Bedrock API surface locally. It is delivered as a single ~19MB binary that starts in approximately 500ms. Because it is a local implementation of the AWS API, your application code does not need to change; you simply point your SDK to the local endpoint.
+fakecloud eliminates these hurdles by emulating the AWS Bedrock API surface locally. It is delivered as a single ~19MB binary that starts in approximately 500ms. Because it is a local implementation of the AWS API, your application code does not need to change; you simply point your SDK to the local endpoint.
 
 To start the environment with Bedrock support, you run a single command:
 
@@ -93,7 +93,7 @@ fakecloud's Bedrock support is comprehensive, covering the data plane, control p
 | Category             | Key Operations Supported                                                     | Utility                                                         |
 | :-------------------- | :---------------------------------------------------------------------------- | :--------------------------------------------------------------- |
 | **Model Invocation** | `InvokeModel`, `InvokeModelWithResponseStream`, `Converse`, `ConverseStream` | Test prompt engineering and streaming UI components.            |
-| **Guardrails**       | `CreateGuardrail`, `ApplyGuardrail`, `GetGuardrail`                          | [Validate safety filters](/blog/bedrock-guardrails-local/) and PII masking logic locally.          |
+| **Guardrails**       | `CreateGuardrail`, `ApplyGuardrail`, `GetGuardrail`                          | Validate safety filters and PII masking logic locally.          |
 | **Agents**           | `CreateAgent`, `InvokeAgent`, `AssociateAgentKnowledgeBase`                  | Prototype autonomous agents and tool-use loops.                 |
 | **Knowledge Bases**  | `CreateKnowledgeBase`, `Retrieve`, `RetrieveAndGenerate`                     | Emulate RAG workflows with local vector storage integration.    |
 | **Provisioning**     | `CreateProvisionedModelThroughput`, `GetFoundationModel`                     | Test infrastructure-as-code (IaC) scripts for model deployment. |
@@ -103,7 +103,7 @@ By supporting 111 operations, fakecloud ensures that even advanced features—li
 
 ## Feature-by-Numbers: Why fakecloud Wins
 
-When comparing development workflows, the metrics favor the standalone binary approach. In an era where "local" tools are becoming increasingly bloated, [fakecloud](https://github.com/faiscadev/fakecloud) maintains a minimalist, high-performance footprint.
+When comparing development workflows, the metrics favor the standalone binary approach. In an era where "local" tools are becoming increasingly bloated, fakecloud maintains a minimalist, high-performance footprint.
 
 - **19MB Binary:** The entire environment is contained in a single file. No Docker daemon is required, though a Docker image is available for those who prefer it.
 - **500ms Startup:** You can start and stop the environment as part of a test suite without adding significant overhead to your CI/CD pipeline.
@@ -118,7 +118,7 @@ When comparing development workflows, the metrics favor the standalone binary ap
 | :--------------- | :---------------- | :-------------------- | :---------------------------- |
 | **Cost**        | $0 (Local)       | Per-token / Per-hour | Subscription + Token Tax     |
 | **Auth**        | None Required    | IAM / Credentials    | Mandatory Account/Token      |
-| **Latency**     | &lt;10ms (Local) | 200ms - 500ms+       | 50ms - 100ms (Auth check)    |
+| **Latency**     | <10ms (Local) | 200ms - 500ms+       | 50ms - 100ms (Auth check)    |
 | **Offline**     | Yes              | No                   | No (Requires Auth Heartbeat) |
 | **Binary Size** | ~19MB            | N/A                  | 500MB+ (Docker-based)        |
 
@@ -140,7 +140,7 @@ This separation ensures that your tests are fast, repeatable, and cost-free, whi
 
 ## Next Step: Run Bedrock Locally
 
-Stop paying for the privilege of debugging your code. Eliminate the latency of the cloud and the friction of account-gated tools. [fakecloud](https://github.com/faiscadev/fakecloud) provides the high-fidelity environment you need to build, test, and ship GenAI applications with confidence.
+Stop paying for the privilege of debugging your code. Eliminate the latency of the cloud and the friction of account-gated tools. fakecloud provides the high-fidelity environment you need to build, test, and ship GenAI applications with confidence.
 
 To get started, download the binary for your platform and run the start command. No sign-up is required.
 
@@ -151,4 +151,11 @@ chmod +x fakecloud
 ./fakecloud start --services bedrock
 ```
 
-For [detailed implementation guides on specific Bedrock operations](/blog/bedrock-local-testing/) or to explore the first-party SDKs for assertions in 6+ programming languages, visit the official documentation at fakecloud.dev.
+For detailed implementation guides on specific Bedrock operations or to explore the first-party SDKs for assertions in 6+ programming languages, visit the official documentation at fakecloud.dev.
+
+## Related Posts
+
+- [Local Bedrock testing guide](/blog/bedrock-local-testing/)
+- [Testing Bedrock Guardrails locally](/blog/bedrock-guardrails-local/)
+- [Running Bedrock tests with real LLMs](/blog/bedrock-tests-real-llm/)
+- [CDK local testing with fakecloud](/blog/cdk-local-testing/)
