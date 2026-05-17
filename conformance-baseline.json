@@ -1,5 +1,5 @@
 {
-  "variants_passed": 84745,
+  "variants_passed": 84787,
   "total_variants": 86327,
   "per_service": {
     "logs": {
@@ -123,7 +123,7 @@
       "total": 2133
     },
     "states": {
-      "passed": 1250,
+      "passed": 1292,
       "total": 1292
     },
     "bedrock": {
