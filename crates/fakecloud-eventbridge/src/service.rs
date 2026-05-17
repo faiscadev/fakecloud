@@ -459,7 +459,12 @@ impl EventBridgeService {
             }
         }
 
-        // Old-style: Action, Principal, StatementId
+        // Old-style: Action, Principal, StatementId. All are @optional in the
+        // Smithy model; non-string values were already rejected above with
+        // SerializationException, so reaching here means each is either a
+        // valid string or absent. Fall back to "" to preserve current behavior
+        // — recording an empty-statement policy entry is harmless since it can
+        // never match a real action/principal pair.
         let action = body["Action"].as_str().unwrap_or("");
         let principal = body["Principal"].as_str().unwrap_or("");
         let statement_id = body["StatementId"].as_str().unwrap_or("");
