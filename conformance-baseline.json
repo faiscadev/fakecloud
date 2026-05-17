@@ -1,5 +1,5 @@
 {
-  "variants_passed": 85076,
+  "variants_passed": 85132,
   "total_variants": 86327,
   "per_service": {
     "logs": {
@@ -19,7 +19,7 @@
       "total": 2110
     },
     "ecs": {
-      "passed": 2322,
+      "passed": 2378,
       "total": 2378
     },
     "ses": {
