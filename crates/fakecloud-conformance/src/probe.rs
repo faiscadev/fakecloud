@@ -295,8 +295,19 @@ pub fn probe_variant_with_model(
                 // see (#816).
                 if let Some(documented) = variant.expected_output.as_ref() {
                     if let Ok(actual) = serde_json::from_str::<serde_json::Value>(&body) {
-                        all_violations
-                            .extend(shape_validator::diff_against_example(&actual, documented));
+                        if let Some((model, output_shape_id)) = model_info {
+                            all_violations.extend(
+                                shape_validator::diff_against_example_with_model(
+                                    &actual,
+                                    documented,
+                                    model,
+                                    output_shape_id,
+                                ),
+                            );
+                        } else {
+                            all_violations
+                                .extend(shape_validator::diff_against_example(&actual, documented));
+                        }
                     }
                 }
                 // Strategy 8 (`round_trip`): chase the Create with the

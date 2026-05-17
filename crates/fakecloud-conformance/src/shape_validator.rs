@@ -3,6 +3,8 @@
 //! Validates that HTTP response bodies from fakecloud match the expected output
 //! shape structure defined in the Smithy model.
 
+use std::collections::HashMap;
+
 use serde_json::Value;
 
 use crate::probe::Protocol;
@@ -182,6 +184,175 @@ pub fn diff_against_example(actual: &Value, documented: &Value) -> Vec<ShapeViol
     let mut violations = Vec::new();
     diff_at(actual, documented, "$", &mut violations);
     violations
+}
+
+/// Schema-aware variant of [`diff_against_example`]. Walks the live response,
+/// the documented `@examples` output, and the Smithy output shape in lockstep
+/// so that map shapes are not diffed by key.
+///
+/// Without the schema, `diff_at` treats every JSON object as a structure and
+/// asserts that every documented key exists in the live response. That works
+/// for true structures, but breaks on Smithy `map` shapes whose example uses
+/// placeholder keys (e.g. `SecretVersionsToStages: {"EXAMPLE1-…": [...]}`).
+/// A live response with real version IDs would never carry that placeholder
+/// key, so the structural diff would fire a false-positive `MissingField`.
+///
+/// With the schema, we recognize map shapes from the model and recurse into
+/// the value type using documented's first value vs actual's first value —
+/// the same representative-element approach already used for list shapes.
+pub fn diff_against_example_with_model(
+    actual: &Value,
+    documented: &Value,
+    model: &ServiceModel,
+    output_shape_id: &str,
+) -> Vec<ShapeViolation> {
+    let mut violations = Vec::new();
+    diff_at_with_shape(
+        actual,
+        documented,
+        Some((model, output_shape_id)),
+        "$",
+        &mut violations,
+    );
+    violations
+}
+
+fn diff_at_with_shape(
+    actual: &Value,
+    documented: &Value,
+    shape: Option<(&ServiceModel, &str)>,
+    path: &str,
+    out: &mut Vec<ShapeViolation>,
+) {
+    // Resolve the effective shape type for the current Smithy shape ID, if any.
+    let shape_type = shape.and_then(|(m, sid)| effective_shape_type(m, sid));
+
+    // Map shapes: don't diff by documented key. Recurse into the value target
+    // using one representative pair (doc's first value vs actual's first
+    // value) — the same approach used for arrays.
+    if let Some(ShapeType::Map { value_target, .. }) = &shape_type {
+        let doc_map = match documented {
+            Value::Object(m) => m,
+            _ => {
+                // Documented isn't an object — fall back to leaf diff.
+                diff_at(actual, documented, path, out);
+                return;
+            }
+        };
+        let actual_map = match actual {
+            Value::Object(m) => m,
+            _ => {
+                out.push(ShapeViolation::ExamplesOutputDivergence {
+                    path: path.to_string(),
+                    reason: ExamplesDivergenceReason::WrongType {
+                        expected: "object".to_string(),
+                        got: json_type_name(actual).to_string(),
+                    },
+                });
+                return;
+            }
+        };
+        if let (Some((_, doc_first)), Some((_, act_first))) =
+            (doc_map.iter().next(), actual_map.iter().next())
+        {
+            let child_path = format!("{}.*", path);
+            let model = shape.map(|(m, _)| m).unwrap();
+            diff_at_with_shape(
+                act_first,
+                doc_first,
+                Some((model, value_target.as_str())),
+                &child_path,
+                out,
+            );
+        }
+        return;
+    }
+
+    match documented {
+        Value::Object(doc_map) => {
+            let actual_map = match actual {
+                Value::Object(m) => m,
+                _ => {
+                    out.push(ShapeViolation::ExamplesOutputDivergence {
+                        path: path.to_string(),
+                        reason: ExamplesDivergenceReason::WrongType {
+                            expected: "object".to_string(),
+                            got: json_type_name(actual).to_string(),
+                        },
+                    });
+                    return;
+                }
+            };
+            let live_pagination_empty = actual_pagination_empty(actual_map);
+
+            // Build a lookup from wire-key -> target shape ID for structures.
+            // Wire-key is `@jsonName` when set, else the Smithy member name —
+            // so the diff resolves to the right child shape even when the
+            // model renames the JSON field.
+            let member_targets: HashMap<String, String> = match &shape_type {
+                Some(ShapeType::Structure { members }) | Some(ShapeType::Union { members }) => {
+                    members
+                        .iter()
+                        .map(|m| {
+                            let key = m.traits.json_name.clone().unwrap_or_else(|| m.name.clone());
+                            (key, m.target.clone())
+                        })
+                        .collect()
+                }
+                _ => HashMap::new(),
+            };
+
+            for (key, doc_val) in doc_map {
+                let child_path = format!("{}.{}", path, key);
+                match actual_map.get(key) {
+                    Some(act_val) => {
+                        let child_shape = shape
+                            .as_ref()
+                            .and_then(|(m, _)| member_targets.get(key).map(|t| (*m, t.as_str())));
+                        diff_at_with_shape(act_val, doc_val, child_shape, &child_path, out);
+                    }
+                    None => {
+                        if live_pagination_empty && is_pagination_token_name(key) {
+                            continue;
+                        }
+                        out.push(ShapeViolation::ExamplesOutputDivergence {
+                            path: child_path,
+                            reason: ExamplesDivergenceReason::MissingField,
+                        })
+                    }
+                }
+            }
+        }
+        Value::Array(doc_arr) => {
+            let actual_arr = match actual {
+                Value::Array(a) => a,
+                _ => {
+                    out.push(ShapeViolation::ExamplesOutputDivergence {
+                        path: path.to_string(),
+                        reason: ExamplesDivergenceReason::WrongType {
+                            expected: "array".to_string(),
+                            got: json_type_name(actual).to_string(),
+                        },
+                    });
+                    return;
+                }
+            };
+            if let (Some(doc_first), Some(act_first)) = (doc_arr.first(), actual_arr.first()) {
+                let child_path = format!("{}[0]", path);
+                let child_shape = match &shape_type {
+                    Some(ShapeType::List { member_target }) => {
+                        shape.as_ref().map(|(m, _)| (*m, member_target.as_str()))
+                    }
+                    _ => None,
+                };
+                diff_at_with_shape(act_first, doc_first, child_shape, &child_path, out);
+            }
+        }
+        _ => {
+            // Leaves: defer to the original type-parity check.
+            diff_at(actual, documented, path, out);
+        }
+    }
 }
 
 fn diff_at(actual: &Value, documented: &Value, path: &str, out: &mut Vec<ShapeViolation>) {
@@ -1543,5 +1714,69 @@ mod tests {
         assert!(v
             .iter()
             .any(|x| matches!(x, ShapeViolation::ExamplesOutputDivergence { .. })));
+    }
+
+    // ----- diff_against_example_with_model -----
+
+    #[test]
+    fn diff_with_model_skips_map_key_diff() {
+        // Documented example uses placeholder map keys (e.g. UUIDs). When the
+        // schema marks the field as a Smithy map, we must not require the live
+        // response to carry the placeholder keys — only the value type.
+        let model = test_model();
+        let documented = serde_json::json!({
+            "QueueUrl": "https://example/q",
+            "Tags": {"PLACEHOLDER-KEY": "anything"}
+        });
+        let actual = serde_json::json!({
+            "QueueUrl": "https://real/q",
+            "Tags": {"real-key": "real-value"}
+        });
+        let v =
+            diff_against_example_with_model(&actual, &documented, &model, "test#CreateQueueOutput");
+        assert!(v.is_empty(), "expected no violations, got {:?}", v);
+    }
+
+    #[test]
+    fn diff_with_model_flags_missing_struct_field() {
+        // Schema-aware diff still flags missing structure fields.
+        let model = test_model();
+        let documented = serde_json::json!({
+            "QueueUrl": "https://example/q",
+            "Tags": {}
+        });
+        let actual = serde_json::json!({"Tags": {}});
+        let v =
+            diff_against_example_with_model(&actual, &documented, &model, "test#CreateQueueOutput");
+        assert!(
+            v.iter().any(|x| matches!(
+                x,
+                ShapeViolation::ExamplesOutputDivergence { path, reason: ExamplesDivergenceReason::MissingField }
+                    if path == "$.QueueUrl"
+            )),
+            "expected MissingField at $.QueueUrl, got {:?}",
+            v
+        );
+    }
+
+    #[test]
+    fn diff_with_model_recurses_into_list_via_schema() {
+        let model = test_model();
+        let documented = serde_json::json!({
+            "Items": [{"Id": 1, "Name": "x"}]
+        });
+        let actual = serde_json::json!({
+            "Items": [{"Id": 7}]
+        });
+        let v = diff_against_example_with_model(&actual, &documented, &model, "test#ListOutput");
+        assert!(
+            v.iter().any(|x| matches!(
+                x,
+                ShapeViolation::ExamplesOutputDivergence { path, reason: ExamplesDivergenceReason::MissingField }
+                    if path == "$.Items[0].Name"
+            )),
+            "expected MissingField at $.Items[0].Name, got {:?}",
+            v
+        );
     }
 }
