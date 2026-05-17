@@ -1,7 +1,7 @@
 +++
 title = "Local AWS Bedrock: Prototyping GenAI Without Cloud Costs"
 date = 2026-05-17
-description = "Discover how fakecloud enables local AWS Bedrock emulation, allowing you to prototype GenAI applications without token costs or internet dependencies."
+description = "Eliminate token costs and API latency by emulating AWS Bedrock locally with fakecloud. Prototyping GenAI applications without an AWS account, internet connection, or usage limits."
 
 [extra]
 author = "Lucas Vieira"
@@ -89,13 +89,15 @@ fakecloud's Bedrock support is comprehensive, covering the data plane, control p
 
 ### Supported API Categories
 
+
 | Category             | Key Operations Supported                                                     | Utility                                                         |
 | :-------------------- | :---------------------------------------------------------------------------- | :--------------------------------------------------------------- |
-| **Model Invocation** | `InvokeModel`, `InvokeModelWithResponseStream", "Converse", "ConverseStream" | Test prompt engineering and streaming UI components.            |
+| **Model Invocation** | `InvokeModel`, `InvokeModelWithResponseStream`, `Converse`, `ConverseStream` | Test prompt engineering and streaming UI components.            |
 | **Guardrails**       | `CreateGuardrail`, `ApplyGuardrail`, `GetGuardrail`                          | Validate safety filters and PII masking logic locally.          |
-| **Agents**           | `CreateAgent`, `InvokeAgent`, `AssociateAgentKnowledgeBase`                  | Prototype autonomous agents and tool-use loops.                 |
+| **Agents**           | `CreateAgent`, `InvokeAgent", `AssociateAgentKnowledgeBase`                  | Prototype autonomous agents and tool-use loops.                 |
 | **Knowledge Bases**  | `CreateKnowledgeBase`, `Retrieve`, `RetrieveAndGenerate`                     | Emulate RAG workflows with local vector storage integration.    |
-| **Provisioning**     | `CreateProvisionedModelThroughput`, `GetFoundationModel"                     | Test infrastructure-as-code (IaC) scripts for model deployment. |
+| **Provisioning**     | `CreateProvisionedModelThroughput`, `GetFoundationModel`                     | Test infrastructure-as-code (IaC) scripts for model deployment. |
+
 
 By supporting 111 operations, fakecloud ensures that even advanced features—like the `InvokeModelWithBidirectionalStream` introduced in late 2025—are available for local testing. This level of conformance is achieved through rigorous testing against the official AWS Smithy models, ensuring that the local environment doesn't just "look" like AWS, but "acts" like it.
 
@@ -111,13 +113,15 @@ When comparing development workflows, the metrics favor the standalone binary ap
 
 ### Comparison: fakecloud vs. The Alternatives
 
+
 | Feature         | fakecloud        | AWS Cloud            | Gated Local Tools (2026)     |
 | :--------------- | :---------------- | :-------------------- | :---------------------------- |
 | **Cost**        | $0 (Local)       | Per-token / Per-hour | Subscription + Token Tax     |
 | **Auth**        | None Required    | IAM / Credentials    | Mandatory Account/Token      |
-| **Latency**     | <10ms (Local) | 200ms - 500ms+       | 50ms - 100ms (Auth check)    |
+| **Latency**     | &lt;10ms (Local) | 200ms - 500ms+       | 50ms - 100ms (Auth check)    |
 | **Offline**     | Yes              | No                   | No (Requires Auth Heartbeat) |
 | **Binary Size** | ~19MB            | N/A                  | 500MB+ (Docker-based)        |
+
 
 ## Deterministic Testing for Non-Deterministic Models
 
