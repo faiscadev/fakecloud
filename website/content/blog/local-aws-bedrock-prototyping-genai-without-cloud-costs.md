@@ -1,7 +1,7 @@
 +++
 title = "Local AWS Bedrock: Prototyping GenAI Without Cloud Costs"
 date = 2026-05-17
-description = "Eliminate token costs and API latency by emulating AWS Bedrock locally with fakecloud. Prototyping GenAI applications without an AWS account, internet connection, or usage limits."
+description = "Learn how to use fakecloud to emulate AWS Bedrock locally, enabling cost-free GenAI prototyping with high-fidelity API support and zero internet dependency."
 
 [extra]
 author = "Lucas Vieira"
@@ -11,7 +11,7 @@ Generative AI development in 2026 has reached a point of extreme financial and o
 
 Beyond the direct costs, the developer experience is hampered by API latency, rate limits, and the increasing complexity of cloud-based authentication. Even local emulation tools, which once promised a friction-free alternative, have largely pivoted to account-based models. As of March 2026, major incumbents in the local AWS emulation space now require mandatory account registration and active internet connections for authentication tokens, effectively turning your local environment into a gated extension of the cloud.
 
-fakecloud provides the alternative: a high-fidelity, zero-friction local AWS environment that behaves like infrastructure, not a mock. It is a standalone binary that gives you 111 AWS Bedrock operations locally, requiring no account, no auth token, and no internet connection.
+[fakecloud](https://github.com/faiscadev/fakecloud) provides the alternative: a high-fidelity, zero-friction local AWS environment that behaves like infrastructure, not a mock. It is a standalone binary that gives you 111 AWS Bedrock operations locally, requiring no account, no auth token, and no internet connection.
 
 ## The Dev Hurdle: Token Costs and API Latency
 
@@ -25,7 +25,7 @@ As of May 2026, the cost of frontier model access on AWS Bedrock remains a prima
 
 While these models offer unprecedented reasoning capabilities, using them for basic integration testing or CI/CD pipelines is economically inefficient. Furthermore, the round-trip latency to a cloud region—often 200ms to 500ms before inference even begins—stalls the developer's momentum. 
 
-When you add the overhead of managing IAM roles, VPC endpoints, and service quotas just to test a single Lambda function's ability to call `InvokeModel`, the friction becomes a barrier to entry. 
+When you add the overhead of managing IAM roles, VPC endpoints, and service quotas just to test a single Lambda function's ability to call `InvokeModel`, the friction becomes a barrier to entry.
 
 ## Solution: `fakecloud start` with Bedrock Support
 
@@ -89,15 +89,13 @@ fakecloud's Bedrock support is comprehensive, covering the data plane, control p
 
 ### Supported API Categories
 
-
 | Category             | Key Operations Supported                                                     | Utility                                                         |
 | :-------------------- | :---------------------------------------------------------------------------- | :--------------------------------------------------------------- |
 | **Model Invocation** | `InvokeModel`, `InvokeModelWithResponseStream`, `Converse`, `ConverseStream` | Test prompt engineering and streaming UI components.            |
 | **Guardrails**       | `CreateGuardrail`, `ApplyGuardrail`, `GetGuardrail`                          | Validate safety filters and PII masking logic locally.          |
-| **Agents**           | `CreateAgent`, `InvokeAgent", `AssociateAgentKnowledgeBase`                  | Prototype autonomous agents and tool-use loops.                 |
+| **Agents**           | `CreateAgent`, `InvokeAgent`, `AssociateAgentKnowledgeBase`                  | Prototype autonomous agents and tool-use loops.                 |
 | **Knowledge Bases**  | `CreateKnowledgeBase`, `Retrieve`, `RetrieveAndGenerate`                     | Emulate RAG workflows with local vector storage integration.    |
 | **Provisioning**     | `CreateProvisionedModelThroughput`, `GetFoundationModel`                     | Test infrastructure-as-code (IaC) scripts for model deployment. |
-
 
 By supporting 111 operations, fakecloud ensures that even advanced features—like the `InvokeModelWithBidirectionalStream` introduced in late 2025—are available for local testing. This level of conformance is achieved through rigorous testing against the official AWS Smithy models, ensuring that the local environment doesn't just "look" like AWS, but "acts" like it.
 
@@ -113,15 +111,13 @@ When comparing development workflows, the metrics favor the standalone binary ap
 
 ### Comparison: fakecloud vs. The Alternatives
 
-
 | Feature         | fakecloud        | AWS Cloud            | Gated Local Tools (2026)     |
 | :--------------- | :---------------- | :-------------------- | :---------------------------- |
 | **Cost**        | $0 (Local)       | Per-token / Per-hour | Subscription + Token Tax     |
 | **Auth**        | None Required    | IAM / Credentials    | Mandatory Account/Token      |
-| **Latency**     | &lt;10ms (Local) | 200ms - 500ms+       | 50ms - 100ms (Auth check)    |
+| **Latency**     | <10ms (Local) | 200ms - 500ms+       | 50ms - 100ms (Auth check)    |
 | **Offline**     | Yes              | No                   | No (Requires Auth Heartbeat) |
 | **Binary Size** | ~19MB            | N/A                  | 500MB+ (Docker-based)        |
-
 
 ## Deterministic Testing for Non-Deterministic Models
 
@@ -136,7 +132,7 @@ In a fakecloud workflow, you distinguish between the **App Client** (the standar
 1. **The App Client** calls `InvokeModel` as it would in production.
 2. **The Test SDK** configures fakecloud to return a specific JSON payload for that call.
 
-This separation ensures that your tests are fast, repeatable, and cost-free, while still exercising the full network stack and SDK logic of your application.
+This separation ensures that your tests are fast, repeatable, and cost-free, while still exercising the full network stack and SDK logic of your application. Learn more in our guide on [Bedrock local testing](/blog/bedrock-local-testing/).
 
 ## Next Step: Run Bedrock Locally
 
@@ -151,4 +147,4 @@ chmod +x fakecloud
 ./fakecloud start --services bedrock
 ```
 
-For detailed implementation guides on specific Bedrock operations or to explore the first-party SDKs for assertions in 6+ programming languages, visit the official documentation at fakecloud.dev.
+For detailed implementation guides on specific Bedrock operations or to explore the first-party SDKs for assertions in 6+ programming languages, visit the [official repository](https://github.com/faiscadev/fakecloud) or see how to configure [AI integration tests](/blog/aws-integration-tests-with-claude-code-cursor/).
