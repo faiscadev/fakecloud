@@ -354,8 +354,8 @@ impl EventBridgeService {
         // Unrecognised pagination tokens still fall back to the start of the
         // list — `InvalidNextTokenException` only fires when the token shape
         // itself is wrong, not when it points at a vanished cursor.
-        validate_optional_string_length("NamePrefix", body["NamePrefix"].as_str(), 1, 256)?;
-        validate_optional_string_length("NextToken", body["NextToken"].as_str(), 1, 2048)?;
+        validate_optional_string_length_value("NamePrefix", &body["NamePrefix"], 1, 256)?;
+        validate_optional_string_length_value("NextToken", &body["NextToken"], 1, 2048)?;
         validate_optional_json_range("Limit", &body["Limit"], 1, 100)?;
         let name_prefix = body["NamePrefix"].as_str();
         let limit = body["Limit"].as_i64().unwrap_or(100).clamp(1, 100) as usize;
@@ -434,10 +434,10 @@ impl EventBridgeService {
         //   Action: length 1..=64
         //   Principal: length 1..=12 (12-digit AWS account or `*`)
         //   StatementId: length 1..=64
-        validate_optional_string_length("EventBusName", body["EventBusName"].as_str(), 1, 256)?;
-        validate_optional_string_length("Action", body["Action"].as_str(), 1, 64)?;
-        validate_optional_string_length("Principal", body["Principal"].as_str(), 1, 12)?;
-        validate_optional_string_length("StatementId", body["StatementId"].as_str(), 1, 64)?;
+        validate_optional_string_length_value("EventBusName", &body["EventBusName"], 1, 256)?;
+        validate_optional_string_length_value("Action", &body["Action"], 1, 64)?;
+        validate_optional_string_length_value("Principal", &body["Principal"], 1, 12)?;
+        validate_optional_string_length_value("StatementId", &body["StatementId"], 1, 64)?;
         let event_bus_name = body["EventBusName"].as_str().unwrap_or("default");
 
         let mut accounts = self.state.write();
@@ -561,13 +561,13 @@ impl EventBridgeService {
             .ok_or_else(|| missing("Name"))?
             .to_string();
         validate_string_length("Name", &name, 1, 64)?;
-        validate_optional_string_length(
+        validate_optional_string_length_value(
             "ScheduleExpression",
-            body["ScheduleExpression"].as_str(),
+            &body["ScheduleExpression"],
             0,
             256,
         )?;
-        validate_optional_string_length("EventPattern", body["EventPattern"].as_str(), 0, 4096)?;
+        validate_optional_string_length_value("EventPattern", &body["EventPattern"], 0, 4096)?;
         validate_optional_enum_value(
             "State",
             &body["State"],
@@ -577,9 +577,9 @@ impl EventBridgeService {
                 "ENABLED_WITH_ALL_CLOUDTRAIL_MANAGEMENT_EVENTS",
             ],
         )?;
-        validate_optional_string_length("Description", body["Description"].as_str(), 0, 512)?;
-        validate_optional_string_length("RoleArn", body["RoleArn"].as_str(), 1, 1600)?;
-        validate_optional_string_length("EventBusName", body["EventBusName"].as_str(), 1, 1600)?;
+        validate_optional_string_length_value("Description", &body["Description"], 0, 512)?;
+        validate_optional_string_length_value("RoleArn", &body["RoleArn"], 1, 1600)?;
+        validate_optional_string_length_value("EventBusName", &body["EventBusName"], 1, 1600)?;
 
         let raw_bus = body["EventBusName"]
             .as_str()
@@ -888,7 +888,7 @@ impl EventBridgeService {
         validate_required("Rule", &body["Rule"])?;
         let rule_name = body["Rule"].as_str().ok_or_else(|| missing("Rule"))?;
         validate_string_length("Rule", rule_name, 1, 64)?;
-        validate_optional_string_length("EventBusName", body["EventBusName"].as_str(), 1, 1600)?;
+        validate_optional_string_length_value("EventBusName", &body["EventBusName"], 1, 1600)?;
         // Targets is @required with TargetList length 1..=100 in the Smithy
         // model. Real AWS rejects empty / oversized lists with a
         // ValidationException; per-target validation continues to flow
@@ -1215,7 +1215,7 @@ impl EventBridgeService {
         // Smithy PutEventsRequest constraints:
         //   EndpointId: length 1..=50
         //   Entries: @required, length 1..=10
-        validate_optional_string_length("EndpointId", body["EndpointId"].as_str(), 1, 50)?;
+        validate_optional_string_length_value("EndpointId", &body["EndpointId"], 1, 50)?;
         validate_required("Entries", &body["Entries"])?;
         let entries_array = body["Entries"].as_array().ok_or_else(|| {
             AwsServiceError::aws_error(

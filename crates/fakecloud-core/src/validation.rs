@@ -91,6 +91,31 @@ pub fn validate_optional_string_length(
     Ok(())
 }
 
+/// Validate an optional string length from a JSON value, rejecting non-string types.
+///
+/// Unlike [`validate_optional_string_length`], this takes a raw [`serde_json::Value`]
+/// so non-string inputs (numbers, arrays, objects) surface as a
+/// `SerializationException` instead of silently being treated as missing via
+/// `Value::as_str() -> None`.
+pub fn validate_optional_string_length_value(
+    field: &str,
+    value: &serde_json::Value,
+    min: usize,
+    max: usize,
+) -> Result<(), AwsServiceError> {
+    if value.is_null() {
+        return Ok(());
+    }
+    let s = value.as_str().ok_or_else(|| {
+        AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "SerializationException",
+            format!("Value for '{}' must be a string", field),
+        )
+    })?;
+    validate_string_length(field, s, min, max)
+}
+
 /// Validate an optional integer range if present.
 pub fn validate_optional_range_i64(
     field: &str,

@@ -206,14 +206,9 @@ impl EventBridgeService {
         //   Limit: LimitMax100 range 1..=100
         //   State: ArchiveState enum {ENABLED, DISABLED, CREATING, UPDATING,
         //          CREATE_FAILED, UPDATE_FAILED}
-        validate_optional_string_length("NamePrefix", body["NamePrefix"].as_str(), 1, 48)?;
-        validate_optional_string_length(
-            "EventSourceArn",
-            body["EventSourceArn"].as_str(),
-            1,
-            1600,
-        )?;
-        validate_optional_string_length("NextToken", body["NextToken"].as_str(), 1, 2048)?;
+        validate_optional_string_length_value("NamePrefix", &body["NamePrefix"], 1, 48)?;
+        validate_optional_string_length_value("EventSourceArn", &body["EventSourceArn"], 1, 1600)?;
+        validate_optional_string_length_value("NextToken", &body["NextToken"], 1, 2048)?;
         validate_optional_json_range("Limit", &body["Limit"], 1, 100)?;
         validate_optional_enum_value(
             "State",
@@ -627,14 +622,9 @@ impl EventBridgeService {
         //   Limit: LimitMax100 range 1..=100
         //   State: ReplayState enum {STARTING, RUNNING, CANCELLING, COMPLETED,
         //          CANCELLED, FAILED}
-        validate_optional_string_length("NamePrefix", body["NamePrefix"].as_str(), 1, 64)?;
-        validate_optional_string_length(
-            "EventSourceArn",
-            body["EventSourceArn"].as_str(),
-            1,
-            1600,
-        )?;
-        validate_optional_string_length("NextToken", body["NextToken"].as_str(), 1, 2048)?;
+        validate_optional_string_length_value("NamePrefix", &body["NamePrefix"], 1, 64)?;
+        validate_optional_string_length_value("EventSourceArn", &body["EventSourceArn"], 1, 1600)?;
+        validate_optional_string_length_value("NextToken", &body["NextToken"], 1, 2048)?;
         validate_optional_json_range("Limit", &body["Limit"], 1, 100)?;
         validate_optional_enum_value(
             "State",
