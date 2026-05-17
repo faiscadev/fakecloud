@@ -1,7 +1,7 @@
 +++
 title = "Benchmarking Local AWS: 500ms Startup vs. Cloud-Dependent Mocks"
 date = 2026-05-17
-description = "A performance and conformance analysis of local AWS emulation in 2026. Compare fakecloud's 500ms startup and offline-first approach against proprietary, cloud-dependent alternatives."
+description = "A performance comparison between fakecloud's zero-friction local AWS environment and proprietary container-based emulators requiring auth tokens."
 
 [extra]
 author = "Lucas Vieira"
@@ -9,7 +9,7 @@ author = "Lucas Vieira"
 
 Cloud-native development has hit a latency wall. As of May 13, 2026, the standard workflow for testing AWS-dependent applications involves either mocking the SDK—which misses behavioral edge cases—or relying on heavy, containerized emulators that now require authentication tokens and internet-connected accounts. This overhead turns a sub-second unit test into a multi-second integration hurdle.
 
-[fakecloud](https://github.com/faiscadev/fakecloud) solves this by providing a high-fidelity, zero-friction local AWS environment. It is a standalone binary that eliminates the need for cloud accounts, paid subscriptions, or auth tokens. When your inner development loop depends on the speed of your feedback, every millisecond spent waiting for a container to pull or an auth handshake to complete is wasted engineering time.
+fakecloud solves this by providing a high-fidelity, zero-friction local AWS environment. It is a standalone binary that eliminates the need for cloud accounts, paid subscriptions, or auth tokens. When your inner development loop depends on the speed of your feedback, every millisecond spent waiting for a container to pull or an auth handshake to complete is wasted engineering time.
 
 ## The Latency Problem: The 2026 Auth Wall
 
@@ -47,7 +47,7 @@ As of 2026-05-13, fakecloud supports:
 
 ## Terminal-First Workflow: S3 and DynamoDB in <2 Seconds
 
-Your development environment should stay out of your way. With [fakecloud](https://github.com/faiscadev/fakecloud), you don't manage complex YAML configurations or wait for heavy runtimes. You execute the binary and run your tests.
+Your development environment should stay out of your way. With fakecloud, you don't manage complex YAML configurations or wait for heavy runtimes. You execute the binary and run your tests.
 
 ### Start the Environment
 
@@ -95,7 +95,7 @@ fakecloud is not a collection of hand-written mocks. It is a depth-first impleme
 
 ### Real Infrastructure for Stateful Services
 
-Unlike tools that return static JSON, [fakecloud](https://github.com/faiscadev/fakecloud) spins up real, lightweight backends for stateful services when needed:
+Unlike tools that return static JSON, fakecloud spins up real, lightweight backends for stateful services when needed:
 
 *   **RDS:** Runs real PostgreSQL, MySQL, or MariaDB instances.
 *   **ElastiCache:** Uses real Valkey or Redis instances for high-fidelity caching tests.
@@ -120,6 +120,6 @@ Your application uses the standard `aws-sdk-go-v2` or `boto3`. Your test suite, 
 
 Efficiency is the only metric that matters in a development tool. If your current local AWS setup requires more than 5 seconds to start or demands an internet connection to verify your identity, it is a bottleneck. 
 
-Inspect the implementation, contribute to the service coverage, and run your first sub-second integration test by reviewing the [AGPL-3.0 source code](https://github.com/faiscadev/fakecloud) on GitHub. Start by running the installation script and pointing your existing test suite at the local endpoint to see the immediate reduction in latency.
+Inspect the implementation, contribute to the service coverage, and run your first sub-second integration test by reviewing the AGPL-3.0 source code on [GitHub](https://github.com/faiscadev/fakecloud). Start by running the installation script and pointing your existing test suite at the local endpoint to see the immediate reduction in latency.
 
 Visit the official documentation at fakecloud.dev to explore the full list of 2,422 supported operations and implementation guides for all 33 services.
