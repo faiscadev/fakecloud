@@ -1,13 +1,13 @@
 +++
 title = "Benchmarking Local AWS: 500ms Startup vs. Cloud-Dependent Mocks"
 date = 2026-05-17
-description = "A technical benchmark comparing fakecloud's sub-second startup and offline capabilities against heavy containerized AWS emulators and cloud-dependent mocks."
+description = "Compare fakecloud's 500ms startup and offline-first engineering against proprietary AWS emulators. Learn how to eliminate CI/CD bottlenecks and reduce local latency."
 
 [extra]
 author = "Lucas Vieira"
 +++
 
-Cloud-native development has hit a latency wall. As of May 13, 2026, the standard workflow for testing AWS-dependent applications involves either mocking the SDK—which misses behavioral edge cases—or relying on heavy, containerized emulators that now require authentication tokens and internet-connected accounts. This overhead turns a sub-second unit test into a multi-second integration hurdle.
+Cloud-native development has hit a latency wall. As of May 2026, the standard workflow for testing AWS-dependent applications involves either mocking the SDK—which misses behavioral edge cases—or relying on heavy, containerized emulators that now require authentication tokens and internet-connected accounts. This overhead turns a sub-second unit test into a multi-second integration hurdle.
 
 fakecloud solves this by providing a high-fidelity, zero-friction local AWS environment. It is a standalone binary that eliminates the need for cloud accounts, paid subscriptions, or auth tokens. When your inner development loop depends on the speed of your feedback, every millisecond spent waiting for a container to pull or an auth handshake to complete is wasted engineering time.
 
@@ -27,7 +27,7 @@ fakecloud removes these hurdles. It is a ~19MB binary that starts in ~500ms. It 
 
 Technical authority is built on data, not marketing adjectives. fakecloud is engineered for depth, ensuring that the local environment behaves exactly like the real AWS infrastructure. 
 
-As of 2026-05-13, fakecloud supports:
+As of May 2026, fakecloud supports:
 
 *   **33 Core AWS Services:** Including S3, Lambda, DynamoDB, SQS, SNS, IAM, and Bedrock.
 *   **2,422 API Operations:** 100% behavioral conformance across all implemented APIs.
@@ -51,7 +51,7 @@ Your development environment should stay out of your way. With fakecloud, you do
 
 ### Start the Environment
 
-```bash
+```sh
 # Download and run the binary
 curl -fsSL https://fakecloud.dev/install.sh | bash
 fakecloud
@@ -61,7 +61,7 @@ fakecloud
 
 In a separate terminal, you can immediately interact with the services using the standard AWS CLI or any SDK. Because fakecloud uses dummy credentials, you never risk accidentally hitting a production account.
 
-```bash
+```sh
 # Create a bucket and a table in under 100ms
 export AWS_ACCESS_KEY_ID=dummy
 export AWS_SECRET_ACCESS_KEY=dummy
@@ -83,11 +83,11 @@ As of May 2026, AI integration is the primary driver of cloud spend. Testing Bed
 
 With 111 supported operations, you can test:
 
-*   **Model Invocations:** Use local LLMs or synthetic responses to test `InvokeModel` and `Converse` (including streaming).
-*   **Guardrails:** Validate that your application correctly handles PII detection and content filtering using real content evaluation logic.
+*   **Model Invocations:** Use local LLMs or synthetic responses to test `InvokeModel` and `Converse` (including streaming). For more, see [Bedrock local testing](/blog/bedrock-local-testing/).
+*   **Guardrails:** Validate that your application correctly handles PII detection and content filtering using real content evaluation logic. Read our guide on [Bedrock Guardrails](/blog/bedrock-guardrails-local/).
 *   **Agentic Workflows:** Test Bedrock AgentCore payments and autonomous agent tasking without incurring real-world costs.
 
-As of 2026-05-13, fakecloud supports the API shapes for the latest frontier models available on Bedrock, including Claude 4.7 and the GPT-5.5 family. This ensures your orchestration logic is sound before you deploy to a live environment.
+As of May 2026, fakecloud supports the API shapes for the latest frontier models available on Bedrock, including Claude 4.7 and the GPT-5.5 family. This ensures your orchestration logic is sound before you deploy to a live environment.
 
 ## Engineering Pragmatism: Why AGPL-3.0 and Smithy Matter
 
@@ -99,7 +99,7 @@ Unlike tools that return static JSON, fakecloud spins up real, lightweight backe
 
 *   **RDS:** Runs real PostgreSQL, MySQL, or MariaDB instances.
 *   **ElastiCache:** Uses real Valkey or Redis instances for high-fidelity caching tests.
-*   **Lambda:** Executes your code in real Docker runtimes across 23 supported environments, ensuring that your local execution environment matches the cloud's CPU and memory constraints.
+*   **Lambda:** Executes your code in real Docker runtimes across 23 supported environments, ensuring that your local execution environment matches the cloud's CPU and memory constraints. See [Lambda integration testing](/blog/cdk-local-testing/).
 
 ### The "No" List
 
@@ -120,6 +120,6 @@ Your application uses the standard `aws-sdk-go-v2` or `boto3`. Your test suite, 
 
 Efficiency is the only metric that matters in a development tool. If your current local AWS setup requires more than 5 seconds to start or demands an internet connection to verify your identity, it is a bottleneck. 
 
-Inspect the implementation, contribute to the service coverage, and run your first sub-second integration test by reviewing the [AGPL-3.0 source code on GitHub](https://github.com/faiscadev/fakecloud). Start by running the installation script and pointing your existing test suite at the local endpoint to see the immediate reduction in latency.
+Inspect the implementation, contribute to the service coverage, and run your first sub-second integration test by reviewing the AGPL-3.0 source code on [GitHub](https://github.com/faiscadev/fakecloud). Start by running the installation script and pointing your existing test suite at the local endpoint to see the immediate reduction in latency.
 
-Visit the official documentation at fakecloud.dev to explore the full list of 2,422 supported operations and implementation guides for all 33 services.
+Visit the official documentation at [fakecloud.dev](https://fakecloud.dev) to explore the full list of 2,422 supported operations and implementation guides for all 33 services.
