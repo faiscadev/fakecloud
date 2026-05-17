@@ -62,14 +62,22 @@ impl EventBridgeService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        // DeletePartnerEventSource's Smithy model declares only
-        // ConcurrentModification, Internal, and OperationDisabled — neither
-        // ValidationException nor ResourceNotFoundException. Treat unknown
-        // sources as a no-op success, matching the idempotent
-        // delete-partner-* semantics on the customer side. SDKs enforce
-        // required-name/account client-side.
-        let name = body["Name"].as_str().unwrap_or("").to_string();
-        let account = body["Account"].as_str().unwrap_or("").to_string();
+        // Smithy declares Name (length 1..=256) and Account (length 12..=12)
+        // as @required. Constraint violations surface as ValidationException
+        // — the same wire shape AWS uses for malformed input even on
+        // operations whose `errors:` set doesn't list it explicitly.
+        validate_required("Name", &body["Name"])?;
+        validate_required("Account", &body["Account"])?;
+        let name = body["Name"]
+            .as_str()
+            .ok_or_else(|| missing("Name"))?
+            .to_string();
+        validate_string_length("Name", &name, 1, 256)?;
+        let account = body["Account"]
+            .as_str()
+            .ok_or_else(|| missing("Account"))?
+            .to_string();
+        validate_string_length("Account", &account, 12, 12)?;
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);

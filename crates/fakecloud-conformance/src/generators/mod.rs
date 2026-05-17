@@ -140,7 +140,20 @@ fn default_value_for_shape_def(model: &ServiceModel, shape: &Shape, depth: usize
             }
             Value::Object(obj)
         }
-        ShapeType::List { .. } => Value::Array(vec![]),
+        ShapeType::List { member_target } => {
+            // Populate at least one element when the list carries a
+            // `@length` min>=1 trait so that services which honour the
+            // bound do not reject auto-built positive variants as a
+            // ValidationException. Lists with min=0 (or no length trait)
+            // still default to empty.
+            let min = shape.traits.length_min.unwrap_or(0) as usize;
+            if min == 0 {
+                Value::Array(vec![])
+            } else {
+                let elem = default_value_for_shape(model, member_target, depth + 1);
+                Value::Array(vec![elem])
+            }
+        }
         ShapeType::Map { .. } => Value::Object(serde_json::Map::new()),
         ShapeType::Union { members } => {
             // Use first member

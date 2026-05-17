@@ -199,11 +199,34 @@ impl EventBridgeService {
 
     pub(super) fn list_archives(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        // ListArchives' Smithy model declares only InternalException and
-        // ResourceNotFoundException — string-length, enum, and exclusive-
-        // filter constraints are client-side. We treat invalid combinations
-        // as best-effort filters rather than emitting an undeclared
-        // ValidationException.
+        // Smithy ListArchivesRequest constraints:
+        //   NamePrefix: ArchiveName length 1..=48
+        //   EventSourceArn: EventBusArn length 1..=1600
+        //   NextToken: length 1..=2048
+        //   Limit: LimitMax100 range 1..=100
+        //   State: ArchiveState enum {ENABLED, DISABLED, CREATING, UPDATING,
+        //          CREATE_FAILED, UPDATE_FAILED}
+        validate_optional_string_length("NamePrefix", body["NamePrefix"].as_str(), 1, 48)?;
+        validate_optional_string_length(
+            "EventSourceArn",
+            body["EventSourceArn"].as_str(),
+            1,
+            1600,
+        )?;
+        validate_optional_string_length("NextToken", body["NextToken"].as_str(), 1, 2048)?;
+        validate_optional_json_range("Limit", &body["Limit"], 1, 100)?;
+        validate_optional_enum(
+            "State",
+            body["State"].as_str(),
+            &[
+                "ENABLED",
+                "DISABLED",
+                "CREATING",
+                "UPDATING",
+                "CREATE_FAILED",
+                "UPDATE_FAILED",
+            ],
+        )?;
         let name_prefix = body["NamePrefix"].as_str();
         let source_arn = body["EventSourceArn"].as_str();
         let archive_state = body["State"].as_str();
@@ -597,9 +620,34 @@ impl EventBridgeService {
 
     pub(super) fn list_replays(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        // ListReplays' Smithy model declares only InternalException —
-        // string-length, enum, and mutually-exclusive-filter constraints are
-        // client-side. Treat invalid combinations as best-effort filters.
+        // Smithy ListReplaysRequest constraints:
+        //   NamePrefix: ReplayName length 1..=64
+        //   EventSourceArn: ArchiveArn length 1..=1600
+        //   NextToken: length 1..=2048
+        //   Limit: LimitMax100 range 1..=100
+        //   State: ReplayState enum {STARTING, RUNNING, CANCELLING, COMPLETED,
+        //          CANCELLED, FAILED}
+        validate_optional_string_length("NamePrefix", body["NamePrefix"].as_str(), 1, 64)?;
+        validate_optional_string_length(
+            "EventSourceArn",
+            body["EventSourceArn"].as_str(),
+            1,
+            1600,
+        )?;
+        validate_optional_string_length("NextToken", body["NextToken"].as_str(), 1, 2048)?;
+        validate_optional_json_range("Limit", &body["Limit"], 1, 100)?;
+        validate_optional_enum(
+            "State",
+            body["State"].as_str(),
+            &[
+                "STARTING",
+                "RUNNING",
+                "CANCELLING",
+                "COMPLETED",
+                "CANCELLED",
+                "FAILED",
+            ],
+        )?;
         let name_prefix = body["NamePrefix"].as_str();
         let source_arn = body["EventSourceArn"].as_str();
         let replay_state = body["State"].as_str();

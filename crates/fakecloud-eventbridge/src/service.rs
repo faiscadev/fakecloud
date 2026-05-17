@@ -347,10 +347,16 @@ impl EventBridgeService {
 
     fn list_event_buses(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        // ListEventBuses' Smithy model only declares InternalException — no
-        // ValidationException or InvalidNextTokenException. Length and shape
-        // constraints are client-side; unrecognised pagination tokens fall
-        // back to the start of the list rather than erroring out.
+        // Smithy ListEventBusesRequest constraints:
+        //   NamePrefix: EventBusName length 1..=256
+        //   NextToken: length 1..=2048
+        //   Limit: LimitMax100 range 1..=100
+        // Unrecognised pagination tokens still fall back to the start of the
+        // list — `InvalidNextTokenException` only fires when the token shape
+        // itself is wrong, not when it points at a vanished cursor.
+        validate_optional_string_length("NamePrefix", body["NamePrefix"].as_str(), 1, 256)?;
+        validate_optional_string_length("NextToken", body["NextToken"].as_str(), 1, 2048)?;
+        validate_optional_json_range("Limit", &body["Limit"], 1, 100)?;
         let name_prefix = body["NamePrefix"].as_str();
         let limit = body["Limit"].as_i64().unwrap_or(100).clamp(1, 100) as usize;
 
@@ -422,9 +428,16 @@ impl EventBridgeService {
 
     fn put_permission(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        // PutPermission's Smithy model does not declare ValidationException —
-        // string-length constraints are client-side. We only emit the
-        // declared errors (ResourceNotFoundException for an unknown bus, etc.).
+        // Smithy PutPermissionRequest constraints (optional members but each
+        // carries a `@length` trait that must be honoured when present):
+        //   EventBusName: NonPartnerEventBusName length 1..=256
+        //   Action: length 1..=64
+        //   Principal: length 1..=12 (12-digit AWS account or `*`)
+        //   StatementId: length 1..=64
+        validate_optional_string_length("EventBusName", body["EventBusName"].as_str(), 1, 256)?;
+        validate_optional_string_length("Action", body["Action"].as_str(), 1, 64)?;
+        validate_optional_string_length("Principal", body["Principal"].as_str(), 1, 12)?;
+        validate_optional_string_length("StatementId", body["StatementId"].as_str(), 1, 64)?;
         let event_bus_name = body["EventBusName"].as_str().unwrap_or("default");
 
         let mut accounts = self.state.write();
@@ -532,13 +545,41 @@ impl EventBridgeService {
 
     fn put_rule(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        // PutRule's Smithy model does not declare ValidationException — string
-        // length, enum, and `@required` checks are client-side. We surface
-        // only declared errors (ResourceNotFound for unknown bus,
-        // InvalidEventPattern for malformed patterns). Missing-Name and
-        // similar inputs are accepted with an empty default; SDKs never let
-        // them reach the wire.
-        let name = body["Name"].as_str().unwrap_or("").to_string();
+        // Smithy PutRuleRequest constraints:
+        //   Name: RuleName length 1..=64, @required
+        //   ScheduleExpression: length 0..=256
+        //   EventPattern: length 0..=4096 (raw JSON, separate
+        //     InvalidEventPatternException still applies to syntax)
+        //   State: RuleState enum {ENABLED, DISABLED,
+        //          ENABLED_WITH_ALL_CLOUDTRAIL_MANAGEMENT_EVENTS}
+        //   Description: RuleDescription length 0..=512
+        //   RoleArn: length 1..=1600
+        //   EventBusName: EventBusNameOrArn length 1..=1600
+        validate_required("Name", &body["Name"])?;
+        let name = body["Name"]
+            .as_str()
+            .ok_or_else(|| missing("Name"))?
+            .to_string();
+        validate_string_length("Name", &name, 1, 64)?;
+        validate_optional_string_length(
+            "ScheduleExpression",
+            body["ScheduleExpression"].as_str(),
+            0,
+            256,
+        )?;
+        validate_optional_string_length("EventPattern", body["EventPattern"].as_str(), 0, 4096)?;
+        validate_optional_enum(
+            "State",
+            body["State"].as_str(),
+            &[
+                "ENABLED",
+                "DISABLED",
+                "ENABLED_WITH_ALL_CLOUDTRAIL_MANAGEMENT_EVENTS",
+            ],
+        )?;
+        validate_optional_string_length("Description", body["Description"].as_str(), 0, 512)?;
+        validate_optional_string_length("RoleArn", body["RoleArn"].as_str(), 1, 1600)?;
+        validate_optional_string_length("EventBusName", body["EventBusName"].as_str(), 1, 1600)?;
 
         let raw_bus = body["EventBusName"]
             .as_str()
@@ -838,12 +879,16 @@ impl EventBridgeService {
 
     fn put_targets(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        // PutTargets' Smithy model only declares ConcurrentModification,
-        // Internal, LimitExceeded, ManagedRule, and ResourceNotFound. Bad
-        // per-target input is surfaced through FailedEntries (matching
-        // AWS), not a top-level ValidationException. Top-level fields
-        // (Rule name, EventBusName) are validated client-side by SDKs.
-        let rule_name = body["Rule"].as_str().unwrap_or("");
+        // Smithy PutTargetsRequest constraints (top-level shape):
+        //   Rule: RuleName @required length 1..=64
+        //   EventBusName: EventBusNameOrArn length 1..=1600
+        //   Targets: TargetList @required length 1..=100
+        // Per-target validation still flows through `FailedEntries` (matching
+        // AWS); only the top-level shape produces ValidationException.
+        validate_required("Rule", &body["Rule"])?;
+        let rule_name = body["Rule"].as_str().ok_or_else(|| missing("Rule"))?;
+        validate_string_length("Rule", rule_name, 1, 64)?;
+        validate_optional_string_length("EventBusName", body["EventBusName"].as_str(), 1, 1600)?;
         let event_bus_name = body["EventBusName"].as_str().unwrap_or("default");
         let targets: Vec<Value> = body["Targets"].as_array().cloned().unwrap_or_default();
 
@@ -1147,10 +1192,11 @@ impl EventBridgeService {
 
     fn put_events(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        // PutEvents' Smithy model declares only InternalException — no
-        // ValidationException. SDKs enforce the Entries length [1, 10]
-        // constraint and the EndpointId 1..=50 range client-side. We accept
-        // whatever reaches the wire and process up to 10 entries.
+        // Smithy PutEventsRequest constraints:
+        //   EndpointId: length 1..=50
+        //   Entries: length 1..=10 — we silently truncate to 10 for legacy
+        //     SDK behaviour; min is enforced by `validate_put_events_entry`.
+        validate_optional_string_length("EndpointId", body["EndpointId"].as_str(), 1, 50)?;
         let entries: Vec<Value> = body["Entries"]
             .as_array()
             .cloned()
