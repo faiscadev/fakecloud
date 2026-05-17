@@ -889,10 +889,10 @@ impl EventBridgeService {
         let rule_name = body["Rule"].as_str().ok_or_else(|| missing("Rule"))?;
         validate_string_length("Rule", rule_name, 1, 64)?;
         validate_optional_string_length("EventBusName", body["EventBusName"].as_str(), 1, 1600)?;
-        // Targets is @required in the Smithy model. We enforce the
-        // null/missing check (matching the real-AWS ValidationException) but
-        // accept empty lists as a no-op — real AWS responds with
-        // FailedEntryCount=0 for an empty Targets list rather than erroring.
+        // Targets is @required with TargetList length 1..=100 in the Smithy
+        // model. Real AWS rejects empty / oversized lists with a
+        // ValidationException; per-target validation continues to flow
+        // through FailedEntries (matching AWS).
         validate_required("Targets", &body["Targets"])?;
         let targets_array = body["Targets"].as_array().ok_or_else(|| {
             AwsServiceError::aws_error(
@@ -901,6 +901,14 @@ impl EventBridgeService {
                 "Targets must be a list",
             )
         })?;
+        if targets_array.is_empty() || targets_array.len() > 100 {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ValidationException",
+                "Value at 'Targets' failed to satisfy constraint: \
+                 Member must have length between 1 and 100",
+            ));
+        }
         let event_bus_name = body["EventBusName"].as_str().unwrap_or("default");
         let targets: Vec<Value> = targets_array.clone();
 
@@ -1206,11 +1214,7 @@ impl EventBridgeService {
         let body = req.json_body();
         // Smithy PutEventsRequest constraints:
         //   EndpointId: length 1..=50
-        //   Entries: @required (null/missing -> ValidationException), max 10
-        //     entries silently truncated for legacy SDK behaviour. The
-        //     min=1 list-length bound is not enforced server-side because
-        //     real AWS routes an empty list through to a 0-entry success
-        //     response (verified against live EventBridge as of 2026-05).
+        //   Entries: @required, length 1..=10
         validate_optional_string_length("EndpointId", body["EndpointId"].as_str(), 1, 50)?;
         validate_required("Entries", &body["Entries"])?;
         let entries_array = body["Entries"].as_array().ok_or_else(|| {
@@ -1220,7 +1224,15 @@ impl EventBridgeService {
                 "Entries must be a list",
             )
         })?;
-        let entries: Vec<Value> = entries_array.iter().take(10).cloned().collect();
+        if entries_array.is_empty() || entries_array.len() > 10 {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ValidationException",
+                "Value at 'Entries' failed to satisfy constraint: \
+                 Member must have length between 1 and 10",
+            ));
+        }
+        let entries: Vec<Value> = entries_array.clone();
         let entries = &entries;
 
         let mut accounts = self.state.write();

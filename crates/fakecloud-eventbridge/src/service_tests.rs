@@ -2764,16 +2764,12 @@ fn cancel_replay_not_found() {
 // ── put_events empty ──
 
 #[test]
-fn put_events_empty_entries_returns_zero_failures() {
-    // PutEvents' Smithy model declares only InternalException — the [1, 10]
-    // Entries length constraint is enforced client-side, so an empty batch
-    // is a no-op success on the wire.
+fn put_events_empty_entries_rejected() {
+    // Smithy PutEventsRequestEntryList carries `@length min=1`. AWS rejects
+    // an empty batch with ValidationException; we enforce the same bound.
     let svc = make_service();
     let req = make_request("PutEvents", json!({"Entries": []}));
-    let resp = svc.put_events(&req).expect("empty entries is accepted");
-    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
-    assert_eq!(body["FailedEntryCount"], 0);
-    assert_eq!(body["Entries"].as_array().unwrap().len(), 0);
+    assert!(svc.put_events(&req).is_err());
 }
 
 #[test]
