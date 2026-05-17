@@ -1,7 +1,7 @@
 +++
 title = "CI/CD without Credentials: Using fakecloud in GitHub Actions"
 date = 2026-05-17
-description = "Learn how to eliminate AWS IAM credential risks and speed up your CI/CD pipelines by running fakecloud as a standalone binary in GitHub Actions."
+description = "Learn how to eliminate AWS IAM credential risks and speed up your CI/CD pipelines by using fakecloud's zero-auth standalone binary in GitHub Actions."
 
 [extra]
 author = "Lucas Vieira"
@@ -44,7 +44,7 @@ Integrating fakecloud into a GitHub Actions workflow requires no environment var
 
 ```bash
 # Download the binary (Linux x64 example)
-curl -L https://github.com/faiscadev/fakecloud/releases/latest/download/fakecloud-linux-amd64 -o fakecloud
+curl -L https://github.com/fakecloud/fakecloud/releases/latest/download/fakecloud-linux-amd64 -o fakecloud
 chmod +x fakecloud
 
 # Start the service in the background
@@ -135,7 +135,7 @@ To understand the utility of fakecloud, consider what you **do not** have to do:
 
 Cloud availability is not guaranteed. On May 1, 2026, a localized power issue in the `ME-CENTRAL-1` (UAE) region caused significant disruptions to S3, DynamoDB, and Lambda. Teams relying on that region for CI/CD integration tests saw their pipelines stall for hours. 
 
-By moving your integration tests to fakecloud, your CI/CD becomes immune to regional cloud outages. Your build remains green as long as your code is correct, regardless of the status of the AWS Health Dashboard.
+By moving your integration tests to [fakecloud](https://github.com/faiscadev/fakecloud), your CI/CD becomes immune to regional cloud outages. Your build remains green as long as your code is correct, regardless of the status of the AWS Health Dashboard.
 
 ## Next Step: Implement in Your Pipeline
 
