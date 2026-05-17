@@ -1,7 +1,7 @@
 +++
 title = "Benchmarking Local AWS Emulators: fakecloud vs LocalStack and Moto"
 date = 2026-05-17
-description = "Evaluate fakecloud against LocalStack and Moto with sub-second startup times, 100% API conformance for core services, and zero-auth workflows for AWS integration testing."
+description = "A comprehensive benchmark of local AWS emulators—fakecloud, LocalStack, and Moto—evaluating startup latency, API conformance, and the impact of the March 2026 LocalStack licensing changes."
 
 [extra]
 author = "Lucas Vieira"
@@ -11,13 +11,13 @@ In modern backend engineering, the "inner loop"—the time between writing a lin
 
 As of May 13, 2026, the landscape for local AWS emulation has shifted. The incumbent, LocalStack, transitioned its Community Edition to a proprietary model in March 2026, now requiring an account and authentication token for all users. This change has introduced friction into CI/CD pipelines and local environments that previously relied on zero-config Docker pulls. 
 
-This benchmark evaluates [fakecloud](https://github.com/faiscadev/fakecloud) against LocalStack and Moto, focusing on the metrics that matter to engineers: startup latency, binary overhead, and API conformance.
+This benchmark evaluates fakecloud against LocalStack and Moto, focusing on the metrics that matter to engineers: startup latency, binary overhead, and API conformance.
 
 ## The Dev Loop Hurdle: Why Latency and Friction Matter
 
 Every second added to a test suite or a local environment start time is a tax on focus. If your local AWS environment takes 10 seconds to start, you stop running tests after every change. If it requires an auth token or an internet connection to verify a license, your workflow is tethered to external systems. 
 
-fakecloud is built on a "depth-first" philosophy. Instead of offering partial coverage for hundreds of services, it provides 100% API conformance for 33 core AWS services. It does this through a single, 19MB static binary that starts in approximately 500ms.
+fakecloud is built on a "depth-first" philosophy. Instead of offering partial coverage for hundreds of services, it provides 100% API conformance for 33 core AWS services. It does this through a single, 19MB static binary that starts in approximately 500ms. 
 
 ### Performance by the Numbers
 
@@ -86,7 +86,7 @@ fakecloud takes a different approach for stateful services. When you request an 
 
 ## AI Development: Full Bedrock Support
 
-For teams building AI-native applications, local emulation of LLM providers is critical. As of May 13, 2026, fakecloud provides the most comprehensive local Bedrock implementation available. [Read more about Bedrock local testing](/blog/bedrock-local-testing/).
+For teams building AI-native applications, local emulation of LLM providers is critical. As of May 13, 2026, fakecloud provides the most comprehensive [local Bedrock implementation](/blog/bedrock-local-testing/) available. 
 
 While LocalStack's Ultimate tier supports 4 Bedrock operations backed by Ollama, fakecloud supports the full surface of 111 operations. This includes not just `InvokeModel` and `Converse` (with streaming), but also the full control plane: guardrails, custom model jobs, and prompt management. 
 
@@ -145,10 +145,8 @@ The transition of LocalStack to a proprietary, account-based model in early 2026
 
 Moto remains a viable option for simple Python unit tests that don't require a real HTTP server. LocalStack remains the choice for teams that need its massive breadth of 100+ services and are willing to pay the "token tax" and subscription fees. 
 
-However, for the 33 core services that power the vast majority of cloud-native applications, fakecloud provides a faster, smaller, and more conformant alternative. Its ~500ms startup time and 19MB binary footprint make it the ideal choice for both local development and [high-speed CI/CD pipelines](/blog/aws-integration-tests-with-claude-code-cursor/).
+However, for the 33 core services that power the vast majority of cloud-native applications, fakecloud provides a faster, smaller, and more conformant alternative. Its ~500ms startup time and 19MB binary footprint make it the ideal choice for both local development and high-speed CI/CD pipelines.
 
 To verify these benchmarks in your own environment, run the following command to install the fakecloud binary and start your first local AWS session:
 
-```sh
-curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash && fakecloud
-```
+`curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash && fakecloud`
