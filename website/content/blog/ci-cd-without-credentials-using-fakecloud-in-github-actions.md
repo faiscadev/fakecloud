@@ -1,7 +1,7 @@
 +++
 title = "CI/CD without Credentials: Using fakecloud in GitHub Actions"
 date = 2026-05-17
-description = "Run high-fidelity AWS integration tests in GitHub Actions without IAM credentials or an AWS account using the fakecloud standalone binary."
+description = "Eliminate AWS IAM credential risks and speed up GitHub Actions by using fakecloud, a high-fidelity local AWS emulator that runs as a 19MB standalone binary without an account or auth tokens."
 
 [extra]
 author = "Lucas Vieira"
@@ -11,7 +11,7 @@ Managing AWS IAM credentials in CI/CD pipelines is a high-stakes liability. As o
 
 For Site Reliability Engineers (SREs), the "Secret Management Tax" isn't just about security; it's about the friction of provisioning dedicated test accounts, managing service quotas, and handling the latency of remote API calls. 
 
-[fakecloud](https://github.com/faiscadev/fakecloud) eliminates this friction by providing a high-fidelity, zero-auth AWS environment that runs as a standalone binary directly within your GitHub Actions runner. No AWS account, no IAM tokens, and no internet connection required.
+fakecloud eliminates this friction by providing a high-fidelity, zero-auth AWS environment that runs as a standalone binary directly within your GitHub Actions runner. No AWS account, no IAM tokens, and no internet connection required.
 
 ## The Problem: The Credential Bottleneck
 
@@ -42,7 +42,7 @@ Integrating fakecloud into a GitHub Actions workflow requires no environment var
 
 ### Bash Snippet: Starting fakecloud
 
-```sh
+```bash
 # Download the binary (Linux x64 example)
 curl -L https://github.com/faiscadev/fakecloud/releases/latest/download/fakecloud-linux-amd64 -o fakecloud
 chmod +x fakecloud
@@ -106,9 +106,9 @@ Unlike simple mocks, fakecloud supports real service triggers. You can upload a 
 
 ## Advanced AI Development: Full Bedrock Support
 
-As of May 2026, AI development has shifted toward autonomous agents. The recent launch of **Amazon Bedrock AgentCore** (May 11, 2026) introduced managed payment capabilities for AI agents. Testing these workflows usually requires significant spend and complex IAM setup. 
+As of May 2026, AI development has shifted toward autonomous agents. The recent launch of **Amazon Bedrock AgentCore** (May 11, 2026) introduced managed payment capabilities for AI agents. Testing these workflows usually requires significant spend and complex IAM setup.
 
-fakecloud supports 111 Bedrock operations, allowing you to test agentic workflows, prompt orchestration, and model invocations locally. You can validate your agent's logic and its interaction with other AWS services without incurring model provider costs or managing sensitive API keys during the development phase. Check out our guide on [Bedrock local testing](/blog/bedrock-local-testing/) for more details.
+fakecloud supports 111 Bedrock operations, allowing you to test agentic workflows, prompt orchestration, and model invocations locally. You can validate your agent's logic and its interaction with other AWS services without incurring model provider costs or managing sensitive API keys during the development phase.
 
 ## The "No" List: Why fakecloud Wins
 
@@ -135,13 +135,13 @@ To understand the utility of fakecloud, consider what you **do not** have to do:
 
 Cloud availability is not guaranteed. On May 1, 2026, a localized power issue in the `ME-CENTRAL-1` (UAE) region caused significant disruptions to S3, DynamoDB, and Lambda. Teams relying on that region for CI/CD integration tests saw their pipelines stall for hours. 
 
-By moving your integration tests to [fakecloud](https://github.com/faiscadev/fakecloud), your CI/CD becomes immune to regional cloud outages. Your build remains green as long as your code is correct, regardless of the status of the AWS Health Dashboard.
+By moving your integration tests to fakecloud, your CI/CD becomes immune to regional cloud outages. Your build remains green as long as your code is correct, regardless of the status of the AWS Health Dashboard.
 
 ## Next Step: Implement in Your Pipeline
 
 Stop managing IAM secrets for your test suites. You can replace your current AWS-dependent test step with the following command to start a local environment immediately:
 
-```sh
+```bash
 curl -fsSL https://fakecloud.dev/install.sh | sh && fakecloud start
 ```
 
