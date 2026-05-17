@@ -1,7 +1,7 @@
 +++
 title = "Benchmarking Local AWS: 500ms Startup vs. Cloud-Dependent Mocks"
 date = 2026-05-17
-description = "A performance comparison between fakecloud's zero-friction local AWS environment and proprietary container-based emulators requiring auth tokens."
+description = "A technical benchmark comparing fakecloud's performance and developer experience against containerized AWS emulators, focusing on startup latency, memory footprint, and auth-free development."
 
 [extra]
 author = "Lucas Vieira"
