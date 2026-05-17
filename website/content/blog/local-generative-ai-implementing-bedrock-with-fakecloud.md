@@ -1,7 +1,7 @@
 +++
 title = "Local Generative AI: Implementing Bedrock with fakecloud"
 date = 2026-05-17
-description = "Reduce costs and eliminate network dependencies by implementing 111 AWS Bedrock operations locally with fakecloud's zero-friction emulator."
+description = "Learn how to implement and test 111 AWS Bedrock operations locally using fakecloud to eliminate costs and reduce latency."
 
 [extra]
 author = "Lucas Vieira"
@@ -44,7 +44,7 @@ Building AI applications often involves more than just calling an LLM. You need 
 | :--- | :--- | :--- |
 | **Agents** | `CreateAgent`, `InvokeAgent`, `CreateAgentAlias` | Full agentic loop emulation with action group triggers. |
 | **Knowledge Bases** | `CreateKnowledgeBase`, `IngestContent`, `Retrieve` | Local RAG workflows using integrated vector storage. |
-| **Guardrails** | `CreateGuardrail`, `UpdateGuardrail`, `ListGuardrails` | Policy-based content filtering and sensitive information masking. |
+| **Guardrails** | `CreateGuardrail`, `UpdateGuardrail`, `ListGuardrails" | Policy-based content filtering and sensitive information masking. |
 | **Provisioned Throughput** | `CreateProvisionedModelThroughput` | Testing code that relies on dedicated capacity identifiers. |
 | **Custom Models** | `CreateModelImportJob`, `ListCustomModels` | Simulating the lifecycle of fine-tuned or imported weights. |
 
@@ -119,7 +119,7 @@ This approach eliminates the need for complex monkey-patching or manual mocking 
 
 ## Reliability Through Conformance
 
-One of the primary risks of using a local emulator is "drift"—the possibility that the emulator behaves differently than the real AWS API. [fakecloud](https://github.com/faiscadev/fakecloud) mitigates this through a rigorous conformance pipeline. 
+One of the primary risks of using a local emulator is "drift"—the possibility that the emulator behaves differently than the real AWS API. fakecloud mitigates this through a rigorous conformance pipeline. 
 
 Every implemented service is validated against AWS's own Smithy models. On every commit, the fakecloud engine runs through 59,000+ generated test variants. These variants cover:
 
@@ -135,7 +135,7 @@ As of 2026, AI applications are moving beyond simple chat interfaces into comple
 
 ### Local Guardrail Testing
 
-You can create a Guardrail locally to test how your application handles blocked content. fakecloud's implementation of `ApplyGuardrail` actually evaluates the input against the configured sensitive information filters and denied topics. For more details on this specific workflow, see our post on [Bedrock Guardrails locally](/blog/bedrock-guardrails-local/).
+You can create a Guardrail locally to test how your application handles blocked content. fakecloud's implementation of `ApplyGuardrail` actually evaluates the input against the configured sensitive information filters and denied topics.
 
 ```sh
 # Create a guardrail via CLI
@@ -175,11 +175,11 @@ This entire flow happens locally, with zero latency from the public internet and
 To maximize the utility of fakecloud in your organization, follow these three steps:
 
 1.  **Standardize the Endpoint**: Use an environment variable like `AWS_ENDPOINT_URL` in your application's configuration layer. Default it to `None` for production and `http://localhost:4566` for local development.
-2.  **CI Integration**: Add [fakecloud](https://github.com/faiscadev/fakecloud) to your GitHub Actions or GitLab CI pipeline as a service container. Because it is a single binary, it starts instantly, adding negligible time to your build.
+2.  **CI Integration**: Add fakecloud to your GitHub Actions or GitLab CI pipeline as a service container. Because it is a single binary, it starts instantly, adding negligible time to your build.
 3.  **Deterministic Seeding**: Use the fakecloud SDK to seed your local environment with the necessary Bedrock Agents and Knowledge Bases before your tests run. This ensures every developer starts with a clean, known state.
 
 ## Next Steps
 
 fakecloud provides the most comprehensive local emulation of AWS Bedrock available today. By moving your generative AI testing to a local environment, you reduce costs, eliminate network dependencies, and tighten your development loop. 
 
-To begin implementing local Bedrock workflows, view our guide on [Bedrock local testing](/blog/bedrock-local-testing/) or browse the detailed operation mapping in our documentation at fakecloud.dev/docs/services/bedrock.
+To begin implementing local Bedrock workflows, view the supported model list and detailed operation mapping in our documentation. You can also read about [Bedrock guardrails local](/blog/bedrock-guardrails-local/) for more specific use cases.
