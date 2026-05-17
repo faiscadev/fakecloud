@@ -1,7 +1,7 @@
 +++
 title = "Benchmarking Local AWS: 500ms Startup vs. Cloud-Dependent Mocks"
 date = 2026-05-17
-description = "A deep dive into the performance bottlenecks of modern AWS emulation and how fakecloud's 500ms startup and offline-first architecture optimize the inner development loop."
+description = "Explore how fakecloud solves cloud-native development latency with a high-fidelity, zero-friction local AWS environment featuring 500ms startup times and no internet dependency."
 
 [extra]
 author = "Lucas Vieira"
@@ -79,15 +79,15 @@ Your application code remains unchanged. You simply point the `endpoint_url` in 
 
 ## AI Development: Full Bedrock Support
 
-As of May 2026, AI integration is the primary driver of cloud spend. [Testing Bedrock-dependent applications](/blog/bedrock-local-testing/) is notoriously difficult due to the high cost of tokens and the latency of remote inference. While other local tools offer limited Bedrock mocks (often restricted to 4 operations in their highest paid tiers), fakecloud provides the full Bedrock surface.
+As of May 2026, AI integration is the primary driver of cloud spend. Testing Bedrock-dependent applications is notoriously difficult due to the high cost of tokens and the latency of remote inference. While other local tools offer limited Bedrock mocks (often restricted to 4 operations in their highest paid tiers), fakecloud provides the full Bedrock surface.
 
 With 111 supported operations, you can test:
 
 *   **Model Invocations:** Use local LLMs or synthetic responses to test `InvokeModel` and `Converse` (including streaming).
-*   **Guardrails:** Validate that your application correctly handles PII detection and content filtering using real content evaluation logic via [Bedrock Guardrails local](/blog/bedrock-guardrails-local/).
+*   **Guardrails:** Validate that your application correctly handles PII detection and content filtering using real content evaluation logic.
 *   **Agentic Workflows:** Test Bedrock AgentCore payments and autonomous agent tasking without incurring real-world costs.
 
-As of 2026-05-13, fakecloud supports the API shapes for the latest frontier models available on Bedrock, including Claude 4.7 and the GPT-5.5 family. This ensures your orchestration logic is sound before you deploy to a live environment, especially when using agents like [Claude Code or Cursor](/blog/aws-integration-tests-with-claude-code-cursor/).
+As of 2026-05-13, fakecloud supports the API shapes for the latest frontier models available on Bedrock, including Claude 4.7 and the GPT-5.5 family. This ensures your orchestration logic is sound before you deploy to a live environment.
 
 ## Engineering Pragmatism: Why AGPL-3.0 and Smithy Matter
 
@@ -112,13 +112,13 @@ To maintain engineering velocity, we have explicitly removed the following requi
 
 ## SDK-Client Separation
 
-One of the most powerful features for Lead Engineers is the separation between the application's AWS SDK and the fakecloud testing SDK. 
+One of the most powerful features for Lead Engineers is the separation between the application's AWS SDK and the fakecloud testing SDK.
 
 Your application uses the standard `aws-sdk-go-v2` or `boto3`. Your test suite, however, can use the first-party fakecloud SDKs (available in Go, Python, TypeScript, Java, PHP, and Rust) to perform out-of-band assertions. For example, you can use the fakecloud SDK to inspect the internal state of an SQS queue or to force a specific failure mode in a Bedrock call without polluting your production code with testing logic.
 
 ## Next Step: Review the Source
 
-Efficiency is the only metric that matters in a development tool. If your current local AWS setup requires more than 5 seconds to start or demands an internet connection to verify your identity, it is a bottleneck. 
+Efficiency is the only metric that matters in a development tool. If your current local AWS setup requires more than 5 seconds to start or demands an internet connection to verify your identity, it is a bottleneck.
 
 Inspect the implementation, contribute to the service coverage, and run your first sub-second integration test by reviewing the [AGPL-3.0 source code on GitHub](https://github.com/faiscadev/fakecloud). Start by running the installation script and pointing your existing test suite at the local endpoint to see the immediate reduction in latency.
 
