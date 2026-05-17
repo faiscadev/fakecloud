@@ -1,11 +1,13 @@
 +++
 title = "CI/CD without Credentials: Using fakecloud in GitHub Actions"
 date = 2026-05-17
-description = "Learn how to eliminate AWS IAM credential risks in CI/CD pipelines by using fakecloud, a zero-auth, high-fidelity AWS emulator that runs locally in GitHub Actions."
+description = "Learn how to eliminate the risk of leaked IAM credentials in CI/CD by running fakecloud as a standalone binary in GitHub Actions."
 
 [extra]
 author = "Lucas Vieira"
 +++
+
+# CI/CD without Credentials: Using fakecloud in GitHub Actions
 
 Managing AWS IAM credentials in CI/CD pipelines is a high-stakes liability. As of May 2026, industry data indicates that 32% of all scanner-detected secrets in public repositories are tied directly to CI/CD infrastructure. Furthermore, recent reports show that 65% of leading AI companies have experienced credential leaks on GitHub, with a median remediation time of 94 days. 
 
@@ -42,7 +44,7 @@ Integrating fakecloud into a GitHub Actions workflow requires no environment var
 
 ### Bash Snippet: Starting fakecloud
 
-```sh
+```bash
 # Download the binary (Linux x64 example)
 curl -L https://github.com/faiscadev/fakecloud/releases/latest/download/fakecloud-linux-amd64 -o fakecloud
 chmod +x fakecloud
@@ -65,7 +67,7 @@ This configuration uses the standard `ubuntu-latest` runner (which, as of May 20
 name: Integration Tests
 on: [push, pull_request]
 
-jobs:
+jobs:    
   test:
     runs-on: ubuntu-latest
     steps:
@@ -141,7 +143,7 @@ By moving your integration tests to fakecloud, your CI/CD becomes immune to regi
 
 Stop managing IAM secrets for your test suites. You can replace your current AWS-dependent test step with the following command to start a local environment immediately:
 
-```sh
+```bash
 curl -fsSL https://fakecloud.dev/install.sh | sh && fakecloud start
 ```
 
