@@ -1,7 +1,7 @@
 +++
 title = "Benchmarking Local AWS Emulators: fakecloud vs LocalStack and Moto"
-date = 2026-05-17
-description = "A comprehensive benchmark of local AWS emulators—fakecloud, LocalStack, and Moto—evaluating startup latency, API conformance, and the impact of the March 2026 LocalStack licensing changes."
+date = "2026-05-17"
+description = "A comprehensive benchmark of local AWS emulators in 2026, comparing fakecloud, LocalStack, and Moto on performance and API conformance."
 
 [extra]
 author = "Lucas Vieira"
@@ -11,7 +11,7 @@ In modern backend engineering, the "inner loop"—the time between writing a lin
 
 As of May 13, 2026, the landscape for local AWS emulation has shifted. The incumbent, LocalStack, transitioned its Community Edition to a proprietary model in March 2026, now requiring an account and authentication token for all users. This change has introduced friction into CI/CD pipelines and local environments that previously relied on zero-config Docker pulls. 
 
-This benchmark evaluates fakecloud against LocalStack and Moto, focusing on the metrics that matter to engineers: startup latency, binary overhead, and API conformance.
+This benchmark evaluates [fakecloud](https://github.com/faiscadev/fakecloud) against LocalStack and Moto, focusing on the metrics that matter to engineers: startup latency, binary overhead, and API conformance.
 
 ## The Dev Loop Hurdle: Why Latency and Friction Matter
 
@@ -71,7 +71,7 @@ fakecloud requires no account, no token, and no internet connection. You run the
 4. Run `docker pull` (requires auth).
 5. Run `localstack start`.
 
-**Using fakecloud with the AWS CLI:**
+### Using fakecloud with the AWS CLI
 
 ```sh
 # No configuration needed beyond the endpoint-url
@@ -86,7 +86,7 @@ fakecloud takes a different approach for stateful services. When you request an 
 
 ## AI Development: Full Bedrock Support
 
-For teams building AI-native applications, local emulation of LLM providers is critical. As of May 13, 2026, fakecloud provides the most comprehensive [local Bedrock implementation](/blog/bedrock-local-testing/) available. 
+For teams building AI-native applications, local emulation of LLM providers is critical. As of May 13, 2026, fakecloud provides the most comprehensive local Bedrock implementation available. 
 
 While LocalStack's Ultimate tier supports 4 Bedrock operations backed by Ollama, fakecloud supports the full surface of 111 operations. This includes not just `InvokeModel` and `Converse` (with streaming), but also the full control plane: guardrails, custom model jobs, and prompt management. 
 
