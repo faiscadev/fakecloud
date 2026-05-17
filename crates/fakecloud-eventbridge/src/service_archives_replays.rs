@@ -215,9 +215,9 @@ impl EventBridgeService {
         )?;
         validate_optional_string_length("NextToken", body["NextToken"].as_str(), 1, 2048)?;
         validate_optional_json_range("Limit", &body["Limit"], 1, 100)?;
-        validate_optional_enum(
+        validate_optional_enum_value(
             "State",
-            body["State"].as_str(),
+            &body["State"],
             &[
                 "ENABLED",
                 "DISABLED",
@@ -636,9 +636,9 @@ impl EventBridgeService {
         )?;
         validate_optional_string_length("NextToken", body["NextToken"].as_str(), 1, 2048)?;
         validate_optional_json_range("Limit", &body["Limit"], 1, 100)?;
-        validate_optional_enum(
+        validate_optional_enum_value(
             "State",
-            body["State"].as_str(),
+            &body["State"],
             &[
                 "STARTING",
                 "RUNNING",
