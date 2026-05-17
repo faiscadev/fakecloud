@@ -1,7 +1,7 @@
 +++
 title = "Local AWS Bedrock: Prototyping GenAI Without Cloud Costs"
 date = 2026-05-17
-description = "Master local GenAI development with fakecloud's AWS Bedrock emulation. Learn how to bypass cloud costs, eliminate API latency, and prototype agentic workflows without an internet connection or account registration."
+description = "Prototyping GenAI workflows is expensive and slow. fakecloud provides 111 AWS Bedrock operations locally with zero costs, no auth tokens, and 100% offline support."
 
 [extra]
 author = "Lucas Vieira"
@@ -11,7 +11,7 @@ Generative AI development in 2026 has reached a point of extreme financial and o
 
 Beyond the direct costs, the developer experience is hampered by API latency, rate limits, and the increasing complexity of cloud-based authentication. Even local emulation tools, which once promised a friction-free alternative, have largely pivoted to account-based models. As of March 2026, major incumbents in the local AWS emulation space now require mandatory account registration and active internet connections for authentication tokens, effectively turning your local environment into a gated extension of the cloud.
 
-[fakecloud](https://github.com/faiscadev/fakecloud) provides the alternative: a high-fidelity, zero-friction local AWS environment that behaves like infrastructure, not a mock. It is a standalone binary that gives you 111 AWS Bedrock operations locally, requiring no account, no auth token, and no internet connection.
+fakecloud provides the alternative: a high-fidelity, zero-friction local AWS environment that behaves like infrastructure, not a mock. It is a standalone binary that gives you 111 AWS Bedrock operations locally, requiring no account, no auth token, and no internet connection.
 
 ## The Dev Hurdle: Token Costs and API Latency
 
@@ -92,7 +92,7 @@ fakecloud's Bedrock support is comprehensive, covering the data plane, control p
 | Category | Key Operations Supported | Utility |
 | :--- | :--- | :--- |
 | **Model Invocation** | `InvokeModel`, `InvokeModelWithResponseStream`, `Converse`, `ConverseStream` | Test prompt engineering and streaming UI components. |
-| **Guardrails** | `CreateGuardrail`, `ApplyGuardrail", "GetGuardrail` | Validate safety filters and PII masking logic locally. |
+| **Guardrails** | `CreateGuardrail`, `ApplyGuardrail`, `GetGuardrail` | Validate safety filters and PII masking logic locally. |
 | **Agents** | `CreateAgent`, `InvokeAgent`, `AssociateAgentKnowledgeBase` | Prototype autonomous agents and tool-use loops. |
 | **Knowledge Bases** | `CreateKnowledgeBase`, `Retrieve`, `RetrieveAndGenerate` | Emulate RAG workflows with local vector storage integration. |
 | **Provisioning** | `CreateProvisionedModelThroughput`, `GetFoundationModel` | Test infrastructure-as-code (IaC) scripts for model deployment. |
@@ -123,7 +123,7 @@ When comparing development workflows, the metrics favor the standalone binary ap
 
 One of the greatest challenges in GenAI development is the non-deterministic nature of LLMs. When you run integration tests against the real Bedrock API, the model's response might change slightly between runs, leading to flaky tests. 
 
-fakecloud allows you to inject deterministic responses into your local Bedrock environment. By using the fakecloud SDK in your test code, you can assert that your application handles specific model outputs correctly without actually performing inference. 
+fakecloud allows you to inject deterministic responses into your local Bedrock environment. By using the fakecloud SDK in your test code, you can assert that your application handles specific model outputs correctly without actually performing inference. For a detailed walkthrough of this approach, check out our previous post on [how to test Bedrock code locally](/blog/bedrock-local-testing/).
 
 ### SDK-Client Separation
 
@@ -149,7 +149,5 @@ chmod +x fakecloud
 
 For detailed implementation guides on specific Bedrock operations or to explore the first-party SDKs for assertions in 6+ programming languages, visit the official documentation at fakecloud.dev.
 
-Further reading on local Bedrock:
-- [Bedrock Local Testing](/blog/bedrock-local-testing/)
-- [Bedrock Guardrails Local](/blog/bedrock-guardrails-local/)
-- [Bedrock Tests with Real LLMs](/blog/bedrock-tests-real-llm/)
+- **Repo:** [https://github.com/faiscadev/fakecloud](https://github.com/faiscadev/fakecloud)
+- **Site:** [fakecloud.dev](https://fakecloud.dev)
