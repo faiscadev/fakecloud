@@ -1,7 +1,7 @@
 +++
 title = "Local AWS Bedrock: Prototyping GenAI Without Cloud Costs"
 date = 2026-05-17
-description = "Learn how to use fakecloud to emulate AWS Bedrock locally, enabling cost-free GenAI prototyping with high-fidelity API support and zero internet dependency."
+description = "Eliminate cloud costs and latency by emulating AWS Bedrock locally with fakecloud for high-fidelity GenAI prototyping."
 
 [extra]
 author = "Lucas Vieira"
@@ -25,7 +25,7 @@ As of May 2026, the cost of frontier model access on AWS Bedrock remains a prima
 
 While these models offer unprecedented reasoning capabilities, using them for basic integration testing or CI/CD pipelines is economically inefficient. Furthermore, the round-trip latency to a cloud region—often 200ms to 500ms before inference even begins—stalls the developer's momentum. 
 
-When you add the overhead of managing IAM roles, VPC endpoints, and service quotas just to test a single Lambda function's ability to call `InvokeModel`, the friction becomes a barrier to entry.
+When you add the overhead of managing IAM roles, VPC endpoints, and service quotas just to test a single Lambda function's ability to call `InvokeModel`, the friction becomes a barrier to entry. 
 
 ## Solution: `fakecloud start` with Bedrock Support
 
@@ -132,11 +132,11 @@ In a fakecloud workflow, you distinguish between the **App Client** (the standar
 1. **The App Client** calls `InvokeModel` as it would in production.
 2. **The Test SDK** configures fakecloud to return a specific JSON payload for that call.
 
-This separation ensures that your tests are fast, repeatable, and cost-free, while still exercising the full network stack and SDK logic of your application. Learn more in our guide on [Bedrock local testing](/blog/bedrock-local-testing/).
+This separation ensures that your tests are fast, repeatable, and cost-free, while still exercising the full network stack and SDK logic of your application.
 
 ## Next Step: Run Bedrock Locally
 
-Stop paying for the privilege of debugging your code. Eliminate the latency of the cloud and the friction of account-gated tools. fakecloud provides the high-fidelity environment you need to build, test, and ship GenAI applications with confidence.
+Stop paying for the privilege of debugging your code. Eliminate the latency of the cloud and the friction of account-gated tools. [fakecloud](https://github.com/faiscadev/fakecloud) provides the high-fidelity environment you need to build, test, and ship GenAI applications with confidence.
 
 To get started, download the binary for your platform and run the start command. No sign-up is required.
 
@@ -147,4 +147,4 @@ chmod +x fakecloud
 ./fakecloud start --services bedrock
 ```
 
-For detailed implementation guides on specific Bedrock operations or to explore the first-party SDKs for assertions in 6+ programming languages, visit the [official repository](https://github.com/faiscadev/fakecloud) or see how to configure [AI integration tests](/blog/aws-integration-tests-with-claude-code-cursor/).
+For detailed implementation guides on specific Bedrock operations or to explore the first-party SDKs for assertions in 6+ programming languages, visit the official documentation at fakecloud.dev.
