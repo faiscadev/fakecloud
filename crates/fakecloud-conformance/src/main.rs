@@ -390,9 +390,14 @@ fn cmd_run(
 /// services where every probe is self-contained). Calling this for those
 /// service names is a no-op.
 fn seed_service_resources(client: &reqwest::blocking::Client, endpoint: &str, service_name: &str) {
-    if service_name != "s3" {
-        return;
+    match service_name {
+        "s3" => seed_s3(client, endpoint),
+        "secretsmanager" => seed_secretsmanager(client, endpoint),
+        _ => {}
     }
+}
+
+fn seed_s3(client: &reqwest::blocking::Client, endpoint: &str) {
     let auth = "AWS4-HMAC-SHA256 Credential=test/20240101/us-east-1/s3/aws4_request, \
                 SignedHeaders=host;x-amz-date, Signature=00";
     // Best-effort: ignore conflicts (bucket/object may already exist if the
@@ -407,6 +412,34 @@ fn seed_service_resources(client: &reqwest::blocking::Client, endpoint: &str, se
         .header("Content-Type", "application/octet-stream")
         .body("conformance-seed")
         .send();
+}
+
+/// Pre-seed the secret used by the documented `@examples` for Secrets Manager
+/// (`MyTestDatabaseSecret`) with both a description and a resource-based
+/// policy. Without this seed, the `GetResourcePolicy` example diff fails
+/// because the live response omits `ResourcePolicy` for secrets that have
+/// none attached. Best-effort: ignores conflicts when the secret already
+/// exists from a previous probe run.
+fn seed_secretsmanager(client: &reqwest::blocking::Client, endpoint: &str) {
+    let auth = "AWS4-HMAC-SHA256 Credential=test/20240101/us-east-1/secretsmanager/aws4_request, \
+                SignedHeaders=host;x-amz-date, Signature=00";
+    let send = |target: &str, body: &str| {
+        let _ = client
+            .post(endpoint)
+            .header("Content-Type", "application/x-amz-json-1.1")
+            .header("X-Amz-Target", format!("secretsmanager.{}", target))
+            .header("Authorization", auth)
+            .body(body.to_string())
+            .send();
+    };
+    send(
+        "CreateSecret",
+        r#"{"Name":"MyTestDatabaseSecret","Description":"My test database secret","SecretString":"conformance-seed"}"#,
+    );
+    send(
+        "PutResourcePolicy",
+        r#"{"SecretId":"MyTestDatabaseSecret","ResourcePolicy":"{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":{\"AWS\":\"arn:aws:iam::123456789012:root\"},\"Action\":\"secretsmanager:GetSecretValue\",\"Resource\":\"*\"}]}"}"#,
+    );
 }
 
 fn load_models(models_dir: &std::path::Path) -> Vec<(String, smithy::ServiceModel)> {

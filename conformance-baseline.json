@@ -1,5 +1,5 @@
 {
-  "variants_passed": 84849,
+  "variants_passed": 84872,
   "total_variants": 86327,
   "per_service": {
     "logs": {
@@ -115,7 +115,7 @@
       "total": 2251
     },
     "secretsmanager": {
-      "passed": 841,
+      "passed": 864,
       "total": 864
     },
     "wafv2": {
