@@ -1,7 +1,7 @@
 +++
 title = "Local Generative AI: Implementing Bedrock with fakecloud"
 date = 2026-05-17
-description = "Learn how to implement and test 111 AWS Bedrock operations locally using fakecloud to reduce costs and latency while maintaining full API conformance."
+description = "Discover how fakecloud enables high-fidelity local emulation of 111 AWS Bedrock operations, allowing developers to test GenAI workflows without AWS costs or latency."
 
 [extra]
 author = "Lucas Vieira"
@@ -44,7 +44,7 @@ Building AI applications often involves more than just calling an LLM. You need 
 | :--- | :--- | :--- |
 | **Agents** | `CreateAgent`, `InvokeAgent`, `CreateAgentAlias` | Full agentic loop emulation with action group triggers. |
 | **Knowledge Bases** | `CreateKnowledgeBase`, `IngestContent`, `Retrieve` | Local RAG workflows using integrated vector storage. |
-| **Guardrails** | `CreateGuardrail`, `UpdateGuardrail`, `ListGuardrails"` | Policy-based content filtering and sensitive information masking. |
+| **Guardrails** | `CreateGuardrail`, `UpdateGuardrail`, `ListGuardrails` | Policy-based content filtering and sensitive information masking. |
 | **Provisioned Throughput** | `CreateProvisionedModelThroughput` | Testing code that relies on dedicated capacity identifiers. |
 | **Custom Models** | `CreateModelImportJob`, `ListCustomModels` | Simulating the lifecycle of fine-tuned or imported weights. |
 
@@ -135,7 +135,7 @@ As of 2026, AI applications are moving beyond simple chat interfaces into comple
 
 ### Local Guardrail Testing
 
-You can create a Guardrail locally to test how your application handles blocked content. fakecloud's implementation of `ApplyGuardrail` actually evaluates the input against the configured sensitive information filters and denied topics.
+You can create a [Guardrail](/blog/bedrock-guardrails-local/) locally to test how your application handles blocked content. fakecloud's implementation of `ApplyGuardrail` actually evaluates the input against the configured sensitive information filters and denied topics.
 
 ```bash
 # Create a guardrail via CLI
@@ -160,7 +160,7 @@ This entire flow happens locally, with zero latency from the public internet and
 
 ## Comparison: fakecloud vs. Alternatives
 
-| Feature | fakecloud | LocalStack (2026) | Live AWS |
+| Feature | fakecloud | [LocalStack Alternatives](/blog/localstack-alternative/) | Live AWS |
 | :--- | :--- | :--- | :--- |
 | **Binary Size** | ~19MB | ~1.2GB (Docker Image) | N/A |
 | **Startup Time** | ~500ms | ~15-30s | N/A |
@@ -176,10 +176,10 @@ To maximize the utility of fakecloud in your organization, follow these three st
 
 1.  **Standardize the Endpoint**: Use an environment variable like `AWS_ENDPOINT_URL` in your application's configuration layer. Default it to `None` for production and `http://localhost:4566` for local development.
 2.  **CI Integration**: Add fakecloud to your GitHub Actions or GitLab CI pipeline as a service container. Because it is a single binary, it starts instantly, adding negligible time to your build.
-3.  **Deterministic Seeding**: Use the [fakecloud SDK](https://github.com/faiscadev/fakecloud) to seed your local environment with the necessary Bedrock Agents and Knowledge Bases before your tests run. This ensures every developer starts with a clean, known state.
+3.  **Deterministic Seeding**: Use the fakecloud SDK to seed your local environment with the necessary Bedrock Agents and Knowledge Bases before your tests run. This ensures every developer starts with a clean, known state.
 
 ## Next Steps
 
 fakecloud provides the most comprehensive local emulation of AWS Bedrock available today. By moving your generative AI testing to a local environment, you reduce costs, eliminate network dependencies, and tighten your development loop. 
 
-To begin implementing local Bedrock workflows, view the supported model list and detailed operation mapping in our documentation at [fakecloud.dev/docs/services/bedrock](https://fakecloud.dev/docs/services/bedrock).
+To begin implementing local Bedrock workflows, view the supported model list and detailed operation mapping in our documentation at fakecloud.dev/docs/services/bedrock.
