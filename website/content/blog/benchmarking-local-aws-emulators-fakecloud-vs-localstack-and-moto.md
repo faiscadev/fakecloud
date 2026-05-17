@@ -1,7 +1,7 @@
 +++
 title = "Benchmarking Local AWS Emulators: fakecloud vs LocalStack and Moto"
 date = 2026-05-17
-description = "A deep dive into startup latency, binary overhead, and API conformance for local AWS development. See how fakecloud compares to LocalStack and Moto in 2026."
+description = "A deep dive into the 2026 local AWS emulation landscape, comparing fakecloud, LocalStack, and Moto on startup speed, binary size, and API conformance."
 
 [extra]
 author = "Lucas Vieira"
@@ -11,7 +11,7 @@ In modern backend engineering, the "inner loop"—the time between writing a lin
 
 As of May 13, 2026, the landscape for local AWS emulation has shifted. The incumbent, LocalStack, transitioned its Community Edition to a proprietary model in March 2026, now requiring an account and authentication token for all users. This change has introduced friction into CI/CD pipelines and local environments that previously relied on zero-config Docker pulls. 
 
-This benchmark evaluates [fakecloud](https://github.com/faiscadev/fakecloud) against LocalStack and Moto, focusing on the metrics that matter to engineers: startup latency, binary overhead, and API conformance.
+This benchmark evaluates fakecloud against LocalStack and Moto, focusing on the metrics that matter to engineers: startup latency, binary overhead, and API conformance.
 
 ## The Dev Loop Hurdle: Why Latency and Friction Matter
 
@@ -46,7 +46,7 @@ As of May 13, 2026, fakecloud supports 2,422 operations across 33 services, incl
 *   **Storage:** S3 (including multipart uploads and lifecycle policies), EBS.
 *   **Database:** DynamoDB (full expression support), RDS (Postgres, MySQL, MariaDB, Oracle, SQL Server), ElastiCache (Redis, Valkey, Memcached).
 *   **Messaging:** SQS, SNS (with fan-out and filter policies), EventBridge.
-*   **AI/ML:** [Bedrock local testing](/blog/bedrock-local-testing/) and Bedrock Runtime (111 operations).
+*   **AI/ML:** Bedrock and Bedrock Runtime (111 operations).
 *   **Security:** IAM, STS, Secrets Manager, KMS, WAF v2.
 *   **Networking:** API Gateway v1/v2, ELBv2 (ALB/NLB), Route 53, CloudFront.
 
@@ -86,7 +86,7 @@ fakecloud takes a different approach for stateful services. When you request an 
 
 ## AI Development: Full Bedrock Support
 
-For teams building AI-native applications, [Bedrock local testing](/blog/bedrock-local-testing/) of LLM providers is critical. As of May 13, 2026, fakecloud provides the most comprehensive local Bedrock implementation available. 
+For teams building AI-native applications, local emulation of LLM providers is critical. As of May 13, 2026, fakecloud provides the most comprehensive local Bedrock implementation available. 
 
 While LocalStack's Ultimate tier supports 4 Bedrock operations backed by Ollama, fakecloud supports the full surface of 111 operations. This includes not just `InvokeModel` and `Converse` (with streaming), but also the full control plane: guardrails, custom model jobs, and prompt management. 
 
@@ -105,7 +105,7 @@ Because fakecloud implements the full API shape, your AI coding agents (like Cur
 
 ## SDK-Client Separation: Asserting on Side Effects
 
-In a standard integration test, you use the AWS SDK to trigger an action (e.g., uploading a file to S3). But how do you verify that an SNS message was sent or an email was dispatched via SES without writing complex polling logic? 
+In a standard integration test, you use the AWS SDK to trigger an action (e.g., uploading a file to S3). But how do you verify that an SNS message was sent or an email was dispatched via SES without writing complex polling logic?
 
 fakecloud provides first-party SDKs for TypeScript, Python, Go, PHP, Java, and Rust. These SDKs allow your tests to "reach into" the emulator and assert on state that isn't visible through the standard AWS API.
 
@@ -149,12 +149,6 @@ However, for the 33 core services that power the vast majority of cloud-native a
 
 To verify these benchmarks in your own environment, run the following command to install the fakecloud binary and start your first local AWS session:
 
-`curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash && fakecloud`
-
-## Links
-
-- Repo: [https://github.com/faiscadev/fakecloud](https://github.com/faiscadev/fakecloud)
-- [Bedrock local testing](/blog/bedrock-local-testing/)
-- [Bedrock guardrails](/blog/bedrock-guardrails-local/)
-- [CDK local testing](/blog/cdk-local-testing/)
-- [AWS integration tests with agents](/blog/aws-integration-tests-with-claude-code-cursor/)
+```sh
+curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash && fakecloud
+```
