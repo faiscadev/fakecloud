@@ -1,7 +1,7 @@
 +++
 title = "Local AWS Bedrock: Prototyping GenAI Without Cloud Costs"
 date = 2026-05-17
-description = "Discover how fakecloud enables high-fidelity, offline emulation of 111 AWS Bedrock operations to eliminate token costs and API latency during GenAI prototyping."
+description = "Master local GenAI development with fakecloud's AWS Bedrock emulation. Learn how to bypass cloud costs, eliminate API latency, and prototype agentic workflows without an internet connection or account registration."
 
 [extra]
 author = "Lucas Vieira"
@@ -33,7 +33,7 @@ fakecloud eliminates these hurdles by emulating the AWS Bedrock API surface loca
 
 To start the environment with Bedrock support, you run a single command:
 
-```bash
+```sh
 # Start fakecloud with Bedrock and S3 enabled
 ./fakecloud start --services bedrock,s3
 ```
@@ -92,7 +92,7 @@ fakecloud's Bedrock support is comprehensive, covering the data plane, control p
 | Category | Key Operations Supported | Utility |
 | :--- | :--- | :--- |
 | **Model Invocation** | `InvokeModel`, `InvokeModelWithResponseStream`, `Converse`, `ConverseStream` | Test prompt engineering and streaming UI components. |
-| **Guardrails** | `CreateGuardrail`, `ApplyGuardrail`, `GetGuardrail" | Validate safety filters and PII masking logic locally. |
+| **Guardrails** | `CreateGuardrail`, `ApplyGuardrail", "GetGuardrail` | Validate safety filters and PII masking logic locally. |
 | **Agents** | `CreateAgent`, `InvokeAgent`, `AssociateAgentKnowledgeBase` | Prototype autonomous agents and tool-use loops. |
 | **Knowledge Bases** | `CreateKnowledgeBase`, `Retrieve`, `RetrieveAndGenerate` | Emulate RAG workflows with local vector storage integration. |
 | **Provisioning** | `CreateProvisionedModelThroughput`, `GetFoundationModel` | Test infrastructure-as-code (IaC) scripts for model deployment. |
@@ -136,15 +136,20 @@ This separation ensures that your tests are fast, repeatable, and cost-free, whi
 
 ## Next Step: Run Bedrock Locally
 
-Stop paying for the privilege of debugging your code. Eliminate the latency of the cloud and the friction of account-gated tools. [fakecloud](https://github.com/faiscadev/fakecloud) provides the high-fidelity environment you need to build, test, and ship GenAI applications with confidence.
+Stop paying for the privilege of debugging your code. Eliminate the latency of the cloud and the friction of account-gated tools. fakecloud provides the high-fidelity environment you need to build, test, and ship GenAI applications with confidence.
 
 To get started, download the binary for your platform and run the start command. No sign-up is required.
 
-```bash
+```sh
 # Download and run (Linux/macOS)
 curl -L https://fakecloud.dev/download/fakecloud -o fakecloud
 chmod +x fakecloud
 ./fakecloud start --services bedrock
 ```
 
-For detailed implementation guides on [specific Bedrock operations](/blog/bedrock-local-testing/) or to explore the first-party SDKs for assertions in 6+ programming languages, visit the official documentation at fakecloud.dev.
+For detailed implementation guides on specific Bedrock operations or to explore the first-party SDKs for assertions in 6+ programming languages, visit the official documentation at fakecloud.dev.
+
+Further reading on local Bedrock:
+- [Bedrock Local Testing](/blog/bedrock-local-testing/)
+- [Bedrock Guardrails Local](/blog/bedrock-guardrails-local/)
+- [Bedrock Tests with Real LLMs](/blog/bedrock-tests-real-llm/)
