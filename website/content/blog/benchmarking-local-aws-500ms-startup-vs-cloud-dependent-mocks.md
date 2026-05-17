@@ -1,7 +1,7 @@
 +++
 title = "Benchmarking Local AWS: 500ms Startup vs. Cloud-Dependent Mocks"
 date = 2026-05-17
-description = "Cloud-native development has hit a latency wall. fakecloud eliminates the 2026 auth wall and provides a sub-second local AWS environment for 33 core services with zero internet dependency."
+description = "Cloud-native development has hit a latency wall. In 2026, testing AWS-dependent apps means either mocking the SDK or using heavy emulators that require auth tokens and internet. fakecloud provides a 19MB binary that starts in 500ms and runs entirely offline."
 
 [extra]
 author = "Lucas Vieira"
@@ -17,7 +17,7 @@ In March 2026, the landscape of local AWS emulation shifted. The primary incumbe
 
 For a Lead Engineer or SRE, this introduces three specific points of friction:
 
-1.  **CI/CD Bottlenecks:** Every CI runner must be provisioned with a secret auth token. If the token expires or the vendor's auth service experiences downtime, your entire deployment pipeline halts. (See our guide on [integration testing AWS in CI](/blog/integration-testing-aws-in-ci/)).
+1.  **CI/CD Bottlenecks:** Every CI runner must be provisioned with a secret auth token. If the token expires or the vendor's auth service experiences downtime, your entire deployment pipeline halts.
 2.  **Cold Start Latency:** Modern container-based emulators often exceed 1GB in image size. Pulling these images and waiting for the internal services to initialize can take 10 to 30 seconds.
 3.  **Internet Dependency:** Development is no longer truly local if the tool requires a phone-home check to verify a subscription tier before it allows you to run a simple S3 bucket creation command.
 
@@ -79,19 +79,19 @@ Your application code remains unchanged. You simply point the `endpoint_url` in 
 
 ## AI Development: Full Bedrock Support
 
-As of May 2026, AI integration is the primary driver of cloud spend. Testing Bedrock-dependent applications is notoriously difficult due to the high cost of tokens and the latency of remote inference. While other local tools offer limited Bedrock mocks (often restricted to 4 operations in their highest paid tiers), [fakecloud](https://github.com/faiscadev/fakecloud) provides the full Bedrock surface (see [Testing Bedrock locally](/blog/bedrock-local-testing/)).
+As of May 2026, AI integration is the primary driver of cloud spend. Testing Bedrock-dependent applications is notoriously difficult due to the high cost of tokens and the latency of remote inference. While other local tools offer limited Bedrock mocks (often restricted to 4 operations in their highest paid tiers), [fakecloud](https://github.com/faiscadev/fakecloud) provides the full Bedrock surface.
 
 With 111 supported operations, you can test:
 
-*   **Model Invocations:** Use local LLMs or synthetic responses to test `InvokeModel` and `Converse` (including streaming).
-*   **Guardrails:** Validate that your application correctly handles PII detection and content filtering using real content evaluation logic.
+*   **[Model Invocations](/blog/bedrock-local-testing/):** Use local LLMs or synthetic responses to test `InvokeModel` and `Converse` (including streaming).
+*   **[Guardrails](/blog/bedrock-guardrails-local/):** Validate that your application correctly handles PII detection and content filtering using real content evaluation logic.
 *   **Agentic Workflows:** Test Bedrock AgentCore payments and autonomous agent tasking without incurring real-world costs.
 
 As of 2026-05-13, [fakecloud](https://github.com/faiscadev/fakecloud) supports the API shapes for the latest frontier models available on Bedrock, including Claude 4.7 and the GPT-5.5 family. This ensures your orchestration logic is sound before you deploy to a live environment.
 
 ## Engineering Pragmatism: Why AGPL-3.0 and Smithy Matter
 
-[fakecloud](https://github.com/faiscadev/fakecloud) is not a collection of hand-written mocks. It is a depth-first implementation of the AWS wire protocol. We use the same Smithy models that AWS uses to generate their SDKs. This means when AWS adds a new field to a response or changes a waiter's behavior, fakecloud's conformance suite catches the drift.
+[fakecloud](https://github.com/faiscadev/fakecloud) is not a collection of hand-written mocks. It is a depth-first implementation of the AWS wire protocol. We use the same Smithy models that AWS uses to generate their SDKs. This means when AWS adds a new field to a response or changes a waiter's behavior, [fakecloud](https://github.com/faiscadev/fakecloud)'s conformance suite catches the drift.
 
 ### Real Infrastructure for Stateful Services
 
@@ -99,13 +99,13 @@ Unlike tools that return static JSON, [fakecloud](https://github.com/faiscadev/f
 
 *   **RDS:** Runs real PostgreSQL, MySQL, or MariaDB instances.
 *   **ElastiCache:** Uses real Valkey or Redis instances for high-fidelity caching tests.
-*   **Lambda:** Executes your code in real Docker runtimes across 23 supported environments, ensuring that your local execution environment matches the cloud's CPU and memory constraints (see [Test Lambda locally](/blog/test-lambda-locally/)).
+*   **Lambda:** Executes your code in real Docker runtimes across 23 supported environments, ensuring that your local execution environment matches the cloud's CPU and memory constraints.
 
 ### The "No" List
 
 To maintain engineering velocity, we have explicitly removed the following requirements:
 
-*   **No Account:** You do not need to sign up for a fakecloud account.
+*   **No Account:** You do not need to sign up for a [fakecloud](https://github.com/faiscadev/fakecloud) account.
 *   **No Auth Token:** There is no `FAKECLOUD_AUTH_TOKEN` to manage in your CI secrets.
 *   **No Internet:** The binary contains everything it needs to run. You can develop on a plane, in a secure facility, or during an ISP outage.
 *   **No Paid Tier:** All 33 services and 2,422 operations are available under the AGPL-3.0 license.
@@ -120,6 +120,6 @@ Your application uses the standard `aws-sdk-go-v2` or `boto3`. Your test suite, 
 
 Efficiency is the only metric that matters in a development tool. If your current local AWS setup requires more than 5 seconds to start or demands an internet connection to verify your identity, it is a bottleneck. 
 
-Inspect the implementation, contribute to the service coverage, and run your first sub-second integration test by reviewing the AGPL-3.0 source code [on GitHub](https://github.com/faiscadev/fakecloud). Start by running the installation script and pointing your existing test suite at the local endpoint to see the immediate reduction in latency.
+Inspect the implementation, contribute to the service coverage, and run your first sub-second integration test by reviewing the [AGPL-3.0 source code on GitHub](https://github.com/faiscadev/fakecloud). Start by running the installation script and pointing your existing test suite at the local endpoint to see the immediate reduction in latency.
 
-Visit the official documentation at fakecloud.dev to explore the full list of 2,422 supported operations and implementation guides for all 33 services.
+Visit the official documentation at [fakecloud.dev](https://fakecloud.dev) to explore the full list of 2,422 supported operations and implementation guides for all 33 services.
