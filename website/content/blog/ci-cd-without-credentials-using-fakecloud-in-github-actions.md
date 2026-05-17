@@ -1,7 +1,7 @@
 +++
 title = "CI/CD without Credentials: Using fakecloud in GitHub Actions"
 date = 2026-05-17
-description = "Eliminate AWS IAM credential risks and speed up GitHub Actions by using fakecloud, a high-fidelity local AWS emulator that runs as a 19MB standalone binary without an account or auth tokens."
+description = "Learn how to eliminate AWS IAM credential risks and speed up your CI/CD pipelines by running fakecloud as a standalone binary in GitHub Actions."
 
 [extra]
 author = "Lucas Vieira"
@@ -11,7 +11,7 @@ Managing AWS IAM credentials in CI/CD pipelines is a high-stakes liability. As o
 
 For Site Reliability Engineers (SREs), the "Secret Management Tax" isn't just about security; it's about the friction of provisioning dedicated test accounts, managing service quotas, and handling the latency of remote API calls. 
 
-fakecloud eliminates this friction by providing a high-fidelity, zero-auth AWS environment that runs as a standalone binary directly within your GitHub Actions runner. No AWS account, no IAM tokens, and no internet connection required.
+[fakecloud](https://github.com/faiscadev/fakecloud) eliminates this friction by providing a high-fidelity, zero-auth AWS environment that runs as a standalone binary directly within your GitHub Actions runner. No AWS account, no IAM tokens, and no internet connection required.
 
 ## The Problem: The Credential Bottleneck
 
