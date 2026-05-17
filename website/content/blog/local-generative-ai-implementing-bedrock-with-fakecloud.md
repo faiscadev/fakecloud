@@ -1,7 +1,7 @@
 +++
 title = "Local Generative AI: Implementing Bedrock with fakecloud"
 date = 2026-05-17
-description = "Implement and test 111 AWS Bedrock operations locally with fakecloud. High-fidelity emulation of Agents, Knowledge Bases, and Guardrails with zero cost and deterministic responses."
+description = "Learn how to use fakecloud to implement and test 111 AWS Bedrock operations locally, reducing costs and increasing development velocity with a high-fidelity emulator."
 
 [extra]
 author = "Lucas Vieira"
@@ -9,11 +9,11 @@ author = "Lucas Vieira"
 
 Generative AI development on AWS Bedrock is governed by a single, inescapable metric: the cost of the feedback loop. As of May 2026, frontier models like Claude 4.7 Opus command $15 per million input tokens and $75 per million output tokens. Even the workhorse models, such as Claude 4.6 Sonnet, maintain a price point of $3 per million input tokens. When your integration tests run on every commit, and your local development environment calls live APIs for every prompt tweak, these costs scale linearly with your engineering velocity. 
 
-Testing generative AI on live infrastructure is inefficient. It introduces network latency, consumes production quotas, and generates line items on your AWS bill for code that hasn't even reached a staging environment. [fakecloud](https://github.com/faiscadev/fakecloud) eliminates this friction by providing a high-fidelity, zero-friction local AWS environment. It allows you to implement and test 111 Bedrock operations locally with a ~19MB binary that starts in ~500ms (see our guide on [local Bedrock testing](/blog/bedrock-local-testing/)).
+Testing generative AI on live infrastructure is inefficient. It introduces network latency, consumes production quotas, and generates line items on your AWS bill for code that hasn't even reached a staging environment. [fakecloud](https://github.com/faiscadev/fakecloud) eliminates this friction by providing a high-fidelity, zero-friction local AWS environment. It allows you to [test 111 Bedrock operations locally](/blog/bedrock-local-testing/) with a ~19MB binary that starts in ~500ms.
 
 ## The Cost of Iteration: Why Live Infrastructure Fails Developers
 
-In a modern CI/CD pipeline, a single feature branch might undergo fifty test runs before merging. If those tests involve Bedrock Agents, Knowledge Bases, or complex [Guardrail configurations](/blog/bedrock-guardrails-local/), the overhead is not just financial. 
+In a modern CI/CD pipeline, a single feature branch might undergo fifty test runs before merging. If those tests involve Bedrock Agents, Knowledge Bases, or complex Guardrail configurations, the overhead is not just financial. 
 
 1.  **Latency**: A round-trip to `us-east-1` for a model invocation adds hundreds of milliseconds of overhead. In a suite of 200 integration tests, this turns a sub-minute test run into a coffee break.
 2.  **State Management**: Cleaning up Bedrock Agents or Knowledge Bases in a live account is slow and prone to leaving orphaned resources that continue to accrue costs (like the $345/month minimum for OpenSearch Serverless backends).
@@ -32,7 +32,7 @@ The runtime operations are where your application spends most of its time. fakec
 *   **InvokeModel**: Standard synchronous inference.
 *   **InvokeModelWithResponseStream**: Server-Sent Events (SSE) for streaming responses.
 *   **Converse / ConverseStream**: The unified conversation API for multi-turn dialogues.
-*   **ApplyGuardrail**: Real-time content filtering and [PII detection logic](/blog/bedrock-guardrails-local/).
+*   **ApplyGuardrail**: Real-time content filtering and PII detection logic.
 
 Because fakecloud is built for testing, it doesn't just proxy these calls. It allows you to configure deterministic responses. You can simulate model hallucinations, specific JSON structures, or Guardrail violations to ensure your application's error-handling logic is robust.
 
@@ -56,7 +56,7 @@ To use fakecloud, you do not need to change your application logic. You only cha
 
 Run the standalone binary. It occupies ~19MB of disk space and starts in roughly 500ms.
 
-```sh
+```bash
 # Download and run
 curl -fsSL https://fakecloud.dev/install.sh | bash
 fakecloud
@@ -133,11 +133,11 @@ For Bedrock specifically, this means that when you call `ConverseStream`, the ch
 
 As of 2026, AI applications are moving beyond simple chat interfaces into complex agentic workflows. fakecloud supports these advanced scenarios out of the box.
 
-### Local [Guardrail Testing](/blog/bedrock-guardrails-local/)
+### Local Guardrail Testing
 
-You can create a Guardrail locally to test how your application handles blocked content. fakecloud's implementation of `ApplyGuardrail` actually evaluates the input against the configured sensitive information filters and denied topics.
+You can create a Guardrail locally to test how your application handles blocked content. fakecloud's [Guardrail implementation](/blog/bedrock-guardrails-local/) actually evaluates the input against the configured sensitive information filters and denied topics.
 
-```sh
+```bash
 # Create a guardrail via CLI
 aws --endpoint-url http://localhost:4566 bedrock create-guardrail \
     --name "PII-Filter" \
@@ -182,4 +182,4 @@ To maximize the utility of fakecloud in your organization, follow these three st
 
 fakecloud provides the most comprehensive local emulation of AWS Bedrock available today. By moving your generative AI testing to a local environment, you reduce costs, eliminate network dependencies, and tighten your development loop. 
 
-To begin implementing local Bedrock workflows, view the supported model list and detailed operation mapping in our documentation at [fakecloud.dev/docs/services/bedrock](https://fakecloud.dev/docs/services/bedrock).
+To begin implementing local Bedrock workflows, view the supported model list and detailed operation mapping in our documentation at fakecloud.dev/docs/services/bedrock.
