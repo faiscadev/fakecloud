@@ -1,8 +1,7 @@
 +++
 title = "Benchmarking Local AWS: 500ms Startup vs. Cloud-Dependent Mocks"
 date = 2026-05-17
-description = "A technical benchmark comparing fakecloud's 500ms startup and offline capabilities against proprietary, cloud-dependent AWS emulators."
-
+description = "Explore how fakecloud addresses the 2026 latency wall with a high-fidelity, 500ms startup local AWS environment that requires no internet or auth tokens."
 [extra]
 author = "Lucas Vieira"
 +++
@@ -120,6 +119,6 @@ Your application uses the standard `aws-sdk-go-v2` or `boto3`. Your test suite, 
 
 Efficiency is the only metric that matters in a development tool. If your current local AWS setup requires more than 5 seconds to start or demands an internet connection to verify your identity, it is a bottleneck. 
 
-Inspect the implementation, contribute to the service coverage, and run your first sub-second integration test by reviewing the AGPL-3.0 source code on [GitHub](https://github.com/faiscadev/fakecloud). Start by running the installation script and pointing your existing test suite at the local endpoint to see the immediate reduction in latency.
+Inspect the implementation, contribute to the service coverage, and run your first sub-second integration test by [reviewing the AGPL-3.0 source code on GitHub](https://github.com/faiscadev/fakecloud). Start by running the installation script and pointing your existing test suite at the local endpoint to see the immediate reduction in latency.
 
 Visit the official documentation at fakecloud.dev to explore the full list of 2,422 supported operations and implementation guides for all 33 services.
