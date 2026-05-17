@@ -1,5 +1,5 @@
 {
-  "variants_passed": 85132,
+  "variants_passed": 85172,
   "total_variants": 86327,
   "per_service": {
     "logs": {
@@ -7,7 +7,7 @@
       "total": 3897
     },
     "ecr": {
-      "passed": 1753,
+      "passed": 1793,
       "total": 1793
     },
     "cloudformation": {
