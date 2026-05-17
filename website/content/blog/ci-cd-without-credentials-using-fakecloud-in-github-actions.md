@@ -1,7 +1,7 @@
 +++
 title = "CI/CD without Credentials: Using fakecloud in GitHub Actions"
 date = 2026-05-17
-description = "Learn how to eliminate AWS IAM credential risks and speed up your GitHub Actions pipelines by using fakecloud's 19MB standalone binary for zero-auth AWS integration testing."
+description = "Run high-fidelity AWS integration tests in GitHub Actions without IAM credentials or an AWS account using the fakecloud standalone binary."
 
 [extra]
 author = "Lucas Vieira"
@@ -42,7 +42,7 @@ Integrating fakecloud into a GitHub Actions workflow requires no environment var
 
 ### Bash Snippet: Starting fakecloud
 
-```bash
+```sh
 # Download the binary (Linux x64 example)
 curl -L https://github.com/faiscadev/fakecloud/releases/latest/download/fakecloud-linux-amd64 -o fakecloud
 chmod +x fakecloud
@@ -106,9 +106,9 @@ Unlike simple mocks, fakecloud supports real service triggers. You can upload a 
 
 ## Advanced AI Development: Full Bedrock Support
 
-As of May 2026, AI development has shifted toward autonomous agents. The recent launch of **Amazon Bedrock AgentCore** (May 11, 2026) introduced managed payment capabilities for AI agents. Testing these workflows usually requires significant spend and complex IAM setup.
+As of May 2026, AI development has shifted toward autonomous agents. The recent launch of **Amazon Bedrock AgentCore** (May 11, 2026) introduced managed payment capabilities for AI agents. Testing these workflows usually requires significant spend and complex IAM setup. 
 
-fakecloud supports 111 Bedrock operations, allowing you to test agentic workflows, prompt orchestration, and model invocations locally. You can validate your agent's logic and its interaction with other AWS services without incurring model provider costs or managing sensitive API keys during the development phase.
+fakecloud supports 111 Bedrock operations, allowing you to test agentic workflows, prompt orchestration, and model invocations locally. You can validate your agent's logic and its interaction with other AWS services without incurring model provider costs or managing sensitive API keys during the development phase. Check out our guide on [Bedrock local testing](/blog/bedrock-local-testing/) for more details.
 
 ## The "No" List: Why fakecloud Wins
 
@@ -135,13 +135,13 @@ To understand the utility of fakecloud, consider what you **do not** have to do:
 
 Cloud availability is not guaranteed. On May 1, 2026, a localized power issue in the `ME-CENTRAL-1` (UAE) region caused significant disruptions to S3, DynamoDB, and Lambda. Teams relying on that region for CI/CD integration tests saw their pipelines stall for hours. 
 
-By moving your integration tests to fakecloud, your CI/CD becomes immune to regional cloud outages. Your build remains green as long as your code is correct, regardless of the status of the AWS Health Dashboard.
+By moving your integration tests to [fakecloud](https://github.com/faiscadev/fakecloud), your CI/CD becomes immune to regional cloud outages. Your build remains green as long as your code is correct, regardless of the status of the AWS Health Dashboard.
 
 ## Next Step: Implement in Your Pipeline
 
 Stop managing IAM secrets for your test suites. You can replace your current AWS-dependent test step with the following command to start a local environment immediately:
 
-```bash
+```sh
 curl -fsSL https://fakecloud.dev/install.sh | sh && fakecloud start
 ```
 
