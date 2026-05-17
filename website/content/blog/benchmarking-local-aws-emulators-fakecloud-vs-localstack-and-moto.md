@@ -1,7 +1,7 @@
 +++
 title = "Benchmarking Local AWS Emulators: fakecloud vs LocalStack and Moto"
 date = 2026-05-17
-description = "A performance and feature comparison between fakecloud, LocalStack, and Moto, focusing on startup latency, binary overhead, and API conformance."
+description = "A performance and conformance benchmark of fakecloud, LocalStack, and Moto, focusing on startup latency, binary overhead, and API fidelity."
 
 [extra]
 author = "Lucas Vieira"
@@ -11,7 +11,7 @@ In modern backend engineering, the "inner loop"—the time between writing a lin
 
 As of May 13, 2026, the landscape for local AWS emulation has shifted. The incumbent, LocalStack, transitioned its Community Edition to a proprietary model in March 2026, now requiring an account and authentication token for all users. This change has introduced friction into CI/CD pipelines and local environments that previously relied on zero-config Docker pulls. 
 
-This benchmark evaluates fakecloud against LocalStack and Moto, focusing on the metrics that matter to engineers: startup latency, binary overhead, and API conformance.
+This benchmark evaluates [fakecloud](https://github.com/faiscadev/fakecloud) against LocalStack and Moto, focusing on the metrics that matter to engineers: startup latency, binary overhead, and API conformance.
 
 ## The Dev Loop Hurdle: Why Latency and Friction Matter
 
@@ -34,7 +34,7 @@ The following table compares the resource requirements and startup performance o
 
 ## API Conformance: 2,422 Operations and 59,000 Smithy Tests
 
-an emulator is only as good as its fidelity to the real AWS API. If `PutItem` works but `ConditionExpression` behaves differently than it does in us-east-1, your local tests are lying to you. 
+An emulator is only as good as its fidelity to the real AWS API. If `PutItem` works but `ConditionExpression` behaves differently than it does in us-east-1, your local tests are lying to you. 
 
 fakecloud achieves 100% conformance across its 33 supported services by using AWS's own Smithy models. On every commit, the fakecloud engine is validated against 59,000+ generated test variants. This ensures that field presence, waiter behavior, and error codes match the official AWS specification exactly.
 
@@ -73,7 +73,7 @@ fakecloud requires no account, no token, and no internet connection. You run the
 
 **Using fakecloud with the AWS CLI:**
 
-```bash
+```sh
 # No configuration needed beyond the endpoint-url
 aws --endpoint-url http://localhost:4566 s3 mb s3://my-local-bucket
 ```
@@ -92,7 +92,7 @@ While LocalStack's Ultimate tier supports 4 Bedrock operations backed by Ollama,
 
 ### Bedrock Local Testing Example
 
-```bash
+```sh
 # Invoke a local model with fakecloud
 aws bedrock-runtime invoke-model \
     --endpoint-url http://localhost:4566 \
@@ -111,7 +111,7 @@ fakecloud provides first-party SDKs for TypeScript, Python, Go, PHP, Java, and R
 
 ### Example: Asserting on SES Emails in TypeScript
 
-```typescript
+```ts
 import { FakeCloud } from "fakecloud";
 const fc = new FakeCloud();
 
@@ -145,7 +145,7 @@ The transition of LocalStack to a proprietary, account-based model in early 2026
 
 Moto remains a viable option for simple Python unit tests that don't require a real HTTP server. LocalStack remains the choice for teams that need its massive breadth of 100+ services and are willing to pay the "token tax" and subscription fees. 
 
-However, for the 33 core services that power the vast majority of cloud-native applications, fakecloud provides a faster, smaller, and more conformant alternative. Its ~500ms startup time and 19MB binary footprint make it the ideal choice for both local development and high-speed CI/CD pipelines.
+However, for the 33 core services that power the vast majority of cloud-native applications, [fakecloud](https://github.com/faiscadev/fakecloud) provides a faster, smaller, and more conformant alternative. Its ~500ms startup time and 19MB binary footprint make it the ideal choice for both local development and high-speed CI/CD pipelines.
 
 To verify these benchmarks in your own environment, run the following command to install the fakecloud binary and start your first local AWS session:
 
