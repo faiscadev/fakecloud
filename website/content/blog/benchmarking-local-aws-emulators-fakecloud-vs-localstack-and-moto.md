@@ -1,7 +1,7 @@
 +++
 title = "Benchmarking Local AWS Emulators: fakecloud vs LocalStack and Moto"
 date = 2026-05-17
-description = "A performance and conformance benchmark of fakecloud, LocalStack, and Moto, focusing on startup latency, binary overhead, and API fidelity."
+description = "A detailed comparison of fakecloud, LocalStack, and Moto, focusing on startup latency, binary overhead, and API conformance as of May 2026."
 
 [extra]
 author = "Lucas Vieira"
@@ -11,7 +11,7 @@ In modern backend engineering, the "inner loop"—the time between writing a lin
 
 As of May 13, 2026, the landscape for local AWS emulation has shifted. The incumbent, LocalStack, transitioned its Community Edition to a proprietary model in March 2026, now requiring an account and authentication token for all users. This change has introduced friction into CI/CD pipelines and local environments that previously relied on zero-config Docker pulls. 
 
-This benchmark evaluates [fakecloud](https://github.com/faiscadev/fakecloud) against LocalStack and Moto, focusing on the metrics that matter to engineers: startup latency, binary overhead, and API conformance.
+This benchmark evaluates fakecloud against LocalStack and Moto, focusing on the metrics that matter to engineers: startup latency, binary overhead, and API conformance.
 
 ## The Dev Loop Hurdle: Why Latency and Friction Matter
 
@@ -73,7 +73,7 @@ fakecloud requires no account, no token, and no internet connection. You run the
 
 **Using fakecloud with the AWS CLI:**
 
-```sh
+```bash
 # No configuration needed beyond the endpoint-url
 aws --endpoint-url http://localhost:4566 s3 mb s3://my-local-bucket
 ```
@@ -88,11 +88,11 @@ fakecloud takes a different approach for stateful services. When you request an 
 
 For teams building AI-native applications, local emulation of LLM providers is critical. As of May 13, 2026, fakecloud provides the most comprehensive local Bedrock implementation available. 
 
-While LocalStack's Ultimate tier supports 4 Bedrock operations backed by Ollama, fakecloud supports the full surface of 111 operations. This includes not just `InvokeModel` and `Converse` (with streaming), but also the full control plane: guardrails, custom model jobs, and prompt management. 
+While LocalStack's Ultimate tier supports 4 Bedrock operations backed by Ollama, fakecloud supports the full surface of 111 operations. This includes not just `InvokeModel" and "Converse` (with streaming), but also the full control plane: guardrails, custom model jobs, and prompt management. 
 
 ### Bedrock Local Testing Example
 
-```sh
+```bash
 # Invoke a local model with fakecloud
 aws bedrock-runtime invoke-model \
     --endpoint-url http://localhost:4566 \
@@ -105,7 +105,7 @@ Because fakecloud implements the full API shape, your AI coding agents (like Cur
 
 ## SDK-Client Separation: Asserting on Side Effects
 
-In a standard integration test, you use the AWS SDK to trigger an action (e.g., uploading a file to S3). But how do you verify that an SNS message was sent or an email was dispatched via SES without writing complex polling logic?
+In a standard integration test, you use the AWS SDK to trigger an action (e.g., uploading a file to S3). But how do you verify that an SNS message was sent or an email was dispatched via SES without writing complex polling logic? 
 
 fakecloud provides first-party SDKs for TypeScript, Python, Go, PHP, Java, and Rust. These SDKs allow your tests to "reach into" the emulator and assert on state that isn't visible through the standard AWS API.
 
@@ -149,4 +149,6 @@ However, for the 33 core services that power the vast majority of cloud-native a
 
 To verify these benchmarks in your own environment, run the following command to install the fakecloud binary and start your first local AWS session:
 
-`curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash && fakecloud`
+```sh
+curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash && fakecloud
+```
