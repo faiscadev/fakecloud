@@ -170,7 +170,14 @@ fn random_value_for_shape_def(
             Value::Object(obj)
         }
         ShapeType::List { member_target } => {
-            let len = rng.next_usize(6); // 0..5
+            // Respect the list's `@length` bounds when generating random
+            // values so positive-success variants don't accidentally hit
+            // services that enforce min>=1 list lengths. `range` is
+            // [min, max+1) over `next_usize`.
+            let min = shape.traits.length_min.unwrap_or(0) as usize;
+            let max = shape.traits.length_max.map(|m| m as usize).unwrap_or(5);
+            let span = max.saturating_sub(min).saturating_add(1).min(6);
+            let len = min + rng.next_usize(span);
             let items: Vec<Value> = (0..len)
                 .map(|_| random_value_for_shape(model, member_target, overrides, rng, depth + 1))
                 .collect();

@@ -2460,9 +2460,10 @@ fn put_permission_with_policy_json() {
 }
 
 #[test]
-fn put_permission_accepts_any_action() {
-    // PutPermission's Smithy model has no ValidationException — bad Action
-    // values are accepted at the wire and never reach the policy evaluator.
+fn put_permission_accepts_any_action_string_within_length_bounds() {
+    // PutPermission validates Action length (1..=64) per the Smithy
+    // @length trait but does not gate against an allow-list — any string
+    // that fits is recorded verbatim.
     let svc = make_service();
     let req = make_request(
         "PutPermission",
@@ -2473,7 +2474,38 @@ fn put_permission_accepts_any_action() {
         }),
     );
     svc.put_permission(&req)
-        .expect("unknown action is accepted");
+        .expect("in-bounds action string is accepted");
+}
+
+#[test]
+fn put_permission_rejects_action_over_length_bound() {
+    // Smithy declares Action length 1..=64; anything longer is a
+    // ValidationException at the wire.
+    let svc = make_service();
+    let req = make_request(
+        "PutPermission",
+        json!({
+            "Action": "a".repeat(65),
+            "Principal": "123456789012",
+            "StatementId": "s1"
+        }),
+    );
+    assert!(svc.put_permission(&req).is_err());
+}
+
+#[test]
+fn put_permission_rejects_principal_over_length_bound() {
+    // Smithy declares Principal length 1..=12 (12-digit account or `*`).
+    let svc = make_service();
+    let req = make_request(
+        "PutPermission",
+        json!({
+            "Action": "events:PutEvents",
+            "Principal": "1".repeat(13),
+            "StatementId": "s1"
+        }),
+    );
+    assert!(svc.put_permission(&req).is_err());
 }
 
 #[test]
@@ -2562,28 +2594,27 @@ fn remove_permission_unknown_statement_errors() {
 // ── put_rule invalid schedule expression ──
 
 #[test]
-fn put_rule_accepts_missing_name() {
-    // PutRule has no declared ValidationException in its Smithy model —
-    // missing/invalid input fields are accepted server-side; AWS SDKs
-    // enforce them client-side.
+fn put_rule_rejects_missing_name() {
+    // Smithy marks Name @required (RuleName length 1..=64).
     let svc = make_service();
     let req = make_request("PutRule", json!({}));
-    svc.put_rule(&req).expect("missing Name is accepted");
+    assert!(svc.put_rule(&req).is_err());
 }
 
 #[test]
-fn put_rule_accepts_long_name() {
+fn put_rule_rejects_long_name() {
     let svc = make_service();
     let name = "x".repeat(65);
     let req = make_request("PutRule", json!({"Name": name}));
-    svc.put_rule(&req).expect("long Name is accepted");
+    assert!(svc.put_rule(&req).is_err());
 }
 
 #[test]
-fn put_rule_accepts_unknown_state() {
+fn put_rule_rejects_unknown_state() {
+    // RuleState enum: ENABLED, DISABLED, ENABLED_WITH_ALL_CLOUDTRAIL_MANAGEMENT_EVENTS.
     let svc = make_service();
     let req = make_request("PutRule", json!({"Name": "r1", "State": "BOGUS"}));
-    svc.put_rule(&req).expect("unknown State is accepted");
+    assert!(svc.put_rule(&req).is_err());
 }
 
 // ── create_connection variants ──
@@ -2733,16 +2764,12 @@ fn cancel_replay_not_found() {
 // ── put_events empty ──
 
 #[test]
-fn put_events_empty_entries_returns_zero_failures() {
-    // PutEvents' Smithy model declares only InternalException — the [1, 10]
-    // Entries length constraint is enforced client-side, so an empty batch
-    // is a no-op success on the wire.
+fn put_events_empty_entries_rejected() {
+    // Smithy PutEventsRequestEntryList carries `@length min=1`. AWS rejects
+    // an empty batch with ValidationException; we enforce the same bound.
     let svc = make_service();
     let req = make_request("PutEvents", json!({"Entries": []}));
-    let resp = svc.put_events(&req).expect("empty entries is accepted");
-    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
-    assert_eq!(body["FailedEntryCount"], 0);
-    assert_eq!(body["Entries"].as_array().unwrap().len(), 0);
+    assert!(svc.put_events(&req).is_err());
 }
 
 #[test]
