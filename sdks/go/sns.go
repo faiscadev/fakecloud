@@ -33,3 +33,20 @@ func (c *SNSClient) ConfirmSubscription(ctx context.Context, req *ConfirmSubscri
 	}
 	return &out, nil
 }
+
+// GetCertPEM returns the SNS signing certificate as a PEM string. This
+// is the certificate AWS uses to sign SNS HTTP notifications; tests can
+// pin against it to verify message signatures locally.
+func (c *SNSClient) GetCertPEM(ctx context.Context) (string, error) {
+	return c.fc.doGetText(ctx, "/_fakecloud/sns/cert.pem")
+}
+
+// GetSMSMessages lists every SMS message published through the fake SNS
+// SMS publisher.
+func (c *SNSClient) GetSMSMessages(ctx context.Context) (*SnsSmsResponse, error) {
+	var out SnsSmsResponse
+	if err := c.fc.doGet(ctx, "/_fakecloud/sns/sms", &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}

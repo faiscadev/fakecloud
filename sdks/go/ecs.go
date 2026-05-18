@@ -2,6 +2,7 @@ package fakecloud
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/url"
 )
@@ -100,4 +101,40 @@ func (c *ECSClient) GetTaskMetadata(ctx context.Context, taskArn string) (*EcsTa
 		return nil, err
 	}
 	return &out, nil
+}
+
+// GetTaskCredentials returns the IAM task-role credentials that the ECS
+// agent's metadata server would hand out at the path advertised in
+// AWS_CONTAINER_CREDENTIALS_RELATIVE_URI.
+func (c *ECSClient) GetTaskCredentials(ctx context.Context, taskID string) (*EcsTaskCredentials, error) {
+	var out EcsTaskCredentials
+	path := fmt.Sprintf("/_fakecloud/ecs/creds/%s", taskID)
+	if err := c.fc.doGet(ctx, path, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// GetTaskMetadataV3 returns the raw v3 ECS task metadata JSON
+// (ECS_CONTAINER_METADATA_URI). The shape is intentionally
+// open-ended; callers can decode further as needed.
+func (c *ECSClient) GetTaskMetadataV3(ctx context.Context, taskID string) (json.RawMessage, error) {
+	var out json.RawMessage
+	path := fmt.Sprintf("/_fakecloud/ecs/v3/%s", taskID)
+	if err := c.fc.doGet(ctx, path, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// GetTaskMetadataV4 returns the raw v4 ECS task metadata JSON
+// (ECS_CONTAINER_METADATA_URI_V4) as the agent serves it to a running
+// container.
+func (c *ECSClient) GetTaskMetadataV4(ctx context.Context, taskID string) (json.RawMessage, error) {
+	var out json.RawMessage
+	path := fmt.Sprintf("/_fakecloud/ecs/v4/%s", taskID)
+	if err := c.fc.doGet(ctx, path, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
 }

@@ -168,6 +168,10 @@ impl FakeCloud {
         OrganizationsClient { fc: self }
     }
 
+    pub fn route53(&self) -> Route53Client<'_> {
+        Route53Client { fc: self }
+    }
+
     pub fn ssm(&self) -> SsmClient<'_> {
         SsmClient { fc: self }
     }
@@ -213,6 +217,58 @@ impl RdsClient<'_> {
             .fc
             .client
             .get(format!("{}/_fakecloud/rds/instances", self.fc.base_url))
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
+
+    /// Bridge endpoint used by the PostgreSQL `aws_lambda` extension
+    /// running inside an RDS container to invoke a Lambda function. A
+    /// `status_code` of `502` is returned (with the response body still
+    /// JSON-decodable) when the target Lambda is unavailable.
+    pub async fn lambda_invoke(
+        &self,
+        req: &RdsLambdaInvokeRequest,
+    ) -> Result<RdsLambdaInvokeResponse, Error> {
+        let resp = self
+            .fc
+            .client
+            .post(format!("{}/_fakecloud/rds/lambda-invoke", self.fc.base_url))
+            .json(req)
+            .send()
+            .await?;
+        let status = resp.status().as_u16();
+        // 502 is a valid bridge response (SERVICE_UNAVAILABLE) — body is
+        // still a well-formed RdsLambdaInvokeResponse, so parse it
+        // rather than treating the call as a transport error.
+        if status == 502 || resp.status().is_success() {
+            return Ok(resp.json::<RdsLambdaInvokeResponse>().await?);
+        }
+        let body = resp.text().await.unwrap_or_default();
+        Err(Error::Api { status, body })
+    }
+
+    /// Bridge endpoint for the PostgreSQL `aws_s3` extension's import
+    /// path. Mirrors `aws_s3.table_import_from_s3` at the transport layer.
+    pub async fn s3_import(&self, req: &RdsS3ImportRequest) -> Result<RdsS3ImportResponse, Error> {
+        let resp = self
+            .fc
+            .client
+            .post(format!("{}/_fakecloud/rds/s3-import", self.fc.base_url))
+            .json(req)
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
+
+    /// Bridge endpoint for the PostgreSQL `aws_s3` extension's export
+    /// path. Mirrors `aws_s3.query_export_to_s3` at the transport layer.
+    pub async fn s3_export(&self, req: &RdsS3ExportRequest) -> Result<RdsS3ExportResponse, Error> {
+        let resp = self
+            .fc
+            .client
+            .post(format!("{}/_fakecloud/rds/s3-export", self.fc.base_url))
+            .json(req)
             .send()
             .await?;
         FakeCloud::parse(resp).await
@@ -467,6 +523,36 @@ impl SnsClient<'_> {
                 self.fc.base_url
             ))
             .json(req)
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
+
+    /// Fetch the PEM-encoded SNS signing certificate used to sign
+    /// outbound notification payloads. Served as
+    /// `application/x-pem-file`; returned as the raw PEM string so
+    /// callers can hand it straight to an X.509 parser.
+    pub async fn cert_pem(&self) -> Result<String, Error> {
+        let resp = self
+            .fc
+            .client
+            .get(format!("{}/_fakecloud/sns/cert.pem", self.fc.base_url))
+            .send()
+            .await?;
+        let status = resp.status().as_u16();
+        if !resp.status().is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(Error::Api { status, body });
+        }
+        Ok(resp.text().await?)
+    }
+
+    /// List recorded SMS publications (phone number + message body).
+    pub async fn sms(&self) -> Result<SnsSmsResponse, Error> {
+        let resp = self
+            .fc
+            .client
+            .get(format!("{}/_fakecloud/sns/sms", self.fc.base_url))
             .send()
             .await?;
         FakeCloud::parse(resp).await
@@ -846,6 +932,61 @@ impl ApiGatewayV2Client<'_> {
             .await?;
         FakeCloud::parse(resp).await
     }
+
+    /// List currently-active WebSocket connections across all WebSocket
+    /// APIs the server has seen.
+    pub async fn connections(&self) -> Result<ApiGatewayV2ConnectionsResponse, Error> {
+        let resp = self
+            .fc
+            .client
+            .get(format!(
+                "{}/_fakecloud/apigatewayv2/connections",
+                self.fc.base_url
+            ))
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
+
+    /// Fetch the mTLS configuration recorded for a custom domain name
+    /// (truststore bundle, version, validity). Pass-through JSON — the
+    /// shape mirrors what the server emits unmodified.
+    pub async fn mtls_info(&self, name: &str) -> Result<serde_json::Value, Error> {
+        let resp = self
+            .fc
+            .client
+            .get(format!(
+                "{}/_fakecloud/apigatewayv2/domain-names/{}/mtls-info",
+                self.fc.base_url, name
+            ))
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
+
+    /// Build the WebSocket upgrade URL for `api_id`. The SDK doesn't
+    /// open the socket itself — pair this with `tokio-tungstenite` or
+    /// any other WebSocket client in test code.
+    pub fn ws_url(&self, api_id: &str, stage: Option<&str>) -> String {
+        let base = self
+            .fc
+            .base_url
+            .replacen("https://", "wss://", 1)
+            .replacen("http://", "ws://", 1);
+        // API Gateway v2 API IDs are 10-char alphanumeric so encoding is
+        // a no-op, but defend against future changes by passing through
+        // reqwest's URL builder for the query parameter.
+        let url = reqwest::Url::parse(&format!("{}/_fakecloud/apigatewayv2/ws/{}", base, api_id))
+            .expect("base url + api id form a valid URL");
+        match stage {
+            Some(s) => {
+                let mut u = url;
+                u.query_pairs_mut().append_pair("stage", s);
+                u.to_string()
+            }
+            None => url.to_string(),
+        }
+    }
 }
 
 // ── Step Functions ──────────────────────────────────────────────────
@@ -1190,6 +1331,108 @@ impl EcsClient<'_> {
             .fc
             .client
             .get(format!("{}/_fakecloud/ecs/events", self.fc.base_url))
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
+
+    /// Fetch the IAM task-role credentials that fakecloud hands out via
+    /// `AWS_CONTAINER_CREDENTIALS_RELATIVE_URI` to the container. Fields
+    /// use AWS's native PascalCase (`AccessKeyId`, `SecretAccessKey`,
+    /// `Token`, `Expiration`, `RoleArn`).
+    pub async fn task_credentials(
+        &self,
+        task_id: &str,
+    ) -> Result<EcsTaskCredentialsResponse, Error> {
+        let resp = self
+            .fc
+            .client
+            .get(format!(
+                "{}/_fakecloud/ecs/creds/{}",
+                self.fc.base_url, task_id
+            ))
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
+
+    /// Fetch the v3 ECS task metadata document for `task_id`. Returned
+    /// as raw JSON (`Cluster`, `TaskARN`, `Family`, `Revision`,
+    /// `DesiredStatus`, `KnownStatus`, `Containers`, `Limits`,
+    /// `Networks`, ...) so callers can pick the fields they need
+    /// without dragging in the entire metadata schema.
+    pub async fn task_metadata_v3(&self, task_id: &str) -> Result<serde_json::Value, Error> {
+        let resp = self
+            .fc
+            .client
+            .get(format!(
+                "{}/_fakecloud/ecs/v3/{}",
+                self.fc.base_url, task_id
+            ))
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
+
+    /// Fetch the v4 ECS task metadata document for `task_id`. Same
+    /// pass-through shape as the v3 endpoint; v4 adds extra container
+    /// runtime fields the server emits as-is.
+    pub async fn task_metadata_v4(&self, task_id: &str) -> Result<serde_json::Value, Error> {
+        let resp = self
+            .fc
+            .client
+            .get(format!(
+                "{}/_fakecloud/ecs/v4/{}",
+                self.fc.base_url, task_id
+            ))
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
+}
+
+// ── Route 53 ────────────────────────────────────────────────────────
+
+pub struct Route53Client<'a> {
+    fc: &'a FakeCloud,
+}
+
+impl Route53Client<'_> {
+    /// Fetch the deterministic DNSSEC chain-of-trust material for a
+    /// hosted zone. Returns `Err(Error::Api { status: 404, .. })` when
+    /// the zone has no ACTIVE KSK.
+    pub async fn dnssec_material(
+        &self,
+        zone_id: &str,
+    ) -> Result<Route53DnssecMaterialResponse, Error> {
+        let resp = self
+            .fc
+            .client
+            .get(format!(
+                "{}/_fakecloud/route53/zones/{}/dnssec",
+                self.fc.base_url, zone_id
+            ))
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
+
+    /// Sign an RRset under the zone's first ACTIVE KSK and return the
+    /// raw RRSIG fields so tests can verify the signature against the
+    /// zone's DNSKEY material.
+    pub async fn dnssec_sign(
+        &self,
+        zone_id: &str,
+        req: &Route53DnssecSignRequest,
+    ) -> Result<Route53DnssecSignResponse, Error> {
+        let resp = self
+            .fc
+            .client
+            .post(format!(
+                "{}/_fakecloud/route53/zones/{}/dnssec/sign",
+                self.fc.base_url, zone_id
+            ))
+            .json(req)
             .send()
             .await?;
         FakeCloud::parse(resp).await

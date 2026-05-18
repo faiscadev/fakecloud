@@ -34,6 +34,19 @@ final class HttpTransport
     }
 
     /**
+     * GET a path and return the raw response body as a string. Used for
+     * endpoints that emit non-JSON content (e.g. SNS signing PEM).
+     */
+    public function getText(string $path): string
+    {
+        $response = $this->execute('GET', $path);
+        if ($response['status'] < 200 || $response['status'] >= 300) {
+            throw new FakeCloudError($response['status'], $response['body']);
+        }
+        return $response['body'];
+    }
+
+    /**
      * GET a path that returns a raw (non-JSON) body. Used for download
      * endpoints that emit binary content like Lambda function code zips
      * and Lambda layer content. Returns the raw bytes; throws

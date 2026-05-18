@@ -1287,6 +1287,115 @@ export interface AthenaNamedQueriesResponse {
   queries: AthenaNamedQuery[];
 }
 
+// ── API Gateway v2 WebSocket connections ───────────────────────────
+
+export interface ApiGatewayV2Connection {
+  connectionId: string;
+  apiId: string;
+  stage: string;
+  connectedAt: string;
+  lastActiveAt: string;
+  sourceIp: string;
+}
+
+export interface ApiGatewayV2ConnectionsResponse {
+  connections: ApiGatewayV2Connection[];
+}
+
+// ── RDS aws_lambda / aws_s3 extension bridge ───────────────────────
+
+export interface RdsLambdaInvokeRequest {
+  function_name: string;
+  payload?: unknown;
+  invocation_type?: string;
+  region?: string;
+}
+
+export interface RdsLambdaInvokeResponse {
+  status_code: number;
+  payload?: unknown;
+  executed_version?: string;
+  log_result?: string;
+}
+
+export interface RdsS3ImportRequest {
+  bucket: string;
+  key: string;
+  region?: string;
+}
+
+export interface RdsS3ImportResponse {
+  bucket: string;
+  key: string;
+  body_b64: string;
+  bytes_processed: number;
+}
+
+export interface RdsS3ExportRequest {
+  bucket: string;
+  key: string;
+  region?: string;
+  body_b64: string;
+}
+
+export interface RdsS3ExportResponse {
+  bucket: string;
+  key: string;
+  bytes_uploaded: number;
+}
+
+// ── Route 53 DNSSEC introspection ──────────────────────────────────
+
+export interface Route53DnssecMaterialResponse {
+  hostedZoneId: string;
+  keySigningKeyName: string;
+  algorithm: number;
+  flags: number;
+  keyTag: number;
+  dnskeyPublicKeyB64: string;
+  dsDigestSha256Hex: string;
+}
+
+export interface Route53DnssecSignRequest {
+  name: string;
+  type: string;
+  ttl: number;
+  rdatas: string[];
+}
+
+export interface Route53DnssecSignResponse {
+  signatureB64: string;
+  algorithm: number;
+  keyTag: number;
+  signerName: string;
+  inception: number;
+  expiration: number;
+  labels: number;
+  originalTtl: number;
+  type: string;
+}
+
+// ── SNS SMS introspection ──────────────────────────────────────────
+
+export interface SnsSmsMessage {
+  phoneNumber: string;
+  message: string;
+}
+
+export interface SnsSmsResponse {
+  messages: SnsSmsMessage[];
+}
+
+// ── ECS task credentials & metadata pass-through ───────────────────
+
+export interface EcsTaskCredentials {
+  AccessKeyId: string;
+  SecretAccessKey: string;
+  Token: string;
+  Expiration: string;
+  RoleArn: string;
+}
+
 // ── SSM ────────────────────────────────────────────────────────────
 
 /** Body for `POST /_fakecloud/ssm/commands/{commandId}/status`. */
