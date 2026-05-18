@@ -1,9 +1,9 @@
 {
-  "variants_passed": 86098,
+  "variants_passed": 86060,
   "total_variants": 86327,
   "per_service": {
     "logs": {
-      "passed": 3897,
+      "passed": 3827,
       "total": 3897
     },
     "ecr": {
@@ -139,7 +139,7 @@
       "total": 2227
     },
     "route53": {
-      "passed": 2366,
+      "passed": 2398,
       "total": 2398
     },
     "lambda": {
