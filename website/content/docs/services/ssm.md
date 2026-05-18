@@ -90,7 +90,7 @@ assert that the subsequent `PutParameter` errors rather than persisting.
 
 ## Limitations
 
-- `StartSession` returns the Smithy-declared `TargetNotConnected` (and `ResumeSession` returns `DoesNotExistException`) with a documentation pointer rather than opening a real websocket. The Session Manager data plane is not implemented; tests that depend on live port-forwarding should use the `POST /_fakecloud/ssm/sessions/{id}/inject` admin endpoint to simulate a websocket session.
+- `StartSession` returns the Smithy-declared `TargetNotConnected` (and `ResumeSession` returns `DoesNotExistException`) with a documentation pointer rather than opening a real websocket. The Session Manager data plane is not implemented; tests that depend on live port-forwarding should use the `POST /_fakecloud/ssm/sessions/inject` admin endpoint to simulate a websocket session.
 
 ## Source
 
