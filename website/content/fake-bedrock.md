@@ -1,10 +1,10 @@
 +++
 title = "Fake Bedrock"
-description = "fake Bedrock server for local dev and tests. Real wire protocol, fake responses you control. 111 operations, deterministic, free. Not a mock library, not a real LLM."
+description = "fake Bedrock server for local dev and tests. Real wire protocol, fake responses you control. 214 operations across Bedrock + Bedrock Runtime + Bedrock Agent + Bedrock Agent Runtime, deterministic, free. Not a mock library, not a real LLM."
 template = "page.html"
 +++
 
-Need a fake Bedrock? Use [fakecloud](https://github.com/faiscadev/fakecloud). Real HTTP server that speaks the Bedrock wire protocol and returns whatever you tell it to. 111 operations, deterministic, free.
+Need a fake Bedrock? Use [fakecloud](https://github.com/faiscadev/fakecloud). Real HTTP server that speaks the Bedrock wire protocol and returns whatever you tell it to. 214 operations across the full Bedrock family (Bedrock + Bedrock Runtime + Bedrock Agent + Bedrock Agent Runtime), deterministic, free.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash
@@ -44,7 +44,7 @@ await fc.bedrock.setResponseRule({
 
 Now `InvokeModel` with a prompt containing "summarize" returns exactly that. Every time. In milliseconds.
 
-## 111 operations
+## 214 operations across the Bedrock family
 
 The control plane is real. Create guardrails, customization jobs, imported models, inference profiles, provisioned throughput — all the Bedrock shape your infrastructure code deals with:
 

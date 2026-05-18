@@ -1,6 +1,6 @@
 +++
 title = "Bedrock emulator"
-description = "Bedrock emulator for tests: 111 operations, real wire protocol, fault injection, configurable responses. Deterministic, offline, free. Not a mock library, not a real LLM."
+description = "Bedrock emulator for tests: 214 operations across Bedrock, Bedrock Runtime, Bedrock Agent, and Bedrock Agent Runtime. Real wire protocol, fault injection, configurable responses. Deterministic, offline, free. Not a mock library, not a real LLM."
 template = "page.html"
 +++
 
@@ -25,7 +25,7 @@ Tests want the third one. You're testing your code, not whether the model happen
 
 ## What fakecloud Bedrock does
 
-**111 operations across the full Bedrock surface**, not just the runtime:
+**214 operations across the full Bedrock family** (Bedrock + Bedrock Runtime + Bedrock Agent + Bedrock Agent Runtime), not just the runtime:
 
 - **Runtime**: `InvokeModel`, `InvokeModelWithResponseStream`, `Converse`, `ConverseStream` — EventStream binary encoded, same as real AWS.
 - **Guardrails**: full CRUD + versioning + apply + content evaluation. Test your guardrail config locally before deploying.
@@ -35,6 +35,8 @@ Tests want the third one. You're testing your code, not whether the model happen
 - **Prompt management**: prompts + prompt routers with versioning.
 - **Foundation model agreements**: the `PutUseCaseForModelAccess` / `CreateFoundationModelAgreement` access approval flow.
 - **Automated reasoning policies**, **evaluation jobs**, **marketplace**, **resource policies**, **logging configuration**.
+- **Agents**: full Agents control plane — agents, aliases/versions, action groups, knowledge bases, data sources, ingestion jobs, prompts, flows. See [Bedrock Agent](/docs/services/bedrock-agent/).
+- **Agent invocation**: `InvokeAgent`, `InvokeInlineAgent`, `InvokeFlow`, `Retrieve`, `RetrieveAndGenerate`, sessions, memory, reranking. Streaming with real eventstream framing. See [Bedrock Agent Runtime](/docs/services/bedrock-agent-runtime/).
 
 What it does NOT do: actual inference. Response content is whatever you configured. That's the point — deterministic tests.
 

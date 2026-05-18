@@ -1,10 +1,10 @@
 +++
 title = "LocalStack Bedrock alternative"
-description = "Free, open-source alternative to LocalStack Ultimate-tier Bedrock. 111 operations, full control plane, deterministic responses for tests. Not backed by Ollama. AGPL-3.0."
+description = "Free, open-source alternative to LocalStack Ultimate-tier Bedrock. 214 operations across Bedrock + Bedrock Runtime + Bedrock Agent + Bedrock Agent Runtime, full control plane, deterministic responses for tests. Not backed by Ollama. AGPL-3.0."
 template = "page.html"
 +++
 
-Looking for a free, open-source alternative to LocalStack's Ultimate-tier Bedrock? Use [fakecloud](https://github.com/faiscadev/fakecloud). 111 Bedrock operations, full control plane, deterministic responses, free.
+Looking for a free, open-source alternative to LocalStack's Ultimate-tier Bedrock? Use [fakecloud](https://github.com/faiscadev/fakecloud). 214 Bedrock-family operations (Bedrock + Bedrock Runtime + Bedrock Agent + Bedrock Agent Runtime), full control plane, deterministic responses, free.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash
@@ -20,7 +20,9 @@ As of April 2026, per [docs.localstack.cloud/aws/services/bedrock](https://docs.
 | | LocalStack Bedrock | fakecloud Bedrock |
 |---|---|---|
 | **Tier** | Ultimate (top paid plan) | Free, AGPL-3.0 |
-| **Operations** | 4: `InvokeModel`, `Converse`, `ListFoundationModels`, `CreateModelInvocationJob` | 111 across runtime + full control plane |
+| **Operations** | 4: `InvokeModel`, `Converse`, `ListFoundationModels`, `CreateModelInvocationJob` | 214 across Bedrock + Bedrock Runtime + Bedrock Agent + Bedrock Agent Runtime |
+| **Agents (Bedrock Agent)** | Not supported | Full control plane: agents, aliases, action groups, knowledge bases, flows, prompts |
+| **Agent invocation (Bedrock Agent Runtime)** | Not supported | `InvokeAgent`, `InvokeFlow`, `Retrieve`, `RetrieveAndGenerate` with real eventstream framing |
 | **Backend** | Ollama (real local LLM) | Configurable responses per prompt rule |
 | **Determinism** | No — real inference, different output each run | Yes — returns exactly what you configured |
 | **Speed** | 1-30s per call (Ollama CPU inference) | Milliseconds |
