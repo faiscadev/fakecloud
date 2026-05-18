@@ -2796,6 +2796,41 @@ fn list_origination_numbers_seeds_default() {
 }
 
 #[test]
+fn list_origination_numbers_rejects_max_results_below_min() {
+    let (svc, _) = make_sns();
+    let req = sns_request("ListOriginationNumbers", vec![("MaxResults", "0")]);
+    let err = match svc.list_origination_numbers(&req) {
+        Err(e) => e,
+        Ok(_) => panic!("expected MaxResults validation error"),
+    };
+    assert_eq!(err.code(), "InvalidParameter");
+}
+
+#[test]
+fn list_origination_numbers_rejects_max_results_above_max() {
+    let (svc, _) = make_sns();
+    // Smithy @range max for ListOriginationNumbers is 30.
+    let req = sns_request("ListOriginationNumbers", vec![("MaxResults", "31")]);
+    let err = match svc.list_origination_numbers(&req) {
+        Err(e) => e,
+        Ok(_) => panic!("expected MaxResults validation error"),
+    };
+    assert_eq!(err.code(), "InvalidParameter");
+}
+
+#[test]
+fn list_sms_sandbox_phone_numbers_rejects_max_results_above_max() {
+    let (svc, _) = make_sns();
+    // Smithy @range max for MaxItems is 100.
+    let req = sns_request("ListSMSSandboxPhoneNumbers", vec![("MaxResults", "101")]);
+    let err = match svc.list_sms_sandbox_phone_numbers(&req) {
+        Err(e) => e,
+        Ok(_) => panic!("expected MaxResults validation error"),
+    };
+    assert_eq!(err.code(), "InvalidParameter");
+}
+
+#[test]
 fn put_data_protection_policy_requires_topic() {
     let (svc, _) = make_sns();
     let req = sns_request(

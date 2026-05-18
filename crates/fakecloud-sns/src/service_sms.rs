@@ -305,6 +305,7 @@ impl SnsService {
         &self,
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
+        validate_max_results(req, 1, 100)?;
         let _accts = self.state.read();
         let _empty = crate::state::SnsState::new(&req.account_id, &req.region, "");
         let state = _accts.get(&req.account_id).unwrap_or(&_empty);
@@ -366,6 +367,7 @@ impl SnsService {
         &self,
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
+        validate_max_results(req, 1, 30)?;
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
         state.seed_default_origination_numbers();
