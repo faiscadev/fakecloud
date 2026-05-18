@@ -12,7 +12,7 @@
   "applicationCategory": "DeveloperApplication",
   "applicationSubCategory": "CloudTestingTool",
   "operatingSystem": "Linux, macOS, Windows",
-  "description": "Free, open-source local AWS cloud emulator. 33 services, 2,422 operations, 100% conformance per implemented service. Single binary, no account, no auth token.",
+  "description": "Free, open-source local AWS cloud emulator. 39 services, 2,585 operations, 86,327/86,327 Smithy variants pass — true 100% conformance. Single binary, no account, no auth token.",
   "url": "https://fakecloud.dev",
   "downloadUrl": "https://github.com/faiscadev/fakecloud/releases",
   "codeRepository": "https://github.com/faiscadev/fakecloud",
@@ -56,7 +56,7 @@
   <div class="container">
     <h1>fake<span>cloud</span></h1>
     <p class="tagline">Local AWS cloud emulator for integration tests. Run your app with normal AWS clients, stay fully local, and use fakecloud SDKs when your tests need deeper visibility.</p>
-    <p class="hero-proof">33 services. 2,422 operations. 100% conformance across implemented APIs.</p>
+    <p class="hero-proof">39 services. 2,585 operations. 86,327/86,327 Smithy variants pass — true 100% conformance.</p>
     <div class="btn-group">
       <a href="#quickstart" class="btn">Get Started</a>
       <a href="#compare" class="btn btn-outline">Why fakecloud</a>
@@ -95,13 +95,13 @@
       </div>
       <div class="feature">
         <div class="label">Coverage</div>
-        <h3>33 AWS services</h3>
-        <p>S3, SQS, SNS, EventBridge, EventBridge Scheduler, IAM, STS, SSM, DynamoDB, Lambda, Secrets Manager, CloudWatch Logs, KMS, CloudFormation, SES, Cognito User Pools, Kinesis, RDS, ElastiCache, ECR, ECS, Elastic Load Balancing v2, Step Functions, API Gateway v1 (REST), API Gateway v2 (HTTP), Bedrock, Bedrock Runtime, CloudFront, Route 53, ACM, Application Auto Scaling, WAF v2, and Athena.</p>
+        <h3>39 AWS services</h3>
+        <p>S3, SQS, SNS, EventBridge, EventBridge Scheduler, Lambda, DynamoDB, IAM, STS, SSM, Secrets Manager, CloudWatch Logs, CloudWatch (Metrics &amp; Alarms), KMS, CloudFormation, SES, Cognito User Pools, Cognito Identity, Kinesis, Firehose, RDS, ElastiCache, Step Functions, API Gateway v1 (REST), API Gateway v2 (HTTP), Bedrock, Bedrock Agent, Bedrock Agent Runtime, Bedrock Runtime, ECR, ECS, Elastic Load Balancing v2, CloudFront, Route 53, WAF v2, Application Auto Scaling, Athena, ACM, and Glue.</p>
       </div>
       <div class="feature">
         <div class="label">Tested</div>
         <h3>Conformance tested</h3>
-        <p>100% conformance across all 2,422 implemented API operations, backed by 59,000+ Smithy-model-generated test variants plus end-to-end tests against the official AWS SDKs.</p>
+        <p>True 100% conformance across all 2,585 implemented API operations: 86,327/86,327 Smithy-model-generated test variants pass on every commit, backed by end-to-end tests against the official AWS SDKs.</p>
       </div>
       <div class="feature">
         <div class="label">Real behavior</div>
@@ -190,7 +190,7 @@
           <tr><td>Startup time</td><td class="check">~500ms</td><td class="cross">~3s</td></tr>
           <tr><td>Idle memory</td><td class="check">~10 MiB</td><td class="cross">~150 MiB</td></tr>
           <tr><td>Install size</td><td class="check">~19 MB binary</td><td class="cross">~1 GB Docker image</td></tr>
-          <tr><td>AWS services</td><td>23</td><td>30+</td></tr>
+          <tr><td>AWS services</td><td class="check">39 at true 100% conformance</td><td>30+ (paid-only past Community)</td></tr>
           <tr><td>Test assertion SDKs</td><td class="check">TypeScript, Python, Go, PHP, Java, Rust</td><td>Python, Java</td></tr>
           <tr><td>Cognito User Pools</td><td class="check">122 operations</td><td class="cross">Paid only</td></tr>
           <tr><td>SES v2</td><td class="check">110 operations</td><td class="cross">Paid only</td></tr>
@@ -215,9 +215,10 @@
       <div class="service"><div class="name">SNS</div><div class="proto">Query protocol &middot; XML</div></div>
       <div class="service"><div class="name">EventBridge</div><div class="proto">JSON protocol</div></div>
       <div class="service"><div class="name">EventBridge Scheduler</div><div class="proto">JSON protocol</div></div>
-      <div class="service"><div class="name">SSM Parameter Store</div><div class="proto">JSON protocol</div></div>
+      <div class="service"><div class="name">SSM</div><div class="proto">JSON protocol</div></div>
       <div class="service"><div class="name">DynamoDB</div><div class="proto">JSON protocol</div></div>
-      <div class="service"><div class="name">IAM / STS</div><div class="proto">Query protocol</div></div>
+      <div class="service"><div class="name">IAM</div><div class="proto">Query protocol</div></div>
+      <div class="service"><div class="name">STS</div><div class="proto">Query protocol</div></div>
       <div class="service"><div class="name">Lambda</div><div class="proto">REST protocol &middot; JSON</div></div>
       <div class="service"><div class="name">Secrets Manager</div><div class="proto">JSON protocol</div></div>
       <div class="service"><div class="name">CloudWatch Logs</div><div class="proto">JSON protocol</div></div>
@@ -233,6 +234,8 @@
       <div class="service"><div class="name">API Gateway v2</div><div class="proto">REST protocol &middot; JSON</div></div>
       <div class="service"><div class="name">Bedrock</div><div class="proto">REST protocol &middot; JSON</div></div>
       <div class="service"><div class="name">Bedrock Runtime</div><div class="proto">REST protocol &middot; JSON</div></div>
+      <div class="service"><div class="name">Bedrock Agent</div><div class="proto">REST protocol &middot; JSON</div></div>
+      <div class="service"><div class="name">Bedrock Agent Runtime</div><div class="proto">REST protocol &middot; JSON</div></div>
       <div class="service"><div class="name">ECR</div><div class="proto">REST protocol &middot; JSON</div></div>
       <div class="service"><div class="name">ECS</div><div class="proto">JSON protocol</div></div>
       <div class="service"><div class="name">Elastic Load Balancing v2</div><div class="proto">Query protocol</div></div>
@@ -242,6 +245,10 @@
       <div class="service"><div class="name">Application Auto Scaling</div><div class="proto">JSON protocol</div></div>
       <div class="service"><div class="name">WAF v2</div><div class="proto">JSON protocol</div></div>
       <div class="service"><div class="name">Athena</div><div class="proto">JSON protocol</div></div>
+      <div class="service"><div class="name">Glue</div><div class="proto">JSON protocol</div></div>
+      <div class="service"><div class="name">Cognito Identity</div><div class="proto">JSON protocol</div></div>
+      <div class="service"><div class="name">CloudWatch (Metrics &amp; Alarms)</div><div class="proto">Query protocol</div></div>
+      <div class="service"><div class="name">Firehose</div><div class="proto">JSON protocol</div></div>
     </div>
   </div>
 </section>

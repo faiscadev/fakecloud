@@ -4,7 +4,7 @@ description = "Service-by-service behavior parity: what is real, what is synthes
 weight = 1
 +++
 
-fakecloud implements **37 AWS services** with **2,482 operations**. Every operation passes [Smithy conformance](https://github.com/faiscadev/fakecloud/blob/main/conformance-baseline.json) validation, meaning request/response shapes, field names, and error codes match AWS exactly. Behavior parity varies by service — some run real infrastructure (Postgres, Redis, Docker containers), some run a real control plane but return synthesized data for complex queries, and a few have control-plane-only coverage with no data-plane enforcement.
+fakecloud implements **39 AWS services** with **2,585 operations**. **86,327/86,327 generated Smithy conformance variants pass** on every commit — true 100% across every implemented service, no flake margin and no skipped services. Conformance checks request/response shapes, field names, and error codes against [AWS's own Smithy models](https://github.com/faiscadev/fakecloud/blob/main/conformance-baseline.json). Behavior parity varies by service — some run real infrastructure (Postgres, Redis, Docker containers), some run a real control plane but return synthesized data for complex queries, and a few have control-plane-only coverage with no data-plane enforcement.
 
 | Service | Ops | Protocol | Control plane | Data plane | Known limitations |
 | --- | --- | --- | --- | --- | --- |
@@ -33,6 +33,8 @@ fakecloud implements **37 AWS services** with **2,482 operations**. Every operat
 | [API Gateway v2](@/docs/services/apigatewayv2.md) | 103 | JSON 1.1 | Full | Full | WebSocket support (`$connect`/`$disconnect`/`$default`), JWT and Lambda authorizer enforcement, AWS service integrations, access log delivery to CloudWatch Logs, stage variables, and custom domain routing are all implemented in the HTTP data plane. |
 | [Bedrock](@/docs/services/bedrock.md) | 101 | JSON 1.1 | Full | Partial | Control plane (guardrails, custom models, jobs, inference profiles) is fully implemented. Runtime (`InvokeModel`, `Converse`, streaming) runs in echo / configurable-response mode with real token counting and fault injection, not real model inference. |
 | [Bedrock Runtime](@/docs/services/bedrock.md) | 10 | JSON 1.1 | Full | Partial | Same as Bedrock runtime notes above. |
+| [Bedrock Agent](@/docs/services/bedrock-agent.md) | 72 | JSON 1.1 | Full | Partial | Full Agents control plane: agents, agent versions/aliases, action groups, knowledge bases, data sources, ingestion jobs, prompt management, flows, and flow aliases/versions. Knowledge-base ingestion and retrieval are shape-correct synthetic — the embedding/foundation model itself is out of scope, see the "never implement" list below. |
+| [Bedrock Agent Runtime](@/docs/services/bedrock-agent-runtime.md) | 31 | JSON 1.1 | Full | Partial | `InvokeAgent`, `Retrieve`, `RetrieveAndGenerate`, `InvokeFlow`, and the streaming variants are wired end-to-end with shape-correct synthetic chunks. No real foundation-model inference — see Bedrock runtime caveat above. |
 | [ECR](@/docs/services/ecr.md) | 58 | JSON 1.1 | Full | Full | OCI v2 push/pull is real. Lifecycle policy evaluation, image scanning, pull-through cache, registry templates, and cosign signature verification are all implemented. |
 | [ECS](@/docs/services/ecs.md) | 60 | JSON 1.1 (Query) | Full | Full | Real Fargate-style task execution via Docker, services with rolling deployments, task sets, container instances, capacity providers, and ECS Exec. Multi-container tasks, volume mounts, health checks, and `dependsOn` ordering are all implemented. |
 | [ELBv2](@/docs/services/elbv2.md) | 51 | JSON 1.1 (Query) | Full | Partial | Control plane (ALB/NLB/GWLB CRUD, target groups, listeners, rules, mTLS trust stores) is fully implemented. An in-process HTTP data plane for ALBs handles rule matching, forwarding, fixed-response, redirect, and sticky sessions. WAFv2 inspection is wired into the ALB data plane. NLB and GWLB data planes are not implemented. |
@@ -54,7 +56,7 @@ fakecloud implements **37 AWS services** with **2,482 operations**. Every operat
 
 ## What "100% conformance" means
 
-fakecloud validates every implemented operation against AWS's own Smithy models using a generated test suite with **59,000+ variants**. This guarantees that field names, types, required/optional flags, error codes, and HTTP signatures are identical to AWS. It does *not* guarantee that every operation behaves exactly like AWS in all edge cases — that is what the **Data plane** and **Known limitations** columns describe.
+fakecloud validates every implemented operation against AWS's own Smithy models using a generated test suite with **86,327 variants**, **all of which pass** on every commit. This guarantees that field names, types, required/optional flags, error codes, and HTTP signatures are identical to AWS. It does *not* guarantee that every operation behaves exactly like AWS in all edge cases — that is what the **Data plane** and **Known limitations** columns describe.
 
 If you need a service that is not listed above, the issue tracker and [roadmap](https://github.com/faiscadev/fakecloud#roadmap) are the best places to request it.
 
