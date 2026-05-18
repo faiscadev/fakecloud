@@ -1813,7 +1813,9 @@ mod tests {
         assert!(is_placeholder_label("%7BIdentifier%7D"));
         assert!(is_placeholder_label("%7bidentifier%7d"));
         assert!(!is_placeholder_label("E1234567890ABC"));
-        assert!(!is_placeholder_label("arn:aws:cloudfront::000:distribution/E1"));
+        assert!(!is_placeholder_label(
+            "arn:aws:cloudfront::000:distribution/E1"
+        ));
     }
 
     #[test]
