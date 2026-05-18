@@ -213,10 +213,7 @@ impl RdsClient<'_> {
         let resp = self
             .fc
             .client
-            .post(format!(
-                "{}/_fakecloud/rds/lambda-invoke",
-                self.fc.base_url
-            ))
+            .post(format!("{}/_fakecloud/rds/lambda-invoke", self.fc.base_url))
             .json(req)
             .send()
             .await?;
@@ -233,10 +230,7 @@ impl RdsClient<'_> {
 
     /// Bridge endpoint for the PostgreSQL `aws_s3` extension's import
     /// path. Mirrors `aws_s3.table_import_from_s3` at the transport layer.
-    pub async fn s3_import(
-        &self,
-        req: &RdsS3ImportRequest,
-    ) -> Result<RdsS3ImportResponse, Error> {
+    pub async fn s3_import(&self, req: &RdsS3ImportRequest) -> Result<RdsS3ImportResponse, Error> {
         let resp = self
             .fc
             .client
@@ -249,10 +243,7 @@ impl RdsClient<'_> {
 
     /// Bridge endpoint for the PostgreSQL `aws_s3` extension's export
     /// path. Mirrors `aws_s3.query_export_to_s3` at the transport layer.
-    pub async fn s3_export(
-        &self,
-        req: &RdsS3ExportRequest,
-    ) -> Result<RdsS3ExportResponse, Error> {
+    pub async fn s3_export(&self, req: &RdsS3ExportRequest) -> Result<RdsS3ExportResponse, Error> {
         let resp = self
             .fc
             .client

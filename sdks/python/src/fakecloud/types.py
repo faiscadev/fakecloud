@@ -2758,8 +2758,7 @@ class ApiGatewayV2ConnectionsResponse:
     def from_dict(cls, data: Dict[str, Any]) -> ApiGatewayV2ConnectionsResponse:
         return cls(
             connections=[
-                ApiGatewayV2Connection.from_dict(c)
-                for c in data.get("connections", [])
+                ApiGatewayV2Connection.from_dict(c) for c in data.get("connections", [])
             ],
         )
 
