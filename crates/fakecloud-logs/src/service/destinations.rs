@@ -1,8 +1,8 @@
 use http::StatusCode;
 use serde_json::{json, Value};
 
+use crate::validation::*;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
-use fakecloud_core::validation::*;
 
 use super::LogsService;
 use chrono::Utc;
@@ -197,10 +197,13 @@ impl LogsService {
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
+        // `PutDestinationPolicy` does not declare `ResourceNotFoundException`
+        // in its Smithy error union — AWS surfaces unknown-destination errors
+        // as `InvalidParameterException`.
         let dest = state.destinations.get_mut(name).ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
-                "ResourceNotFoundException",
+                "InvalidParameterException",
                 format!("The specified destination does not exist: {name}"),
             )
         })?;
@@ -283,6 +286,11 @@ mod tests {
                 "accessPolicy": "{}",
             }),
         );
-        assert!(svc.put_destination_policy(&req).is_err());
+        // CloudWatch Logs declares `InvalidParameterException` (not
+        // `ResourceNotFoundException`) for unknown destinations on this op.
+        match svc.put_destination_policy(&req) {
+            Err(e) => assert_eq!(e.code(), "InvalidParameterException"),
+            Ok(_) => panic!("expected error for unknown destination"),
+        }
     }
 }
