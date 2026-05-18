@@ -1,5 +1,6 @@
 use crate::error::Error;
 use crate::types::*;
+use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 
 /// Client for the fakecloud introspection and simulation API (`/_fakecloud/*`).
 pub struct FakeCloud {
@@ -1738,7 +1739,8 @@ impl LogsClient<'_> {
             .client
             .get(format!(
                 "{}/_fakecloud/logs/field-indexes/{}",
-                self.fc.base_url, log_group_name
+                self.fc.base_url,
+                utf8_percent_encode(log_group_name, NON_ALPHANUMERIC)
             ))
             .send()
             .await?;
