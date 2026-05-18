@@ -897,13 +897,25 @@ impl ApiGatewayV2Client<'_> {
     /// Build the WebSocket upgrade URL for `api_id`. The SDK doesn't
     /// open the socket itself — pair this with `tokio-tungstenite` or
     /// any other WebSocket client in test code.
-    pub fn ws_url(&self, api_id: &str) -> String {
+    pub fn ws_url(&self, api_id: &str, stage: Option<&str>) -> String {
         let base = self
             .fc
             .base_url
             .replacen("https://", "wss://", 1)
             .replacen("http://", "ws://", 1);
-        format!("{}/_fakecloud/apigatewayv2/ws/{}", base, api_id)
+        // API Gateway v2 API IDs are 10-char alphanumeric so encoding is
+        // a no-op, but defend against future changes by passing through
+        // reqwest's URL builder for the query parameter.
+        let url = reqwest::Url::parse(&format!("{}/_fakecloud/apigatewayv2/ws/{}", base, api_id))
+            .expect("base url + api id form a valid URL");
+        match stage {
+            Some(s) => {
+                let mut u = url;
+                u.query_pairs_mut().append_pair("stage", s);
+                u.to_string()
+            }
+            None => url.to_string(),
+        }
     }
 }
 

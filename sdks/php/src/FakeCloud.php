@@ -772,11 +772,14 @@ final class ApiGatewayV2Client
      */
     public function wsUrl(string $apiId, ?string $stage = null): string
     {
-        unset($stage);
         $base = $this->http->baseUrl();
         $base = preg_replace('#^https://#', 'wss://', $base, 1);
         $base = preg_replace('#^http://#', 'ws://', $base, 1);
-        return $base . '/_fakecloud/apigatewayv2/ws/' . HttpTransport::encodePath($apiId);
+        $path = $base . '/_fakecloud/apigatewayv2/ws/' . HttpTransport::encodePath($apiId);
+        if ($stage === null) {
+            return $path;
+        }
+        return $path . '?stage=' . rawurlencode($stage);
     }
 }
 

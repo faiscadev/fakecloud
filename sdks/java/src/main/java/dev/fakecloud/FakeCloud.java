@@ -749,7 +749,7 @@ public final class FakeCloud {
          * the default {@code "$default"} stage.
          */
         public String wsUrl(String apiId) {
-            return wsUrl(apiId, "$default");
+            return wsUrl(apiId, null);
         }
 
         /** Build the WebSocket URL for the given API id and stage. */
@@ -763,7 +763,15 @@ public final class FakeCloud {
             } else {
                 wsBase = base;
             }
-            return wsBase + "/apigatewayv2/" + encodePath(apiId) + "/" + encodePath(stage);
+            String path = wsBase + "/_fakecloud/apigatewayv2/ws/" + encodePath(apiId);
+            if (stage == null) {
+                return path;
+            }
+            try {
+                return path + "?stage=" + java.net.URLEncoder.encode(stage, java.nio.charset.StandardCharsets.UTF_8);
+            } catch (Exception e) {
+                throw new RuntimeException(e);
+            }
         }
     }
 

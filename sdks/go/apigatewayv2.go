@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"strings"
 )
 
@@ -48,10 +49,6 @@ func (c *ApiGatewayV2Client) GetDomainNameMtlsInfo(ctx context.Context, name str
 // provided. The scheme is derived from the client's BaseURL: an https://
 // base maps to wss://, anything else to ws://.
 func (c *ApiGatewayV2Client) WsURL(apiID string, stage ...string) string {
-	stg := "$default"
-	if len(stage) > 0 && stage[0] != "" {
-		stg = stage[0]
-	}
 	base := c.fc.BaseURL
 	scheme := "ws"
 	rest := base
@@ -62,5 +59,9 @@ func (c *ApiGatewayV2Client) WsURL(apiID string, stage ...string) string {
 	case strings.HasPrefix(base, "http://"):
 		rest = strings.TrimPrefix(base, "http://")
 	}
-	return fmt.Sprintf("%s://%s/%s/%s", scheme, rest, apiID, stg)
+	path := fmt.Sprintf("%s://%s/_fakecloud/apigatewayv2/ws/%s", scheme, rest, url.PathEscape(apiID))
+	if len(stage) == 0 || stage[0] == "" {
+		return path
+	}
+	return path + "?stage=" + url.QueryEscape(stage[0])
 }

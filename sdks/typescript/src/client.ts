@@ -717,11 +717,13 @@ export class ApiGatewayV2Client {
    * derived from the configured fakecloud base URL. The HTTP scheme is
    * swapped for `ws://` (or `wss://` when the base URL is `https://`).
    */
-  wsUrl(apiId: string, stage: string = "$default"): string {
+  wsUrl(apiId: string, stage?: string): string {
     const wsBase = this.baseUrl.replace(/^http/, "ws");
-    return `${wsBase}/_fakecloud/apigatewayv2/ws/${encodeURIComponent(
-      apiId,
-    )}/${encodeURIComponent(stage)}`;
+    const path = `/_fakecloud/apigatewayv2/ws/${encodeURIComponent(apiId)}`;
+    if (stage === undefined) {
+      return `${wsBase}${path}`;
+    }
+    return `${wsBase}${path}?stage=${encodeURIComponent(stage)}`;
   }
 }
 

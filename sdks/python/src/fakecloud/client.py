@@ -1228,17 +1228,26 @@ class ApiGatewayV2Client:
     def ws_url(self, api_id: str, stage: Optional[str] = None) -> str:
         """Build the WebSocket URL for ``api_id`` at ``stage``.
 
-        Switches the scheme from ``http(s)://`` to ``ws(s)://`` and appends
-        the API Gateway v2 WebSocket path. Defaults stage to ``"prod"``.
+        Switches the scheme from ``http(s)://`` to ``ws(s)://``, appends
+        the server's ``/_fakecloud/apigatewayv2/ws/{api_id}`` path, and
+        passes the stage as a query parameter (the server reads it from
+        the query string; when omitted the server defaults to
+        ``$default``).
         """
-        stage_part = stage if stage is not None else "prod"
         if self._base.startswith("https://"):
             ws = "wss://" + self._base[len("https://") :]
         elif self._base.startswith("http://"):
             ws = "ws://" + self._base[len("http://") :]
         else:
             ws = self._base
-        return f"{ws}/__ws/apigatewayv2/{api_id}/{stage_part}"
+        from urllib.parse import quote as _q
+
+        api_id_enc = _q(api_id, safe="")
+        if stage is None:
+            return f"{ws}/_fakecloud/apigatewayv2/ws/{api_id_enc}"
+        return (
+            f"{ws}/_fakecloud/apigatewayv2/ws/{api_id_enc}?stage={_q(stage, safe='')}"
+        )
 
 
 class StepFunctionsClient:
@@ -1850,14 +1859,20 @@ class _SyncApiGatewayV2Client:
         return cast(Dict[str, Any], resp.json())
 
     def ws_url(self, api_id: str, stage: Optional[str] = None) -> str:
-        stage_part = stage if stage is not None else "prod"
         if self._base.startswith("https://"):
             ws = "wss://" + self._base[len("https://") :]
         elif self._base.startswith("http://"):
             ws = "ws://" + self._base[len("http://") :]
         else:
             ws = self._base
-        return f"{ws}/__ws/apigatewayv2/{api_id}/{stage_part}"
+        from urllib.parse import quote as _q
+
+        api_id_enc = _q(api_id, safe="")
+        if stage is None:
+            return f"{ws}/_fakecloud/apigatewayv2/ws/{api_id_enc}"
+        return (
+            f"{ws}/_fakecloud/apigatewayv2/ws/{api_id_enc}?stage={_q(stage, safe='')}"
+        )
 
 
 class _SyncStepFunctionsClient:
