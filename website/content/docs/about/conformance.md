@@ -35,7 +35,7 @@ Every response is validated against the operation's Smithy output shape. Missing
 
 ## Current coverage
 
-86,327/86,327 generated test variants across all 39 services (2,607 operations) pass on every commit — true 100% conformance with no flake margin and no skipped services. The exact pass/total per service is checked into [`conformance-baseline.json`](https://github.com/faiscadev/fakecloud/blob/main/conformance-baseline.json).
+86,327/86,327 generated test variants across all 39 services (2,592 operations) pass on every commit — true 100% conformance with no flake margin and no skipped services. The exact pass/total per service is checked into [`conformance-baseline.json`](https://github.com/faiscadev/fakecloud/blob/main/conformance-baseline.json).
 
 See the harness and methodology at [`crates/fakecloud-conformance/`](https://github.com/faiscadev/fakecloud/tree/main/crates/fakecloud-conformance).
 

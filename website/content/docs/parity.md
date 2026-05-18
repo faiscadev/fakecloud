@@ -4,7 +4,7 @@ description = "Service-by-service behavior parity: what is real, what is synthes
 weight = 1
 +++
 
-fakecloud implements **39 AWS services** with **2,607 operations**. **86,327/86,327 generated Smithy conformance variants pass** on every commit — true 100% across every implemented service, no flake margin and no skipped services. Conformance checks request/response shapes, field names, and error codes against [AWS's own Smithy models](https://github.com/faiscadev/fakecloud/blob/main/conformance-baseline.json). Behavior parity varies by service — some run real infrastructure (Postgres, Redis, Docker containers), some run a real control plane but return synthesized data for complex queries, and a few have control-plane-only coverage with no data-plane enforcement.
+fakecloud implements **39 AWS services** with **2,592 operations**. **86,327/86,327 generated Smithy conformance variants pass** on every commit — true 100% across every implemented service, no flake margin and no skipped services. Conformance checks request/response shapes, field names, and error codes against [AWS's own Smithy models](https://github.com/faiscadev/fakecloud/blob/main/conformance-baseline.json). Behavior parity varies by service — some run real infrastructure (Postgres, Redis, Docker containers), some run a real control plane but return synthesized data for complex queries, and a few have control-plane-only coverage with no data-plane enforcement.
 
 | Service | Ops | Protocol | Control plane | Data plane | Known limitations |
 | --- | --- | --- | --- | --- | --- |
@@ -13,7 +13,7 @@ fakecloud implements **39 AWS services** with **2,607 operations**. **86,327/86,
 | [SNS](@/docs/services/sns.md) | 42 | JSON 1.1 (Query) | Full | Full | Email subscriptions deliver via SMTP relay when `FAKECLOUD_SMTP_RELAY_*` env is configured; otherwise they land in the introspection ledger. |
 | [EventBridge](@/docs/services/eventbridge.md) | 57 | JSON 1.1 | Full | Full | — |
 | [EventBridge Scheduler](@/docs/services/scheduler.md) | 12 | JSON 1.1 | Full | Full | — |
-| [Lambda](@/docs/services/lambda.md) | 85 | REST-JSON | Full | Full | `UpdateFunctionCode` fetches real bytes from S3 and recomputes `CodeSha256`. Reserved concurrency is recorded but not yet enforced at invoke time. Provisioned concurrency is a roadmap item. |
+| [Lambda](@/docs/services/lambda.md) | 70 | REST-JSON | Full | Full | `UpdateFunctionCode` fetches real bytes from S3 and recomputes `CodeSha256`. Reserved concurrency is recorded but not yet enforced at invoke time. Provisioned concurrency is a roadmap item. |
 | [DynamoDB](@/docs/services/dynamodb.md) | 57 | JSON 1.1 | Full | Full | — |
 | [IAM](@/docs/services/iam.md) | 176 | JSON 1.1 (Query) | Full | Full | — |
 | [STS](@/docs/services/sts.md) | 11 | JSON 1.1 (Query) | Full | Full | — |
