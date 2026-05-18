@@ -37,7 +37,7 @@ Run your actual test suite against both. Numbers published on landing pages are 
 | RDS | Real PostgreSQL/MySQL/MariaDB via Docker |
 | ElastiCache | Real Redis/Valkey/Memcached via Docker |
 | Cross-service wiring | S3 -> Lambda, SNS fan-out, EventBridge -> Step Functions, SES inbound -> S3/SNS/Lambda, 15+ more fire end-to-end |
-| Conformance methodology | Smithy-validated, 59k+ test variants per commit |
+| Conformance methodology | Smithy-validated, 86,327/86,327 test variants pass on every commit |
 | Terraform TestAcc CI | Yes (upstream suites run against fakecloud) |
 | Test-assertion SDKs | TypeScript, Python, Go, PHP, Java, Rust |
 | Multi-account, SCPs, ABAC | Yes |
