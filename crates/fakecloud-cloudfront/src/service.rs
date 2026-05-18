@@ -326,7 +326,9 @@ impl AwsService for CloudFrontService {
             | "ListDistributionsByConnectionFunction"
             | "ListDistributionsByOwnedResource"
             | "ListDistributionsByTrustStore"
-            | "ListDistributionsByRealtimeLogConfig" => self.list_distributions_by(resolved.action),
+            | "ListDistributionsByRealtimeLogConfig" => {
+                self.list_distributions_by(&req, &resolved, resolved.action)
+            }
             "CreateOriginAccessControl" => self.create_origin_access_control(&req),
             "GetOriginAccessControl" => self.get_origin_access_control(&resolved),
             "GetOriginAccessControlConfig" => self.get_origin_access_control_config(&resolved),
@@ -851,7 +853,67 @@ impl CloudFrontService {
         Ok(xml_response(StatusCode::OK, body, HeaderMap::new()))
     }
 
-    fn list_distributions_by(&self, action: &str) -> Result<AwsResponse, AwsServiceError> {
+    fn list_distributions_by(
+        &self,
+        req: &AwsRequest,
+        route: &Route,
+        action: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        // Each "by-X" listing has a Smithy-required identifier (path or query)
+        // plus, for ConnectionMode, an enum-constrained discriminator. The
+        // synthetic probe sends `negative_omit_*` variants without these, so
+        // every handler that can short-circuit on a missing identifier must
+        // do so up-front. Otherwise the empty-list 200 looks like an honest
+        // pass to the probe and a 100% conformance number is unreachable.
+        match action {
+            // Path-id ops: route.id is the URL placeholder. If the probe
+            // omitted the field, the substitution left the literal
+            // `{Member}` braces in place — easy to detect.
+            "ListDistributionsByCachePolicyId"
+            | "ListDistributionsByOriginRequestPolicyId"
+            | "ListDistributionsByResponseHeadersPolicyId"
+            | "ListDistributionsByKeyGroup"
+            | "ListDistributionsByWebACLId"
+            | "ListDistributionsByVpcOriginId"
+            | "ListDistributionsByAnycastIpListId"
+            | "ListDistributionsByOwnedResource" => {
+                let id = route.id.as_deref().unwrap_or("");
+                if is_placeholder_label(id) {
+                    return Err(invalid_argument(format!(
+                        "Required URL identifier for {action} is missing or invalid"
+                    )));
+                }
+            }
+            "ListDistributionsByConnectionMode" => {
+                let id = route.id.as_deref().unwrap_or("");
+                if is_placeholder_label(id) {
+                    return Err(invalid_argument(
+                        "ConnectionMode is required for ListDistributionsByConnectionMode",
+                    ));
+                }
+                if id != "direct" && id != "tenant-only" {
+                    return Err(invalid_argument(format!(
+                        "ConnectionMode must be 'direct' or 'tenant-only', got '{id}'"
+                    )));
+                }
+            }
+            "ListDistributionsByConnectionFunction"
+                if parse_query_value(&req.raw_query, "ConnectionFunctionIdentifier").is_none() =>
+            {
+                return Err(invalid_argument(
+                    "ConnectionFunctionIdentifier query parameter is required",
+                ));
+            }
+            "ListDistributionsByTrustStore"
+                if parse_query_value(&req.raw_query, "TrustStoreIdentifier").is_none() =>
+            {
+                return Err(invalid_argument(
+                    "TrustStoreIdentifier query parameter is required",
+                ));
+            }
+            _ => {}
+        }
+
         // The "by-X" listings each have a distinct response root element.
         // We never index distributions by the predicate (that would require
         // shipping each policy/key-group/etc service first), so each
@@ -1193,7 +1255,37 @@ impl CloudFrontService {
         Ok(empty_response(StatusCode::OK))
     }
 
-    fn list_conflicting_aliases(&self, _req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+    fn list_conflicting_aliases(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let alias = parse_query_value(&req.raw_query, "Alias")
+            .ok_or_else(|| invalid_argument("Alias query parameter is required"))?;
+        let dist_id = parse_query_value(&req.raw_query, "DistributionId")
+            .ok_or_else(|| invalid_argument("DistributionId query parameter is required"))?;
+        // aliasString max 253, distributionIdString max 25 per the Smithy
+        // model. Reject probe-generated boundary variants that overrun the
+        // documented length so they produce the declared InvalidArgument
+        // instead of an empty 200.
+        if alias.len() > 253 {
+            return Err(invalid_argument(format!(
+                "Alias length {} exceeds maximum 253",
+                alias.len()
+            )));
+        }
+        if dist_id.len() > 25 {
+            return Err(invalid_argument(format!(
+                "DistributionId length {} exceeds maximum 25",
+                dist_id.len()
+            )));
+        }
+        if let Some(max_items) = parse_query_value(&req.raw_query, "MaxItems") {
+            let n: i64 = max_items.parse().map_err(|_| {
+                invalid_argument(format!("MaxItems must be an integer, got '{max_items}'"))
+            })?;
+            if n > 100 {
+                return Err(invalid_argument(format!(
+                    "MaxItems {n} exceeds maximum 100"
+                )));
+            }
+        }
         // We never produce conflicts because every alias is owned by one
         // distribution at most. Return an empty list with the proper shape.
         let body = format!(
@@ -1245,15 +1337,24 @@ impl CloudFrontService {
             .id
             .as_deref()
             .ok_or_else(|| invalid_argument("missing distribution id"))?;
+        // DisassociateDistributionWebACL's Smithy model declares EntityNotFound
+        // (not NoSuchDistribution) for unknown distribution IDs.
+        let entity_not_found = || {
+            aws_error(
+                StatusCode::NOT_FOUND,
+                "EntityNotFound",
+                format!("The specified distribution does not exist: {id}"),
+            )
+        };
         let mut state = self.state.write();
         let account = state
             .accounts
             .get_mut(DEFAULT_ACCOUNT)
-            .ok_or_else(|| no_such_distribution(id))?;
+            .ok_or_else(entity_not_found)?;
         let dist = account
             .distributions
             .get_mut(id)
-            .ok_or_else(|| no_such_distribution(id))?;
+            .ok_or_else(entity_not_found)?;
         dist.config.web_acl_id = None;
         dist.etag = generate_etag();
         dist.last_modified_time = Utc::now();
@@ -1642,6 +1743,56 @@ fn hex_digit(b: u8) -> Option<u8> {
     }
 }
 
+/// True when a URL-decoded label segment looks like an unsubstituted Smithy
+/// URI placeholder (e.g. `{Identifier}` or its percent-encoded form
+/// `%7BIdentifier%7D`). Conformance probes that omit a required `@httpLabel`
+/// input leave the literal placeholder in the URL; handlers that can
+/// short-circuit on it return the declared validation error instead of a
+/// fabricated 200.
+pub(crate) fn is_placeholder_label(value: &str) -> bool {
+    if value.is_empty() {
+        return true;
+    }
+    let lower = value.to_ascii_lowercase();
+    value.starts_with('{') || lower.starts_with("%7b")
+}
+
+/// Best-effort field extractor for request bodies the probe sends as JSON
+/// even when the service is REST-XML. Walks the body trying JSON first,
+/// then a naive XML element scan. Returns the value for the first occurrence
+/// of `key`. Used by handlers that need to validate optional/required body
+/// members up-front (enum bounds, length, presence) without committing to a
+/// full strongly-typed parse — the actual handler still uses the typed XML
+/// parser for the structured fields it consumes.
+pub(crate) fn extract_body_field(body: &[u8], key: &str) -> Option<String> {
+    if let Ok(s) = std::str::from_utf8(body) {
+        let trimmed = s.trim_start();
+        if trimmed.starts_with('{') {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
+                if let Some(field) = v.get(key) {
+                    return match field {
+                        serde_json::Value::String(s) => Some(s.clone()),
+                        serde_json::Value::Number(n) => Some(n.to_string()),
+                        serde_json::Value::Bool(b) => Some(b.to_string()),
+                        _ => None,
+                    };
+                }
+                return None;
+            }
+        }
+        // Fall back to a naive XML extraction for genuine XML bodies.
+        let open = format!("<{key}>");
+        let close = format!("</{key}>");
+        if let Some(start) = s.find(&open) {
+            let after = start + open.len();
+            if let Some(end_rel) = s[after..].find(&close) {
+                return Some(s[after..after + end_rel].to_string());
+            }
+        }
+    }
+    None
+}
+
 fn parse_query_value(query: &str, key: &str) -> Option<String> {
     let prefix = format!("{key}=");
     for pair in query.split('&').filter(|p| !p.is_empty()) {
@@ -1655,6 +1806,37 @@ fn parse_query_value(query: &str, key: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn placeholder_label_detects_braces_and_percent_encoding() {
+        assert!(is_placeholder_label(""));
+        assert!(is_placeholder_label("{Identifier}"));
+        assert!(is_placeholder_label("%7BIdentifier%7D"));
+        assert!(is_placeholder_label("%7bidentifier%7d"));
+        assert!(!is_placeholder_label("E1234567890ABC"));
+        assert!(!is_placeholder_label(
+            "arn:aws:cloudfront::000:distribution/E1"
+        ));
+    }
+
+    #[test]
+    fn extract_body_field_handles_json_and_xml() {
+        let json = br#"{"Stage":"BROKEN","Marker":"x"}"#;
+        assert_eq!(
+            extract_body_field(json, "Stage"),
+            Some("BROKEN".to_string())
+        );
+        assert_eq!(extract_body_field(json, "MaxItems"), None);
+
+        let xml = br#"<?xml version="1.0"?><Body><Domain>example.com</Domain></Body>"#;
+        assert_eq!(
+            extract_body_field(xml, "Domain"),
+            Some("example.com".to_string())
+        );
+        assert_eq!(extract_body_field(xml, "Missing"), None);
+
+        assert_eq!(extract_body_field(b"", "x"), None);
+    }
 
     fn make_state() -> SharedCloudFrontState {
         Arc::new(RwLock::new(CloudFrontAccounts::new()))

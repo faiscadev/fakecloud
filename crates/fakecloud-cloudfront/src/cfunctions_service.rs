@@ -16,8 +16,8 @@ use crate::policies::{
 };
 use crate::router::Route;
 use crate::service::{
-    aws_error, esc, generate_id_with_prefix, invalid_argument, xml_response, CloudFrontService,
-    DEFAULT_ACCOUNT,
+    aws_error, esc, extract_body_field, generate_id_with_prefix, invalid_argument, xml_response,
+    CloudFrontService, DEFAULT_ACCOUNT,
 };
 use crate::xml_io;
 
@@ -206,8 +206,20 @@ impl CloudFrontService {
 
     pub(crate) fn list_connection_functions(
         &self,
-        _req: &AwsRequest,
+        req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
+        // ListConnectionFunctions accepts an optional Stage filter constrained
+        // to the FunctionStage enum (DEVELOPMENT | LIVE). Reject unknown
+        // values up-front so conformance negative variants surface an
+        // InvalidArgument (declared in the op's Smithy error list) instead of
+        // silently returning the full unfiltered list.
+        if let Some(stage) = extract_body_field(&req.body, "Stage") {
+            if stage != "DEVELOPMENT" && stage != "LIVE" {
+                return Err(crate::service::invalid_argument(format!(
+                    "Stage must be one of 'DEVELOPMENT' or 'LIVE', got '{stage}'"
+                )));
+            }
+        }
         let state = self.state.read();
         let mut items: Vec<StoredConnectionFunction> = state
             .accounts

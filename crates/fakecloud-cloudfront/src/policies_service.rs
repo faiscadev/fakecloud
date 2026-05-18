@@ -366,7 +366,7 @@ impl CloudFrontService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         touch_account(&self.state, DEFAULT_ACCOUNT);
-        let filter = parse_type_filter(&req.raw_query);
+        let filter = validate_policy_type_query(&req.raw_query)?;
         let state = self.state.read();
         let mut items: Vec<StoredCachePolicy> = state
             .accounts
@@ -560,7 +560,7 @@ impl CloudFrontService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         touch_account(&self.state, DEFAULT_ACCOUNT);
-        let filter = parse_type_filter(&req.raw_query);
+        let filter = validate_policy_type_query(&req.raw_query)?;
         let state = self.state.read();
         let mut items: Vec<StoredOriginRequestPolicy> = state
             .accounts
@@ -757,7 +757,7 @@ impl CloudFrontService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         touch_account(&self.state, DEFAULT_ACCOUNT);
-        let filter = parse_type_filter(&req.raw_query);
+        let filter = validate_policy_type_query(&req.raw_query)?;
         let state = self.state.read();
         let mut items: Vec<StoredResponseHeadersPolicy> = state
             .accounts
@@ -996,4 +996,22 @@ fn config_xml<T: serde::Serialize>(root: &str, cfg: &T) -> Result<String, AwsSer
 fn parse_type_filter(query: &str) -> Option<String> {
     let pairs: HashMap<&str, &str> = query.split('&').filter_map(|p| p.split_once('=')).collect();
     pairs.get("Type").map(|v| v.to_string())
+}
+
+/// Validate the `Type` query parameter against the
+/// CachePolicyType / OriginRequestPolicyType / ResponseHeadersPolicyType
+/// enum (all three share the same `managed` | `custom` value space). When
+/// present and unknown, return InvalidArgument; absent or valid is OK.
+pub(crate) fn validate_policy_type_query(
+    query: &str,
+) -> Result<Option<String>, fakecloud_core::service::AwsServiceError> {
+    let filter = parse_type_filter(query);
+    if let Some(ref v) = filter {
+        if v != "managed" && v != "custom" {
+            return Err(crate::service::invalid_argument(format!(
+                "Type must be one of 'managed' or 'custom', got '{v}'"
+            )));
+        }
+    }
+    Ok(filter)
 }

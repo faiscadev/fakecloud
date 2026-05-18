@@ -107,7 +107,7 @@
       "total": 4469
     },
     "cloudfront": {
-      "passed": 4044,
+      "passed": 4112,
       "total": 4112
     },
     "elasticache": {

@@ -192,7 +192,7 @@ impl CloudFrontService {
     }
 
     pub(crate) fn list_functions(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        let stage = parse_stage_query(&req.raw_query);
+        let stage = validate_stage_query(&req.raw_query)?;
         let state = self.state.read();
         let mut items: Vec<StoredFunction> = state
             .accounts
@@ -989,6 +989,20 @@ impl CloudFrontService {
         route: &Route,
     ) -> Result<AwsResponse, AwsServiceError> {
         let dist_id = route_id(route, "Distribution")?;
+        // Check the distribution exists before parsing the body. Synthetic
+        // probes hit this op against a placeholder distribution ID; surfacing
+        // NoSuchDistribution (declared in the Smithy errors list) before any
+        // XML-parse InvalidArgument keeps the conformance probe honest.
+        {
+            let state = self.state.read();
+            let has_dist = state
+                .accounts
+                .get(DEFAULT_ACCOUNT)
+                .is_some_and(|a| a.distributions.contains_key(&dist_id));
+            if !has_dist {
+                return Err(not_found("Distribution", &dist_id));
+            }
+        }
         let parsed: MonitoringSubscriptionBody = xml_io::from_xml_root(&req.body)
             .map_err(|e| invalid_argument(format!("invalid MonitoringSubscription XML: {e}")))?;
         let mut state = self.state.write();
@@ -1118,6 +1132,23 @@ fn parse_stage_query(query: &str) -> Option<String> {
     use std::collections::HashMap;
     let pairs: HashMap<&str, &str> = query.split('&').filter_map(|p| p.split_once('=')).collect();
     pairs.get("Stage").map(|s| s.to_string())
+}
+
+/// Validate the `Stage` query against the FunctionStage enum
+/// (DEVELOPMENT | LIVE). Returns InvalidArgument for unknown values; absent
+/// or valid is OK.
+pub(crate) fn validate_stage_query(
+    query: &str,
+) -> Result<Option<String>, fakecloud_core::service::AwsServiceError> {
+    let stage = parse_stage_query(query);
+    if let Some(ref v) = stage {
+        if v != "DEVELOPMENT" && v != "LIVE" {
+            return Err(crate::service::invalid_argument(format!(
+                "Stage must be one of 'DEVELOPMENT' or 'LIVE', got '{v}'"
+            )));
+        }
+    }
+    Ok(stage)
 }
 
 fn stage_view(f: &StoredFunction, stage: &Option<String>) -> StoredFunction {
