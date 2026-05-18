@@ -525,6 +525,7 @@ impl Route53Service {
                     key: "hostedzonetype",
                     allowed: &["PrivateHostedZone"],
                 },
+                MAX_ITEMS_CONSTRAINT,
             ],
         )?;
         let state = self.state.read();
@@ -563,6 +564,7 @@ impl Route53Service {
                     min: 0,
                     max: 32,
                 },
+                MAX_ITEMS_CONSTRAINT,
             ],
         )?;
         let dns_name = req.query_params.get("dnsname").cloned();
@@ -1338,11 +1340,14 @@ impl Route53Service {
     fn list_health_checks(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         validate_query_constraints(
             &req.query_params,
-            &[QueryConstraint::StrLen {
-                key: "marker",
-                min: 0,
-                max: 64,
-            }],
+            &[
+                QueryConstraint::StrLen {
+                    key: "marker",
+                    min: 0,
+                    max: 64,
+                },
+                MAX_ITEMS_CONSTRAINT,
+            ],
         )?;
         let marker = req.query_params.get("marker").cloned();
         let max_items: usize = req
@@ -1858,11 +1863,14 @@ impl Route53Service {
     fn list_traffic_policies(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         validate_query_constraints(
             &req.query_params,
-            &[QueryConstraint::StrLen {
-                key: "trafficpolicyid",
-                min: 1,
-                max: 36,
-            }],
+            &[
+                QueryConstraint::StrLen {
+                    key: "trafficpolicyid",
+                    min: 1,
+                    max: 36,
+                },
+                MAX_ITEMS_CONSTRAINT,
+            ],
         )?;
         let marker = req.query_params.get("trafficpolicyid").cloned();
         let max_items: usize = req
@@ -2188,6 +2196,7 @@ impl Route53Service {
                     key: "trafficpolicyinstancetype",
                     allowed: &RR_TYPES,
                 },
+                MAX_ITEMS_CONSTRAINT,
             ],
         )?;
         let max_items: usize = req
@@ -2320,6 +2329,7 @@ impl Route53Service {
                     key: "trafficpolicyinstancetype",
                     allowed: &RR_TYPES,
                 },
+                MAX_ITEMS_CONSTRAINT,
             ],
         )?;
         let policy_id = req
@@ -2813,6 +2823,7 @@ impl Route53Service {
                     min: 0,
                     max: 1024,
                 },
+                MAX_RESULTS_CONSTRAINT,
             ],
         )?;
         let zone_filter = req.query_params.get("hostedzoneid").cloned();
@@ -3017,11 +3028,14 @@ impl Route53Service {
     fn list_cidr_collections(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         validate_query_constraints(
             &req.query_params,
-            &[QueryConstraint::StrLen {
-                key: "nexttoken",
-                min: 0,
-                max: 1024,
-            }],
+            &[
+                QueryConstraint::StrLen {
+                    key: "nexttoken",
+                    min: 0,
+                    max: 1024,
+                },
+                MAX_RESULTS_CONSTRAINT,
+            ],
         )?;
         let max_items: usize = req
             .query_params

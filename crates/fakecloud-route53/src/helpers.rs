@@ -930,6 +930,7 @@ impl Route53Service {
                     min: 0,
                     max: 1024,
                 },
+                MAX_ITEMS_CONSTRAINT,
             ],
         )?;
         let vpc_id = req
@@ -1118,11 +1119,14 @@ impl Route53Service {
     ) -> Result<AwsResponse, AwsServiceError> {
         validate_query_constraints(
             &req.query_params,
-            &[QueryConstraint::StrLen {
-                key: "marker",
-                min: 0,
-                max: 64,
-            }],
+            &[
+                QueryConstraint::StrLen {
+                    key: "marker",
+                    min: 0,
+                    max: 64,
+                },
+                MAX_ITEMS_CONSTRAINT,
+            ],
         )?;
         let state = self.state.read();
         let mut sets: Vec<StoredReusableDelegationSet> = state
@@ -1220,6 +1224,7 @@ impl Route53Service {
                     min: 1,
                     max: 3,
                 },
+                MAX_ITEMS_CONSTRAINT,
             ],
         )?;
         let start_continent = req.query_params.get("startcontinentcode").cloned();
@@ -1898,6 +1903,26 @@ pub(crate) const VPC_REGIONS: [&str; 46] = [
     "us-isob-west-1",
     "eusc-de-east-1",
 ];
+
+/// Shared `maxitems` constraint: Route 53 advertises a per-page ceiling
+/// of 100 across its `maxitems`-paginated list APIs and rejects values
+/// outside `[1, 100]` (or any non-integer) with `InvalidInput`. Reuse
+/// this from every `Max*`-paginated handler so an out-of-range
+/// `?maxitems=-1` doesn't silently fall back to the default of 100.
+pub(crate) const MAX_ITEMS_CONSTRAINT: QueryConstraint = QueryConstraint::IntRange {
+    key: "maxitems",
+    min: 1,
+    max: 100,
+};
+
+/// Same as [`MAX_ITEMS_CONSTRAINT`] but for the few endpoints that
+/// expose the parameter as `?maxresults=` (Route 53's CIDR collection
+/// and query-logging list APIs).
+pub(crate) const MAX_RESULTS_CONSTRAINT: QueryConstraint = QueryConstraint::IntRange {
+    key: "maxresults",
+    min: 1,
+    max: 100,
+};
 
 /// Constraint spec for a single Route 53 list-style query parameter.
 ///
