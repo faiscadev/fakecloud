@@ -2013,3 +2013,37 @@ pub struct EcsTaskCredentialsResponse {
     #[serde(rename = "RoleArn")]
     pub role_arn: String,
 }
+
+// ── KMS usage (admin) ───────────────────────────────────────────────
+
+/// One recorded KMS data-plane invocation, exposed by
+/// `GET /_fakecloud/kms/usage`. Fields mirror the JSON payload emitted
+/// by the server's usage recorder.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KmsUsageRecord {
+    pub timestamp: String,
+    pub operation: String,
+    pub service_principal: Option<String>,
+    pub account_id: String,
+    pub key_arn: String,
+    pub encryption_context: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KmsUsageResponse {
+    pub records: Vec<KmsUsageRecord>,
+}
+
+// ── ELBv2 WAF counts (admin) ────────────────────────────────────────
+
+/// Response body for `GET /_fakecloud/elbv2/waf-counts`. The exact
+/// shape of `counts` is service-internal and intentionally left as
+/// free-form JSON so we don't have to track every new dimension in
+/// the SDK.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Elbv2WafCountsResponse {
+    pub counts: serde_json::Value,
+}

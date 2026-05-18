@@ -1561,6 +1561,99 @@ class StepFunctionsExecutionsResponse:
 
 
 @dataclass
+class StepFunctionsSyncBillingDetails:
+    billed_duration_in_milliseconds: int
+    billed_memory_used_in_mb: int
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> StepFunctionsSyncBillingDetails:
+        d = _convert_keys(data)
+        return cls(**d)
+
+
+@dataclass
+class StepFunctionsSyncExecution:
+    execution_arn: str
+    state_machine_arn: str
+    name: str
+    status: str
+    started_at: str
+    duration_ms: int
+    billing_details: StepFunctionsSyncBillingDetails
+    input: Optional[str] = None
+    output: Optional[str] = None
+    stopped_at: Optional[str] = None
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> StepFunctionsSyncExecution:
+        return cls(
+            execution_arn=data["executionArn"],
+            state_machine_arn=data["stateMachineArn"],
+            name=data["name"],
+            status=data["status"],
+            started_at=data["startedAt"],
+            duration_ms=data["durationMs"],
+            billing_details=StepFunctionsSyncBillingDetails.from_dict(
+                data["billingDetails"]
+            ),
+            input=data.get("input"),
+            output=data.get("output"),
+            stopped_at=data.get("stoppedAt"),
+        )
+
+
+@dataclass
+class StepFunctionsSyncExecutionsResponse:
+    executions: List[StepFunctionsSyncExecution]
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> StepFunctionsSyncExecutionsResponse:
+        return cls(
+            executions=[
+                StepFunctionsSyncExecution.from_dict(e)
+                for e in data.get("executions", [])
+            ],
+        )
+
+
+@dataclass
+class StepFunctionsExecutionTreeNode:
+    arn: str
+    state_machine_arn: str
+    status: str
+    started_at: str
+    children: List[StepFunctionsExecutionTreeNode]
+    stopped_at: Optional[str] = None
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> StepFunctionsExecutionTreeNode:
+        return cls(
+            arn=data["arn"],
+            state_machine_arn=data["stateMachineArn"],
+            status=data["status"],
+            started_at=data["startedAt"],
+            stopped_at=data.get("stoppedAt"),
+            children=[
+                StepFunctionsExecutionTreeNode.from_dict(c)
+                for c in data.get("children", [])
+            ],
+        )
+
+
+@dataclass
+class StepFunctionsExecutionTreeResponse:
+    root_arn: str
+    tree: StepFunctionsExecutionTreeNode
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> StepFunctionsExecutionTreeResponse:
+        return cls(
+            root_arn=data["rootArn"],
+            tree=StepFunctionsExecutionTreeNode.from_dict(data["tree"]),
+        )
+
+
+@dataclass
 class SfnEnqueueActivityTaskRequest:
     activity_arn: str
     input: Optional[str] = None
@@ -2763,6 +2856,87 @@ class ApiGatewayV2ConnectionsResponse:
         )
 
 
+# ── SSM admin ───────────────────────────────────────────────────────
+
+
+@dataclass
+class SetSsmCommandStatusRequest:
+    status: str
+    account_id: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        out: Dict[str, Any] = {"status": self.status}
+        if self.account_id is not None:
+            out["accountId"] = self.account_id
+        return out
+
+
+@dataclass
+class SetSsmCommandStatusResponse:
+    updated: bool
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> SetSsmCommandStatusResponse:
+        return cls(updated=bool(data.get("updated", False)))
+
+
+@dataclass
+class FailSsmCommandRequest:
+    account_id: Optional[str] = None
+    instance_id: Optional[str] = None
+    status_details: Optional[str] = None
+    standard_error_content: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        out: Dict[str, Any] = {}
+        if self.account_id is not None:
+            out["accountId"] = self.account_id
+        if self.instance_id is not None:
+            out["instanceId"] = self.instance_id
+        if self.status_details is not None:
+            out["statusDetails"] = self.status_details
+        if self.standard_error_content is not None:
+            out["standardErrorContent"] = self.standard_error_content
+        return out
+
+
+@dataclass
+class FailSsmCommandResponse:
+    updated_invocations: int
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> FailSsmCommandResponse:
+        d = _convert_keys(data)
+        return cls(updated_invocations=int(d.get("updated_invocations", 0)))
+
+
+@dataclass
+class SsmParameterPolicyEvent:
+    parameter_name: str
+    parameter_arn: str
+    event_type: str
+    message: str
+    created_at: str
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> SsmParameterPolicyEvent:
+        d = _convert_keys(data)
+        return cls(**d)
+
+
+@dataclass
+class SsmParameterPolicyEventsResponse:
+    events: List[SsmParameterPolicyEvent] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> SsmParameterPolicyEventsResponse:
+        return cls(
+            events=[
+                SsmParameterPolicyEvent.from_dict(e) for e in data.get("events", [])
+            ],
+        )
+
+
 # ── RDS aws_lambda / aws_s3 extension bridges ───────────────────────
 
 
@@ -2992,3 +3166,72 @@ class EcsTaskCredentials:
             expiration=data["Expiration"],
             role_arn=data["RoleArn"],
         )
+
+
+@dataclass
+class InjectSsmSessionResponse:
+    session_id: str
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> InjectSsmSessionResponse:
+        d = _convert_keys(data)
+        return cls(session_id=str(d.get("session_id", "")))
+
+
+# ── KMS usage ───────────────────────────────────────────────────────
+
+
+@dataclass
+class KmsUsageRecord:
+    timestamp: str
+    operation: str
+    service_principal: Optional[str] = None
+    account_id: Optional[str] = None
+    key_arn: Optional[str] = None
+    encryption_context: Dict[str, str] = field(default_factory=dict)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> KmsUsageRecord:
+        d = _convert_keys(data)
+        return cls(
+            timestamp=str(d.get("timestamp", "")),
+            operation=str(d.get("operation", "")),
+            service_principal=d.get("service_principal"),
+            account_id=d.get("account_id"),
+            key_arn=d.get("key_arn"),
+            encryption_context=dict(d.get("encryption_context") or {}),
+        )
+
+
+@dataclass
+class KmsUsageResponse:
+    records: List[KmsUsageRecord] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> KmsUsageResponse:
+        return cls(
+            records=[KmsUsageRecord.from_dict(r) for r in data.get("records", [])],
+        )
+
+
+# ── CloudFront admin ────────────────────────────────────────────────
+
+
+@dataclass
+class CloudFrontDistributionStatusRequest:
+    status: str
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"status": self.status}
+
+
+# ── ELBv2 WAF counts ────────────────────────────────────────────────
+
+
+@dataclass
+class Elbv2WafCountsResponse:
+    counts: Dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> Elbv2WafCountsResponse:
+        return cls(counts=dict(data.get("counts") or {}))

@@ -89,6 +89,8 @@ import type {
   CompromisedPasswordsResponse,
   WebAuthnCredentialsResponse,
   StepFunctionsExecutionsResponse,
+  StepFunctionsSyncExecutionsResponse,
+  StepFunctionsExecutionTreeResponse,
   SfnEnqueueActivityTaskRequest,
   SfnEnqueueActivityTaskResponse,
   EcsClustersResponse,
@@ -103,6 +105,16 @@ import type {
   Elbv2ListenersResponse,
   Elbv2RulesResponse,
   OrganizationsAccountsResponse,
+  SetSsmCommandStatusRequest,
+  SetSsmCommandStatusResponse,
+  FailSsmCommandRequest,
+  FailSsmCommandResponse,
+  SsmParameterPolicyEventsResponse,
+  InjectSsmSessionRequest,
+  InjectSsmSessionResponse,
+  KmsUsageResponse,
+  CloudFrontDistributionStatusRequest,
+  Elbv2WafCountsResponse,
 } from "./types.js";
 
 export class FakeCloudError extends Error {
@@ -146,6 +158,54 @@ export class LambdaClient {
       { method: "POST" },
     );
     return parse(resp);
+  }
+
+  /**
+   * Download the raw ZIP bytes for a function's code. Pass `"latest"`
+   * (default) to fetch `latest.zip` or a numeric version like `"3"` to
+   * fetch `3.zip`. Returns the ArrayBuffer of the response body.
+   */
+  async downloadFunctionCode(
+    accountId: string,
+    functionName: string,
+    qualifierOrLatest: string = "latest",
+  ): Promise<ArrayBuffer> {
+    const file =
+      qualifierOrLatest === "latest"
+        ? "latest.zip"
+        : `${qualifierOrLatest}.zip`;
+    const resp = await fetch(
+      `${this.baseUrl}/_fakecloud/lambda/function-code/${encodeURIComponent(
+        accountId,
+      )}/${encodeURIComponent(functionName)}/${encodeURIComponent(file)}`,
+    );
+    if (!resp.ok) {
+      const body = await resp.text().catch(() => "");
+      throw new FakeCloudError(resp.status, body);
+    }
+    return resp.arrayBuffer();
+  }
+
+  /**
+   * Download the raw ZIP bytes for a Lambda layer version's content.
+   * Returns the ArrayBuffer of the response body.
+   */
+  async downloadLayerContent(
+    accountId: string,
+    layerName: string,
+    version: string | number,
+  ): Promise<ArrayBuffer> {
+    const file = `${String(version)}.zip`;
+    const resp = await fetch(
+      `${this.baseUrl}/_fakecloud/lambda/layer-content/${encodeURIComponent(
+        accountId,
+      )}/${encodeURIComponent(layerName)}/${encodeURIComponent(file)}`,
+    );
+    if (!resp.ok) {
+      const body = await resp.text().catch(() => "");
+      throw new FakeCloudError(resp.status, body);
+    }
+    return resp.arrayBuffer();
   }
 }
 
@@ -737,6 +797,22 @@ export class StepFunctionsClient {
     return parse(resp);
   }
 
+  async getSyncExecutions(): Promise<StepFunctionsSyncExecutionsResponse> {
+    const resp = await fetch(
+      `${this.baseUrl}/_fakecloud/stepfunctions/sync-executions`,
+    );
+    return parse(resp);
+  }
+
+  async getExecutionTree(
+    arn: string,
+  ): Promise<StepFunctionsExecutionTreeResponse> {
+    const resp = await fetch(
+      `${this.baseUrl}/_fakecloud/stepfunctions/execution-tree/${encodeURIComponent(arn)}`,
+    );
+    return parse(resp);
+  }
+
   async enqueueActivityTask(
     req: SfnEnqueueActivityTaskRequest,
   ): Promise<SfnEnqueueActivityTaskResponse> {
@@ -857,6 +933,147 @@ export class BedrockAgentRuntimeClient {
   }
 }
 
+/**
+ * SSM admin/introspection client. Wraps the deterministic-control
+ * endpoints under `/_fakecloud/ssm/*` that let tests drive command
+ * status, parameter-policy event history, and inject session records
+ * without relying on the periodic execution tick.
+ */
+export class SsmClient {
+  constructor(private baseUrl: string) {}
+
+  /** Flip a Run Command's status synchronously. */
+  async setCommandStatus(
+    commandId: string,
+    req: SetSsmCommandStatusRequest,
+  ): Promise<SetSsmCommandStatusResponse> {
+    const resp = await fetch(
+      `${this.baseUrl}/_fakecloud/ssm/commands/${encodeURIComponent(commandId)}/status`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(req),
+      },
+    );
+    return parse(resp);
+  }
+
+  /**
+   * Mark a Run Command's invocations as failed. When `instanceId` is
+   * omitted, every invocation is flipped; otherwise only the named
+   * instance is affected.
+   */
+  async failCommand(
+    commandId: string,
+    req?: FailSsmCommandRequest,
+  ): Promise<FailSsmCommandResponse> {
+    const resp = await fetch(
+      `${this.baseUrl}/_fakecloud/ssm/commands/${encodeURIComponent(commandId)}/fail`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(req ?? {}),
+      },
+    );
+    return parse(resp);
+  }
+
+  /** List recorded SSM parameter-policy lifecycle events. */
+  async getParameterPolicyEvents(
+    accountId?: string,
+  ): Promise<SsmParameterPolicyEventsResponse> {
+    const qs = accountId ? `?accountId=${encodeURIComponent(accountId)}` : "";
+    const resp = await fetch(
+      `${this.baseUrl}/_fakecloud/ssm/parameter-policy-events${qs}`,
+    );
+    return parse(resp);
+  }
+
+  /**
+   * Inject a fake Session Manager session into state without going
+   * through `StartSession`. Lets tests assert
+   * `DescribeSessions`/`TerminateSession` paths end-to-end.
+   */
+  async injectSession(
+    req: InjectSsmSessionRequest,
+  ): Promise<InjectSsmSessionResponse> {
+    const resp = await fetch(`${this.baseUrl}/_fakecloud/ssm/sessions/inject`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(req),
+    });
+    return parse(resp);
+  }
+}
+
+/**
+ * KMS introspection client. Wraps the usage-record log fakecloud
+ * keeps for every server-side encryption operation routed through a
+ * KMS key.
+ */
+export class KmsClient {
+  constructor(private baseUrl: string) {}
+
+  /** Return every recorded KMS usage record. */
+  async getUsage(): Promise<KmsUsageResponse> {
+    const resp = await fetch(`${this.baseUrl}/_fakecloud/kms/usage`);
+    return parse(resp);
+  }
+}
+
+/**
+ * WAFv2 admin client. The `evaluate` endpoint runs an arbitrary
+ * request payload against fakecloud's WebACL evaluation engine and
+ * returns the raw match decision — both request and response are
+ * pass-through JSON so the SDK does not constrain payload shape.
+ */
+export class WafV2Client {
+  constructor(private baseUrl: string) {}
+
+  /**
+   * Evaluate an arbitrary request payload against the configured
+   * WebACLs. Request and response are opaque JSON bags.
+   */
+  async evaluate(
+    req: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    const resp = await fetch(`${this.baseUrl}/_fakecloud/wafv2/evaluate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(req),
+    });
+    return parse(resp);
+  }
+}
+
+/**
+ * CloudFront admin client. Wraps the per-distribution status flip
+ * endpoint that lets tests force a Distribution synchronously into
+ * `Deployed` or `InProgress` without waiting on the propagation tick.
+ */
+export class CloudFrontClient {
+  constructor(private baseUrl: string) {}
+
+  /** Flip a stored Distribution's status synchronously. */
+  async setDistributionStatus(
+    distributionId: string,
+    req: CloudFrontDistributionStatusRequest,
+  ): Promise<void> {
+    const resp = await fetch(
+      `${this.baseUrl}/_fakecloud/cloudfront/distributions/${encodeURIComponent(distributionId)}/status`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(req),
+      },
+    );
+    if (!resp.ok) {
+      const body = await resp.text().catch(() => "");
+      throw new FakeCloudError(resp.status, body);
+    }
+  }
+}
+
 // ── Main client ────────────────────────────────────────────────────
 
 export class FakeCloud {
@@ -889,6 +1106,10 @@ export class FakeCloud {
   private readonly _applicationAutoscaling: ApplicationAutoScalingClient;
   private readonly _athena: AthenaClient;
   private readonly _organizations: OrganizationsClient;
+  private readonly _ssm: SsmClient;
+  private readonly _kms: KmsClient;
+  private readonly _wafv2: WafV2Client;
+  private readonly _cloudfront: CloudFrontClient;
 
   constructor(baseUrl: string = "http://localhost:4566") {
     this.baseUrl = baseUrl.replace(/\/+$/, "");
@@ -922,6 +1143,10 @@ export class FakeCloud {
     );
     this._athena = new AthenaClient(this.baseUrl);
     this._organizations = new OrganizationsClient(this.baseUrl);
+    this._ssm = new SsmClient(this.baseUrl);
+    this._kms = new KmsClient(this.baseUrl);
+    this._wafv2 = new WafV2Client(this.baseUrl);
+    this._cloudfront = new CloudFrontClient(this.baseUrl);
   }
 
   // ── Health & Reset ─────────────────────────────────────────────
@@ -1066,6 +1291,22 @@ export class FakeCloud {
 
   get organizations(): OrganizationsClient {
     return this._organizations;
+  }
+
+  get ssm(): SsmClient {
+    return this._ssm;
+  }
+
+  get kms(): KmsClient {
+    return this._kms;
+  }
+
+  get wafv2(): WafV2Client {
+    return this._wafv2;
+  }
+
+  get cloudfront(): CloudFrontClient {
+    return this._cloudfront;
   }
 }
 
@@ -1266,6 +1507,16 @@ export class Elbv2Client {
         method: "POST",
       },
     );
+    return parse(resp);
+  }
+
+  /**
+   * Pass-through admin endpoint returning the current WAF
+   * association/evaluation counts as recorded by fakecloud's ELBv2
+   * stack. Shape is opaque; treat as data for assertion-by-equality.
+   */
+  async getWafCounts(): Promise<Elbv2WafCountsResponse> {
+    const resp = await fetch(`${this.baseUrl}/_fakecloud/elbv2/waf-counts`);
     return parse(resp);
   }
 }

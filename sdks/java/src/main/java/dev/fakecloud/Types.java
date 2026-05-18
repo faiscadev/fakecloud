@@ -605,6 +605,41 @@ public final class Types {
     @JsonIgnoreProperties(ignoreUnknown = true)
     public record StepFunctionsExecutionsResponse(List<StepFunctionsExecution> executions) {}
 
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record StepFunctionsSyncBillingDetails(
+            long billedDurationInMilliseconds,
+            long billedMemoryUsedInMb) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record StepFunctionsSyncExecution(
+            String executionArn,
+            String stateMachineArn,
+            String name,
+            String status,
+            String input,
+            String output,
+            String startedAt,
+            String stoppedAt,
+            long durationMs,
+            StepFunctionsSyncBillingDetails billingDetails) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record StepFunctionsSyncExecutionsResponse(List<StepFunctionsSyncExecution> executions) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record StepFunctionsExecutionTreeNode(
+            String arn,
+            String stateMachineArn,
+            String status,
+            String startedAt,
+            String stoppedAt,
+            List<StepFunctionsExecutionTreeNode> children) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record StepFunctionsExecutionTreeResponse(
+            String rootArn,
+            StepFunctionsExecutionTreeNode tree) {}
+
     @JsonInclude(JsonInclude.Include.NON_NULL)
     public record SfnEnqueueActivityTaskRequest(
             String activityArn,
@@ -1250,4 +1285,96 @@ public final class Types {
             @JsonProperty("Token") String token,
             @JsonProperty("Expiration") String expiration,
             @JsonProperty("RoleArn") String roleArn) {}
+
+    // ── SSM admin ────────────────────────────────────────────────
+
+    /**
+     * Body for {@code POST /_fakecloud/ssm/commands/{commandId}/status}.
+     * {@code accountId} is omitted from the JSON when null and falls back
+     * to the default account on the server side.
+     */
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record SetSsmCommandStatusRequest(String accountId, String status) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record SetSsmCommandStatusResponse(boolean updated) {}
+
+    /**
+     * Body for {@code POST /_fakecloud/ssm/commands/{commandId}/fail}. All
+     * fields are optional: when {@code instanceId} is null every
+     * invocation on the command is flipped to {@code Failed}.
+     */
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record FailSsmCommandRequest(
+            String accountId,
+            String instanceId,
+            String statusDetails,
+            String standardErrorContent) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record FailSsmCommandResponse(int updatedInvocations) {}
+
+    /** One entry from {@code GET /_fakecloud/ssm/parameter-policy-events}. */
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record SsmParameterPolicyEvent(
+            String parameterName,
+            String parameterArn,
+            String eventType,
+            String message,
+            String createdAt) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record SsmParameterPolicyEventsResponse(
+            List<SsmParameterPolicyEvent> events) {}
+
+    /**
+     * Body for {@code POST /_fakecloud/ssm/sessions/inject}. Drops a fake
+     * session record into state without going through {@code StartSession}.
+     */
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record InjectSsmSessionRequest(
+            String accountId,
+            String target,
+            String status,
+            String owner,
+            String reason,
+            String sessionId) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record InjectSsmSessionResponse(String sessionId) {}
+
+    // ── KMS usage (admin) ────────────────────────────────────────
+
+    /** One recorded KMS data-plane invocation. */
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record KmsUsageRecord(
+            String timestamp,
+            String operation,
+            String servicePrincipal,
+            String accountId,
+            String keyArn,
+            Map<String, String> encryptionContext) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record KmsUsageResponse(List<KmsUsageRecord> records) {}
+
+    // ── ELBv2 WAF counts (admin) ─────────────────────────────────
+
+    /**
+     * Response from {@code GET /_fakecloud/elbv2/waf-counts}. The exact
+     * shape of {@code counts} is service-internal and intentionally left
+     * as free-form JSON.
+     */
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record Elbv2WafCountsResponse(Object counts) {}
+
+    // ── CloudFront admin ─────────────────────────────────────────
+
+    /**
+     * Body for {@code POST /_fakecloud/cloudfront/distributions/{id}/status}.
+     * Flips a stored CloudFront Distribution's status to e.g.
+     * {@code "Deployed"} or {@code "InProgress"} synchronously.
+     */
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record CloudFrontDistributionStatusRequest(String status) {}
 }

@@ -26,5 +26,9 @@ export {
   ApplicationAutoScalingClient,
   AthenaClient,
   OrganizationsClient,
+  SsmClient,
+  KmsClient,
+  WafV2Client,
+  CloudFrontClient,
 } from "./client.js";
 export type * from "./types.js";
