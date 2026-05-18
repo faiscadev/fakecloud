@@ -739,6 +739,20 @@ final class StepFunctionsClient
         );
     }
 
+    public function getSyncExecutions(): StepFunctionsSyncExecutionsResponse
+    {
+        return StepFunctionsSyncExecutionsResponse::fromArray(
+            $this->http->get('/_fakecloud/stepfunctions/sync-executions')
+        );
+    }
+
+    public function getExecutionTree(string $arn): StepFunctionsExecutionTreeResponse
+    {
+        return StepFunctionsExecutionTreeResponse::fromArray(
+            $this->http->get('/_fakecloud/stepfunctions/execution-tree/' . rawurlencode($arn))
+        );
+    }
+
     public function enqueueActivityTask(SfnEnqueueActivityTaskRequest $req): SfnEnqueueActivityTaskResponse
     {
         return SfnEnqueueActivityTaskResponse::fromArray(

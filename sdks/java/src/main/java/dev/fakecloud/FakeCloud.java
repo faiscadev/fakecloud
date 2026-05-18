@@ -94,6 +94,8 @@ import dev.fakecloud.Types.SetHealthCheckStatusRequest;
 import dev.fakecloud.Types.SnsMessagesResponse;
 import dev.fakecloud.Types.SqsMessagesResponse;
 import dev.fakecloud.Types.StepFunctionsExecutionsResponse;
+import dev.fakecloud.Types.StepFunctionsSyncExecutionsResponse;
+import dev.fakecloud.Types.StepFunctionsExecutionTreeResponse;
 import dev.fakecloud.Types.TokensResponse;
 import dev.fakecloud.Types.TtlTickResponse;
 import dev.fakecloud.Types.UserConfirmationCodes;
@@ -749,6 +751,18 @@ public final class FakeCloud {
             return http.get(
                     "/_fakecloud/stepfunctions/executions",
                     StepFunctionsExecutionsResponse.class);
+        }
+
+        public StepFunctionsSyncExecutionsResponse getSyncExecutions() {
+            return http.get(
+                    "/_fakecloud/stepfunctions/sync-executions",
+                    StepFunctionsSyncExecutionsResponse.class);
+        }
+
+        public StepFunctionsExecutionTreeResponse getExecutionTree(String arn) {
+            return http.get(
+                    "/_fakecloud/stepfunctions/execution-tree/" + encodePath(arn),
+                    StepFunctionsExecutionTreeResponse.class);
         }
 
         public Types.SfnEnqueueActivityTaskResponse enqueueActivityTask(

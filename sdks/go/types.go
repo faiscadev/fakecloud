@@ -727,6 +727,47 @@ type StepFunctionsExecutionsResponse struct {
 	Executions []StepFunctionsExecution `json:"executions"`
 }
 
+// StepFunctionsSyncBillingDetails captures billed compute for a sync execution.
+type StepFunctionsSyncBillingDetails struct {
+	BilledDurationInMilliseconds int64 `json:"billedDurationInMilliseconds"`
+	BilledMemoryUsedInMb         int64 `json:"billedMemoryUsedInMb"`
+}
+
+// StepFunctionsSyncExecution represents a recorded EXPRESS sync execution.
+type StepFunctionsSyncExecution struct {
+	ExecutionARN    string                          `json:"executionArn"`
+	StateMachineARN string                          `json:"stateMachineArn"`
+	Name            string                          `json:"name"`
+	Status          string                          `json:"status"`
+	Input           *string                         `json:"input,omitempty"`
+	Output          *string                         `json:"output,omitempty"`
+	StartedAt       string                          `json:"startedAt"`
+	StoppedAt       *string                         `json:"stoppedAt,omitempty"`
+	DurationMs      int64                           `json:"durationMs"`
+	BillingDetails  StepFunctionsSyncBillingDetails `json:"billingDetails"`
+}
+
+// StepFunctionsSyncExecutionsResponse contains all recorded sync executions.
+type StepFunctionsSyncExecutionsResponse struct {
+	Executions []StepFunctionsSyncExecution `json:"executions"`
+}
+
+// StepFunctionsExecutionTreeNode is a node in a parent/child execution tree.
+type StepFunctionsExecutionTreeNode struct {
+	ARN             string                           `json:"arn"`
+	StateMachineARN string                           `json:"stateMachineArn"`
+	Status          string                           `json:"status"`
+	StartedAt       string                           `json:"startedAt"`
+	StoppedAt       *string                          `json:"stoppedAt,omitempty"`
+	Children        []StepFunctionsExecutionTreeNode `json:"children"`
+}
+
+// StepFunctionsExecutionTreeResponse is the rooted parent/child tree for an execution.
+type StepFunctionsExecutionTreeResponse struct {
+	RootARN string                         `json:"rootArn"`
+	Tree    StepFunctionsExecutionTreeNode `json:"tree"`
+}
+
 // SfnEnqueueActivityTaskRequest queues a task for an activity worker without
 // running an ASL execution.
 type SfnEnqueueActivityTaskRequest struct {

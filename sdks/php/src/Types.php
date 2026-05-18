@@ -1800,6 +1800,108 @@ final class StepFunctionsExecutionsResponse
     }
 }
 
+final class StepFunctionsSyncBillingDetails
+{
+    public function __construct(
+        public readonly int $billedDurationInMilliseconds,
+        public readonly int $billedMemoryUsedInMb,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            (int) $data['billedDurationInMilliseconds'],
+            (int) $data['billedMemoryUsedInMb'],
+        );
+    }
+}
+
+final class StepFunctionsSyncExecution
+{
+    public function __construct(
+        public readonly string $executionArn,
+        public readonly string $stateMachineArn,
+        public readonly string $name,
+        public readonly string $status,
+        public readonly ?string $input,
+        public readonly ?string $output,
+        public readonly string $startedAt,
+        public readonly ?string $stoppedAt,
+        public readonly int $durationMs,
+        public readonly StepFunctionsSyncBillingDetails $billingDetails,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            $data['executionArn'],
+            $data['stateMachineArn'],
+            $data['name'],
+            $data['status'],
+            $data['input'] ?? null,
+            $data['output'] ?? null,
+            $data['startedAt'],
+            $data['stoppedAt'] ?? null,
+            (int) $data['durationMs'],
+            StepFunctionsSyncBillingDetails::fromArray($data['billingDetails']),
+        );
+    }
+}
+
+final class StepFunctionsSyncExecutionsResponse
+{
+    public function __construct(
+        /** @var StepFunctionsSyncExecution[] */
+        public readonly array $executions,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(array_map(StepFunctionsSyncExecution::fromArray(...), $data['executions']));
+    }
+}
+
+final class StepFunctionsExecutionTreeNode
+{
+    public function __construct(
+        public readonly string $arn,
+        public readonly string $stateMachineArn,
+        public readonly string $status,
+        public readonly string $startedAt,
+        public readonly ?string $stoppedAt,
+        /** @var StepFunctionsExecutionTreeNode[] */
+        public readonly array $children,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            $data['arn'],
+            $data['stateMachineArn'],
+            $data['status'],
+            $data['startedAt'],
+            $data['stoppedAt'] ?? null,
+            array_map(self::fromArray(...), $data['children'] ?? []),
+        );
+    }
+}
+
+final class StepFunctionsExecutionTreeResponse
+{
+    public function __construct(
+        public readonly string $rootArn,
+        public readonly StepFunctionsExecutionTreeNode $tree,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            $data['rootArn'],
+            StepFunctionsExecutionTreeNode::fromArray($data['tree']),
+        );
+    }
+}
+
 final class SfnEnqueueActivityTaskRequest
 {
     public function __construct(
