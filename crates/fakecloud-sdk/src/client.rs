@@ -1,5 +1,6 @@
 use crate::error::Error;
 use crate::types::*;
+use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 
 /// Client for the fakecloud introspection and simulation API (`/_fakecloud/*`).
 pub struct FakeCloud {
@@ -168,8 +169,32 @@ impl FakeCloud {
         OrganizationsClient { fc: self }
     }
 
+    pub fn acm(&self) -> AcmClient<'_> {
+        AcmClient { fc: self }
+    }
+
+    pub fn ecr(&self) -> EcrClient<'_> {
+        EcrClient { fc: self }
+    }
+
+    pub fn elbv2(&self) -> Elbv2Client<'_> {
+        Elbv2Client { fc: self }
+    }
+
+    pub fn glue(&self) -> GlueClient<'_> {
+        GlueClient { fc: self }
+    }
+
+    pub fn logs(&self) -> LogsClient<'_> {
+        LogsClient { fc: self }
+    }
+
     pub fn route53(&self) -> Route53Client<'_> {
         Route53Client { fc: self }
+    }
+
+    pub fn scheduler(&self) -> SchedulerClient<'_> {
+        SchedulerClient { fc: self }
     }
 
     pub fn ssm(&self) -> SsmClient<'_> {
@@ -186,10 +211,6 @@ impl FakeCloud {
 
     pub fn cloudfront(&self) -> CloudFrontClient<'_> {
         CloudFrontClient { fc: self }
-    }
-
-    pub fn elbv2(&self) -> Elbv2Client<'_> {
-        Elbv2Client { fc: self }
     }
 
     // ── Internal helpers ────────────────────────────────────────────
@@ -472,6 +493,135 @@ impl SesClient<'_> {
             .client
             .post(format!("{}/_fakecloud/ses/inbound", self.fc.base_url))
             .json(req)
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
+
+    /// Snapshot the running SES counters (currently only
+    /// `suppressed_drops_total`).
+    pub async fn get_metrics(&self) -> Result<SesMetricsResponse, Error> {
+        let resp = self
+            .fc
+            .client
+            .get(format!("{}/_fakecloud/ses/metrics", self.fc.base_url))
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
+
+    /// List recorded SES bounces with per-recipient bounce metadata.
+    pub async fn get_bounces(&self) -> Result<SesBouncesResponse, Error> {
+        let resp = self
+            .fc
+            .client
+            .get(format!("{}/_fakecloud/ses/bounces", self.fc.base_url))
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
+
+    /// Flip the SES account-level `production_access_enabled` flag.
+    /// `sandbox=true` puts the account back into sandbox mode (production
+    /// access disabled); `sandbox=false` re-enables production access.
+    pub async fn set_sandbox(&self, sandbox: bool) -> Result<SesSandboxResponse, Error> {
+        let resp = self
+            .fc
+            .client
+            .post(format!(
+                "{}/_fakecloud/ses/account/sandbox",
+                self.fc.base_url
+            ))
+            .json(&SesSandboxRequest { sandbox })
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
+
+    /// List event-destination delivery dispatches recorded by the
+    /// SES sender (one row per dispatched event-destination target).
+    pub async fn get_event_destination_deliveries(
+        &self,
+    ) -> Result<SesEventDestinationDeliveriesResponse, Error> {
+        let resp = self
+            .fc
+            .client
+            .get(format!(
+                "{}/_fakecloud/ses/event-destinations/deliveries",
+                self.fc.base_url
+            ))
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
+
+    /// Get the deterministic DKIM public key + selector + signing-enabled
+    /// flag for an identity. 404 if the identity is unknown.
+    pub async fn get_dkim_public_key(
+        &self,
+        identity: &str,
+    ) -> Result<SesDkimPublicKeyResponse, Error> {
+        let resp = self
+            .fc
+            .client
+            .get(format!(
+                "{}/_fakecloud/ses/identities/{}/dkim-public-key",
+                self.fc.base_url, identity
+            ))
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
+
+    /// Flip an identity's `MailFromDomainStatus`. Must be one of
+    /// `NotStarted` / `Pending` / `Success` / `Failed`.
+    pub async fn set_mail_from_status(
+        &self,
+        identity: &str,
+        status: &str,
+    ) -> Result<SesMailFromStatusResponse, Error> {
+        let resp = self
+            .fc
+            .client
+            .post(format!(
+                "{}/_fakecloud/ses/identities/{}/mail-from-status",
+                self.fc.base_url, identity
+            ))
+            .json(&SesMailFromStatusRequest {
+                status: status.to_string(),
+            })
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
+
+    /// Get a per-message insights snapshot (sends, deliveries, bounces,
+    /// complaints, ...). 404 if the message id is unknown.
+    pub async fn get_message_insights(
+        &self,
+        message_id: &str,
+    ) -> Result<SesMessageInsightsResponse, Error> {
+        let resp = self
+            .fc
+            .client
+            .get(format!(
+                "{}/_fakecloud/ses/messages/{}/insights",
+                self.fc.base_url, message_id
+            ))
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
+
+    /// List submissions received via the SES SMTP endpoint.
+    pub async fn get_smtp_submissions(&self) -> Result<SesSmtpSubmissionsResponse, Error> {
+        let resp = self
+            .fc
+            .client
+            .get(format!(
+                "{}/_fakecloud/ses/smtp/submissions",
+                self.fc.base_url
+            ))
             .send()
             .await?;
         FakeCloud::parse(resp).await
@@ -910,6 +1060,61 @@ impl CognitoClient<'_> {
             .await?;
         FakeCloud::parse(resp).await
     }
+
+    /// Mint an OAuth2 `authorization_code` for the given `(client_id,
+    /// redirect_uri, scopes, PKCE)` binding. Lets tests drive the
+    /// `authorization_code` grant before the hosted-UI lands.
+    pub async fn mint_authorization_code(
+        &self,
+        req: &MintAuthorizationCodeRequest,
+    ) -> Result<MintAuthorizationCodeResponse, Error> {
+        let resp = self
+            .fc
+            .client
+            .post(format!(
+                "{}/_fakecloud/cognito/authorization-codes",
+                self.fc.base_url
+            ))
+            .json(req)
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
+
+    /// Register one or more plaintext passwords with the compromised-
+    /// credentials set so subsequent `InitiateAuth` /
+    /// `AdminInitiateAuth` calls trip the `BLOCK` action when the pool's
+    /// `CompromisedCredentialsRiskConfiguration` is enabled.
+    pub async fn set_compromised_passwords(
+        &self,
+        req: &CognitoCompromisedPasswordsRequest,
+    ) -> Result<CompromisedPasswordsResponse, Error> {
+        let resp = self
+            .fc
+            .client
+            .post(format!(
+                "{}/_fakecloud/cognito/compromised-passwords",
+                self.fc.base_url
+            ))
+            .json(req)
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
+
+    /// List every registered WebAuthn credential across pools.
+    pub async fn get_webauthn_credentials(&self) -> Result<WebAuthnCredentialsResponse, Error> {
+        let resp = self
+            .fc
+            .client
+            .get(format!(
+                "{}/_fakecloud/cognito/webauthn-credentials",
+                self.fc.base_url
+            ))
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
 }
 
 // ── API Gateway v2 ──────────────────────────────────────────────────
@@ -1029,6 +1234,27 @@ impl StepFunctionsClient<'_> {
     /// Return the nested call tree rooted at `execution_arn`. Children are
     /// executions that were started by their parent via
     /// `arn:aws:states:::states:startExecution[.sync]`.
+    /// Inject an activity task into the worker pool, skipping a
+    /// state-machine execution. Used by tests that want to exercise the
+    /// worker-pool API surface (`GetActivityTask` / `SendTaskSuccess`)
+    /// without spinning up an ASL workflow.
+    pub async fn enqueue_activity_task(
+        &self,
+        req: &SfnEnqueueActivityTaskRequest,
+    ) -> Result<SfnEnqueueActivityTaskResponse, Error> {
+        let resp = self
+            .fc
+            .client
+            .post(format!(
+                "{}/_fakecloud/stepfunctions/enqueue-activity-task",
+                self.fc.base_url
+            ))
+            .json(req)
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
+
     pub async fn get_execution_tree(
         &self,
         execution_arn: &str,
@@ -1336,6 +1562,34 @@ impl EcsClient<'_> {
         FakeCloud::parse(resp).await
     }
 
+    /// Get the ECS task-metadata v4 dump keyed by full task ARN. Unlike
+    /// the per-container `/_fakecloud/ecs/v4/{task_id}` endpoint, this
+    /// is keyed by ARN for assertion-friendly use from tests that hold
+    /// the `RunTask` response. Returned as raw JSON because the shape
+    /// is the aggregated container-metadata document AWS surfaces at
+    /// `ECS_CONTAINER_METADATA_URI_V4`.
+    pub async fn get_metadata_by_arn(&self, task_arn: &str) -> Result<serde_json::Value, Error> {
+        let mut encoded = String::with_capacity(task_arn.len());
+        for b in task_arn.bytes() {
+            match b {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                    encoded.push(b as char);
+                }
+                _ => encoded.push_str(&format!("%{:02X}", b)),
+            }
+        }
+        let resp = self
+            .fc
+            .client
+            .get(format!(
+                "{}/_fakecloud/ecs/metadata/{}",
+                self.fc.base_url, encoded
+            ))
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
+
     /// Fetch the IAM task-role credentials that fakecloud hands out via
     /// `AWS_CONTAINER_CREDENTIALS_RELATIVE_URI` to the container. Fields
     /// use AWS's native PascalCase (`AccessKeyId`, `SecretAccessKey`,
@@ -1482,6 +1736,388 @@ impl OrganizationsClient<'_> {
             .get(format!(
                 "{}/_fakecloud/organizations/accounts",
                 self.fc.base_url
+            ))
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
+}
+
+// ── ACM ─────────────────────────────────────────────────────────────
+
+pub struct AcmClient<'a> {
+    fc: &'a FakeCloud,
+}
+
+impl AcmClient<'_> {
+    fn certificate_id(arn_or_id: &str) -> String {
+        match arn_or_id.rfind("certificate/") {
+            Some(idx) => arn_or_id[idx + "certificate/".len()..].to_string(),
+            None => arn_or_id.to_string(),
+        }
+    }
+
+    /// Flip a stored ACM certificate's status (and optionally record a
+    /// failure reason). Accepts either the full ACM ARN or just the
+    /// trailing UUID. Returns `Error::Api { status: 404, .. }` if the
+    /// certificate is unknown.
+    pub async fn set_certificate_status(
+        &self,
+        arn_or_id: &str,
+        req: &AcmCertificateStatusRequest,
+    ) -> Result<(), Error> {
+        let id = Self::certificate_id(arn_or_id);
+        let resp = self
+            .fc
+            .client
+            .post(format!(
+                "{}/_fakecloud/acm/certificates/{}/status",
+                self.fc.base_url, id
+            ))
+            .json(req)
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(Error::Api { status, body });
+        }
+        Ok(())
+    }
+
+    /// Inspect a stored certificate's PEM block counts and byte sizes.
+    /// `external_ca_validated` is always `false` — fakecloud does not run
+    /// real X.509 verification.
+    pub async fn get_certificate_chain_info(
+        &self,
+        arn_or_id: &str,
+    ) -> Result<AcmCertificateChainInfo, Error> {
+        let id = Self::certificate_id(arn_or_id);
+        let resp = self
+            .fc
+            .client
+            .get(format!(
+                "{}/_fakecloud/acm/certificates/{}/chain-info",
+                self.fc.base_url, id
+            ))
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
+
+    /// Approve a `PENDING_VALIDATION` certificate (synchronous equivalent
+    /// of "user clicked the validation link"). Flips the cert to `ISSUED`
+    /// and refreshes its renewal eligibility / RenewalSummary.
+    pub async fn approve_certificate(&self, arn_or_id: &str) -> Result<(), Error> {
+        let id = Self::certificate_id(arn_or_id);
+        let resp = self
+            .fc
+            .client
+            .post(format!(
+                "{}/_fakecloud/acm/certificates/{}/approve",
+                self.fc.base_url, id
+            ))
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(Error::Api { status, body });
+        }
+        Ok(())
+    }
+}
+
+// ── ECR ─────────────────────────────────────────────────────────────
+
+pub struct EcrClient<'a> {
+    fc: &'a FakeCloud,
+}
+
+impl EcrClient<'_> {
+    /// List every ECR image across every repository.
+    pub async fn get_images(&self) -> Result<EcrImagesResponse, Error> {
+        let resp = self
+            .fc
+            .client
+            .get(format!("{}/_fakecloud/ecr/images", self.fc.base_url))
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
+
+    /// List every ECR repository.
+    pub async fn get_repositories(&self) -> Result<EcrRepositoriesResponse, Error> {
+        let resp = self
+            .fc
+            .client
+            .get(format!("{}/_fakecloud/ecr/repositories", self.fc.base_url))
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
+
+    /// List configured ECR pull-through-cache rules.
+    pub async fn get_pull_through_rules(&self) -> Result<EcrPullThroughRulesResponse, Error> {
+        let resp = self
+            .fc
+            .client
+            .get(format!(
+                "{}/_fakecloud/ecr/pull-through-rules",
+                self.fc.base_url
+            ))
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
+}
+
+// ── ELBv2 ───────────────────────────────────────────────────────────
+
+pub struct Elbv2Client<'a> {
+    fc: &'a FakeCloud,
+}
+
+impl Elbv2Client<'_> {
+    /// List every ELBv2 load balancer (ALB / NLB / GWLB).
+    pub async fn get_load_balancers(&self) -> Result<Elbv2LoadBalancersResponse, Error> {
+        let resp = self
+            .fc
+            .client
+            .get(format!(
+                "{}/_fakecloud/elbv2/load-balancers",
+                self.fc.base_url
+            ))
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
+
+    /// List every ELBv2 listener.
+    pub async fn get_listeners(&self) -> Result<Elbv2ListenersResponse, Error> {
+        let resp = self
+            .fc
+            .client
+            .get(format!("{}/_fakecloud/elbv2/listeners", self.fc.base_url))
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
+
+    /// List every ELBv2 routing rule.
+    pub async fn get_rules(&self) -> Result<Elbv2RulesResponse, Error> {
+        let resp = self
+            .fc
+            .client
+            .get(format!("{}/_fakecloud/elbv2/rules", self.fc.base_url))
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
+
+    /// List every ELBv2 target group with its registered targets and
+    /// health-check configuration.
+    pub async fn get_target_groups(&self) -> Result<Elbv2TargetGroupsResponse, Error> {
+        let resp = self
+            .fc
+            .client
+            .get(format!(
+                "{}/_fakecloud/elbv2/target-groups",
+                self.fc.base_url
+            ))
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
+
+    /// Flush buffered access-log records to the configured S3 bucket
+    /// now. Returns the number of records that were flushed.
+    pub async fn flush_access_logs(&self) -> Result<Elbv2AccessLogsFlushResponse, Error> {
+        let resp = self
+            .fc
+            .client
+            .post(format!(
+                "{}/_fakecloud/elbv2/access-logs/flush",
+                self.fc.base_url
+            ))
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
+}
+
+// ── Glue ────────────────────────────────────────────────────────────
+
+pub struct GlueClient<'a> {
+    fc: &'a FakeCloud,
+}
+
+impl GlueClient<'_> {
+    /// List every configured Glue job.
+    pub async fn get_jobs(&self) -> Result<GlueJobsResponse, Error> {
+        let resp = self
+            .fc
+            .client
+            .get(format!("{}/_fakecloud/glue/jobs", self.fc.base_url))
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
+
+    /// List Glue JobRun records. Optionally scope to a single job by
+    /// name (matches the `job_name` query parameter).
+    pub async fn get_job_runs(&self, job_name: Option<&str>) -> Result<GlueJobRunsResponse, Error> {
+        fn encode(s: &str) -> String {
+            let mut out = String::with_capacity(s.len());
+            for b in s.bytes() {
+                match b {
+                    b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                        out.push(b as char);
+                    }
+                    _ => out.push_str(&format!("%{:02X}", b)),
+                }
+            }
+            out
+        }
+        let mut url = format!("{}/_fakecloud/glue/job-runs", self.fc.base_url);
+        if let Some(name) = job_name {
+            url.push_str("?job_name=");
+            url.push_str(&encode(name));
+        }
+        let resp = self.fc.client.get(url).send().await?;
+        FakeCloud::parse(resp).await
+    }
+}
+
+// ── Logs ────────────────────────────────────────────────────────────
+
+pub struct LogsClient<'a> {
+    fc: &'a FakeCloud,
+}
+
+impl LogsClient<'_> {
+    /// Seed a synthetic CloudWatch Logs anomaly so tests can exercise
+    /// `ListAnomalies` / `UpdateAnomaly` deterministically. Returns the
+    /// minted anomaly id.
+    pub async fn inject_anomaly(
+        &self,
+        req: &LogsAnomalyInjectRequest,
+    ) -> Result<LogsAnomalyInjectResponse, Error> {
+        let resp = self
+            .fc
+            .client
+            .post(format!(
+                "{}/_fakecloud/logs/anomalies/inject",
+                self.fc.base_url
+            ))
+            .json(req)
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
+
+    /// Snapshot the per-delivery configuration (one row per
+    /// `Delivery`), joined with the `log_type` of its associated
+    /// `DeliverySource`.
+    pub async fn get_delivery_config(&self) -> Result<LogsDeliveryConfigResponse, Error> {
+        let resp = self
+            .fc
+            .client
+            .get(format!(
+                "{}/_fakecloud/logs/delivery-config",
+                self.fc.base_url
+            ))
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
+
+    /// Get the parsed `Fields` lists from a single log group's index
+    /// policies. Returns `Error::Api { status: 404, .. }` if the log
+    /// group is unknown.
+    pub async fn get_field_indexes(
+        &self,
+        log_group_name: &str,
+    ) -> Result<LogsFieldIndexesResponse, Error> {
+        let resp = self
+            .fc
+            .client
+            .get(format!(
+                "{}/_fakecloud/logs/field-indexes/{}",
+                self.fc.base_url,
+                utf8_percent_encode(log_group_name, NON_ALPHANUMERIC)
+            ))
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
+}
+
+impl Route53Client<'_> {
+    /// Flip a stored Route 53 health check's reported status (and
+    /// optionally its last-failure observation) so tests can simulate
+    /// failover scenarios without a live checker. Returns
+    /// `Error::Api { status: 404, .. }` if the health check is unknown.
+    pub async fn set_health_check_status(
+        &self,
+        id: &str,
+        req: &Route53HealthCheckStatusRequest,
+    ) -> Result<(), Error> {
+        let resp = self
+            .fc
+            .client
+            .post(format!(
+                "{}/_fakecloud/route53/health-checks/{}/status",
+                self.fc.base_url, id
+            ))
+            .json(req)
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(Error::Api { status, body });
+        }
+        Ok(())
+    }
+}
+
+// ── Scheduler ───────────────────────────────────────────────────────
+
+pub struct SchedulerClient<'a> {
+    fc: &'a FakeCloud,
+}
+
+impl SchedulerClient<'_> {
+    /// List every EventBridge Scheduler schedule across every account
+    /// and group.
+    pub async fn get_schedules(&self) -> Result<SchedulerSchedulesResponse, Error> {
+        let resp = self
+            .fc
+            .client
+            .get(format!(
+                "{}/_fakecloud/scheduler/schedules",
+                self.fc.base_url
+            ))
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
+
+    /// Fire a single schedule by `(group, name)` immediately, bypassing
+    /// the cron tick. Returns the schedule + target ARN that received the
+    /// invocation.
+    pub async fn fire_schedule(
+        &self,
+        group: &str,
+        name: &str,
+    ) -> Result<FireScheduleResponse, Error> {
+        let resp = self
+            .fc
+            .client
+            .post(format!(
+                "{}/_fakecloud/scheduler/fire/{}/{}",
+                self.fc.base_url, group, name
             ))
             .send()
             .await?;
@@ -1648,12 +2284,6 @@ impl CloudFrontClient<'_> {
         }
         Ok(())
     }
-}
-
-// ── ELBv2 ───────────────────────────────────────────────────────────
-
-pub struct Elbv2Client<'a> {
-    fc: &'a FakeCloud,
 }
 
 impl Elbv2Client<'_> {

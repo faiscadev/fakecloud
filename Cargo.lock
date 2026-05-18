@@ -3888,6 +3888,7 @@ dependencies = [
 name = "fakecloud-sdk"
 version = "0.14.0"
 dependencies = [
+ "percent-encoding",
  "reqwest",
  "serde",
  "serde_json",
