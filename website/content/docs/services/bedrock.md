@@ -4,12 +4,14 @@ description = "Foundation models, guardrails, custom models, invocation jobs, ev
 weight = 21
 +++
 
-fakecloud implements **111 of 111** Bedrock operations across two APIs:
+fakecloud implements **214 of 214** Bedrock-family operations across four APIs:
 
-- **Bedrock** (control plane) — 101 operations
-- **Bedrock Runtime** (invocation) — 10 operations
+- **Bedrock** (control plane) — 101 operations *(this page)*
+- **Bedrock Runtime** (model invocation) — 10 operations *(this page)*
+- [**Bedrock Agent**](/docs/services/bedrock-agent/) (agents control plane) — 72 operations
+- [**Bedrock Agent Runtime**](/docs/services/bedrock-agent-runtime/) (agent invocation) — 31 operations
 
-Both at 100% Smithy conformance. **No other AWS emulator supports Bedrock at any tier.**
+All four at true 100% Smithy conformance. **No other AWS emulator supports Bedrock at any tier.**
 
 For a complete testing guide with code examples, see [Testing Bedrock](/docs/guides/testing-bedrock/). This page is the service reference.
 

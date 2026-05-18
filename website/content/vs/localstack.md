@@ -30,7 +30,7 @@ Since LocalStack replaced its open-source Community Edition with a proprietary i
 | API Gateway v1 | 124 ops | [Paid only](https://docs.localstack.cloud/references/licensing/) | Yes |
 | API Gateway v2 | 103 ops | [Paid only](https://docs.localstack.cloud/references/licensing/) | Yes |
 | ECR | 58 ops + real `docker push`/`pull` via OCI v2 | [Paid only](https://docs.localstack.cloud/references/licensing/) (and push is [flaky](https://github.com/localstack/localstack/issues/8128) when paid) | Yes |
-| Bedrock | 111 ops (control plane + runtime) | Not available | Not available |
+| Bedrock | 214 ops across Bedrock + Bedrock Runtime + Bedrock Agent + Bedrock Agent Runtime | Not available | Not available |
 | SCPs / multi-account | Yes (Organizations control plane + ceiling enforcement) | No | Partial |
 | Lambda real code execution | Yes (23 runtimes) | Paywall required | Yes |
 

@@ -54,7 +54,7 @@ This is why fakecloud runs real Lambda code in real runtime containers, runs rea
 | ElastiCache | 75 ops, real Redis/Valkey/Memcached via Docker | [Paid only](https://docs.localstack.cloud/references/licensing/) |
 | API Gateway v1 | 124 ops, REST APIs incl. real Lambda proxy data plane | [Paid only](https://docs.localstack.cloud/references/licensing/) |
 | API Gateway v2 | 103 ops, HTTP APIs + developer portals + JWT/Lambda authorizers | [Paid only](https://docs.localstack.cloud/references/licensing/) |
-| Bedrock | 111 ops (control plane + runtime) | Not available |
+| Bedrock | 214 ops across Bedrock + Bedrock Runtime + Bedrock Agent + Bedrock Agent Runtime | Not available |
 
 Performance numbers measured on Apple M1 via `time fakecloud`, `ps -o rss`, `ls -lh`. LocalStack numbers from a fresh `localstack start` on the same hardware.
 
