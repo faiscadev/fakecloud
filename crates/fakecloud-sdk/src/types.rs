@@ -1972,3 +1972,99 @@ pub struct CloudFrontDistributionStatusRequest {
     /// New distribution status. Typically `"Deployed"` or `"InProgress"`.
     pub status: String,
 }
+
+// ── ACM (introspection) ─────────────────────────────────────────────
+
+/// Response body for `GET /_fakecloud/acm/certificates/{arn-or-id}/chain-info`.
+/// Reports PEM block/byte counts and a `status` / `cert_type` snapshot
+/// so tests can verify that uploaded chains round-trip intact. The
+/// `external_ca_validated` flag is always `false` to document that
+/// fakecloud does not run real X.509 verification.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct AcmCertificateChainInfo {
+    pub certificate_arn: String,
+    pub certificate_pem_bytes: u64,
+    pub certificate_pem_blocks: u64,
+    pub chain_pem_bytes: u64,
+    pub chain_pem_blocks: u64,
+    pub external_ca_validated: bool,
+    pub status: String,
+    pub cert_type: String,
+}
+
+// ── Cognito extras ──────────────────────────────────────────────────
+
+/// Response from `POST /_fakecloud/cognito/compromised-passwords`. Echoes
+/// the count of *new* password hashes added to the compromised-credentials
+/// set on this call.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompromisedPasswordsResponse {
+    pub added: u64,
+}
+
+/// One registered WebAuthn credential surfaced by
+/// `GET /_fakecloud/cognito/webauthn-credentials`. `attestation_info` is
+/// kept as raw JSON because its shape depends on the attestation format.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebAuthnCredential {
+    pub account_id: String,
+    pub pool_user: String,
+    pub credential_id: String,
+    pub relying_party_id: String,
+    pub attestation_info: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebAuthnCredentialsResponse {
+    pub credentials: Vec<WebAuthnCredential>,
+}
+
+// ── SES extras (admin responses) ────────────────────────────────────
+
+/// Response from `POST /_fakecloud/ses/identities/{name}/mail-from-status`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SesMailFromStatusResponse {
+    pub identity: String,
+    pub mail_from_domain_status: String,
+}
+
+/// Response from `GET /_fakecloud/ses/identities/{name}/dkim-public-key`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SesDkimPublicKeyResponse {
+    pub identity: String,
+    pub selector: String,
+    pub public_key_base64: String,
+    pub signing_enabled: bool,
+}
+
+/// Response from `POST /_fakecloud/ses/account/sandbox`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SesSandboxResponse {
+    pub sandbox: bool,
+    pub production_access_enabled: bool,
+}
+
+/// Response from `GET /_fakecloud/ses/metrics`. fakecloud surfaces a
+/// running `suppressedDropsTotal` counter so test code can verify that
+/// the suppression list short-circuits sends.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SesMetricsResponse {
+    pub suppressed_drops_total: u64,
+}
+
+// ── ELBv2 admin ─────────────────────────────────────────────────────
+
+/// Response from `POST /_fakecloud/elbv2/access-logs/flush`. `flushed`
+/// is the number of access-log records flushed to the configured S3
+/// bucket on this call.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Elbv2AccessLogsFlushResponse {
+    pub flushed: u64,
+}
