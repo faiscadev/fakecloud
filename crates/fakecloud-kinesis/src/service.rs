@@ -312,8 +312,10 @@ impl KinesisService {
         let exclusive_start = body["ExclusiveStartStreamName"].as_str();
         validate_optional_string_length("ExclusiveStartStreamName", exclusive_start, 1, 128)?;
         validate_optional_string_length("NextToken", body["NextToken"].as_str(), 1, 1048576)?;
-        validate_optional_json_range("Limit", &body["Limit"], 1, 100)?;
-        let limit = body["Limit"].as_i64().unwrap_or(100);
+        // Smithy: ListStreamsInputLimit is @range(1, 10000). Real Kinesis caps at 100
+        // server-side per the operation docs, but the wire-layer accepts up to 10000.
+        validate_optional_json_range("Limit", &body["Limit"], 1, 10000)?;
+        let limit = body["Limit"].as_i64().unwrap_or(100).min(100);
 
         let accounts = self.state.read();
         let empty = KinesisState::new(&request.account_id, &request.region);
