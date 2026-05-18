@@ -94,8 +94,11 @@ impl ApplicationAutoScalingService {
     fn register_scalable_target(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         let service_namespace = require_str(&body, "ServiceNamespace")?;
+        validate_service_namespace(&service_namespace)?;
         let resource_id = require_str(&body, "ResourceId")?;
+        validate_resource_id_len("resourceId", &resource_id)?;
         let scalable_dimension = require_str(&body, "ScalableDimension")?;
+        validate_scalable_dimension(&scalable_dimension)?;
         let min_capacity = body
             .get("MinCapacity")
             .and_then(Value::as_i64)
@@ -108,6 +111,9 @@ impl ApplicationAutoScalingService {
             .get("RoleARN")
             .and_then(Value::as_str)
             .map(|s| s.to_string());
+        if let Some(role) = role_arn.as_deref() {
+            validate_resource_id_len("roleARN", role)?;
+        }
         let suspended_state = body.get("SuspendedState").map(parse_suspended_state);
 
         let key = (
@@ -208,6 +214,7 @@ impl ApplicationAutoScalingService {
     fn describe_scalable_targets(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         let namespace = require_str(&body, "ServiceNamespace")?;
+        validate_service_namespace(&namespace)?;
         let resource_ids: Vec<String> = body
             .get("ResourceIds")
             .and_then(Value::as_array)
@@ -217,10 +224,16 @@ impl ApplicationAutoScalingService {
                     .collect()
             })
             .unwrap_or_default();
+        for rid in &resource_ids {
+            validate_resource_id_len("resourceIds", rid)?;
+        }
         let dimension = body
             .get("ScalableDimension")
             .and_then(Value::as_str)
             .map(|s| s.to_string());
+        if let Some(d) = dimension.as_deref() {
+            validate_scalable_dimension(d)?;
+        }
         let max_results = body
             .get("MaxResults")
             .and_then(Value::as_u64)
@@ -362,6 +375,7 @@ impl ApplicationAutoScalingService {
     fn describe_scaling_policies(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         let namespace = require_str(&body, "ServiceNamespace")?;
+        validate_service_namespace(&namespace)?;
         let policy_names: Vec<String> = body
             .get("PolicyNames")
             .and_then(Value::as_array)
@@ -375,10 +389,16 @@ impl ApplicationAutoScalingService {
             .get("ResourceId")
             .and_then(Value::as_str)
             .map(|s| s.to_string());
+        if let Some(r) = resource_id.as_deref() {
+            validate_resource_id_len("resourceId", r)?;
+        }
         let dimension = body
             .get("ScalableDimension")
             .and_then(Value::as_str)
             .map(|s| s.to_string());
+        if let Some(d) = dimension.as_deref() {
+            validate_scalable_dimension(d)?;
+        }
         let max_results = body
             .get("MaxResults")
             .and_then(Value::as_u64)
@@ -525,6 +545,7 @@ impl ApplicationAutoScalingService {
     fn describe_scheduled_actions(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         let namespace = require_str(&body, "ServiceNamespace")?;
+        validate_service_namespace(&namespace)?;
         let names: Vec<String> = body
             .get("ScheduledActionNames")
             .and_then(Value::as_array)
@@ -538,10 +559,16 @@ impl ApplicationAutoScalingService {
             .get("ResourceId")
             .and_then(Value::as_str)
             .map(|s| s.to_string());
+        if let Some(r) = resource_id.as_deref() {
+            validate_resource_id_len("resourceId", r)?;
+        }
         let dimension = body
             .get("ScalableDimension")
             .and_then(Value::as_str)
             .map(|s| s.to_string());
+        if let Some(d) = dimension.as_deref() {
+            validate_scalable_dimension(d)?;
+        }
         let max_results = body
             .get("MaxResults")
             .and_then(Value::as_u64)
@@ -610,14 +637,21 @@ impl ApplicationAutoScalingService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         let namespace = require_str(&body, "ServiceNamespace")?;
+        validate_service_namespace(&namespace)?;
         let resource_id = body
             .get("ResourceId")
             .and_then(Value::as_str)
             .map(|s| s.to_string());
+        if let Some(r) = resource_id.as_deref() {
+            validate_resource_id_len("resourceId", r)?;
+        }
         let dimension = body
             .get("ScalableDimension")
             .and_then(Value::as_str)
             .map(|s| s.to_string());
+        if let Some(d) = dimension.as_deref() {
+            validate_scalable_dimension(d)?;
+        }
         let include_not_scaled = body
             .get("IncludeNotScaledActivities")
             .and_then(Value::as_bool)
@@ -812,6 +846,85 @@ fn require_str(body: &Value, field: &str) -> Result<String, AwsServiceError> {
 
 fn invalid_param(msg: impl Into<String>) -> AwsServiceError {
     AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "ValidationException", msg)
+}
+
+// Smithy: com.amazonaws.applicationautoscaling#ServiceNamespace
+const VALID_SERVICE_NAMESPACES: &[&str] = &[
+    "ecs",
+    "elasticmapreduce",
+    "ec2",
+    "appstream",
+    "dynamodb",
+    "rds",
+    "sagemaker",
+    "custom-resource",
+    "comprehend",
+    "lambda",
+    "cassandra",
+    "kafka",
+    "elasticache",
+    "neptune",
+    "workspaces",
+];
+
+// Smithy: com.amazonaws.applicationautoscaling#ScalableDimension
+const VALID_SCALABLE_DIMENSIONS: &[&str] = &[
+    "ecs:service:DesiredCount",
+    "ec2:spot-fleet-request:TargetCapacity",
+    "elasticmapreduce:instancegroup:InstanceCount",
+    "appstream:fleet:DesiredCapacity",
+    "dynamodb:table:ReadCapacityUnits",
+    "dynamodb:table:WriteCapacityUnits",
+    "dynamodb:index:ReadCapacityUnits",
+    "dynamodb:index:WriteCapacityUnits",
+    "rds:cluster:ReadReplicaCount",
+    "sagemaker:variant:DesiredInstanceCount",
+    "custom-resource:ResourceType:Property",
+    "comprehend:document-classifier-endpoint:DesiredInferenceUnits",
+    "comprehend:entity-recognizer-endpoint:DesiredInferenceUnits",
+    "lambda:function:ProvisionedConcurrency",
+    "cassandra:table:ReadCapacityUnits",
+    "cassandra:table:WriteCapacityUnits",
+    "kafka:broker-storage:VolumeSize",
+    "elasticache:cache-cluster:Nodes",
+    "elasticache:replication-group:NodeGroups",
+    "elasticache:replication-group:Replicas",
+    "neptune:cluster:ReadReplicaCount",
+    "sagemaker:variant:DesiredProvisionedConcurrency",
+    "sagemaker:inference-component:DesiredCopyCount",
+    "workspaces:workspacespool:DesiredUserSessions",
+];
+
+fn validate_service_namespace(value: &str) -> Result<(), AwsServiceError> {
+    if VALID_SERVICE_NAMESPACES.contains(&value) {
+        Ok(())
+    } else {
+        Err(invalid_param(format!(
+            "Value '{value}' at 'serviceNamespace' failed to satisfy constraint: Member must satisfy enum value set: {VALID_SERVICE_NAMESPACES:?}"
+        )))
+    }
+}
+
+fn validate_scalable_dimension(value: &str) -> Result<(), AwsServiceError> {
+    if VALID_SCALABLE_DIMENSIONS.contains(&value) {
+        Ok(())
+    } else {
+        Err(invalid_param(format!(
+            "Value '{value}' at 'scalableDimension' failed to satisfy constraint: Member must satisfy enum value set: {VALID_SCALABLE_DIMENSIONS:?}"
+        )))
+    }
+}
+
+// Smithy: com.amazonaws.applicationautoscaling#ResourceIdMaxLen1600 (length 1..=1600).
+// Same shape is also used for RoleARN, so we validate both via the same range.
+fn validate_resource_id_len(field: &str, value: &str) -> Result<(), AwsServiceError> {
+    let len = value.chars().count();
+    if !(1..=1600).contains(&len) {
+        return Err(invalid_param(format!(
+            "Value at '{field}' failed to satisfy constraint: Member must have length between 1 and 1600, inclusive"
+        )));
+    }
+    Ok(())
 }
 
 fn object_not_found(msg: impl Into<String>) -> AwsServiceError {
