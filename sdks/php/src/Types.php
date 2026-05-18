@@ -3244,3 +3244,131 @@ final class AthenaNamedQueriesResponse
         return new self(array_map(AthenaNamedQuery::fromArray(...), $data['queries'] ?? []));
     }
 }
+
+// ── SSM admin ─────────────────────────────────────────────────────
+
+final class SetSsmCommandStatusResponse
+{
+    public function __construct(
+        public readonly bool $updated,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self((bool) ($data['updated'] ?? false));
+    }
+}
+
+final class FailSsmCommandResponse
+{
+    public function __construct(
+        public readonly int $updatedInvocations,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self((int) ($data['updatedInvocations'] ?? 0));
+    }
+}
+
+final class SsmParameterPolicyEvent
+{
+    public function __construct(
+        public readonly string $parameterName,
+        public readonly string $parameterArn,
+        public readonly string $eventType,
+        public readonly string $message,
+        public readonly string $createdAt,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            (string) ($data['parameterName'] ?? ''),
+            (string) ($data['parameterArn'] ?? ''),
+            (string) ($data['eventType'] ?? ''),
+            (string) ($data['message'] ?? ''),
+            (string) ($data['createdAt'] ?? ''),
+        );
+    }
+}
+
+final class SsmParameterPolicyEventsResponse
+{
+    public function __construct(
+        /** @var SsmParameterPolicyEvent[] */
+        public readonly array $events,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(array_map(SsmParameterPolicyEvent::fromArray(...), $data['events'] ?? []));
+    }
+}
+
+final class InjectSsmSessionResponse
+{
+    public function __construct(
+        public readonly string $sessionId,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self((string) ($data['sessionId'] ?? ''));
+    }
+}
+
+// ── KMS admin ─────────────────────────────────────────────────────
+
+final class KmsUsageRecord
+{
+    public function __construct(
+        public readonly string $timestamp,
+        public readonly string $operation,
+        public readonly ?string $servicePrincipal,
+        public readonly string $accountId,
+        public readonly string $keyArn,
+        /** @var mixed Arbitrary JSON-decoded encryption context (object/null). */
+        public readonly mixed $encryptionContext,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            (string) ($data['timestamp'] ?? ''),
+            (string) ($data['operation'] ?? ''),
+            isset($data['servicePrincipal']) ? (string) $data['servicePrincipal'] : null,
+            (string) ($data['accountId'] ?? ''),
+            (string) ($data['keyArn'] ?? ''),
+            $data['encryptionContext'] ?? null,
+        );
+    }
+}
+
+final class KmsUsageResponse
+{
+    public function __construct(
+        /** @var KmsUsageRecord[] */
+        public readonly array $records,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(array_map(KmsUsageRecord::fromArray(...), $data['records'] ?? []));
+    }
+}
+
+// ── ELBv2 admin ─────────────────────────────────────────────────
+
+final class Elbv2WafCountsResponse
+{
+    public function __construct(
+        /** @var mixed Arbitrary counts payload (server-defined shape). */
+        public readonly mixed $counts,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self($data['counts'] ?? null);
+    }
+}

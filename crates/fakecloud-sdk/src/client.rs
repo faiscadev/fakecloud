@@ -168,6 +168,26 @@ impl FakeCloud {
         OrganizationsClient { fc: self }
     }
 
+    pub fn ssm(&self) -> SsmClient<'_> {
+        SsmClient { fc: self }
+    }
+
+    pub fn kms(&self) -> KmsClient<'_> {
+        KmsClient { fc: self }
+    }
+
+    pub fn wafv2(&self) -> WafV2Client<'_> {
+        WafV2Client { fc: self }
+    }
+
+    pub fn cloudfront(&self) -> CloudFrontClient<'_> {
+        CloudFrontClient { fc: self }
+    }
+
+    pub fn elbv2(&self) -> Elbv2Client<'_> {
+        Elbv2Client { fc: self }
+    }
+
     // ── Internal helpers ────────────────────────────────────────────
 
     async fn parse<T: serde::de::DeserializeOwned>(resp: reqwest::Response) -> Result<T, Error> {
@@ -315,6 +335,56 @@ impl LambdaClient<'_> {
             .send()
             .await?;
         FakeCloud::parse(resp).await
+    }
+
+    /// Download the raw zip bytes for a function's code. Pass `"latest"`
+    /// for the live function code, or a published version string (e.g.
+    /// `"1"`) for a version snapshot.
+    pub async fn download_function_code(
+        &self,
+        account_id: &str,
+        function_name: &str,
+        qualifier_or_latest: &str,
+    ) -> Result<Vec<u8>, Error> {
+        let resp = self
+            .fc
+            .client
+            .get(format!(
+                "{}/_fakecloud/lambda/function-code/{}/{}/{}.zip",
+                self.fc.base_url, account_id, function_name, qualifier_or_latest
+            ))
+            .send()
+            .await?;
+        let status = resp.status().as_u16();
+        if !resp.status().is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(Error::Api { status, body });
+        }
+        Ok(resp.bytes().await?.to_vec())
+    }
+
+    /// Download the raw zip bytes for a published Lambda layer version.
+    pub async fn download_layer_content(
+        &self,
+        account_id: &str,
+        layer_name: &str,
+        version: i64,
+    ) -> Result<Vec<u8>, Error> {
+        let resp = self
+            .fc
+            .client
+            .get(format!(
+                "{}/_fakecloud/lambda/layer-content/{}/{}/{}.zip",
+                self.fc.base_url, account_id, layer_name, version
+            ))
+            .send()
+            .await?;
+        let status = resp.status().as_u16();
+        if !resp.status().is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(Error::Api { status, body });
+        }
+        Ok(resp.bytes().await?.to_vec())
     }
 }
 
@@ -1170,6 +1240,188 @@ impl OrganizationsClient<'_> {
                 "{}/_fakecloud/organizations/accounts",
                 self.fc.base_url
             ))
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
+}
+
+// ── SSM ─────────────────────────────────────────────────────────────
+
+pub struct SsmClient<'a> {
+    fc: &'a FakeCloud,
+}
+
+impl SsmClient<'_> {
+    /// Force a specific SSM command's status. Useful for driving the
+    /// `Pending`/`InProgress`/`Success` lifecycle synchronously in tests.
+    pub async fn set_command_status(
+        &self,
+        command_id: &str,
+        req: &SetSsmCommandStatusRequest,
+    ) -> Result<SetSsmCommandStatusResponse, Error> {
+        let resp = self
+            .fc
+            .client
+            .post(format!(
+                "{}/_fakecloud/ssm/commands/{}/status",
+                self.fc.base_url, command_id
+            ))
+            .json(req)
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
+
+    /// Flip a command's invocations to `Failed`. `req` is optional; when
+    /// `None`, the server uses default values (all invocations, default
+    /// account, generic "Failed" status detail).
+    pub async fn fail_command(
+        &self,
+        command_id: &str,
+        req: Option<&FailSsmCommandRequest>,
+    ) -> Result<FailSsmCommandResponse, Error> {
+        let mut builder = self.fc.client.post(format!(
+            "{}/_fakecloud/ssm/commands/{}/fail",
+            self.fc.base_url, command_id
+        ));
+        if let Some(body) = req {
+            builder = builder.json(body);
+        }
+        let resp = builder.send().await?;
+        FakeCloud::parse(resp).await
+    }
+
+    /// List recorded parameter-policy events for an account. Pass `None`
+    /// to use the server's default account.
+    pub async fn parameter_policy_events(
+        &self,
+        account_id: Option<&str>,
+    ) -> Result<SsmParameterPolicyEventsResponse, Error> {
+        let mut url = format!(
+            "{}/_fakecloud/ssm/parameter-policy-events",
+            self.fc.base_url
+        );
+        if let Some(id) = account_id {
+            url.push_str("?accountId=");
+            url.push_str(id);
+        }
+        let resp = self.fc.client.get(url).send().await?;
+        FakeCloud::parse(resp).await
+    }
+
+    /// Inject a fake SSM session record so tests can exercise
+    /// `DescribeSessions`/`TerminateSession` without going through
+    /// `StartSession`.
+    pub async fn inject_session(
+        &self,
+        req: &InjectSsmSessionRequest,
+    ) -> Result<InjectSsmSessionResponse, Error> {
+        let resp = self
+            .fc
+            .client
+            .post(format!(
+                "{}/_fakecloud/ssm/sessions/inject",
+                self.fc.base_url
+            ))
+            .json(req)
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
+}
+
+// ── KMS ─────────────────────────────────────────────────────────────
+
+pub struct KmsClient<'a> {
+    fc: &'a FakeCloud,
+}
+
+impl KmsClient<'_> {
+    /// List recorded KMS data-plane invocations.
+    pub async fn usage(&self) -> Result<KmsUsageResponse, Error> {
+        let resp = self
+            .fc
+            .client
+            .get(format!("{}/_fakecloud/kms/usage", self.fc.base_url))
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
+}
+
+// ── WAFv2 ───────────────────────────────────────────────────────────
+
+pub struct WafV2Client<'a> {
+    fc: &'a FakeCloud,
+}
+
+impl WafV2Client<'_> {
+    /// Evaluate a synthetic request against a `WebACL` and return the
+    /// raw verdict JSON. Both request and response shapes are
+    /// intentionally free-form so the SDK doesn't have to track every
+    /// new field the evaluator emits.
+    pub async fn evaluate(&self, body: &serde_json::Value) -> Result<serde_json::Value, Error> {
+        let resp = self
+            .fc
+            .client
+            .post(format!("{}/_fakecloud/wafv2/evaluate", self.fc.base_url))
+            .json(body)
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
+}
+
+// ── CloudFront ──────────────────────────────────────────────────────
+
+pub struct CloudFrontClient<'a> {
+    fc: &'a FakeCloud,
+}
+
+impl CloudFrontClient<'_> {
+    /// Force a stored CloudFront Distribution into a new status (typically
+    /// `"Deployed"` or `"InProgress"`). Returns an `Api { status: 404, .. }`
+    /// error when the distribution doesn't exist.
+    pub async fn set_distribution_status(
+        &self,
+        distribution_id: &str,
+        req: &CloudFrontDistributionStatusRequest,
+    ) -> Result<(), Error> {
+        let resp = self
+            .fc
+            .client
+            .post(format!(
+                "{}/_fakecloud/cloudfront/distributions/{}/status",
+                self.fc.base_url, distribution_id
+            ))
+            .json(req)
+            .send()
+            .await?;
+        let status = resp.status().as_u16();
+        if !resp.status().is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(Error::Api { status, body });
+        }
+        Ok(())
+    }
+}
+
+// ── ELBv2 ───────────────────────────────────────────────────────────
+
+pub struct Elbv2Client<'a> {
+    fc: &'a FakeCloud,
+}
+
+impl Elbv2Client<'_> {
+    /// Snapshot the ELBv2 WAF count-metric registry. The `counts` field
+    /// is intentionally free-form JSON because its shape tracks the
+    /// service-internal metric layout.
+    pub async fn waf_counts(&self) -> Result<Elbv2WafCountsResponse, Error> {
+        let resp = self
+            .fc
+            .client
+            .get(format!("{}/_fakecloud/elbv2/waf-counts", self.fc.base_url))
             .send()
             .await?;
         FakeCloud::parse(resp).await

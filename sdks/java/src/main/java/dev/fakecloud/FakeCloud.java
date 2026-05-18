@@ -19,6 +19,7 @@ import dev.fakecloud.Types.BedrockInvocationsResponse;
 import dev.fakecloud.Types.BedrockModelResponseConfig;
 import dev.fakecloud.Types.BedrockResponseRule;
 import dev.fakecloud.Types.BedrockStatusResponse;
+import dev.fakecloud.Types.CloudFrontDistributionStatusRequest;
 import dev.fakecloud.Types.CreateAdminRequest;
 import dev.fakecloud.Types.CreateAdminResponse;
 import dev.fakecloud.Types.ConfirmSubscriptionRequest;
@@ -41,6 +42,15 @@ import dev.fakecloud.Types.Elbv2ListenersResponse;
 import dev.fakecloud.Types.Elbv2LoadBalancersResponse;
 import dev.fakecloud.Types.Elbv2RulesResponse;
 import dev.fakecloud.Types.Elbv2TargetGroupsResponse;
+import dev.fakecloud.Types.Elbv2WafCountsResponse;
+import dev.fakecloud.Types.FailSsmCommandRequest;
+import dev.fakecloud.Types.FailSsmCommandResponse;
+import dev.fakecloud.Types.InjectSsmSessionRequest;
+import dev.fakecloud.Types.InjectSsmSessionResponse;
+import dev.fakecloud.Types.KmsUsageResponse;
+import dev.fakecloud.Types.SetSsmCommandStatusRequest;
+import dev.fakecloud.Types.SetSsmCommandStatusResponse;
+import dev.fakecloud.Types.SsmParameterPolicyEventsResponse;
 import dev.fakecloud.Types.ElastiCacheAclsResponse;
 import dev.fakecloud.Types.ElastiCacheClustersResponse;
 import dev.fakecloud.Types.ElastiCacheReplicationGroupsResponse;
@@ -135,6 +145,10 @@ public final class FakeCloud {
     private final ApplicationAutoScalingClient applicationAutoscaling;
     private final AthenaClient athena;
     private final OrganizationsClient organizations;
+    private final SsmClient ssm;
+    private final KmsClient kms;
+    private final WafV2Client wafv2;
+    private final CloudFrontClient cloudfront;
 
     public FakeCloud() {
         this(DEFAULT_BASE_URL);
@@ -169,6 +183,10 @@ public final class FakeCloud {
         this.applicationAutoscaling = new ApplicationAutoScalingClient(http);
         this.athena = new AthenaClient(http);
         this.organizations = new OrganizationsClient(http);
+        this.ssm = new SsmClient(http);
+        this.kms = new KmsClient(http);
+        this.wafv2 = new WafV2Client(http);
+        this.cloudfront = new CloudFrontClient(http);
     }
 
     static String trimTrailingSlashes(String url) {
@@ -235,6 +253,10 @@ public final class FakeCloud {
     public ApplicationAutoScalingClient applicationAutoscaling() { return applicationAutoscaling; }
     public AthenaClient athena() { return athena; }
     public OrganizationsClient organizations() { return organizations; }
+    public SsmClient ssm() { return ssm; }
+    public KmsClient kms() { return kms; }
+    public WafV2Client wafv2() { return wafv2; }
+    public CloudFrontClient cloudfront() { return cloudfront; }
 
     // ── Sub-clients ────────────────────────────────────────────────
 
@@ -254,6 +276,43 @@ public final class FakeCloud {
             return http.postEmpty(
                     "/_fakecloud/lambda/" + encodePath(functionName) + "/evict-container",
                     EvictContainerResponse.class);
+        }
+
+        /**
+         * Download the stored zip archive for a Lambda function's deployment
+         * package. {@code qualifierOrLatest} is either {@code "latest"} or a
+         * concrete version (e.g. {@code "1"}); the corresponding file
+         * ({@code latest.zip} / {@code <version>.zip}) is fetched verbatim.
+         */
+        public byte[] downloadFunctionCode(
+                String accountId, String functionName, String qualifierOrLatest) {
+            String file =
+                    "latest".equals(qualifierOrLatest)
+                            ? "latest.zip"
+                            : qualifierOrLatest + ".zip";
+            return http.getBytes(
+                    "/_fakecloud/lambda/function-code/"
+                            + encodePath(accountId)
+                            + "/"
+                            + encodePath(functionName)
+                            + "/"
+                            + encodePath(file));
+        }
+
+        /**
+         * Download the stored zip archive for a specific Lambda layer
+         * version.
+         */
+        public byte[] downloadLayerContent(
+                String accountId, String layerName, long version) {
+            return http.getBytes(
+                    "/_fakecloud/lambda/layer-content/"
+                            + encodePath(accountId)
+                            + "/"
+                            + encodePath(layerName)
+                            + "/"
+                            + version
+                            + ".zip");
         }
     }
 
@@ -869,6 +928,15 @@ public final class FakeCloud {
             return http.postEmpty(
                     "/_fakecloud/elbv2/access-logs/flush", Elbv2FlushAccessLogsResponse.class);
         }
+
+        /**
+         * Returns the WAFv2 association/evaluation counts the ELBv2 service
+         * has accumulated. The exact shape of {@code counts} is
+         * service-internal and intentionally returned as free-form JSON.
+         */
+        public Elbv2WafCountsResponse getWafCounts() {
+            return http.get("/_fakecloud/elbv2/waf-counts", Elbv2WafCountsResponse.class);
+        }
     }
 
     /**
@@ -987,6 +1055,131 @@ public final class FakeCloud {
             return http.get(
                     "/_fakecloud/organizations/accounts",
                     Types.OrganizationsAccountsResponse.class);
+        }
+    }
+
+    /**
+     * Systems Manager admin sub-client. Wraps the {@code /_fakecloud/ssm/*}
+     * endpoints that let tests force command/invocation lifecycle
+     * transitions and seed sessions without going through the real
+     * agent-driven path.
+     */
+    public static final class SsmClient {
+        private final HttpTransport http;
+        SsmClient(HttpTransport http) { this.http = http; }
+
+        /**
+         * Flip the status of every invocation under a SendCommand
+         * command id. {@code accountId} may be {@code null} to target
+         * the default account.
+         */
+        public SetSsmCommandStatusResponse setCommandStatus(
+                String commandId, String accountId, String status) {
+            return http.postJson(
+                    "/_fakecloud/ssm/commands/" + encodePath(commandId) + "/status",
+                    new SetSsmCommandStatusRequest(accountId, status),
+                    SetSsmCommandStatusResponse.class);
+        }
+
+        /**
+         * Force a command (or a specific invocation under it) into
+         * {@code Failed}. Pass {@code null} for the request to flip every
+         * invocation on the command with default status detail.
+         */
+        public FailSsmCommandResponse failCommand(
+                String commandId, FailSsmCommandRequest req) {
+            FailSsmCommandRequest body =
+                    req != null ? req : new FailSsmCommandRequest(null, null, null, null);
+            return http.postJson(
+                    "/_fakecloud/ssm/commands/" + encodePath(commandId) + "/fail",
+                    body,
+                    FailSsmCommandResponse.class);
+        }
+
+        /**
+         * Return every parameter-policy event recorded for the given
+         * account (default account when {@code accountId} is null).
+         */
+        public SsmParameterPolicyEventsResponse getParameterPolicyEvents(String accountId) {
+            String path = "/_fakecloud/ssm/parameter-policy-events";
+            if (accountId != null && !accountId.isEmpty()) {
+                path += "?accountId=" + encodePath(accountId);
+            }
+            return http.get(path, SsmParameterPolicyEventsResponse.class);
+        }
+
+        /**
+         * Drop a fake Session Manager session into state without going
+         * through {@code StartSession}, so {@code DescribeSessions} /
+         * {@code TerminateSession} can be exercised end-to-end.
+         */
+        public InjectSsmSessionResponse injectSession(InjectSsmSessionRequest req) {
+            return http.postJson(
+                    "/_fakecloud/ssm/sessions/inject",
+                    req,
+                    InjectSsmSessionResponse.class);
+        }
+    }
+
+    /**
+     * KMS admin sub-client. Exposes the data-plane usage recorder so
+     * tests can assert on which keys were touched, with what
+     * encryption context, by which service.
+     */
+    public static final class KmsClient {
+        private final HttpTransport http;
+        KmsClient(HttpTransport http) { this.http = http; }
+
+        /** Return every recorded KMS data-plane invocation. */
+        public KmsUsageResponse getUsage() {
+            return http.get("/_fakecloud/kms/usage", KmsUsageResponse.class);
+        }
+    }
+
+    /**
+     * WAFv2 admin sub-client. Wraps the {@code /_fakecloud/wafv2/evaluate}
+     * endpoint that runs an arbitrary evaluation payload through the
+     * stored web ACL rule set. Request and response are intentionally
+     * free-form JSON.
+     */
+    public static final class WafV2Client {
+        private final HttpTransport http;
+        WafV2Client(HttpTransport http) { this.http = http; }
+
+        /**
+         * Evaluate an arbitrary request payload against the stored
+         * WAFv2 rule set. Both the body and the response are free-form
+         * JSON — the exact shape is service-internal.
+         */
+        @SuppressWarnings("unchecked")
+        public Map<String, Object> evaluate(Map<String, Object> request) {
+            return http.postJson(
+                    "/_fakecloud/wafv2/evaluate", request, Map.class);
+        }
+    }
+
+    /**
+     * CloudFront admin sub-client. Wraps the per-distribution status
+     * admin endpoint that lets tests synchronously flip a stored
+     * Distribution between {@code Deployed} and {@code InProgress}
+     * without waiting on the propagation tick.
+     */
+    public static final class CloudFrontClient {
+        private final HttpTransport http;
+        CloudFrontClient(HttpTransport http) { this.http = http; }
+
+        /**
+         * Flip a stored CloudFront Distribution's status (e.g.
+         * {@code "Deployed"} or {@code "InProgress"}). Throws
+         * {@link FakeCloudError} with status 404 when the distribution
+         * does not exist.
+         */
+        public void setDistributionStatus(String distributionId, String status) {
+            http.postJsonNoContent(
+                    "/_fakecloud/cloudfront/distributions/"
+                            + encodePath(distributionId)
+                            + "/status",
+                    new CloudFrontDistributionStatusRequest(status));
         }
     }
 }
