@@ -2772,3 +2772,65 @@ async fn invoke_publishes_invocations_metric_when_runtime_missing() {
     assert!(names.contains(&"Duration"), "missing Duration: {names:?}");
     assert!(names.contains(&"Errors"), "missing Errors: {names:?}");
 }
+
+/// Pin the three `DestinationConfig` echo behaviours documented in the
+/// Lambda Smithy `@examples` and asserted by the conformance round-trip
+/// strategy. See `event_invoke_json` in `extras.rs`.
+#[tokio::test]
+async fn put_function_event_invoke_destination_config_echo_variants() {
+    let svc = LambdaService::new(make_state());
+    seed_function(&svc, "ei-fn").await;
+
+    // 1. Input omits DestinationConfig -> response synthesizes both halves
+    //    (matches @examples for PutFunctionEventInvokeConfig).
+    let req = make_request(
+        Method::PUT,
+        "/2019-09-25/functions/ei-fn/event-invoke-config",
+        &json!({"MaximumRetryAttempts": 0, "MaximumEventAgeInSeconds": 3600}).to_string(),
+    );
+    let v: Value =
+        serde_json::from_slice(svc.handle(req).await.unwrap().body.expect_bytes()).unwrap();
+    assert_eq!(
+        v["DestinationConfig"],
+        json!({"OnSuccess": {}, "OnFailure": {}}),
+        "omitted DestinationConfig should synthesize empty halves"
+    );
+
+    // 2. Input is explicit empty object -> echo verbatim (round-trip strategy).
+    let req = make_request(
+        Method::PUT,
+        "/2019-09-25/functions/ei-fn/event-invoke-config",
+        &json!({"DestinationConfig": {}}).to_string(),
+    );
+    let v: Value =
+        serde_json::from_slice(svc.handle(req).await.unwrap().body.expect_bytes()).unwrap();
+    assert_eq!(
+        v["DestinationConfig"],
+        json!({}),
+        "explicit empty DestinationConfig should echo verbatim"
+    );
+
+    // 3. Half-populated -> backfill missing half (matches @examples for
+    //    UpdateFunctionEventInvokeConfig).
+    let req = make_request(
+        Method::PUT,
+        "/2019-09-25/functions/ei-fn/event-invoke-config",
+        &json!({
+            "DestinationConfig": {
+                "OnFailure": {"Destination": "arn:aws:sqs:us-east-1:123456789012:dlq"}
+            }
+        })
+        .to_string(),
+    );
+    let v: Value =
+        serde_json::from_slice(svc.handle(req).await.unwrap().body.expect_bytes()).unwrap();
+    assert_eq!(
+        v["DestinationConfig"]["OnFailure"]["Destination"],
+        "arn:aws:sqs:us-east-1:123456789012:dlq"
+    );
+    assert_eq!(
+        v["DestinationConfig"]["OnSuccess"],
+        json!({}),
+        "missing OnSuccess half should be backfilled as empty object"
+    );
+}
