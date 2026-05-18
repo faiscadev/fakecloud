@@ -4,6 +4,7 @@ pub mod query;
 pub(crate) mod service;
 pub(crate) mod state;
 pub mod transformer;
+pub(crate) mod validation;
 
 pub use service::LogsService;
 pub use state::{

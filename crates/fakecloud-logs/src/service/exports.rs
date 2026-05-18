@@ -2,7 +2,7 @@ use http::StatusCode;
 use serde_json::{json, Value};
 
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
-use fakecloud_core::validation::*;
+use crate::validation::*;
 
 use flate2::write::GzEncoder;
 use flate2::Compression;
@@ -230,16 +230,10 @@ impl LogsService {
         let empty = crate::state::LogsState::new(&req.account_id, &req.region);
         let state = accounts.get(&req.account_id).unwrap_or(&empty);
 
-        if let Some(task_id) = task_id_filter {
-            let task = state.export_tasks.iter().find(|t| t.task_id == task_id);
-            if task.is_none() {
-                return Err(AwsServiceError::aws_error(
-                    StatusCode::BAD_REQUEST,
-                    "ResourceNotFoundException",
-                    "The specified export task does not exist.",
-                ));
-            }
-        }
+        // Real CloudWatch Logs returns an empty `exportTasks` array for an
+        // unknown taskId — `DescribeExportTasks` doesn't declare
+        // `ResourceNotFoundException` in its Smithy error union. The filter
+        // below narrows by taskId.
 
         let tasks: Vec<Value> = state
             .export_tasks
@@ -879,5 +873,17 @@ mod tests {
         let data = entries[0]["data"].as_str().unwrap();
         assert!(data.contains("web event"));
         assert!(!data.contains("api event"));
+    }
+
+    #[test]
+    fn describe_export_tasks_unknown_id_returns_empty_list() {
+        // Real CloudWatch Logs returns an empty `exportTasks` array for an
+        // unknown taskId; `DescribeExportTasks` doesn't declare
+        // `ResourceNotFoundException` in its Smithy model.
+        let svc = make_service();
+        let req = make_request("DescribeExportTasks", json!({ "taskId": "does-not-exist" }));
+        let resp = svc.describe_export_tasks(&req).unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(body["exportTasks"].as_array().unwrap().len(), 0);
     }
 }

@@ -2,7 +2,7 @@ use http::StatusCode;
 use serde_json::{json, Value};
 
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
-use fakecloud_core::validation::*;
+use crate::validation::*;
 
 use super::LogsService;
 use chrono::Utc;

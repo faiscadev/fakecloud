@@ -3,7 +3,7 @@ use serde_json::{json, Value};
 
 use fakecloud_aws::arn::Arn;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
-use fakecloud_core::validation::*;
+use crate::validation::*;
 
 use super::{require_str, LogsService};
 use chrono::Utc;
@@ -603,52 +603,20 @@ impl LogsService {
             .filter(|s| !s.is_empty())
             .map(String::from);
 
-        // Real CWL StartLiveTail returns vnd.amazon.eventstream over HTTP/2.
-        // fakecloud emulates the same logical session by returning a single
-        // JSON envelope containing a sessionStart followed by a sessionUpdate
-        // populated with the most recent ~500 events from the targeted log
-        // groups that match the filter pattern. SDKs treating the response as
-        // a complete envelope can read both, mirroring what `aws logs
-        // start-live-tail --start-time=now-30s` would surface.
+        // Real CWL StartLiveTail returns vnd.amazon.eventstream over HTTP/2:
+        // each event-stream message carries exactly one `StartLiveTailResponseStream`
+        // union variant (e.g. one `sessionStart`, then a sequence of
+        // `sessionUpdate`s). fakecloud emulates the initial framed response by
+        // returning the first variant (`sessionStart`) inside the JSON envelope.
+        // Subsequent `sessionUpdate`s would be additional event-stream messages
+        // in the real wire format. Returning both variants in one envelope
+        // breaks the union contract (`responseStream` must hold exactly one
+        // member), so SDKs that strictly decode the union would reject it.
+        // Consume the unused state read + filter args so they don't show up
+        // as dead-code warnings; live-tail history is exposed through
+        // FilterLogEvents / GetLogEvents instead.
         let session_id = uuid::Uuid::new_v4().to_string();
-        let mut session_results: Vec<Value> = Vec::new();
-        let accounts = self.state.read();
-        if let Some(state) = accounts.get(&req.account_id) {
-            for ident in &identifiers {
-                let group_name = log_group_name_from_identifier(ident);
-                let Some(group) = state.log_groups.get(&group_name) else {
-                    continue;
-                };
-                for (stream_name, stream) in &group.log_streams {
-                    if !stream_filter.is_empty() && !stream_filter.iter().any(|s| s == stream_name)
-                    {
-                        continue;
-                    }
-                    for ev in stream
-                        .events
-                        .iter()
-                        .rev()
-                        .take(500)
-                        .collect::<Vec<_>>()
-                        .into_iter()
-                        .rev()
-                    {
-                        if let Some(p) = &pattern {
-                            if !ev.message.contains(p) {
-                                continue;
-                            }
-                        }
-                        session_results.push(json!({
-                            "logGroupIdentifier": group.arn,
-                            "logStreamName": stream_name,
-                            "message": ev.message,
-                            "timestamp": ev.timestamp,
-                            "ingestionTime": ev.ingestion_time,
-                        }));
-                    }
-                }
-            }
-        }
+        let _ = (&self.state, &stream_filter, &pattern);
         Ok(AwsResponse::json(
             StatusCode::OK,
             serde_json::to_string(&json!({
@@ -659,10 +627,6 @@ impl LogsService {
                         "logGroupIdentifiers": identifiers,
                         "logEventFilterPattern": pattern,
                         "logStreamNames": stream_filter,
-                    },
-                    "sessionUpdate": {
-                        "sessionResults": session_results,
-                        "sessionMetadata": {"sampled": false},
                     },
                 }
             }))
@@ -1295,6 +1259,11 @@ mod tests {
         assert!(body["responseStream"]["sessionStart"]["sessionId"]
             .as_str()
             .is_some());
+        // `StartLiveTailResponseStream` is a Smithy union — the initial
+        // framed response carries exactly one variant (sessionStart).
+        let stream = body["responseStream"].as_object().unwrap();
+        assert_eq!(stream.len(), 1);
+        assert!(stream.contains_key("sessionStart"));
     }
 
     #[test]
