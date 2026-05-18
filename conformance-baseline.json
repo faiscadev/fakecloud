@@ -1,5 +1,5 @@
 {
-  "variants_passed": 86060,
+  "variants_passed": 86128,
   "total_variants": 86327,
   "per_service": {
     "logs": {
@@ -107,7 +107,7 @@
       "total": 4469
     },
     "cloudfront": {
-      "passed": 4044,
+      "passed": 4112,
       "total": 4112
     },
     "elasticache": {

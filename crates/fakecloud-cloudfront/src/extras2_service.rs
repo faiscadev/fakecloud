@@ -14,8 +14,8 @@ use crate::policies::{
 };
 use crate::router::Route;
 use crate::service::{
-    aws_error, esc, generate_id_with_prefix, invalid_argument, xml_response, CloudFrontService,
-    DEFAULT_ACCOUNT,
+    aws_error, esc, extract_body_field, generate_id_with_prefix, invalid_argument, xml_response,
+    CloudFrontService, DEFAULT_ACCOUNT,
 };
 use crate::xml_io;
 
@@ -235,8 +235,21 @@ impl CloudFrontService {
 impl CloudFrontService {
     pub(crate) fn list_domain_conflicts(
         &self,
-        _req: &AwsRequest,
+        req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
+        // Domain and DomainControlValidationResource are required in the
+        // Smithy model. Reject probe negatives that omit either so the op
+        // returns the declared InvalidArgument instead of an empty 200.
+        let domain = extract_body_field(&req.body, "Domain");
+        if domain.as_deref().unwrap_or("").is_empty() {
+            return Err(invalid_argument("Domain is required"));
+        }
+        let dcv = extract_body_field(&req.body, "DomainControlValidationResource");
+        if dcv.is_none() {
+            return Err(invalid_argument(
+                "DomainControlValidationResource is required",
+            ));
+        }
         let mut body = String::with_capacity(256);
         body.push_str(XML_DECL);
         body.push_str(&format!("<ListDomainConflictsResult xmlns=\"{NS}\">"));
@@ -311,6 +324,18 @@ impl CloudFrontService {
         route: &Route,
     ) -> Result<AwsResponse, AwsServiceError> {
         let id = route_id(route, "ManagedCertificate")?;
+        // When the conformance probe omits the required Identifier label,
+        // the URI template substitution leaves the literal `{Identifier}` in
+        // place. Treat that (and any empty value) as a missing cert: the op's
+        // declared error shapes are AccessDenied / EntityNotFound, so return
+        // EntityNotFound rather than a fabricated 200.
+        if crate::service::is_placeholder_label(&id) {
+            return Err(aws_error(
+                StatusCode::NOT_FOUND,
+                "EntityNotFound",
+                format!("ManagedCertificate not found: {id}"),
+            ));
+        }
         let mut body = String::with_capacity(256);
         body.push_str(XML_DECL);
         body.push_str(&format!("<ManagedCertificateDetails xmlns=\"{NS}\">"));
