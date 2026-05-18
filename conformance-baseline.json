@@ -1,5 +1,5 @@
 {
-  "variants_passed": 86282,
+  "variants_passed": 86286,
   "total_variants": 86327,
   "per_service": {
     "logs": {
@@ -39,7 +39,7 @@
       "total": 1166
     },
     "sns": {
-      "passed": 1014,
+      "passed": 1018,
       "total": 1018
     },
     "bedrock-runtime": {

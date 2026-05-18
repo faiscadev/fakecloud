@@ -86,6 +86,36 @@ pub(crate) fn required(req: &AwsRequest, name: &str) -> Result<String, AwsServic
     })
 }
 
+/// Validate MaxResults is in [min, max] per Smithy `@range` traits.
+///
+/// AWS SNS rejects out-of-range MaxResults with `InvalidParameter` (HTTP 400)
+/// rather than silently clamping. Different list ops use different ranges
+/// (e.g. ListOriginationNumbers 1..=30, ListSMSSandboxPhoneNumbers 1..=100).
+pub(crate) fn validate_max_results(
+    req: &AwsRequest,
+    min: i64,
+    max: i64,
+) -> Result<(), AwsServiceError> {
+    let Some(raw) = param(req, "MaxResults") else {
+        return Ok(());
+    };
+    let n: i64 = raw.trim().parse().map_err(|_| {
+        AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidParameter",
+            format!("Invalid parameter: MaxResults must be an integer, got {raw}"),
+        )
+    })?;
+    if n < min || n > max {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidParameter",
+            format!("Invalid parameter: MaxResults must be between {min} and {max}, got {n}"),
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_message_structure_json(message: &str) -> Result<(), AwsServiceError> {
     let parsed: Value = serde_json::from_str(message).map_err(|_| {
         AwsServiceError::aws_error(
