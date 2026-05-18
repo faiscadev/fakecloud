@@ -9,7 +9,7 @@ author = "Lucas Vieira"
 
 Generative AI development on AWS Bedrock is governed by a single, inescapable metric: the cost of the feedback loop. As of May 2026, frontier models like Claude 4.7 Opus command $15 per million input tokens and $75 per million output tokens. Even the workhorse models, such as Claude 4.6 Sonnet, maintain a price point of $3 per million input tokens. When your integration tests run on every commit, and your local development environment calls live APIs for every prompt tweak, these costs scale linearly with your engineering velocity. 
 
-Testing generative AI on live infrastructure is inefficient. It introduces network latency, consumes production quotas, and generates line items on your AWS bill for code that hasn't even reached a staging environment. [fakecloud](https://github.com/faiscadev/fakecloud) eliminates this friction by providing a high-fidelity, zero-friction local AWS environment. It allows you to implement and test 111 Bedrock operations locally with a ~19MB binary that starts in ~500ms.
+Testing generative AI on live infrastructure is inefficient. It introduces network latency, consumes production quotas, and generates line items on your AWS bill for code that hasn't even reached a staging environment. [fakecloud](https://github.com/faiscadev/fakecloud) eliminates this friction by providing a high-fidelity, zero-friction local AWS environment. It allows you to implement and test 214 Bedrock operations across 4 APIs locally with a ~19MB binary that starts in ~500ms.
 
 ## The Cost of Iteration: Why Live Infrastructure Fails Developers
 
@@ -21,7 +21,7 @@ In a modern CI/CD pipeline, a single feature branch might undergo fifty test run
 
 fakecloud operates on a different philosophy. It requires no account, no auth token, and no internet connection. You run the binary, point your SDK at the local endpoint, and execute your logic against a 100% API-conformant environment.
 
-## Bedrock Locally: Support for 111 Operations
+## Bedrock Locally: Support for 214 Operations Across 4 APIs
 
 fakecloud provides comprehensive coverage for the Bedrock API surface, spanning both the control plane (management) and the data plane (runtime). While other emulators might only support basic model invocation via a proxy to Ollama, fakecloud implements the full Smithy-modeled API shape. This ensures that your code, which uses the official AWS SDK, behaves exactly as it would in production.
 
@@ -38,7 +38,7 @@ Because fakecloud is built for testing, it doesn't just proxy these calls. It al
 
 ### Control Plane: Infrastructure Management
 
-Building AI applications often involves more than just calling an LLM. You need to manage the surrounding infrastructure. fakecloud supports 111 operations, including:
+Building AI applications often involves more than just calling an LLM. You need to manage the surrounding infrastructure. fakecloud supports 214 operations across 4 APIs, including:
 
 | Category | Operations Supported | Key Features |
 | :--- | :--- | :--- |
@@ -121,7 +121,7 @@ This approach eliminates the need for complex monkey-patching or manual mocking 
 
 One of the primary risks of using a local emulator is "drift"—the possibility that the emulator behaves differently than the real AWS API. fakecloud mitigates this through a rigorous conformance pipeline. 
 
-Every implemented service is validated against AWS's own Smithy models. On every commit, the fakecloud engine runs through 59,000+ generated test variants. These variants cover:
+Every implemented service is validated against AWS's own Smithy models. On every commit, the fakecloud engine runs through 86,327 generated test variants. These variants cover:
 
 *   **Field Presence**: Ensuring that optional fields are handled correctly and required fields trigger the appropriate 400-series errors when missing.
 *   **Boundary Values**: Testing the limits of string lengths, integer ranges, and collection sizes as defined by the AWS specification.
@@ -166,7 +166,7 @@ This entire flow happens locally, with zero latency from the public internet and
 | **Startup Time** | ~500ms | ~15-30s | N/A |
 | **Account Required** | No | Yes (as of March 2026) | Yes |
 | **Auth Token** | No | Yes | Yes |
-| **Bedrock Ops** | 111 | 4 (Ultimate Tier) | All |
+| **Bedrock Ops** | 214 (4 APIs) | 4 (Ultimate Tier) | All |
 | **Cost** | Free (AGPL-3.0) | Paid Subscription | Pay-per-token |
 | **Offline Mode** | Yes | Limited | No |
 
