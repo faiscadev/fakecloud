@@ -1,5 +1,5 @@
 {
-  "variants_passed": 86286,
+  "variants_passed": 86297,
   "total_variants": 86327,
   "per_service": {
     "logs": {
@@ -15,7 +15,7 @@
       "total": 3426
     },
     "dynamodb": {
-      "passed": 2099,
+      "passed": 2110,
       "total": 2110
     },
     "ecs": {
