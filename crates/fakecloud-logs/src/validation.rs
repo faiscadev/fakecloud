@@ -143,15 +143,13 @@ mod tests {
     fn optional_helpers_passthrough_on_none() {
         assert!(validate_optional_string_length("x", None, 1, 5).is_ok());
         assert!(validate_optional_range_i64("y", None, 1, 5).is_ok());
-        assert!(
-            validate_optional_enum_value("z", &serde_json::Value::Null, &["a", "b"]).is_ok()
-        );
+        assert!(validate_optional_enum_value("z", &serde_json::Value::Null, &["a", "b"]).is_ok());
     }
 
     #[test]
     fn enum_value_rejects_non_string() {
-        let err = validate_optional_enum_value("kind", &serde_json::json!(123), &["a"])
-            .unwrap_err();
+        let err =
+            validate_optional_enum_value("kind", &serde_json::json!(123), &["a"]).unwrap_err();
         assert_eq!(err.code(), "SerializationException");
     }
 }

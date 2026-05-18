@@ -1,8 +1,8 @@
 use http::StatusCode;
 use serde_json::json;
 
-use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 use crate::validation::*;
+use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use super::LogsService;
 
