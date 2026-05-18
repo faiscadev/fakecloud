@@ -22,16 +22,16 @@ For a Lead Engineer or SRE, this introduces three specific points of friction:
 
 fakecloud removes these hurdles. It is a ~19MB binary that starts in ~500ms. It requires no internet connection and no account. You run the binary, point your SDK at `http://localhost:4566`, and begin testing.
 
-## Feature-by-Numbers: 100% Conformance Across 2,422 Operations
+## Feature-by-Numbers: 100% Conformance Across 2,592 Operations
 
 Technical authority is built on data, not marketing adjectives. fakecloud is engineered for depth, ensuring that the local environment behaves exactly like the real AWS infrastructure. 
 
 As of 2026-05-13, fakecloud supports:
 
-*   **33 Core AWS Services:** Including S3, Lambda, DynamoDB, SQS, SNS, IAM, and Bedrock.
-*   **2,422 API Operations:** 100% behavioral conformance across all implemented APIs.
-*   **59,000+ Smithy Test Variants:** Every commit is validated against AWS’s own Smithy models to ensure the wire protocol and response shapes are identical to the cloud.
-*   **111 Bedrock Operations:** Full support for AI development, including `InvokeModel`, `ConverseStream`, and Guardrails.
+*   **39 Core AWS Services:** Including S3, Lambda, DynamoDB, SQS, SNS, IAM, and Bedrock.
+*   **2,592 API Operations:** 100% behavioral conformance across all implemented APIs.
+*   **86,327 Smithy Test Variants:** Every commit is validated against AWS’s own Smithy models to ensure the wire protocol and response shapes are identical to the cloud.
+*   **214 Bedrock Operations Across 4 APIs:** Full support for AI development, including `InvokeModel`, `ConverseStream`, and Guardrails.
 
 ### Performance Metrics: fakecloud vs. The Incumbent
 
@@ -80,7 +80,7 @@ Your application code remains unchanged. You simply point the `endpoint_url` in 
 
 As of May 2026, AI integration is the primary driver of cloud spend. Testing Bedrock-dependent applications is notoriously difficult due to the high cost of tokens and the latency of remote inference. While other local tools offer limited Bedrock mocks (often restricted to 4 operations in their highest paid tiers), fakecloud provides the full Bedrock surface.
 
-With 111 supported operations, you can test:
+With 214 supported operations across 4 APIs, you can test:
 
 *   **Model Invocations:** Use local LLMs or synthetic responses to test `InvokeModel` and `Converse` (including streaming).
 *   **Guardrails:** Validate that your application correctly handles PII detection and content filtering using real content evaluation logic.
@@ -98,7 +98,7 @@ Unlike tools that return static JSON, fakecloud spins up real, lightweight backe
 
 *   **RDS:** Runs real PostgreSQL, MySQL, or MariaDB instances.
 *   **ElastiCache:** Uses real Valkey or Redis instances for high-fidelity caching tests.
-*   **Lambda:** Executes your code in real Docker runtimes across 23 supported environments, ensuring that your local execution environment matches the cloud's CPU and memory constraints.
+*   **Lambda:** Executes your code in real Docker runtimes across 23 supported runtimes, ensuring that your local execution environment matches the cloud's CPU and memory constraints.
 
 ### The "No" List
 
@@ -107,7 +107,7 @@ To maintain engineering velocity, we have explicitly removed the following requi
 *   **No Account:** You do not need to sign up for a fakecloud account.
 *   **No Auth Token:** There is no `FAKECLOUD_AUTH_TOKEN` to manage in your CI secrets.
 *   **No Internet:** The binary contains everything it needs to run. You can develop on a plane, in a secure facility, or during an ISP outage.
-*   **No Paid Tier:** All 33 services and 2,422 operations are available under the AGPL-3.0 license.
+*   **No Paid Tier:** All 39 services and 2,592 operations are available under the AGPL-3.0 license.
 
 ## SDK-Client Separation
 
@@ -121,4 +121,4 @@ Efficiency is the only metric that matters in a development tool. If your curren
 
 Inspect the implementation, contribute to the service coverage, and run your first sub-second integration test by [reviewing the AGPL-3.0 source code on GitHub](https://github.com/faiscadev/fakecloud). Start by running the installation script and pointing your existing test suite at the local endpoint to see the immediate reduction in latency.
 
-Visit the official documentation at fakecloud.dev to explore the full list of 2,422 supported operations and implementation guides for all 33 services.
+Visit the official documentation at fakecloud.dev to explore the full list of 2,592 supported operations and implementation guides for all 39 services.
