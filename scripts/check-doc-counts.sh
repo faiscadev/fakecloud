@@ -45,10 +45,20 @@ parity_ops=$(awk '
 variants_pass=$(jq -r .variants_passed "$BASELINE")
 variants_total=$(jq -r .total_variants "$BASELINE")
 
-# Comma-format thousands. `printf %'d` is POSIX-locale-dependent so force C.UTF-8 + en_US.UTF-8 fallback.
+# Comma-format thousands. Locale-free: `printf %'d` depends on a locale being
+# installed (e.g. en_US.UTF-8), which is not guaranteed on minimal CI images
+# and silently degrades to "1234" instead of "1,234" — that would cause the
+# grouped-thousands regex below to miss matches and produce false negatives.
+# Do it ourselves with awk.
 fmt() {
-    # LC_ALL=en_US.UTF-8 makes %'d insert thousands separators on both macOS and Linux.
-    LC_ALL=en_US.UTF-8 printf "%'d" "$1"
+    awk -v n="$1" 'BEGIN {
+        out = ""
+        while (length(n) > 3) {
+            out = "," substr(n, length(n) - 2) out
+            n = substr(n, 1, length(n) - 3)
+        }
+        print n out
+    }'
 }
 
 ops_fmt=$(fmt "$parity_ops")
