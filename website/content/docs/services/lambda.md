@@ -4,7 +4,7 @@ description = "Real code execution in Docker containers across 27 runtimes. Even
 weight = 5
 +++
 
-fakecloud implements **85 of 85** Lambda operations at 100% Smithy conformance. Unlike most emulators, **Lambda functions actually execute** — fakecloud runs your code inside real Docker containers.
+fakecloud implements **70 of 70** Lambda operations at 100% Smithy conformance. Unlike most emulators, **Lambda functions actually execute** — fakecloud runs your code inside real Docker containers.
 
 ## Supported features
 
