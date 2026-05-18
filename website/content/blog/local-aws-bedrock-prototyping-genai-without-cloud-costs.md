@@ -1,7 +1,7 @@
 +++
 title = "Local AWS Bedrock: Prototyping GenAI Without Cloud Costs"
 date = 2026-05-17
-description = "Eliminate AWS costs and API latency by prototyping GenAI applications locally. fakecloud provides 111 high-fidelity Bedrock operations in a standalone binary, requiring no account, tokens, or internet."
+description = "Eliminate AWS costs and API latency by prototyping GenAI applications locally. fakecloud provides 214 high-fidelity Bedrock operations across 4 APIs in a standalone binary, requiring no account, tokens, or internet."
 
 [extra]
 author = "Lucas Vieira"
@@ -11,7 +11,7 @@ Generative AI development in 2026 has reached a point of extreme financial and o
 
 Beyond the direct costs, the developer experience is hampered by API latency, rate limits, and the increasing complexity of cloud-based authentication. Even local emulation tools, which once promised a friction-free alternative, have largely pivoted to account-based models. As of March 2026, major incumbents in the local AWS emulation space now require mandatory account registration and active internet connections for authentication tokens, effectively turning your local environment into a gated extension of the cloud.
 
-[fakecloud](https://github.com/faiscadev/fakecloud) provides the alternative: a high-fidelity, zero-friction local AWS environment that behaves like infrastructure, not a mock. It is a standalone binary that gives you 111 AWS Bedrock operations locally, requiring no account, no auth token, and no internet connection.
+[fakecloud](https://github.com/faiscadev/fakecloud) provides the alternative: a high-fidelity, zero-friction local AWS environment that behaves like infrastructure, not a mock. It is a standalone binary that gives you 214 AWS Bedrock operations across 4 APIs locally, requiring no account, no auth token, and no internet connection.
 
 ## The Dev Hurdle: Token Costs and API Latency
 
@@ -38,7 +38,7 @@ To start the environment with Bedrock support, you run a single command:
 ./fakecloud start --services bedrock,s3
 ```
 
-Once running, fakecloud listens on `localhost:4566`. It provides a 100% API-conformant environment across 2,422 operations, including 111 specific to Bedrock. This is not a simple mock that returns static strings; it is a functional emulation backed by over 59,000 Smithy-model-generated test variants to ensure the behavior matches the real AWS environment.
+Once running, fakecloud listens on `localhost:4566`. It provides a 100% API-conformant environment across 2,592 operations, including 214 across the Bedrock surface (4 APIs). This is not a simple mock that returns static strings; it is a functional emulation backed by 86,327 Smithy-model-generated test variants to ensure the behavior matches the real AWS environment.
 
 ### The "No" List
 
@@ -83,7 +83,7 @@ print(response['output']['message']['content'][0]['text'])
 
 In this workflow, your application logic remains pure. You are testing the integration, the error handling, and the response parsing without spending a single cent on tokens.
 
-## Evidence: 111 Supported Bedrock Operations
+## Evidence: 214 Supported Bedrock Operations Across 4 APIs
 
 fakecloud's Bedrock support is comprehensive, covering the data plane, control plane, and agentic features. This allows AI engineers to prototype complex RAG (Retrieval-Augmented Generation) pipelines and multi-agent systems locally.
 
@@ -97,7 +97,7 @@ fakecloud's Bedrock support is comprehensive, covering the data plane, control p
 | **Knowledge Bases**  | `CreateKnowledgeBase`, `Retrieve`, `RetrieveAndGenerate`                     | Emulate RAG workflows with local vector storage integration.    |
 | **Provisioning**     | `CreateProvisionedModelThroughput`, `GetFoundationModel`                     | Test infrastructure-as-code (IaC) scripts for model deployment. |
 
-By supporting 111 operations, fakecloud ensures that even advanced features—like the `InvokeModelWithBidirectionalStream` introduced in late 2025—are available for local testing. This level of conformance is achieved through rigorous testing against the official AWS Smithy models, ensuring that the local environment doesn't just "look" like AWS, but "acts" like it.
+By supporting 214 operations across 4 APIs, fakecloud ensures that even advanced features—like the `InvokeModelWithBidirectionalStream` introduced in late 2025—are available for local testing. This level of conformance is achieved through rigorous testing against the official AWS Smithy models, ensuring that the local environment doesn't just "look" like AWS, but "acts" like it.
 
 ## Feature-by-Numbers: Why fakecloud Wins
 
@@ -105,8 +105,8 @@ When comparing development workflows, the metrics favor the standalone binary ap
 
 - **19MB Binary:** The entire environment is contained in a single file. No Docker daemon is required, though a Docker image is available for those who prefer it.
 - **500ms Startup:** You can start and stop the environment as part of a test suite without adding significant overhead to your CI/CD pipeline.
-- **33+ AWS Services:** Beyond Bedrock, you get S3, Lambda, DynamoDB, SNS, SQS, and more, allowing for full cross-service integration testing (e.g., an S3 upload triggering a Lambda that calls Bedrock).
-- **2,422 Operations:** Total API coverage across all supported services, ensuring that your `boto3` or `aws-sdk-js` calls don't fail due to missing methods.
+- **39 AWS services:** Beyond Bedrock, you get S3, Lambda, DynamoDB, SNS, SQS, and more, allowing for full cross-service integration testing (e.g., an S3 upload triggering a Lambda that calls Bedrock).
+- **2,592 Operations:** Total API coverage across all supported services, ensuring that your `boto3` or `aws-sdk-js` calls don't fail due to missing methods.
 - **AGPL-3.0 License:** Open-source for local development, ensuring that the tool remains accessible to the community without sudden licensing shifts.
 
 ### Comparison: fakecloud vs. The Alternatives
