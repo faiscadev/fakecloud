@@ -2728,3 +2728,177 @@ class AthenaNamedQueriesResponse:
         return cls(
             queries=[AthenaNamedQuery.from_dict(q) for q in d.get("queries", [])],
         )
+
+
+# ── SSM admin ───────────────────────────────────────────────────────
+
+
+@dataclass
+class SetSsmCommandStatusRequest:
+    status: str
+    account_id: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        out: Dict[str, Any] = {"status": self.status}
+        if self.account_id is not None:
+            out["accountId"] = self.account_id
+        return out
+
+
+@dataclass
+class SetSsmCommandStatusResponse:
+    updated: bool
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> SetSsmCommandStatusResponse:
+        return cls(updated=bool(data.get("updated", False)))
+
+
+@dataclass
+class FailSsmCommandRequest:
+    account_id: Optional[str] = None
+    instance_id: Optional[str] = None
+    status_details: Optional[str] = None
+    standard_error_content: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        out: Dict[str, Any] = {}
+        if self.account_id is not None:
+            out["accountId"] = self.account_id
+        if self.instance_id is not None:
+            out["instanceId"] = self.instance_id
+        if self.status_details is not None:
+            out["statusDetails"] = self.status_details
+        if self.standard_error_content is not None:
+            out["standardErrorContent"] = self.standard_error_content
+        return out
+
+
+@dataclass
+class FailSsmCommandResponse:
+    updated_invocations: int
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> FailSsmCommandResponse:
+        d = _convert_keys(data)
+        return cls(updated_invocations=int(d.get("updated_invocations", 0)))
+
+
+@dataclass
+class SsmParameterPolicyEvent:
+    parameter_name: str
+    parameter_arn: str
+    event_type: str
+    message: str
+    created_at: str
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> SsmParameterPolicyEvent:
+        d = _convert_keys(data)
+        return cls(**d)
+
+
+@dataclass
+class SsmParameterPolicyEventsResponse:
+    events: List[SsmParameterPolicyEvent] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> SsmParameterPolicyEventsResponse:
+        return cls(
+            events=[
+                SsmParameterPolicyEvent.from_dict(e) for e in data.get("events", [])
+            ],
+        )
+
+
+@dataclass
+class InjectSsmSessionRequest:
+    target: str
+    account_id: Optional[str] = None
+    status: Optional[str] = None
+    owner: Optional[str] = None
+    reason: Optional[str] = None
+    session_id: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        out: Dict[str, Any] = {"target": self.target}
+        if self.account_id is not None:
+            out["accountId"] = self.account_id
+        if self.status is not None:
+            out["status"] = self.status
+        if self.owner is not None:
+            out["owner"] = self.owner
+        if self.reason is not None:
+            out["reason"] = self.reason
+        if self.session_id is not None:
+            out["sessionId"] = self.session_id
+        return out
+
+
+@dataclass
+class InjectSsmSessionResponse:
+    session_id: str
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> InjectSsmSessionResponse:
+        d = _convert_keys(data)
+        return cls(session_id=str(d.get("session_id", "")))
+
+
+# ── KMS usage ───────────────────────────────────────────────────────
+
+
+@dataclass
+class KmsUsageRecord:
+    timestamp: str
+    operation: str
+    service_principal: Optional[str] = None
+    account_id: Optional[str] = None
+    key_arn: Optional[str] = None
+    encryption_context: Dict[str, str] = field(default_factory=dict)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> KmsUsageRecord:
+        d = _convert_keys(data)
+        return cls(
+            timestamp=str(d.get("timestamp", "")),
+            operation=str(d.get("operation", "")),
+            service_principal=d.get("service_principal"),
+            account_id=d.get("account_id"),
+            key_arn=d.get("key_arn"),
+            encryption_context=dict(d.get("encryption_context") or {}),
+        )
+
+
+@dataclass
+class KmsUsageResponse:
+    records: List[KmsUsageRecord] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> KmsUsageResponse:
+        return cls(
+            records=[KmsUsageRecord.from_dict(r) for r in data.get("records", [])],
+        )
+
+
+# ── CloudFront admin ────────────────────────────────────────────────
+
+
+@dataclass
+class CloudFrontDistributionStatusRequest:
+    status: str
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"status": self.status}
+
+
+# ── ELBv2 WAF counts ────────────────────────────────────────────────
+
+
+@dataclass
+class Elbv2WafCountsResponse:
+    counts: Dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> Elbv2WafCountsResponse:
+        return cls(counts=dict(data.get("counts") or {}))

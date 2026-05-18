@@ -33,6 +33,21 @@ final class HttpTransport
         return $this->send('GET', $path);
     }
 
+    /**
+     * GET a path that returns a raw (non-JSON) body. Used for download
+     * endpoints that emit binary content like Lambda function code zips
+     * and Lambda layer content. Returns the raw bytes; throws
+     * {@see FakeCloudError} on non-2xx.
+     */
+    public function getRaw(string $path): string
+    {
+        $response = $this->execute('GET', $path);
+        if ($response['status'] < 200 || $response['status'] >= 300) {
+            throw new FakeCloudError($response['status'], $response['body']);
+        }
+        return $response['body'];
+    }
+
     public function postEmpty(string $path): array
     {
         return $this->send('POST', $path);

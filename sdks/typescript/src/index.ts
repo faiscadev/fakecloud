@@ -21,5 +21,9 @@ export {
   EcsClient,
   AthenaClient,
   OrganizationsClient,
+  SsmClient,
+  KmsClient,
+  WafV2Client,
+  CloudFrontClient,
 } from "./client.js";
 export type * from "./types.js";

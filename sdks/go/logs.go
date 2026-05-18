@@ -61,15 +61,15 @@ func (c *LogsClient) GetFieldIndexes(ctx context.Context, logGroupName string) (
 // LogsDeliveryConfiguration mirrors one entry of the delivery-config
 // introspection response.
 type LogsDeliveryConfiguration struct {
-	ID                       string                 `json:"id"`
-	Name                     string                 `json:"name"`
-	DeliveryDestinationARN   string                 `json:"deliveryDestinationArn"`
-	DeliverySourceName       string                 `json:"deliverySourceName"`
-	LogType                  string                 `json:"logType"`
-	RecordFields             []string               `json:"recordFields,omitempty"`
-	FieldDelimiter           *string                `json:"fieldDelimiter,omitempty"`
-	S3DeliveryConfiguration  map[string]interface{} `json:"s3DeliveryConfiguration,omitempty"`
-	CreatedAt                int64                  `json:"createdAt"`
+	ID                      string                 `json:"id"`
+	Name                    string                 `json:"name"`
+	DeliveryDestinationARN  string                 `json:"deliveryDestinationArn"`
+	DeliverySourceName      string                 `json:"deliverySourceName"`
+	LogType                 string                 `json:"logType"`
+	RecordFields            []string               `json:"recordFields,omitempty"`
+	FieldDelimiter          *string                `json:"fieldDelimiter,omitempty"`
+	S3DeliveryConfiguration map[string]interface{} `json:"s3DeliveryConfiguration,omitempty"`
+	CreatedAt               int64                  `json:"createdAt"`
 }
 
 // LogsDeliveryConfigResponse is returned by GetDeliveryConfig.
