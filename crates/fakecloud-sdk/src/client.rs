@@ -197,6 +197,22 @@ impl FakeCloud {
         SchedulerClient { fc: self }
     }
 
+    pub fn ssm(&self) -> SsmClient<'_> {
+        SsmClient { fc: self }
+    }
+
+    pub fn kms(&self) -> KmsClient<'_> {
+        KmsClient { fc: self }
+    }
+
+    pub fn wafv2(&self) -> WafV2Client<'_> {
+        WafV2Client { fc: self }
+    }
+
+    pub fn cloudfront(&self) -> CloudFrontClient<'_> {
+        CloudFrontClient { fc: self }
+    }
+
     // ── Internal helpers ────────────────────────────────────────────
 
     async fn parse<T: serde::de::DeserializeOwned>(resp: reqwest::Response) -> Result<T, Error> {
@@ -222,6 +238,58 @@ impl RdsClient<'_> {
             .fc
             .client
             .get(format!("{}/_fakecloud/rds/instances", self.fc.base_url))
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
+
+    /// Bridge endpoint used by the PostgreSQL `aws_lambda` extension
+    /// running inside an RDS container to invoke a Lambda function. A
+    /// `status_code` of `502` is returned (with the response body still
+    /// JSON-decodable) when the target Lambda is unavailable.
+    pub async fn lambda_invoke(
+        &self,
+        req: &RdsLambdaInvokeRequest,
+    ) -> Result<RdsLambdaInvokeResponse, Error> {
+        let resp = self
+            .fc
+            .client
+            .post(format!("{}/_fakecloud/rds/lambda-invoke", self.fc.base_url))
+            .json(req)
+            .send()
+            .await?;
+        let status = resp.status().as_u16();
+        // 502 is a valid bridge response (SERVICE_UNAVAILABLE) — body is
+        // still a well-formed RdsLambdaInvokeResponse, so parse it
+        // rather than treating the call as a transport error.
+        if status == 502 || resp.status().is_success() {
+            return Ok(resp.json::<RdsLambdaInvokeResponse>().await?);
+        }
+        let body = resp.text().await.unwrap_or_default();
+        Err(Error::Api { status, body })
+    }
+
+    /// Bridge endpoint for the PostgreSQL `aws_s3` extension's import
+    /// path. Mirrors `aws_s3.table_import_from_s3` at the transport layer.
+    pub async fn s3_import(&self, req: &RdsS3ImportRequest) -> Result<RdsS3ImportResponse, Error> {
+        let resp = self
+            .fc
+            .client
+            .post(format!("{}/_fakecloud/rds/s3-import", self.fc.base_url))
+            .json(req)
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
+
+    /// Bridge endpoint for the PostgreSQL `aws_s3` extension's export
+    /// path. Mirrors `aws_s3.query_export_to_s3` at the transport layer.
+    pub async fn s3_export(&self, req: &RdsS3ExportRequest) -> Result<RdsS3ExportResponse, Error> {
+        let resp = self
+            .fc
+            .client
+            .post(format!("{}/_fakecloud/rds/s3-export", self.fc.base_url))
+            .json(req)
             .send()
             .await?;
         FakeCloud::parse(resp).await
@@ -344,6 +412,56 @@ impl LambdaClient<'_> {
             .send()
             .await?;
         FakeCloud::parse(resp).await
+    }
+
+    /// Download the raw zip bytes for a function's code. Pass `"latest"`
+    /// for the live function code, or a published version string (e.g.
+    /// `"1"`) for a version snapshot.
+    pub async fn download_function_code(
+        &self,
+        account_id: &str,
+        function_name: &str,
+        qualifier_or_latest: &str,
+    ) -> Result<Vec<u8>, Error> {
+        let resp = self
+            .fc
+            .client
+            .get(format!(
+                "{}/_fakecloud/lambda/function-code/{}/{}/{}.zip",
+                self.fc.base_url, account_id, function_name, qualifier_or_latest
+            ))
+            .send()
+            .await?;
+        let status = resp.status().as_u16();
+        if !resp.status().is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(Error::Api { status, body });
+        }
+        Ok(resp.bytes().await?.to_vec())
+    }
+
+    /// Download the raw zip bytes for a published Lambda layer version.
+    pub async fn download_layer_content(
+        &self,
+        account_id: &str,
+        layer_name: &str,
+        version: i64,
+    ) -> Result<Vec<u8>, Error> {
+        let resp = self
+            .fc
+            .client
+            .get(format!(
+                "{}/_fakecloud/lambda/layer-content/{}/{}/{}.zip",
+                self.fc.base_url, account_id, layer_name, version
+            ))
+            .send()
+            .await?;
+        let status = resp.status().as_u16();
+        if !resp.status().is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(Error::Api { status, body });
+        }
+        Ok(resp.bytes().await?.to_vec())
     }
 }
 
@@ -555,6 +673,36 @@ impl SnsClient<'_> {
                 self.fc.base_url
             ))
             .json(req)
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
+
+    /// Fetch the PEM-encoded SNS signing certificate used to sign
+    /// outbound notification payloads. Served as
+    /// `application/x-pem-file`; returned as the raw PEM string so
+    /// callers can hand it straight to an X.509 parser.
+    pub async fn cert_pem(&self) -> Result<String, Error> {
+        let resp = self
+            .fc
+            .client
+            .get(format!("{}/_fakecloud/sns/cert.pem", self.fc.base_url))
+            .send()
+            .await?;
+        let status = resp.status().as_u16();
+        if !resp.status().is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(Error::Api { status, body });
+        }
+        Ok(resp.text().await?)
+    }
+
+    /// List recorded SMS publications (phone number + message body).
+    pub async fn sms(&self) -> Result<SnsSmsResponse, Error> {
+        let resp = self
+            .fc
+            .client
+            .get(format!("{}/_fakecloud/sns/sms", self.fc.base_url))
             .send()
             .await?;
         FakeCloud::parse(resp).await
@@ -989,6 +1137,61 @@ impl ApiGatewayV2Client<'_> {
             .await?;
         FakeCloud::parse(resp).await
     }
+
+    /// List currently-active WebSocket connections across all WebSocket
+    /// APIs the server has seen.
+    pub async fn connections(&self) -> Result<ApiGatewayV2ConnectionsResponse, Error> {
+        let resp = self
+            .fc
+            .client
+            .get(format!(
+                "{}/_fakecloud/apigatewayv2/connections",
+                self.fc.base_url
+            ))
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
+
+    /// Fetch the mTLS configuration recorded for a custom domain name
+    /// (truststore bundle, version, validity). Pass-through JSON — the
+    /// shape mirrors what the server emits unmodified.
+    pub async fn mtls_info(&self, name: &str) -> Result<serde_json::Value, Error> {
+        let resp = self
+            .fc
+            .client
+            .get(format!(
+                "{}/_fakecloud/apigatewayv2/domain-names/{}/mtls-info",
+                self.fc.base_url, name
+            ))
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
+
+    /// Build the WebSocket upgrade URL for `api_id`. The SDK doesn't
+    /// open the socket itself — pair this with `tokio-tungstenite` or
+    /// any other WebSocket client in test code.
+    pub fn ws_url(&self, api_id: &str, stage: Option<&str>) -> String {
+        let base = self
+            .fc
+            .base_url
+            .replacen("https://", "wss://", 1)
+            .replacen("http://", "ws://", 1);
+        // API Gateway v2 API IDs are 10-char alphanumeric so encoding is
+        // a no-op, but defend against future changes by passing through
+        // reqwest's URL builder for the query parameter.
+        let url = reqwest::Url::parse(&format!("{}/_fakecloud/apigatewayv2/ws/{}", base, api_id))
+            .expect("base url + api id form a valid URL");
+        match stage {
+            Some(s) => {
+                let mut u = url;
+                u.query_pairs_mut().append_pair("stage", s);
+                u.to_string()
+            }
+            None => url.to_string(),
+        }
+    }
 }
 
 // ── Step Functions ──────────────────────────────────────────────────
@@ -1386,6 +1589,108 @@ impl EcsClient<'_> {
             .await?;
         FakeCloud::parse(resp).await
     }
+
+    /// Fetch the IAM task-role credentials that fakecloud hands out via
+    /// `AWS_CONTAINER_CREDENTIALS_RELATIVE_URI` to the container. Fields
+    /// use AWS's native PascalCase (`AccessKeyId`, `SecretAccessKey`,
+    /// `Token`, `Expiration`, `RoleArn`).
+    pub async fn task_credentials(
+        &self,
+        task_id: &str,
+    ) -> Result<EcsTaskCredentialsResponse, Error> {
+        let resp = self
+            .fc
+            .client
+            .get(format!(
+                "{}/_fakecloud/ecs/creds/{}",
+                self.fc.base_url, task_id
+            ))
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
+
+    /// Fetch the v3 ECS task metadata document for `task_id`. Returned
+    /// as raw JSON (`Cluster`, `TaskARN`, `Family`, `Revision`,
+    /// `DesiredStatus`, `KnownStatus`, `Containers`, `Limits`,
+    /// `Networks`, ...) so callers can pick the fields they need
+    /// without dragging in the entire metadata schema.
+    pub async fn task_metadata_v3(&self, task_id: &str) -> Result<serde_json::Value, Error> {
+        let resp = self
+            .fc
+            .client
+            .get(format!(
+                "{}/_fakecloud/ecs/v3/{}",
+                self.fc.base_url, task_id
+            ))
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
+
+    /// Fetch the v4 ECS task metadata document for `task_id`. Same
+    /// pass-through shape as the v3 endpoint; v4 adds extra container
+    /// runtime fields the server emits as-is.
+    pub async fn task_metadata_v4(&self, task_id: &str) -> Result<serde_json::Value, Error> {
+        let resp = self
+            .fc
+            .client
+            .get(format!(
+                "{}/_fakecloud/ecs/v4/{}",
+                self.fc.base_url, task_id
+            ))
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
+}
+
+// ── Route 53 ────────────────────────────────────────────────────────
+
+pub struct Route53Client<'a> {
+    fc: &'a FakeCloud,
+}
+
+impl Route53Client<'_> {
+    /// Fetch the deterministic DNSSEC chain-of-trust material for a
+    /// hosted zone. Returns `Err(Error::Api { status: 404, .. })` when
+    /// the zone has no ACTIVE KSK.
+    pub async fn dnssec_material(
+        &self,
+        zone_id: &str,
+    ) -> Result<Route53DnssecMaterialResponse, Error> {
+        let resp = self
+            .fc
+            .client
+            .get(format!(
+                "{}/_fakecloud/route53/zones/{}/dnssec",
+                self.fc.base_url, zone_id
+            ))
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
+
+    /// Sign an RRset under the zone's first ACTIVE KSK and return the
+    /// raw RRSIG fields so tests can verify the signature against the
+    /// zone's DNSKEY material.
+    pub async fn dnssec_sign(
+        &self,
+        zone_id: &str,
+        req: &Route53DnssecSignRequest,
+    ) -> Result<Route53DnssecSignResponse, Error> {
+        let resp = self
+            .fc
+            .client
+            .post(format!(
+                "{}/_fakecloud/route53/zones/{}/dnssec/sign",
+                self.fc.base_url, zone_id
+            ))
+            .json(req)
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
 }
 
 // ── Athena ──────────────────────────────────────────────────────────
@@ -1748,12 +2053,6 @@ impl LogsClient<'_> {
     }
 }
 
-// ── Route 53 ────────────────────────────────────────────────────────
-
-pub struct Route53Client<'a> {
-    fc: &'a FakeCloud,
-}
-
 impl Route53Client<'_> {
     /// Flip a stored Route 53 health check's reported status (and
     /// optionally its last-failure observation) so tests can simulate
@@ -1820,6 +2119,182 @@ impl SchedulerClient<'_> {
                 "{}/_fakecloud/scheduler/fire/{}/{}",
                 self.fc.base_url, group, name
             ))
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
+}
+
+// ── SSM ─────────────────────────────────────────────────────────────
+
+pub struct SsmClient<'a> {
+    fc: &'a FakeCloud,
+}
+
+impl SsmClient<'_> {
+    /// Force a specific SSM command's status. Useful for driving the
+    /// `Pending`/`InProgress`/`Success` lifecycle synchronously in tests.
+    pub async fn set_command_status(
+        &self,
+        command_id: &str,
+        req: &SetSsmCommandStatusRequest,
+    ) -> Result<SetSsmCommandStatusResponse, Error> {
+        let resp = self
+            .fc
+            .client
+            .post(format!(
+                "{}/_fakecloud/ssm/commands/{}/status",
+                self.fc.base_url, command_id
+            ))
+            .json(req)
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
+
+    /// Flip a command's invocations to `Failed`. `req` is optional; when
+    /// `None`, the server uses default values (all invocations, default
+    /// account, generic "Failed" status detail).
+    pub async fn fail_command(
+        &self,
+        command_id: &str,
+        req: Option<&FailSsmCommandRequest>,
+    ) -> Result<FailSsmCommandResponse, Error> {
+        let mut builder = self.fc.client.post(format!(
+            "{}/_fakecloud/ssm/commands/{}/fail",
+            self.fc.base_url, command_id
+        ));
+        if let Some(body) = req {
+            builder = builder.json(body);
+        }
+        let resp = builder.send().await?;
+        FakeCloud::parse(resp).await
+    }
+
+    /// List recorded parameter-policy events for an account. Pass `None`
+    /// to use the server's default account.
+    pub async fn parameter_policy_events(
+        &self,
+        account_id: Option<&str>,
+    ) -> Result<SsmParameterPolicyEventsResponse, Error> {
+        let mut url = format!(
+            "{}/_fakecloud/ssm/parameter-policy-events",
+            self.fc.base_url
+        );
+        if let Some(id) = account_id {
+            url.push_str("?accountId=");
+            url.push_str(id);
+        }
+        let resp = self.fc.client.get(url).send().await?;
+        FakeCloud::parse(resp).await
+    }
+
+    /// Inject a fake SSM session record so tests can exercise
+    /// `DescribeSessions`/`TerminateSession` without going through
+    /// `StartSession`.
+    pub async fn inject_session(
+        &self,
+        req: &InjectSsmSessionRequest,
+    ) -> Result<InjectSsmSessionResponse, Error> {
+        let resp = self
+            .fc
+            .client
+            .post(format!(
+                "{}/_fakecloud/ssm/sessions/inject",
+                self.fc.base_url
+            ))
+            .json(req)
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
+}
+
+// ── KMS ─────────────────────────────────────────────────────────────
+
+pub struct KmsClient<'a> {
+    fc: &'a FakeCloud,
+}
+
+impl KmsClient<'_> {
+    /// List recorded KMS data-plane invocations.
+    pub async fn usage(&self) -> Result<KmsUsageResponse, Error> {
+        let resp = self
+            .fc
+            .client
+            .get(format!("{}/_fakecloud/kms/usage", self.fc.base_url))
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
+}
+
+// ── WAFv2 ───────────────────────────────────────────────────────────
+
+pub struct WafV2Client<'a> {
+    fc: &'a FakeCloud,
+}
+
+impl WafV2Client<'_> {
+    /// Evaluate a synthetic request against a `WebACL` and return the
+    /// raw verdict JSON. Both request and response shapes are
+    /// intentionally free-form so the SDK doesn't have to track every
+    /// new field the evaluator emits.
+    pub async fn evaluate(&self, body: &serde_json::Value) -> Result<serde_json::Value, Error> {
+        let resp = self
+            .fc
+            .client
+            .post(format!("{}/_fakecloud/wafv2/evaluate", self.fc.base_url))
+            .json(body)
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
+}
+
+// ── CloudFront ──────────────────────────────────────────────────────
+
+pub struct CloudFrontClient<'a> {
+    fc: &'a FakeCloud,
+}
+
+impl CloudFrontClient<'_> {
+    /// Force a stored CloudFront Distribution into a new status (typically
+    /// `"Deployed"` or `"InProgress"`). Returns an `Api { status: 404, .. }`
+    /// error when the distribution doesn't exist.
+    pub async fn set_distribution_status(
+        &self,
+        distribution_id: &str,
+        req: &CloudFrontDistributionStatusRequest,
+    ) -> Result<(), Error> {
+        let resp = self
+            .fc
+            .client
+            .post(format!(
+                "{}/_fakecloud/cloudfront/distributions/{}/status",
+                self.fc.base_url, distribution_id
+            ))
+            .json(req)
+            .send()
+            .await?;
+        let status = resp.status().as_u16();
+        if !resp.status().is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(Error::Api { status, body });
+        }
+        Ok(())
+    }
+}
+
+impl Elbv2Client<'_> {
+    /// Snapshot the ELBv2 WAF count-metric registry. The `counts` field
+    /// is intentionally free-form JSON because its shape tracks the
+    /// service-internal metric layout.
+    pub async fn waf_counts(&self) -> Result<Elbv2WafCountsResponse, Error> {
+        let resp = self
+            .fc
+            .client
+            .get(format!("{}/_fakecloud/elbv2/waf-counts", self.fc.base_url))
             .send()
             .await?;
         FakeCloud::parse(resp).await

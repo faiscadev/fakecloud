@@ -19,6 +19,7 @@ import dev.fakecloud.Types.BedrockInvocationsResponse;
 import dev.fakecloud.Types.BedrockModelResponseConfig;
 import dev.fakecloud.Types.BedrockResponseRule;
 import dev.fakecloud.Types.BedrockStatusResponse;
+import dev.fakecloud.Types.CloudFrontDistributionStatusRequest;
 import dev.fakecloud.Types.CreateAdminRequest;
 import dev.fakecloud.Types.CreateAdminResponse;
 import dev.fakecloud.Types.ConfirmSubscriptionRequest;
@@ -41,6 +42,15 @@ import dev.fakecloud.Types.Elbv2ListenersResponse;
 import dev.fakecloud.Types.Elbv2LoadBalancersResponse;
 import dev.fakecloud.Types.Elbv2RulesResponse;
 import dev.fakecloud.Types.Elbv2TargetGroupsResponse;
+import dev.fakecloud.Types.Elbv2WafCountsResponse;
+import dev.fakecloud.Types.FailSsmCommandRequest;
+import dev.fakecloud.Types.FailSsmCommandResponse;
+import dev.fakecloud.Types.InjectSsmSessionRequest;
+import dev.fakecloud.Types.InjectSsmSessionResponse;
+import dev.fakecloud.Types.KmsUsageResponse;
+import dev.fakecloud.Types.SetSsmCommandStatusRequest;
+import dev.fakecloud.Types.SetSsmCommandStatusResponse;
+import dev.fakecloud.Types.SsmParameterPolicyEventsResponse;
 import dev.fakecloud.Types.ElastiCacheAclsResponse;
 import dev.fakecloud.Types.ElastiCacheClustersResponse;
 import dev.fakecloud.Types.ElastiCacheReplicationGroupsResponse;
@@ -84,6 +94,8 @@ import dev.fakecloud.Types.SetHealthCheckStatusRequest;
 import dev.fakecloud.Types.SnsMessagesResponse;
 import dev.fakecloud.Types.SqsMessagesResponse;
 import dev.fakecloud.Types.StepFunctionsExecutionsResponse;
+import dev.fakecloud.Types.StepFunctionsSyncExecutionsResponse;
+import dev.fakecloud.Types.StepFunctionsExecutionTreeResponse;
 import dev.fakecloud.Types.TokensResponse;
 import dev.fakecloud.Types.TtlTickResponse;
 import dev.fakecloud.Types.UserConfirmationCodes;
@@ -135,6 +147,10 @@ public final class FakeCloud {
     private final ApplicationAutoScalingClient applicationAutoscaling;
     private final AthenaClient athena;
     private final OrganizationsClient organizations;
+    private final SsmClient ssm;
+    private final KmsClient kms;
+    private final WafV2Client wafv2;
+    private final CloudFrontClient cloudfront;
 
     public FakeCloud() {
         this(DEFAULT_BASE_URL);
@@ -169,6 +185,10 @@ public final class FakeCloud {
         this.applicationAutoscaling = new ApplicationAutoScalingClient(http);
         this.athena = new AthenaClient(http);
         this.organizations = new OrganizationsClient(http);
+        this.ssm = new SsmClient(http);
+        this.kms = new KmsClient(http);
+        this.wafv2 = new WafV2Client(http);
+        this.cloudfront = new CloudFrontClient(http);
     }
 
     static String trimTrailingSlashes(String url) {
@@ -235,6 +255,10 @@ public final class FakeCloud {
     public ApplicationAutoScalingClient applicationAutoscaling() { return applicationAutoscaling; }
     public AthenaClient athena() { return athena; }
     public OrganizationsClient organizations() { return organizations; }
+    public SsmClient ssm() { return ssm; }
+    public KmsClient kms() { return kms; }
+    public WafV2Client wafv2() { return wafv2; }
+    public CloudFrontClient cloudfront() { return cloudfront; }
 
     // ── Sub-clients ────────────────────────────────────────────────
 
@@ -255,6 +279,43 @@ public final class FakeCloud {
                     "/_fakecloud/lambda/" + encodePath(functionName) + "/evict-container",
                     EvictContainerResponse.class);
         }
+
+        /**
+         * Download the stored zip archive for a Lambda function's deployment
+         * package. {@code qualifierOrLatest} is either {@code "latest"} or a
+         * concrete version (e.g. {@code "1"}); the corresponding file
+         * ({@code latest.zip} / {@code <version>.zip}) is fetched verbatim.
+         */
+        public byte[] downloadFunctionCode(
+                String accountId, String functionName, String qualifierOrLatest) {
+            String file =
+                    "latest".equals(qualifierOrLatest)
+                            ? "latest.zip"
+                            : qualifierOrLatest + ".zip";
+            return http.getBytes(
+                    "/_fakecloud/lambda/function-code/"
+                            + encodePath(accountId)
+                            + "/"
+                            + encodePath(functionName)
+                            + "/"
+                            + encodePath(file));
+        }
+
+        /**
+         * Download the stored zip archive for a specific Lambda layer
+         * version.
+         */
+        public byte[] downloadLayerContent(
+                String accountId, String layerName, long version) {
+            return http.getBytes(
+                    "/_fakecloud/lambda/layer-content/"
+                            + encodePath(accountId)
+                            + "/"
+                            + encodePath(layerName)
+                            + "/"
+                            + version
+                            + ".zip");
+        }
     }
 
     public static final class RdsClient {
@@ -263,6 +324,35 @@ public final class FakeCloud {
 
         public RdsInstancesResponse getInstances() {
             return http.get("/_fakecloud/rds/instances", RdsInstancesResponse.class);
+        }
+
+        /**
+         * Bridge endpoint the PostgreSQL {@code aws_lambda} extension calls
+         * into from inside an RDS DB instance container. Normally not driven
+         * by user code directly.
+         */
+        public Types.RdsLambdaInvokeResponse lambdaInvoke(Types.RdsLambdaInvokeRequest req) {
+            return http.postJson(
+                    "/_fakecloud/rds/lambda-invoke", req, Types.RdsLambdaInvokeResponse.class);
+        }
+
+        /**
+         * Bridge endpoint the PostgreSQL {@code aws_s3} extension calls into
+         * to fetch an object from a fakecloud bucket. Body is returned base64
+         * encoded so JSON transport stays text-only.
+         */
+        public Types.RdsS3ImportResponse s3Import(Types.RdsS3ImportRequest req) {
+            return http.postJson(
+                    "/_fakecloud/rds/s3-import", req, Types.RdsS3ImportResponse.class);
+        }
+
+        /**
+         * Bridge equivalent of an S3 PutObject driven from inside the DB
+         * container.
+         */
+        public Types.RdsS3ExportResponse s3Export(Types.RdsS3ExportRequest req) {
+            return http.postJson(
+                    "/_fakecloud/rds/s3-export", req, Types.RdsS3ExportResponse.class);
         }
     }
 
@@ -416,6 +506,19 @@ public final class FakeCloud {
         public ConfirmSubscriptionResponse confirmSubscription(ConfirmSubscriptionRequest req) {
             return http.postJson(
                     "/_fakecloud/sns/confirm-subscription", req, ConfirmSubscriptionResponse.class);
+        }
+
+        /**
+         * Returns the PEM-encoded SNS signing certificate used by message
+         * signature validators (e.g. {@code aws-sns-validator}).
+         */
+        public String getCertPem() {
+            return http.getText("/_fakecloud/sns/cert.pem");
+        }
+
+        /** List captured SMS messages SNS has "delivered". */
+        public Types.SnsSmsResponse getSmsMessages() {
+            return http.get("/_fakecloud/sns/sms", Types.SnsSmsResponse.class);
         }
     }
 
@@ -680,6 +783,57 @@ public final class FakeCloud {
             return http.get(
                     "/_fakecloud/apigatewayv2/requests", ApiGatewayV2RequestsResponse.class);
         }
+
+        /** List every active WebSocket connection tracked by API Gateway v2. */
+        public Types.ApiGatewayV2ConnectionsResponse getConnections() {
+            return http.get(
+                    "/_fakecloud/apigatewayv2/connections",
+                    Types.ApiGatewayV2ConnectionsResponse.class);
+        }
+
+        /**
+         * Fetch the mTLS truststore info for a custom domain name. Returns
+         * a raw JSON map so the surface stays forward-compatible with
+         * server-side additions.
+         */
+        @SuppressWarnings("unchecked")
+        public Map<String, Object> getDomainNameMtlsInfo(String domainName) {
+            return http.get(
+                    "/_fakecloud/apigatewayv2/domain-names/"
+                            + encodePath(domainName)
+                            + "/mtls-info",
+                    Map.class);
+        }
+
+        /**
+         * Build the WebSocket URL fakecloud serves for the given API id on
+         * the default {@code "$default"} stage.
+         */
+        public String wsUrl(String apiId) {
+            return wsUrl(apiId, null);
+        }
+
+        /** Build the WebSocket URL for the given API id and stage. */
+        public String wsUrl(String apiId, String stage) {
+            String base = http.baseUrl();
+            String wsBase;
+            if (base.startsWith("https://")) {
+                wsBase = "wss://" + base.substring("https://".length());
+            } else if (base.startsWith("http://")) {
+                wsBase = "ws://" + base.substring("http://".length());
+            } else {
+                wsBase = base;
+            }
+            String path = wsBase + "/_fakecloud/apigatewayv2/ws/" + encodePath(apiId);
+            if (stage == null) {
+                return path;
+            }
+            try {
+                return path + "?stage=" + java.net.URLEncoder.encode(stage, java.nio.charset.StandardCharsets.UTF_8);
+            } catch (Exception e) {
+                throw new RuntimeException(e);
+            }
+        }
     }
 
     public static final class StepFunctionsClient {
@@ -690,6 +844,18 @@ public final class FakeCloud {
             return http.get(
                     "/_fakecloud/stepfunctions/executions",
                     StepFunctionsExecutionsResponse.class);
+        }
+
+        public StepFunctionsSyncExecutionsResponse getSyncExecutions() {
+            return http.get(
+                    "/_fakecloud/stepfunctions/sync-executions",
+                    StepFunctionsSyncExecutionsResponse.class);
+        }
+
+        public StepFunctionsExecutionTreeResponse getExecutionTree(String arn) {
+            return http.get(
+                    "/_fakecloud/stepfunctions/execution-tree/" + encodePath(arn),
+                    StepFunctionsExecutionTreeResponse.class);
         }
 
         public Types.SfnEnqueueActivityTaskResponse enqueueActivityTask(
@@ -839,6 +1005,41 @@ public final class FakeCloud {
                     "/_fakecloud/ecs/metadata/" + encodePath(taskArn),
                     EcsTaskMetadataResponse.class);
         }
+
+        /**
+         * Return short-lived IAM credentials for a task. Matches the wire
+         * shape ECS exposes via the task metadata credentials endpoint
+         * (PascalCase keys).
+         */
+        public Types.EcsTaskCredentialsResponse getCredentials(String taskId) {
+            return http.get(
+                    "/_fakecloud/ecs/creds/" + encodePath(taskId),
+                    Types.EcsTaskCredentialsResponse.class);
+        }
+
+        /**
+         * Return the raw v3 task metadata document for the task. The
+         * server response is a free-form JSON object that mirrors what
+         * {@code ECS_CONTAINER_METADATA_URI} would expose; returned as a
+         * {@code Map<String, Object>} pass-through to stay
+         * forward-compatible.
+         */
+        @SuppressWarnings("unchecked")
+        public Map<String, Object> getMetadataV3(String taskId) {
+            return http.get(
+                    "/_fakecloud/ecs/v3/" + encodePath(taskId), Map.class);
+        }
+
+        /**
+         * Return the raw v4 task metadata document for the task. Returned
+         * as a {@code Map<String, Object>} pass-through to stay
+         * forward-compatible.
+         */
+        @SuppressWarnings("unchecked")
+        public Map<String, Object> getMetadataV4(String taskId) {
+            return http.get(
+                    "/_fakecloud/ecs/v4/" + encodePath(taskId), Map.class);
+        }
     }
 
     public static final class Elbv2Client {
@@ -869,6 +1070,15 @@ public final class FakeCloud {
             return http.postEmpty(
                     "/_fakecloud/elbv2/access-logs/flush", Elbv2FlushAccessLogsResponse.class);
         }
+
+        /**
+         * Returns the WAFv2 association/evaluation counts the ELBv2 service
+         * has accumulated. The exact shape of {@code counts} is
+         * service-internal and intentionally returned as free-form JSON.
+         */
+        public Elbv2WafCountsResponse getWafCounts() {
+            return http.get("/_fakecloud/elbv2/waf-counts", Elbv2WafCountsResponse.class);
+        }
     }
 
     /**
@@ -893,6 +1103,31 @@ public final class FakeCloud {
             http.postJsonNoContent(
                     "/_fakecloud/route53/health-checks/" + encodePath(healthCheckId) + "/status",
                     new SetHealthCheckStatusRequest(status, reason));
+        }
+
+        /**
+         * Fetch the deterministic DNSSEC material (DNSKEY + DS digest) for
+         * a hosted zone with at least one ACTIVE Key Signing Key. Throws
+         * {@link FakeCloudError} with status 404 when the zone has no
+         * active KSK.
+         */
+        public Types.Route53DnssecMaterialResponse getDnssecMaterial(String zoneId) {
+            return http.get(
+                    "/_fakecloud/route53/zones/" + encodePath(zoneId) + "/dnssec",
+                    Types.Route53DnssecMaterialResponse.class);
+        }
+
+        /**
+         * Sign an RRset under the zone's first ACTIVE KSK. Returns raw
+         * RRSIG fields so tests can verify the signature against the
+         * DNSKEY public key from {@link #getDnssecMaterial(String)}.
+         */
+        public Types.Route53DnssecSignResponse signDnssec(
+                String zoneId, Types.Route53DnssecSignRequest req) {
+            return http.postJson(
+                    "/_fakecloud/route53/zones/" + encodePath(zoneId) + "/dnssec/sign",
+                    req,
+                    Types.Route53DnssecSignResponse.class);
         }
     }
 
@@ -987,6 +1222,131 @@ public final class FakeCloud {
             return http.get(
                     "/_fakecloud/organizations/accounts",
                     Types.OrganizationsAccountsResponse.class);
+        }
+    }
+
+    /**
+     * Systems Manager admin sub-client. Wraps the {@code /_fakecloud/ssm/*}
+     * endpoints that let tests force command/invocation lifecycle
+     * transitions and seed sessions without going through the real
+     * agent-driven path.
+     */
+    public static final class SsmClient {
+        private final HttpTransport http;
+        SsmClient(HttpTransport http) { this.http = http; }
+
+        /**
+         * Flip the status of every invocation under a SendCommand
+         * command id. {@code accountId} may be {@code null} to target
+         * the default account.
+         */
+        public SetSsmCommandStatusResponse setCommandStatus(
+                String commandId, String accountId, String status) {
+            return http.postJson(
+                    "/_fakecloud/ssm/commands/" + encodePath(commandId) + "/status",
+                    new SetSsmCommandStatusRequest(accountId, status),
+                    SetSsmCommandStatusResponse.class);
+        }
+
+        /**
+         * Force a command (or a specific invocation under it) into
+         * {@code Failed}. Pass {@code null} for the request to flip every
+         * invocation on the command with default status detail.
+         */
+        public FailSsmCommandResponse failCommand(
+                String commandId, FailSsmCommandRequest req) {
+            FailSsmCommandRequest body =
+                    req != null ? req : new FailSsmCommandRequest(null, null, null, null);
+            return http.postJson(
+                    "/_fakecloud/ssm/commands/" + encodePath(commandId) + "/fail",
+                    body,
+                    FailSsmCommandResponse.class);
+        }
+
+        /**
+         * Return every parameter-policy event recorded for the given
+         * account (default account when {@code accountId} is null).
+         */
+        public SsmParameterPolicyEventsResponse getParameterPolicyEvents(String accountId) {
+            String path = "/_fakecloud/ssm/parameter-policy-events";
+            if (accountId != null && !accountId.isEmpty()) {
+                path += "?accountId=" + encodePath(accountId);
+            }
+            return http.get(path, SsmParameterPolicyEventsResponse.class);
+        }
+
+        /**
+         * Drop a fake Session Manager session into state without going
+         * through {@code StartSession}, so {@code DescribeSessions} /
+         * {@code TerminateSession} can be exercised end-to-end.
+         */
+        public InjectSsmSessionResponse injectSession(InjectSsmSessionRequest req) {
+            return http.postJson(
+                    "/_fakecloud/ssm/sessions/inject",
+                    req,
+                    InjectSsmSessionResponse.class);
+        }
+    }
+
+    /**
+     * KMS admin sub-client. Exposes the data-plane usage recorder so
+     * tests can assert on which keys were touched, with what
+     * encryption context, by which service.
+     */
+    public static final class KmsClient {
+        private final HttpTransport http;
+        KmsClient(HttpTransport http) { this.http = http; }
+
+        /** Return every recorded KMS data-plane invocation. */
+        public KmsUsageResponse getUsage() {
+            return http.get("/_fakecloud/kms/usage", KmsUsageResponse.class);
+        }
+    }
+
+    /**
+     * WAFv2 admin sub-client. Wraps the {@code /_fakecloud/wafv2/evaluate}
+     * endpoint that runs an arbitrary evaluation payload through the
+     * stored web ACL rule set. Request and response are intentionally
+     * free-form JSON.
+     */
+    public static final class WafV2Client {
+        private final HttpTransport http;
+        WafV2Client(HttpTransport http) { this.http = http; }
+
+        /**
+         * Evaluate an arbitrary request payload against the stored
+         * WAFv2 rule set. Both the body and the response are free-form
+         * JSON — the exact shape is service-internal.
+         */
+        @SuppressWarnings("unchecked")
+        public Map<String, Object> evaluate(Map<String, Object> request) {
+            return http.postJson(
+                    "/_fakecloud/wafv2/evaluate", request, Map.class);
+        }
+    }
+
+    /**
+     * CloudFront admin sub-client. Wraps the per-distribution status
+     * admin endpoint that lets tests synchronously flip a stored
+     * Distribution between {@code Deployed} and {@code InProgress}
+     * without waiting on the propagation tick.
+     */
+    public static final class CloudFrontClient {
+        private final HttpTransport http;
+        CloudFrontClient(HttpTransport http) { this.http = http; }
+
+        /**
+         * Flip a stored CloudFront Distribution's status (e.g.
+         * {@code "Deployed"} or {@code "InProgress"}). Throws
+         * {@link FakeCloudError} with status 404 when the distribution
+         * does not exist.
+         */
+        public void setDistributionStatus(String distributionId, String status) {
+            http.postJsonNoContent(
+                    "/_fakecloud/cloudfront/distributions/"
+                            + encodePath(distributionId)
+                            + "/status",
+                    new CloudFrontDistributionStatusRequest(status));
         }
     }
 }

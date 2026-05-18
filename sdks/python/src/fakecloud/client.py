@@ -9,6 +9,7 @@ import httpx
 
 from fakecloud.types import (
     AcmCertificateChainInfo,
+    ApiGatewayV2ConnectionsResponse,
     ApiGatewayV2RequestsResponse,
     AppAsScheduledTickResponse,
     AppAsTickResponse,
@@ -22,6 +23,7 @@ from fakecloud.types import (
     BedrockModelResponseConfig,
     BedrockResponseRule,
     BedrockStatusResponse,
+    CloudFrontDistributionStatusRequest,
     CompromisedPasswordsRequest,
     CompromisedPasswordsResponse,
     ConfirmationCodesResponse,
@@ -37,6 +39,7 @@ from fakecloud.types import (
     EcsEventsResponse,
     EcsMarkFailedRequest,
     EcsTask,
+    EcsTaskCredentials,
     EcsTaskLogsResponse,
     EcsTaskMetadataResponse,
     EcsTasksResponse,
@@ -48,11 +51,14 @@ from fakecloud.types import (
     Elbv2LoadBalancersResponse,
     Elbv2RulesResponse,
     Elbv2TargetGroupsResponse,
+    Elbv2WafCountsResponse,
     EventHistoryResponse,
     EvictContainerResponse,
     ExpirationTickResponse,
     ExpireTokensRequest,
     ExpireTokensResponse,
+    FailSsmCommandRequest,
+    FailSsmCommandResponse,
     FireRuleRequest,
     FireRuleResponse,
     FireScheduleResponse,
@@ -62,6 +68,9 @@ from fakecloud.types import (
     HealthResponse,
     InboundEmailRequest,
     InboundEmailResponse,
+    InjectSsmSessionRequest,
+    InjectSsmSessionResponse,
+    KmsUsageResponse,
     LambdaInvocationsResponse,
     LifecycleTickResponse,
     LogsAnomalyInjectRequest,
@@ -74,9 +83,18 @@ from fakecloud.types import (
     PendingConfirmationsResponse,
     PreTokenGenInvocationsResponse,
     RdsInstancesResponse,
+    RdsLambdaInvokeRequest,
+    RdsLambdaInvokeResponse,
+    RdsS3ExportRequest,
+    RdsS3ExportResponse,
+    RdsS3ImportRequest,
+    RdsS3ImportResponse,
     ResetResponse,
     ResetServiceResponse,
     RotationTickResponse,
+    Route53DnssecMaterial,
+    Route53DnssecSignRequest,
+    Route53DnssecSignResponse,
     S3AccessPointsResponse,
     S3NotificationsResponse,
     S3ObjectLambdaResponsesResponse,
@@ -90,11 +108,17 @@ from fakecloud.types import (
     SesMetrics,
     SesSandboxResponse,
     SesSmtpSubmissionsResponse,
+    SetSsmCommandStatusRequest,
+    SetSsmCommandStatusResponse,
     SfnEnqueueActivityTaskRequest,
     SfnEnqueueActivityTaskResponse,
     SnsMessagesResponse,
+    SnsSmsResponse,
     SqsMessagesResponse,
+    SsmParameterPolicyEventsResponse,
     StepFunctionsExecutionsResponse,
+    StepFunctionsExecutionTreeResponse,
+    StepFunctionsSyncExecutionsResponse,
     TokensResponse,
     TtlTickResponse,
     UserConfirmationCodes,
@@ -139,6 +163,39 @@ class LambdaClient:
         _check(resp)
         return EvictContainerResponse.from_dict(resp.json())
 
+    async def download_function_code(
+        self,
+        account_id: str,
+        function_name: str,
+        qualifier_or_latest: str = "latest",
+    ) -> bytes:
+        """Download a function-code zip blob.
+
+        ``qualifier_or_latest`` is ``"latest"`` for the most recent
+        publish or a numeric version string. The server file name is
+        ``<qualifier>.zip``.
+        """
+        acct = _urlquote(account_id, safe="")
+        name = _urlquote(function_name, safe="")
+        qual = _urlquote(qualifier_or_latest, safe="")
+        resp = await self._client.get(
+            f"{self._base}/_fakecloud/lambda/function-code/{acct}/{name}/{qual}.zip"
+        )
+        _check(resp)
+        return resp.content
+
+    async def download_layer_content(
+        self, account_id: str, layer_name: str, version: int
+    ) -> bytes:
+        """Download a layer-version zip blob."""
+        acct = _urlquote(account_id, safe="")
+        name = _urlquote(layer_name, safe="")
+        resp = await self._client.get(
+            f"{self._base}/_fakecloud/lambda/layer-content/{acct}/{name}/{version}.zip"
+        )
+        _check(resp)
+        return resp.content
+
 
 class RdsClient:
     """Async RDS introspection client."""
@@ -151,6 +208,40 @@ class RdsClient:
         resp = await self._client.get(f"{self._base}/_fakecloud/rds/instances")
         _check(resp)
         return RdsInstancesResponse.from_dict(resp.json())
+
+    async def lambda_invoke(
+        self, req: RdsLambdaInvokeRequest
+    ) -> RdsLambdaInvokeResponse:
+        """Invoke a Lambda function via the RDS ``aws_lambda`` bridge.
+
+        Used internally by the PostgreSQL ``aws_lambda`` extension inside
+        RDS containers. The wire format is snake_case to match the
+        extension's calling convention.
+        """
+        resp = await self._client.post(
+            f"{self._base}/_fakecloud/rds/lambda-invoke",
+            json=req.to_dict(),
+        )
+        _check(resp)
+        return RdsLambdaInvokeResponse.from_dict(resp.json())
+
+    async def s3_import(self, req: RdsS3ImportRequest) -> RdsS3ImportResponse:
+        """Fetch an S3 object via the RDS ``aws_s3`` extension bridge."""
+        resp = await self._client.post(
+            f"{self._base}/_fakecloud/rds/s3-import",
+            json=req.to_dict(),
+        )
+        _check(resp)
+        return RdsS3ImportResponse.from_dict(resp.json())
+
+    async def s3_export(self, req: RdsS3ExportRequest) -> RdsS3ExportResponse:
+        """Upload an object via the RDS ``aws_s3`` extension bridge."""
+        resp = await self._client.post(
+            f"{self._base}/_fakecloud/rds/s3-export",
+            json=req.to_dict(),
+        )
+        _check(resp)
+        return RdsS3ExportResponse.from_dict(resp.json())
 
 
 class ElastiCacheClient:
@@ -313,6 +404,27 @@ class EcsClient:
         _check(resp)
         return EcsTaskMetadataResponse.from_dict(resp.json())
 
+    async def get_task_credentials(self, task_id: str) -> EcsTaskCredentials:
+        """Fetch the IAM credentials a running ECS task would see at
+        ``$AWS_CONTAINER_CREDENTIALS_RELATIVE_URI``."""
+        resp = await self._client.get(f"{self._base}/_fakecloud/ecs/creds/{task_id}")
+        _check(resp)
+        return EcsTaskCredentials.from_dict(resp.json())
+
+    async def get_task_metadata_v3(self, task_id: str) -> Dict[str, Any]:
+        """Return the v3 task metadata document. Pass-through dict — the
+        shape mirrors the real ECS v3 metadata endpoint."""
+        resp = await self._client.get(f"{self._base}/_fakecloud/ecs/v3/{task_id}")
+        _check(resp)
+        return cast(Dict[str, Any], resp.json())
+
+    async def get_task_metadata_v4(self, task_id: str) -> Dict[str, Any]:
+        """Return the v4 task metadata document. Pass-through dict — the
+        shape mirrors the real ECS v4 metadata endpoint."""
+        resp = await self._client.get(f"{self._base}/_fakecloud/ecs/v4/{task_id}")
+        _check(resp)
+        return cast(Dict[str, Any], resp.json())
+
 
 class _SyncEcsClient:
     """Sync ECS introspection client."""
@@ -377,6 +489,21 @@ class _SyncEcsClient:
         _check(resp)
         return EcsTaskMetadataResponse.from_dict(resp.json())
 
+    def get_task_credentials(self, task_id: str) -> EcsTaskCredentials:
+        resp = self._client.get(f"{self._base}/_fakecloud/ecs/creds/{task_id}")
+        _check(resp)
+        return EcsTaskCredentials.from_dict(resp.json())
+
+    def get_task_metadata_v3(self, task_id: str) -> Dict[str, Any]:
+        resp = self._client.get(f"{self._base}/_fakecloud/ecs/v3/{task_id}")
+        _check(resp)
+        return cast(Dict[str, Any], resp.json())
+
+    def get_task_metadata_v4(self, task_id: str) -> Dict[str, Any]:
+        resp = self._client.get(f"{self._base}/_fakecloud/ecs/v4/{task_id}")
+        _check(resp)
+        return cast(Dict[str, Any], resp.json())
+
 
 class Elbv2Client:
     """Async ELBv2 (Elastic Load Balancing v2) introspection client."""
@@ -413,6 +540,12 @@ class Elbv2Client:
         _check(resp)
         return cast("dict[str, Any]", resp.json())
 
+    async def get_waf_counts(self) -> Elbv2WafCountsResponse:
+        """Snapshot the WAF-association count metrics across ALBs."""
+        resp = await self._client.get(f"{self._base}/_fakecloud/elbv2/waf-counts")
+        _check(resp)
+        return Elbv2WafCountsResponse.from_dict(resp.json())
+
 
 class _SyncElbv2Client:
     """Sync ELBv2 introspection client."""
@@ -446,6 +579,12 @@ class _SyncElbv2Client:
         resp = self._client.post(f"{self._base}/_fakecloud/elbv2/access-logs/flush")
         _check(resp)
         return cast("dict[str, Any]", resp.json())
+
+    def get_waf_counts(self) -> Elbv2WafCountsResponse:
+        """Snapshot the WAF-association count metrics across ALBs."""
+        resp = self._client.get(f"{self._base}/_fakecloud/elbv2/waf-counts")
+        _check(resp)
+        return Elbv2WafCountsResponse.from_dict(resp.json())
 
 
 class Route53Client:
@@ -483,6 +622,30 @@ class Route53Client:
         )
         _check(resp)
 
+    async def get_dnssec_material(self, zone_id: str) -> Route53DnssecMaterial:
+        """Return the deterministic DNSSEC KSK material for ``zone_id``.
+
+        Raises ``FakeCloudError`` with status 404 if the zone has no
+        ACTIVE Key Signing Key.
+        """
+        resp = await self._client.get(
+            f"{self._base}/_fakecloud/route53/zones/{zone_id}/dnssec",
+        )
+        _check(resp)
+        return Route53DnssecMaterial.from_dict(resp.json())
+
+    async def sign_dnssec_rrset(
+        self, zone_id: str, req: Route53DnssecSignRequest
+    ) -> Route53DnssecSignResponse:
+        """Sign an RRset under the zone's first ACTIVE KSK and return the
+        raw RRSIG fields. Useful for verifier-side tests."""
+        resp = await self._client.post(
+            f"{self._base}/_fakecloud/route53/zones/{zone_id}/dnssec/sign",
+            json=req.to_dict(),
+        )
+        _check(resp)
+        return Route53DnssecSignResponse.from_dict(resp.json())
+
 
 class _SyncRoute53Client:
     """Sync Route 53 admin client."""
@@ -503,6 +666,235 @@ class _SyncRoute53Client:
         resp = self._client.post(
             f"{self._base}/_fakecloud/route53/health-checks/{health_check_id}/status",
             json=body,
+        )
+        _check(resp)
+
+    def get_dnssec_material(self, zone_id: str) -> Route53DnssecMaterial:
+        resp = self._client.get(
+            f"{self._base}/_fakecloud/route53/zones/{zone_id}/dnssec",
+        )
+        _check(resp)
+        return Route53DnssecMaterial.from_dict(resp.json())
+
+    def sign_dnssec_rrset(
+        self, zone_id: str, req: Route53DnssecSignRequest
+    ) -> Route53DnssecSignResponse:
+        resp = self._client.post(
+            f"{self._base}/_fakecloud/route53/zones/{zone_id}/dnssec/sign",
+            json=req.to_dict(),
+        )
+        _check(resp)
+        return Route53DnssecSignResponse.from_dict(resp.json())
+
+
+class SsmClient:
+    """Async SSM admin client."""
+
+    def __init__(self, client: httpx.AsyncClient, base_url: str) -> None:
+        self._client = client
+        self._base = base_url
+
+    async def set_command_status(
+        self,
+        command_id: str,
+        status: str,
+        account_id: Optional[str] = None,
+    ) -> SetSsmCommandStatusResponse:
+        """Force a stored ``SendCommand`` command into the given status."""
+        req = SetSsmCommandStatusRequest(status=status, account_id=account_id)
+        resp = await self._client.post(
+            f"{self._base}/_fakecloud/ssm/commands/{_urlquote(command_id, safe='')}/status",  # noqa: E501
+            json=req.to_dict(),
+        )
+        _check(resp)
+        return SetSsmCommandStatusResponse.from_dict(resp.json())
+
+    async def fail_command(
+        self,
+        command_id: str,
+        req: Optional[FailSsmCommandRequest] = None,
+    ) -> FailSsmCommandResponse:
+        """Flip every (or one) invocation on a command to ``Failed``."""
+        body = req.to_dict() if req is not None else {}
+        resp = await self._client.post(
+            f"{self._base}/_fakecloud/ssm/commands/{_urlquote(command_id, safe='')}/fail",  # noqa: E501
+            json=body,
+        )
+        _check(resp)
+        return FailSsmCommandResponse.from_dict(resp.json())
+
+    async def get_parameter_policy_events(
+        self, account_id: Optional[str] = None
+    ) -> SsmParameterPolicyEventsResponse:
+        params: Dict[str, str] = {}
+        if account_id is not None:
+            params["accountId"] = account_id
+        resp = await self._client.get(
+            f"{self._base}/_fakecloud/ssm/parameter-policy-events", params=params
+        )
+        _check(resp)
+        return SsmParameterPolicyEventsResponse.from_dict(resp.json())
+
+    async def inject_session(
+        self, req: InjectSsmSessionRequest
+    ) -> InjectSsmSessionResponse:
+        """Drop a fake Session Manager record into state."""
+        resp = await self._client.post(
+            f"{self._base}/_fakecloud/ssm/sessions/inject",
+            json=req.to_dict(),
+        )
+        _check(resp)
+        return InjectSsmSessionResponse.from_dict(resp.json())
+
+
+class _SyncSsmClient:
+    """Sync SSM admin client."""
+
+    def __init__(self, client: httpx.Client, base_url: str) -> None:
+        self._client = client
+        self._base = base_url
+
+    def set_command_status(
+        self,
+        command_id: str,
+        status: str,
+        account_id: Optional[str] = None,
+    ) -> SetSsmCommandStatusResponse:
+        req = SetSsmCommandStatusRequest(status=status, account_id=account_id)
+        resp = self._client.post(
+            f"{self._base}/_fakecloud/ssm/commands/{_urlquote(command_id, safe='')}/status",  # noqa: E501
+            json=req.to_dict(),
+        )
+        _check(resp)
+        return SetSsmCommandStatusResponse.from_dict(resp.json())
+
+    def fail_command(
+        self,
+        command_id: str,
+        req: Optional[FailSsmCommandRequest] = None,
+    ) -> FailSsmCommandResponse:
+        body = req.to_dict() if req is not None else {}
+        resp = self._client.post(
+            f"{self._base}/_fakecloud/ssm/commands/{_urlquote(command_id, safe='')}/fail",  # noqa: E501
+            json=body,
+        )
+        _check(resp)
+        return FailSsmCommandResponse.from_dict(resp.json())
+
+    def get_parameter_policy_events(
+        self, account_id: Optional[str] = None
+    ) -> SsmParameterPolicyEventsResponse:
+        params: Dict[str, str] = {}
+        if account_id is not None:
+            params["accountId"] = account_id
+        resp = self._client.get(
+            f"{self._base}/_fakecloud/ssm/parameter-policy-events", params=params
+        )
+        _check(resp)
+        return SsmParameterPolicyEventsResponse.from_dict(resp.json())
+
+    def inject_session(self, req: InjectSsmSessionRequest) -> InjectSsmSessionResponse:
+        resp = self._client.post(
+            f"{self._base}/_fakecloud/ssm/sessions/inject",
+            json=req.to_dict(),
+        )
+        _check(resp)
+        return InjectSsmSessionResponse.from_dict(resp.json())
+
+
+class KmsClient:
+    """Async KMS introspection client."""
+
+    def __init__(self, client: httpx.AsyncClient, base_url: str) -> None:
+        self._client = client
+        self._base = base_url
+
+    async def get_usage(self) -> KmsUsageResponse:
+        """Snapshot the recorded KMS usage events across services."""
+        resp = await self._client.get(f"{self._base}/_fakecloud/kms/usage")
+        _check(resp)
+        return KmsUsageResponse.from_dict(resp.json())
+
+
+class _SyncKmsClient:
+    """Sync KMS introspection client."""
+
+    def __init__(self, client: httpx.Client, base_url: str) -> None:
+        self._client = client
+        self._base = base_url
+
+    def get_usage(self) -> KmsUsageResponse:
+        resp = self._client.get(f"{self._base}/_fakecloud/kms/usage")
+        _check(resp)
+        return KmsUsageResponse.from_dict(resp.json())
+
+
+class WafV2Client:
+    """Async WAFv2 admin client."""
+
+    def __init__(self, client: httpx.AsyncClient, base_url: str) -> None:
+        self._client = client
+        self._base = base_url
+
+    async def evaluate(self, body: Dict[str, Any]) -> Dict[str, Any]:
+        """Run a synthetic request through the WAFv2 evaluator.
+
+        Body and response shapes mirror the admin endpoint and are
+        passed through as arbitrary dicts.
+        """
+        resp = await self._client.post(
+            f"{self._base}/_fakecloud/wafv2/evaluate", json=body
+        )
+        _check(resp)
+        return cast("Dict[str, Any]", resp.json())
+
+
+class _SyncWafV2Client:
+    """Sync WAFv2 admin client."""
+
+    def __init__(self, client: httpx.Client, base_url: str) -> None:
+        self._client = client
+        self._base = base_url
+
+    def evaluate(self, body: Dict[str, Any]) -> Dict[str, Any]:
+        resp = self._client.post(f"{self._base}/_fakecloud/wafv2/evaluate", json=body)
+        _check(resp)
+        return cast("Dict[str, Any]", resp.json())
+
+
+class CloudFrontClient:
+    """Async CloudFront admin client."""
+
+    def __init__(self, client: httpx.AsyncClient, base_url: str) -> None:
+        self._client = client
+        self._base = base_url
+
+    async def set_distribution_status(self, distribution_id: str, status: str) -> None:
+        """Force a stored CloudFront distribution into a given status.
+
+        Returns ``None`` on success (HTTP 204) and raises
+        ``FakeCloudError`` if the distribution does not exist.
+        """
+        req = CloudFrontDistributionStatusRequest(status=status)
+        resp = await self._client.post(
+            f"{self._base}/_fakecloud/cloudfront/distributions/{_urlquote(distribution_id, safe='')}/status",  # noqa: E501
+            json=req.to_dict(),
+        )
+        _check(resp)
+
+
+class _SyncCloudFrontClient:
+    """Sync CloudFront admin client."""
+
+    def __init__(self, client: httpx.Client, base_url: str) -> None:
+        self._client = client
+        self._base = base_url
+
+    def set_distribution_status(self, distribution_id: str, status: str) -> None:
+        req = CloudFrontDistributionStatusRequest(status=status)
+        resp = self._client.post(
+            f"{self._base}/_fakecloud/cloudfront/distributions/{_urlquote(distribution_id, safe='')}/status",  # noqa: E501
+            json=req.to_dict(),
         )
         _check(resp)
 
@@ -782,6 +1174,21 @@ class SnsClient:
         )
         _check(resp)
         return ConfirmSubscriptionResponse.from_dict(resp.json())
+
+    async def get_cert_pem(self) -> str:
+        """Return the SNS signing certificate as a PEM-encoded string.
+
+        The response body is text (``application/x-pem-file``), not JSON.
+        """
+        resp = await self._client.get(f"{self._base}/_fakecloud/sns/cert.pem")
+        _check(resp)
+        return resp.text
+
+    async def get_sms(self) -> SnsSmsResponse:
+        """Return all SMS messages the SNS fake has accepted."""
+        resp = await self._client.get(f"{self._base}/_fakecloud/sns/sms")
+        _check(resp)
+        return SnsSmsResponse.from_dict(resp.json())
 
 
 class SqsClient:
@@ -1067,6 +1474,50 @@ class ApiGatewayV2Client:
         _check(resp)
         return ApiGatewayV2RequestsResponse.from_dict(resp.json())
 
+    async def get_connections(self) -> ApiGatewayV2ConnectionsResponse:
+        """List active WebSocket connections tracked by the API Gateway v2 fake."""
+        resp = await self._client.get(
+            f"{self._base}/_fakecloud/apigatewayv2/connections"
+        )
+        _check(resp)
+        return ApiGatewayV2ConnectionsResponse.from_dict(resp.json())
+
+    async def get_mtls_info(self, domain_name: str) -> Dict[str, Any]:
+        """Return the mTLS trust-store summary for a custom domain.
+
+        The shape is service-internal and may evolve, so this returns a
+        pass-through dict rather than a typed dataclass.
+        """
+        resp = await self._client.get(
+            f"{self._base}/_fakecloud/apigatewayv2/domain-names/{domain_name}/mtls-info"
+        )
+        _check(resp)
+        return cast(Dict[str, Any], resp.json())
+
+    def ws_url(self, api_id: str, stage: Optional[str] = None) -> str:
+        """Build the WebSocket URL for ``api_id`` at ``stage``.
+
+        Switches the scheme from ``http(s)://`` to ``ws(s)://``, appends
+        the server's ``/_fakecloud/apigatewayv2/ws/{api_id}`` path, and
+        passes the stage as a query parameter (the server reads it from
+        the query string; when omitted the server defaults to
+        ``$default``).
+        """
+        if self._base.startswith("https://"):
+            ws = "wss://" + self._base[len("https://") :]
+        elif self._base.startswith("http://"):
+            ws = "ws://" + self._base[len("http://") :]
+        else:
+            ws = self._base
+        from urllib.parse import quote as _q
+
+        api_id_enc = _q(api_id, safe="")
+        if stage is None:
+            return f"{ws}/_fakecloud/apigatewayv2/ws/{api_id_enc}"
+        return (
+            f"{ws}/_fakecloud/apigatewayv2/ws/{api_id_enc}?stage={_q(stage, safe='')}"
+        )
+
 
 class StepFunctionsClient:
     """Async Step Functions introspection client."""
@@ -1081,6 +1532,21 @@ class StepFunctionsClient:
         )
         _check(resp)
         return StepFunctionsExecutionsResponse.from_dict(resp.json())
+
+    async def get_sync_executions(self) -> StepFunctionsSyncExecutionsResponse:
+        resp = await self._client.get(
+            f"{self._base}/_fakecloud/stepfunctions/sync-executions"
+        )
+        _check(resp)
+        return StepFunctionsSyncExecutionsResponse.from_dict(resp.json())
+
+    async def get_execution_tree(self, arn: str) -> StepFunctionsExecutionTreeResponse:
+        encoded = _urlquote(arn, safe="")
+        resp = await self._client.get(
+            f"{self._base}/_fakecloud/stepfunctions/execution-tree/{encoded}"
+        )
+        _check(resp)
+        return StepFunctionsExecutionTreeResponse.from_dict(resp.json())
 
     async def enqueue_activity_task(
         self, req: SfnEnqueueActivityTaskRequest
@@ -1210,6 +1676,32 @@ class _SyncLambdaClient:
         _check(resp)
         return EvictContainerResponse.from_dict(resp.json())
 
+    def download_function_code(
+        self,
+        account_id: str,
+        function_name: str,
+        qualifier_or_latest: str = "latest",
+    ) -> bytes:
+        acct = _urlquote(account_id, safe="")
+        name = _urlquote(function_name, safe="")
+        qual = _urlquote(qualifier_or_latest, safe="")
+        resp = self._client.get(
+            f"{self._base}/_fakecloud/lambda/function-code/{acct}/{name}/{qual}.zip"
+        )
+        _check(resp)
+        return resp.content
+
+    def download_layer_content(
+        self, account_id: str, layer_name: str, version: int
+    ) -> bytes:
+        acct = _urlquote(account_id, safe="")
+        name = _urlquote(layer_name, safe="")
+        resp = self._client.get(
+            f"{self._base}/_fakecloud/lambda/layer-content/{acct}/{name}/{version}.zip"
+        )
+        _check(resp)
+        return resp.content
+
 
 class _SyncRdsClient:
     """Sync RDS introspection client."""
@@ -1222,6 +1714,30 @@ class _SyncRdsClient:
         resp = self._client.get(f"{self._base}/_fakecloud/rds/instances")
         _check(resp)
         return RdsInstancesResponse.from_dict(resp.json())
+
+    def lambda_invoke(self, req: RdsLambdaInvokeRequest) -> RdsLambdaInvokeResponse:
+        resp = self._client.post(
+            f"{self._base}/_fakecloud/rds/lambda-invoke",
+            json=req.to_dict(),
+        )
+        _check(resp)
+        return RdsLambdaInvokeResponse.from_dict(resp.json())
+
+    def s3_import(self, req: RdsS3ImportRequest) -> RdsS3ImportResponse:
+        resp = self._client.post(
+            f"{self._base}/_fakecloud/rds/s3-import",
+            json=req.to_dict(),
+        )
+        _check(resp)
+        return RdsS3ImportResponse.from_dict(resp.json())
+
+    def s3_export(self, req: RdsS3ExportRequest) -> RdsS3ExportResponse:
+        resp = self._client.post(
+            f"{self._base}/_fakecloud/rds/s3-export",
+            json=req.to_dict(),
+        )
+        _check(resp)
+        return RdsS3ExportResponse.from_dict(resp.json())
 
 
 class _SyncElastiCacheClient:
@@ -1395,6 +1911,16 @@ class _SyncSnsClient:
         )
         _check(resp)
         return ConfirmSubscriptionResponse.from_dict(resp.json())
+
+    def get_cert_pem(self) -> str:
+        resp = self._client.get(f"{self._base}/_fakecloud/sns/cert.pem")
+        _check(resp)
+        return resp.text
+
+    def get_sms(self) -> SnsSmsResponse:
+        resp = self._client.get(f"{self._base}/_fakecloud/sns/sms")
+        _check(resp)
+        return SnsSmsResponse.from_dict(resp.json())
 
 
 class _SyncSqsClient:
@@ -1630,6 +2156,34 @@ class _SyncApiGatewayV2Client:
         _check(resp)
         return ApiGatewayV2RequestsResponse.from_dict(resp.json())
 
+    def get_connections(self) -> ApiGatewayV2ConnectionsResponse:
+        resp = self._client.get(f"{self._base}/_fakecloud/apigatewayv2/connections")
+        _check(resp)
+        return ApiGatewayV2ConnectionsResponse.from_dict(resp.json())
+
+    def get_mtls_info(self, domain_name: str) -> Dict[str, Any]:
+        resp = self._client.get(
+            f"{self._base}/_fakecloud/apigatewayv2/domain-names/{domain_name}/mtls-info"
+        )
+        _check(resp)
+        return cast(Dict[str, Any], resp.json())
+
+    def ws_url(self, api_id: str, stage: Optional[str] = None) -> str:
+        if self._base.startswith("https://"):
+            ws = "wss://" + self._base[len("https://") :]
+        elif self._base.startswith("http://"):
+            ws = "ws://" + self._base[len("http://") :]
+        else:
+            ws = self._base
+        from urllib.parse import quote as _q
+
+        api_id_enc = _q(api_id, safe="")
+        if stage is None:
+            return f"{ws}/_fakecloud/apigatewayv2/ws/{api_id_enc}"
+        return (
+            f"{ws}/_fakecloud/apigatewayv2/ws/{api_id_enc}?stage={_q(stage, safe='')}"
+        )
+
 
 class _SyncStepFunctionsClient:
     def __init__(self, client: httpx.Client, base_url: str) -> None:
@@ -1640,6 +2194,21 @@ class _SyncStepFunctionsClient:
         resp = self._client.get(f"{self._base}/_fakecloud/stepfunctions/executions")
         _check(resp)
         return StepFunctionsExecutionsResponse.from_dict(resp.json())
+
+    def get_sync_executions(self) -> StepFunctionsSyncExecutionsResponse:
+        resp = self._client.get(
+            f"{self._base}/_fakecloud/stepfunctions/sync-executions"
+        )
+        _check(resp)
+        return StepFunctionsSyncExecutionsResponse.from_dict(resp.json())
+
+    def get_execution_tree(self, arn: str) -> StepFunctionsExecutionTreeResponse:
+        encoded = _urlquote(arn, safe="")
+        resp = self._client.get(
+            f"{self._base}/_fakecloud/stepfunctions/execution-tree/{encoded}"
+        )
+        _check(resp)
+        return StepFunctionsExecutionTreeResponse.from_dict(resp.json())
 
     def enqueue_activity_task(
         self, req: SfnEnqueueActivityTaskRequest
@@ -1882,6 +2451,22 @@ class FakeCloud:
         return Route53Client(self._client, self._base)
 
     @property
+    def ssm(self) -> SsmClient:
+        return SsmClient(self._client, self._base)
+
+    @property
+    def kms(self) -> KmsClient:
+        return KmsClient(self._client, self._base)
+
+    @property
+    def wafv2(self) -> WafV2Client:
+        return WafV2Client(self._client, self._base)
+
+    @property
+    def cloudfront(self) -> CloudFrontClient:
+        return CloudFrontClient(self._client, self._base)
+
+    @property
     def acm(self) -> AcmClient:
         return AcmClient(self._client, self._base)
 
@@ -2037,6 +2622,22 @@ class FakeCloudSync:
     @property
     def route53(self) -> _SyncRoute53Client:
         return _SyncRoute53Client(self._client, self._base)
+
+    @property
+    def ssm(self) -> _SyncSsmClient:
+        return _SyncSsmClient(self._client, self._base)
+
+    @property
+    def kms(self) -> _SyncKmsClient:
+        return _SyncKmsClient(self._client, self._base)
+
+    @property
+    def wafv2(self) -> _SyncWafV2Client:
+        return _SyncWafV2Client(self._client, self._base)
+
+    @property
+    def cloudfront(self) -> _SyncCloudFrontClient:
+        return _SyncCloudFrontClient(self._client, self._base)
 
     @property
     def acm(self) -> _SyncAcmClient:

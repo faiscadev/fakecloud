@@ -45,6 +45,10 @@ final class FakeCloud
     private ApplicationAutoScalingClient $applicationAutoscaling;
     private AthenaClient $athena;
     private OrganizationsClient $organizations;
+    private SsmClient $ssm;
+    private KmsClient $kms;
+    private WafV2Client $wafv2;
+    private CloudFrontClient $cloudfront;
 
     public function __construct(string $baseUrl = self::DEFAULT_BASE_URL)
     {
@@ -76,6 +80,10 @@ final class FakeCloud
         $this->applicationAutoscaling = new ApplicationAutoScalingClient($this->http);
         $this->athena = new AthenaClient($this->http);
         $this->organizations = new OrganizationsClient($this->http);
+        $this->ssm = new SsmClient($this->http);
+        $this->kms = new KmsClient($this->http);
+        $this->wafv2 = new WafV2Client($this->http);
+        $this->cloudfront = new CloudFrontClient($this->http);
     }
 
     public function baseUrl(): string
@@ -141,9 +149,12 @@ final class FakeCloud
     public function elbv2(): Elbv2Client { return $this->elbv2; }
     public function route53(): Route53Client { return $this->route53; }
     public function acm(): AcmClient { return $this->acm; }
-    public function applicationAutoscaling(): ApplicationAutoScalingClient { return $this->applicationAutoscaling; }
-    public function athena(): AthenaClient { return $this->athena; }
+    public function applicationAutoscaling(): ApplicationAutoScalingClient { return $this->applicationAutoscaling; }    public function athena(): AthenaClient { return $this->athena; }
     public function organizations(): OrganizationsClient { return $this->organizations; }
+    public function ssm(): SsmClient { return $this->ssm; }
+    public function kms(): KmsClient { return $this->kms; }
+    public function wafv2(): WafV2Client { return $this->wafv2; }
+    public function cloudfront(): CloudFrontClient { return $this->cloudfront; }
 }
 
 // ── Sub-clients ────────────────────────────────────────────────
@@ -172,6 +183,41 @@ final class LambdaClient
             $this->http->postEmpty('/_fakecloud/lambda/' . HttpTransport::encodePath($functionName) . '/evict-container')
         );
     }
+
+    /**
+     * Download the stored zip bundle for a Lambda function's code.
+     *
+     * `$qualifierOrLatest` is either the literal string `"latest"` (the
+     * value the server stores under `latest.zip`) or a numeric version
+     * string (e.g. `"3"`) to fetch `<version>.zip`. Returns the raw zip
+     * bytes; throws {@see FakeCloudError} on 404 / non-2xx.
+     */
+    public function downloadFunctionCode(string $accountId, string $functionName, string $qualifierOrLatest): string
+    {
+        $file = $qualifierOrLatest === 'latest' ? 'latest.zip' : $qualifierOrLatest . '.zip';
+        return $this->http->getRaw(
+            '/_fakecloud/lambda/function-code/'
+                . HttpTransport::encodePath($accountId) . '/'
+                . HttpTransport::encodePath($functionName) . '/'
+                . HttpTransport::encodePath($file)
+        );
+    }
+
+    /**
+     * Download the stored zip bundle for a specific Lambda layer
+     * version. Returns the raw zip bytes; throws {@see FakeCloudError}
+     * on 404 / non-2xx.
+     */
+    public function downloadLayerContent(string $accountId, string $layerName, int|string $version): string
+    {
+        $file = ((string) $version) . '.zip';
+        return $this->http->getRaw(
+            '/_fakecloud/lambda/layer-content/'
+                . HttpTransport::encodePath($accountId) . '/'
+                . HttpTransport::encodePath($layerName) . '/'
+                . HttpTransport::encodePath($file)
+        );
+    }
 }
 
 final class RdsClient
@@ -182,6 +228,41 @@ final class RdsClient
     {
         return RdsInstancesResponse::fromArray(
             $this->http->get('/_fakecloud/rds/instances')
+        );
+    }
+
+    /**
+     * Bridge endpoint the PostgreSQL `aws_lambda` extension calls into
+     * from inside an RDS DB container. Wire format is snake_case; the
+     * SDK preserves it verbatim rather than auto-converting.
+     */
+    public function lambdaInvoke(RdsLambdaInvokeRequest $req): RdsLambdaInvokeResponse
+    {
+        return RdsLambdaInvokeResponse::fromArray(
+            $this->http->postJson('/_fakecloud/rds/lambda-invoke', $req->toArray())
+        );
+    }
+
+    /**
+     * Bridge endpoint for the PostgreSQL `aws_s3` extension: fetch a
+     * fakecloud S3 object. Body is base64-encoded so the JSON transport
+     * stays text-only. snake_case on the wire.
+     */
+    public function s3Import(RdsS3ImportRequest $req): RdsS3ImportResponse
+    {
+        return RdsS3ImportResponse::fromArray(
+            $this->http->postJson('/_fakecloud/rds/s3-import', $req->toArray())
+        );
+    }
+
+    /**
+     * Bridge equivalent of an S3 PutObject driven from inside the DB
+     * container. snake_case on the wire.
+     */
+    public function s3Export(RdsS3ExportRequest $req): RdsS3ExportResponse
+    {
+        return RdsS3ExportResponse::fromArray(
+            $this->http->postJson('/_fakecloud/rds/s3-export', $req->toArray())
         );
     }
 }
@@ -377,6 +458,28 @@ final class SnsClient
     {
         return ConfirmSubscriptionResponse::fromArray(
             $this->http->postJson('/_fakecloud/sns/confirm-subscription', $req->toArray())
+        );
+    }
+
+    /**
+     * Fetch the PEM-encoded signing certificate fakecloud uses to sign
+     * SNS HTTP delivery payloads. Returned as a raw PEM string —
+     * subscribers fetch this via `SigningCertURL` on real SNS.
+     */
+    public function getSigningCertPem(): string
+    {
+        return $this->http->getText('/_fakecloud/sns/cert.pem');
+    }
+
+    /**
+     * List captured SMS messages. SNS SMS Publish calls don't hit a real
+     * carrier under fakecloud; this returns the destination phone number
+     * and message body so tests can assert delivery.
+     */
+    public function getSmsMessages(): SnsSmsResponse
+    {
+        return SnsSmsResponse::fromArray(
+            $this->http->get('/_fakecloud/sns/sms')
         );
     }
 }
@@ -680,6 +783,50 @@ final class ApiGatewayV2Client
             $this->http->get('/_fakecloud/apigatewayv2/requests')
         );
     }
+
+    /**
+     * List currently-active WebSocket connections across every
+     * WebSocket API the server has seen.
+     */
+    public function getConnections(): ApiGatewayV2ConnectionsResponse
+    {
+        return ApiGatewayV2ConnectionsResponse::fromArray(
+            $this->http->get('/_fakecloud/apigatewayv2/connections')
+        );
+    }
+
+    /**
+     * Fetch the mTLS configuration recorded for a custom domain name
+     * (truststore bundle, version, validity). Pass-through JSON — the
+     * server-side shape can evolve, so this returns the decoded array
+     * unmodified.
+     */
+    public function mtlsInfo(string $domainName): array
+    {
+        return $this->http->get(
+            '/_fakecloud/apigatewayv2/domain-names/'
+            . HttpTransport::encodePath($domainName)
+            . '/mtls-info'
+        );
+    }
+
+    /**
+     * Build the WebSocket upgrade URL for `apiId`. The SDK doesn't open
+     * the socket itself — pair this with any PHP WebSocket client
+     * (e.g. Ratchet, Workerman) in test code. `$stage` is accepted for
+     * symmetry with other SDKs but is not part of the path today.
+     */
+    public function wsUrl(string $apiId, ?string $stage = null): string
+    {
+        $base = $this->http->baseUrl();
+        $base = preg_replace('#^https://#', 'wss://', $base, 1);
+        $base = preg_replace('#^http://#', 'ws://', $base, 1);
+        $path = $base . '/_fakecloud/apigatewayv2/ws/' . HttpTransport::encodePath($apiId);
+        if ($stage === null) {
+            return $path;
+        }
+        return $path . '?stage=' . rawurlencode($stage);
+    }
 }
 
 final class StepFunctionsClient
@@ -690,6 +837,20 @@ final class StepFunctionsClient
     {
         return StepFunctionsExecutionsResponse::fromArray(
             $this->http->get('/_fakecloud/stepfunctions/executions')
+        );
+    }
+
+    public function getSyncExecutions(): StepFunctionsSyncExecutionsResponse
+    {
+        return StepFunctionsSyncExecutionsResponse::fromArray(
+            $this->http->get('/_fakecloud/stepfunctions/sync-executions')
+        );
+    }
+
+    public function getExecutionTree(string $arn): StepFunctionsExecutionTreeResponse
+    {
+        return StepFunctionsExecutionTreeResponse::fromArray(
+            $this->http->get('/_fakecloud/stepfunctions/execution-tree/' . rawurlencode($arn))
         );
     }
 
@@ -884,6 +1045,37 @@ final class EcsClient
             )
         );
     }
+
+    /**
+     * Fetch the IAM credentials fakecloud minted for a task. Mirrors
+     * what `AWS_CONTAINER_CREDENTIALS_RELATIVE_URI` exposes inside a
+     * real ECS task container. Field casing is PascalCase on the wire;
+     * the returned object exposes camelCase properties.
+     */
+    public function getTaskCredentials(string $taskId): EcsTaskCredentialsResponse
+    {
+        return EcsTaskCredentialsResponse::fromArray(
+            $this->http->get('/_fakecloud/ecs/creds/' . HttpTransport::encodePath($taskId))
+        );
+    }
+
+    /**
+     * Fetch the v3 task metadata dump (the legacy endpoint exposed via
+     * `ECS_CONTAINER_METADATA_URI`). Pass-through JSON.
+     */
+    public function getTaskMetadataV3(string $taskId): array
+    {
+        return $this->http->get('/_fakecloud/ecs/v3/' . HttpTransport::encodePath($taskId));
+    }
+
+    /**
+     * Fetch the v4 task metadata dump (the endpoint exposed via
+     * `ECS_CONTAINER_METADATA_URI_V4`). Pass-through JSON.
+     */
+    public function getTaskMetadataV4(string $taskId): array
+    {
+        return $this->http->get('/_fakecloud/ecs/v4/' . HttpTransport::encodePath($taskId));
+    }
 }
 
 final class Elbv2Client
@@ -928,6 +1120,19 @@ final class Elbv2Client
             $this->http->postEmpty('/_fakecloud/elbv2/access-logs/flush')
         );
     }
+
+    /**
+     * Snapshot of per-association WAF evaluation counters as recorded
+     * by the ELBv2 -> WAFv2 bridge. The `counts` payload shape is
+     * server-defined; it's exposed as-is so tests can drill into it
+     * with array access.
+     */
+    public function getWafCounts(): Elbv2WafCountsResponse
+    {
+        return Elbv2WafCountsResponse::fromArray(
+            $this->http->get('/_fakecloud/elbv2/waf-counts')
+        );
+    }
 }
 
 /**
@@ -958,6 +1163,35 @@ final class Route53Client
         $this->http->postJsonNoContent(
             '/_fakecloud/route53/health-checks/' . HttpTransport::encodePath($healthCheckId) . '/status',
             $body
+        );
+    }
+
+    /**
+     * Fetch the DNSSEC key material fakecloud derived for a hosted
+     * zone's first ACTIVE Key Signing Key. Throws {@see FakeCloudError}
+     * with status 404 if the zone has no active KSK.
+     */
+    public function getDnssecMaterial(string $zoneId): Route53DnssecMaterialResponse
+    {
+        return Route53DnssecMaterialResponse::fromArray(
+            $this->http->get(
+                '/_fakecloud/route53/zones/' . HttpTransport::encodePath($zoneId) . '/dnssec'
+            )
+        );
+    }
+
+    /**
+     * Sign an RRset under the hosted zone's first ACTIVE KSK and return
+     * the raw RRSIG fields so tests can verify the signature against
+     * the material returned by {@see getDnssecMaterial()}.
+     */
+    public function signDnssec(string $zoneId, Route53DnssecSignRequest $req): Route53DnssecSignResponse
+    {
+        return Route53DnssecSignResponse::fromArray(
+            $this->http->postJson(
+                '/_fakecloud/route53/zones/' . HttpTransport::encodePath($zoneId) . '/dnssec/sign',
+                $req->toArray()
+            )
         );
     }
 }
@@ -1066,6 +1300,185 @@ final class OrganizationsClient
     {
         return OrganizationsAccountsResponse::fromArray(
             $this->http->get('/_fakecloud/organizations/accounts')
+        );
+    }
+}
+
+/**
+ * SSM admin / introspection sub-client. Lets tests drive RunCommand
+ * invocations, parameter-policy events, and Session Manager records
+ * synchronously without going through the real SSM agent flow.
+ */
+final class SsmClient
+{
+    public function __construct(private readonly HttpTransport $http) {}
+
+    /**
+     * Flip a stored `SendCommand` to a terminal status (`Success`,
+     * `Failed`, `Cancelled`, `TimedOut`, etc). $accountId is optional;
+     * when omitted the server resolves against the default account.
+     */
+    public function setCommandStatus(string $commandId, string $status, ?string $accountId = null): SetSsmCommandStatusResponse
+    {
+        $body = ['status' => $status];
+        if ($accountId !== null) {
+            $body['accountId'] = $accountId;
+        }
+        return SetSsmCommandStatusResponse::fromArray(
+            $this->http->postJson(
+                '/_fakecloud/ssm/commands/' . HttpTransport::encodePath($commandId) . '/status',
+                $body
+            )
+        );
+    }
+
+    /**
+     * Force a command (or a single invocation when $instanceId is set)
+     * into the `Failed` terminal state. Optional $statusDetails /
+     * $standardErrorContent surface through `GetCommandInvocation`.
+     */
+    public function failCommand(
+        string $commandId,
+        ?string $accountId = null,
+        ?string $instanceId = null,
+        ?string $statusDetails = null,
+        ?string $standardErrorContent = null,
+    ): FailSsmCommandResponse {
+        $body = [];
+        if ($accountId !== null) {
+            $body['accountId'] = $accountId;
+        }
+        if ($instanceId !== null) {
+            $body['instanceId'] = $instanceId;
+        }
+        if ($statusDetails !== null) {
+            $body['statusDetails'] = $statusDetails;
+        }
+        if ($standardErrorContent !== null) {
+            $body['standardErrorContent'] = $standardErrorContent;
+        }
+        return FailSsmCommandResponse::fromArray(
+            $this->http->postJson(
+                '/_fakecloud/ssm/commands/' . HttpTransport::encodePath($commandId) . '/fail',
+                $body
+            )
+        );
+    }
+
+    /**
+     * Snapshot of recorded SSM Parameter Store policy events
+     * (registrations, expirations, no-change notifications).
+     */
+    public function getParameterPolicyEvents(?string $accountId = null): SsmParameterPolicyEventsResponse
+    {
+        $path = '/_fakecloud/ssm/parameter-policy-events';
+        if ($accountId !== null) {
+            $path .= '?accountId=' . rawurlencode($accountId);
+        }
+        return SsmParameterPolicyEventsResponse::fromArray($this->http->get($path));
+    }
+
+    /**
+     * Inject a fake Session Manager session record so tests can assert
+     * on `DescribeSessions`/`TerminateSession` without a live agent.
+     * Defaults: status=Connected, owner=account-root IAM ARN, autogen
+     * sessionId.
+     */
+    public function injectSession(
+        string $target,
+        ?string $accountId = null,
+        ?string $status = null,
+        ?string $owner = null,
+        ?string $reason = null,
+        ?string $sessionId = null,
+    ): InjectSsmSessionResponse {
+        $body = ['target' => $target];
+        if ($accountId !== null) {
+            $body['accountId'] = $accountId;
+        }
+        if ($status !== null) {
+            $body['status'] = $status;
+        }
+        if ($owner !== null) {
+            $body['owner'] = $owner;
+        }
+        if ($reason !== null) {
+            $body['reason'] = $reason;
+        }
+        if ($sessionId !== null) {
+            $body['sessionId'] = $sessionId;
+        }
+        return InjectSsmSessionResponse::fromArray(
+            $this->http->postJson('/_fakecloud/ssm/sessions/inject', $body)
+        );
+    }
+}
+
+/**
+ * KMS admin / introspection sub-client. Exposes the recorded
+ * data-plane usage trail so tests can assert which keys/operations
+ * the system under test invoked.
+ */
+final class KmsClient
+{
+    public function __construct(private readonly HttpTransport $http) {}
+
+    /**
+     * Snapshot every recorded KMS data-plane invocation (Encrypt,
+     * Decrypt, GenerateDataKey, Sign, Verify, etc.) with timestamps,
+     * caller service principal, and encryption context.
+     */
+    public function getUsage(): KmsUsageResponse
+    {
+        return KmsUsageResponse::fromArray(
+            $this->http->get('/_fakecloud/kms/usage')
+        );
+    }
+}
+
+/**
+ * WAFv2 admin / simulation sub-client. The `/evaluate` endpoint is a
+ * pass-through that runs a rule-set evaluation harness; payload shape
+ * is server-defined and exposed as a raw array.
+ */
+final class WafV2Client
+{
+    public function __construct(private readonly HttpTransport $http) {}
+
+    /**
+     * Run the WAFv2 evaluation harness against an arbitrary request.
+     * Both the request body and response are forwarded as plain
+     * decoded JSON arrays so tests can pin to the exact server shape.
+     *
+     * @param array<array-key, mixed> $body
+     * @return array<array-key, mixed>
+     */
+    public function evaluate(array $body): array
+    {
+        return $this->http->postJson('/_fakecloud/wafv2/evaluate', $body);
+    }
+}
+
+/**
+ * CloudFront admin sub-client. Wraps the per-distribution status
+ * admin endpoint so tests can synchronously flip a distribution
+ * between `InProgress` and `Deployed` without waiting on the
+ * propagation tick.
+ */
+final class CloudFrontClient
+{
+    public function __construct(private readonly HttpTransport $http) {}
+
+    /**
+     * Force a CloudFront distribution into the given status (typically
+     * `"Deployed"` or `"InProgress"`). Throws {@see FakeCloudError}
+     * with HTTP 404 when the distribution id is unknown.
+     */
+    public function setDistributionStatus(string $distributionId, string $status): void
+    {
+        $this->http->postJsonNoContent(
+            '/_fakecloud/cloudfront/distributions/' . HttpTransport::encodePath($distributionId) . '/status',
+            ['status' => $status]
         );
     }
 }

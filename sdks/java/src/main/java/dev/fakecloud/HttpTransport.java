@@ -46,6 +46,19 @@ final class HttpTransport {
         return send(HttpRequest.newBuilder(uri(path)).GET(), type);
     }
 
+    /**
+     * GET an endpoint whose response is plain text (e.g. a PEM block).
+     * Throws {@link FakeCloudError} on non-2xx.
+     */
+    String getText(String path) {
+        HttpResponse<byte[]> resp = execute(HttpRequest.newBuilder(uri(path)).GET());
+        int status = resp.statusCode();
+        if (status < 200 || status >= 300) {
+            throw new FakeCloudError(status, new String(resp.body(), StandardCharsets.UTF_8));
+        }
+        return new String(resp.body(), StandardCharsets.UTF_8);
+    }
+
     <T> T postEmpty(String path, Class<T> type) {
         return send(HttpRequest.newBuilder(uri(path)).POST(HttpRequest.BodyPublishers.noBody()), type);
     }
@@ -98,6 +111,21 @@ final class HttpTransport {
                 .header("Content-Type", "text/plain")
                 .POST(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8));
         return send(req, type);
+    }
+
+    /**
+     * GET a path and return the raw response body as bytes. Used for
+     * binary admin endpoints (Lambda function code, Lambda layer
+     * content) that respond with a zip archive rather than JSON.
+     * Throws {@link FakeCloudError} on non-2xx.
+     */
+    byte[] getBytes(String path) {
+        HttpResponse<byte[]> resp = execute(HttpRequest.newBuilder(uri(path)).GET());
+        int status = resp.statusCode();
+        if (status < 200 || status >= 300) {
+            throw new FakeCloudError(status, new String(resp.body(), StandardCharsets.UTF_8));
+        }
+        return resp.body();
     }
 
     <T> T delete(String path, Class<T> type) {

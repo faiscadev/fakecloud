@@ -19,7 +19,16 @@ export {
   BedrockAgentClient,
   BedrockAgentRuntimeClient,
   EcsClient,
+  ApiGatewayV2Client,
+  Route53Client,
+  AcmClient,
+  StepFunctionsClient,
+  ApplicationAutoScalingClient,
   AthenaClient,
   OrganizationsClient,
+  SsmClient,
+  KmsClient,
+  WafV2Client,
+  CloudFrontClient,
 } from "./client.js";
 export type * from "./types.js";

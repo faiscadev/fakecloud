@@ -727,6 +727,47 @@ type StepFunctionsExecutionsResponse struct {
 	Executions []StepFunctionsExecution `json:"executions"`
 }
 
+// StepFunctionsSyncBillingDetails captures billed compute for a sync execution.
+type StepFunctionsSyncBillingDetails struct {
+	BilledDurationInMilliseconds int64 `json:"billedDurationInMilliseconds"`
+	BilledMemoryUsedInMb         int64 `json:"billedMemoryUsedInMb"`
+}
+
+// StepFunctionsSyncExecution represents a recorded EXPRESS sync execution.
+type StepFunctionsSyncExecution struct {
+	ExecutionARN    string                          `json:"executionArn"`
+	StateMachineARN string                          `json:"stateMachineArn"`
+	Name            string                          `json:"name"`
+	Status          string                          `json:"status"`
+	Input           *string                         `json:"input,omitempty"`
+	Output          *string                         `json:"output,omitempty"`
+	StartedAt       string                          `json:"startedAt"`
+	StoppedAt       *string                         `json:"stoppedAt,omitempty"`
+	DurationMs      int64                           `json:"durationMs"`
+	BillingDetails  StepFunctionsSyncBillingDetails `json:"billingDetails"`
+}
+
+// StepFunctionsSyncExecutionsResponse contains all recorded sync executions.
+type StepFunctionsSyncExecutionsResponse struct {
+	Executions []StepFunctionsSyncExecution `json:"executions"`
+}
+
+// StepFunctionsExecutionTreeNode is a node in a parent/child execution tree.
+type StepFunctionsExecutionTreeNode struct {
+	ARN             string                           `json:"arn"`
+	StateMachineARN string                           `json:"stateMachineArn"`
+	Status          string                           `json:"status"`
+	StartedAt       string                           `json:"startedAt"`
+	StoppedAt       *string                          `json:"stoppedAt,omitempty"`
+	Children        []StepFunctionsExecutionTreeNode `json:"children"`
+}
+
+// StepFunctionsExecutionTreeResponse is the rooted parent/child tree for an execution.
+type StepFunctionsExecutionTreeResponse struct {
+	RootARN string                         `json:"rootArn"`
+	Tree    StepFunctionsExecutionTreeNode `json:"tree"`
+}
+
 // SfnEnqueueActivityTaskRequest queues a task for an activity worker without
 // running an ASL execution.
 type SfnEnqueueActivityTaskRequest struct {
@@ -1318,4 +1359,226 @@ type AthenaNamedQuery struct {
 
 type AthenaNamedQueriesResponse struct {
 	Queries []AthenaNamedQuery `json:"queries"`
+}
+
+// ── API Gateway v2 WebSocket connections ───────────────────────────
+
+// ApiGatewayV2Connection is one live WebSocket connection tracked by
+// the fake API Gateway v2 runtime.
+type ApiGatewayV2Connection struct {
+	ConnectionID string `json:"connectionId"`
+	ApiID        string `json:"apiId"`
+	Stage        string `json:"stage"`
+	ConnectedAt  string `json:"connectedAt"`
+	LastActiveAt string `json:"lastActiveAt"`
+	SourceIP     string `json:"sourceIp"`
+}
+
+// ApiGatewayV2ConnectionsResponse wraps the list of live WebSocket
+// connections.
+type ApiGatewayV2ConnectionsResponse struct {
+	Connections []ApiGatewayV2Connection `json:"connections"`
+}
+
+// ── RDS bridges (aws_lambda / aws_s3 extensions) ───────────────────
+
+// RdsLambdaInvokeRequest is the body for POST /_fakecloud/rds/lambda-invoke.
+type RdsLambdaInvokeRequest struct {
+	FunctionName   string          `json:"function_name"`
+	Payload        json.RawMessage `json:"payload,omitempty"`
+	InvocationType string          `json:"invocation_type,omitempty"`
+	Region         string          `json:"region,omitempty"`
+}
+
+// RdsLambdaInvokeResponse mirrors what aws_lambda.invoke() returns to
+// SQL callers.
+type RdsLambdaInvokeResponse struct {
+	StatusCode      int32           `json:"status_code"`
+	Payload         json.RawMessage `json:"payload,omitempty"`
+	ExecutedVersion string          `json:"executed_version,omitempty"`
+	LogResult       string          `json:"log_result,omitempty"`
+}
+
+// RdsS3ImportRequest is the body for POST /_fakecloud/rds/s3-import.
+type RdsS3ImportRequest struct {
+	Bucket string `json:"bucket"`
+	Key    string `json:"key"`
+	Region string `json:"region,omitempty"`
+}
+
+// RdsS3ImportResponse returns the fetched object body base64-encoded.
+type RdsS3ImportResponse struct {
+	Bucket         string `json:"bucket"`
+	Key            string `json:"key"`
+	BodyB64        string `json:"body_b64"`
+	BytesProcessed int64  `json:"bytes_processed"`
+}
+
+// RdsS3ExportRequest is the body for POST /_fakecloud/rds/s3-export.
+type RdsS3ExportRequest struct {
+	Bucket  string `json:"bucket"`
+	Key     string `json:"key"`
+	Region  string `json:"region,omitempty"`
+	BodyB64 string `json:"body_b64"`
+}
+
+// RdsS3ExportResponse returns the byte count uploaded to S3.
+type RdsS3ExportResponse struct {
+	Bucket        string `json:"bucket"`
+	Key           string `json:"key"`
+	BytesUploaded int64  `json:"bytes_uploaded"`
+}
+
+// ── Route 53 DNSSEC ────────────────────────────────────────────────
+
+// Route53DnssecMaterialResponse exposes the active KSK material for a
+// hosted zone so tests can verify DNSSEC signatures.
+type Route53DnssecMaterialResponse struct {
+	HostedZoneID       string `json:"hostedZoneId"`
+	KeySigningKeyName  string `json:"keySigningKeyName"`
+	Algorithm          uint8  `json:"algorithm"`
+	Flags              uint16 `json:"flags"`
+	KeyTag             uint16 `json:"keyTag"`
+	DnskeyPublicKeyB64 string `json:"dnskeyPublicKeyB64"`
+	DsDigestSha256Hex  string `json:"dsDigestSha256Hex"`
+}
+
+// Route53DnssecSignRequest signs an RRset under the zone's first ACTIVE
+// KSK. The wire field name is "type"; the Go field is RecordType.
+type Route53DnssecSignRequest struct {
+	Name       string   `json:"name"`
+	RecordType string   `json:"type"`
+	TTL        uint32   `json:"ttl"`
+	Rdatas     []string `json:"rdatas"`
+}
+
+// Route53DnssecSignResponse returns the raw RRSIG fields.
+type Route53DnssecSignResponse struct {
+	SignatureB64 string `json:"signatureB64"`
+	Algorithm    uint8  `json:"algorithm"`
+	KeyTag       uint16 `json:"keyTag"`
+	SignerName   string `json:"signerName"`
+	Inception    uint32 `json:"inception"`
+	Expiration   uint32 `json:"expiration"`
+	Labels       uint8  `json:"labels"`
+	OriginalTTL  uint32 `json:"originalTtl"`
+	RRsetType    string `json:"type"`
+}
+
+// ── SNS SMS ────────────────────────────────────────────────────────
+
+// SnsSmsMessage is one SMS that was "sent" through the fake SNS SMS
+// publisher.
+type SnsSmsMessage struct {
+	PhoneNumber string `json:"phoneNumber"`
+	Message     string `json:"message"`
+}
+
+// SnsSmsResponse wraps the list of recorded SMS messages.
+type SnsSmsResponse struct {
+	Messages []SnsSmsMessage `json:"messages"`
+}
+
+// ── ECS task IAM credentials ───────────────────────────────────────
+
+// EcsTaskCredentials mirrors the JSON the ECS container credentials
+// endpoint serves at AWS_CONTAINER_CREDENTIALS_RELATIVE_URI.
+type EcsTaskCredentials struct {
+	AccessKeyID     string `json:"AccessKeyId"`
+	SecretAccessKey string `json:"SecretAccessKey"`
+	Token           string `json:"Token"`
+	Expiration      string `json:"Expiration"`
+	RoleArn         string `json:"RoleArn"`
+}
+
+// ── SSM ────────────────────────────────────────────────────────────
+
+// SetSsmCommandStatusRequest is the body for
+// POST /_fakecloud/ssm/commands/{command_id}/status.
+type SetSsmCommandStatusRequest struct {
+	AccountID string `json:"accountId,omitempty"`
+	Status    string `json:"status"`
+}
+
+// SetSsmCommandStatusResponse is the response from setting a command status.
+type SetSsmCommandStatusResponse struct {
+	Updated bool `json:"updated"`
+}
+
+// FailSsmCommandRequest is the (optional) body for
+// POST /_fakecloud/ssm/commands/{command_id}/fail.
+type FailSsmCommandRequest struct {
+	AccountID            string `json:"accountId,omitempty"`
+	InstanceID           string `json:"instanceId,omitempty"`
+	StatusDetails        string `json:"statusDetails,omitempty"`
+	StandardErrorContent string `json:"standardErrorContent,omitempty"`
+}
+
+// FailSsmCommandResponse is the response from failing a command.
+type FailSsmCommandResponse struct {
+	UpdatedInvocations int `json:"updatedInvocations"`
+}
+
+// SsmParameterPolicyEvent is one emitted parameter-policy event.
+type SsmParameterPolicyEvent struct {
+	ParameterName string `json:"parameterName"`
+	ParameterArn  string `json:"parameterArn"`
+	EventType     string `json:"eventType"`
+	Message       string `json:"message"`
+	CreatedAt     string `json:"createdAt"`
+}
+
+// SsmParameterPolicyEventsResponse is the response from
+// GET /_fakecloud/ssm/parameter-policy-events.
+type SsmParameterPolicyEventsResponse struct {
+	Events []SsmParameterPolicyEvent `json:"events"`
+}
+
+// InjectSsmSessionRequest is the body for
+// POST /_fakecloud/ssm/sessions/inject.
+type InjectSsmSessionRequest struct {
+	AccountID string `json:"accountId,omitempty"`
+	Target    string `json:"target"`
+	Status    string `json:"status,omitempty"`
+	Owner     string `json:"owner,omitempty"`
+	Reason    string `json:"reason,omitempty"`
+	SessionID string `json:"sessionId,omitempty"`
+}
+
+// InjectSsmSessionResponse is the response from injecting a session.
+type InjectSsmSessionResponse struct {
+	SessionID string `json:"sessionId"`
+}
+
+// ── KMS ────────────────────────────────────────────────────────────
+
+// KMSUsageRecord is one row from GET /_fakecloud/kms/usage.
+type KMSUsageRecord struct {
+	Timestamp         string            `json:"timestamp"`
+	Operation         string            `json:"operation"`
+	ServicePrincipal  string            `json:"servicePrincipal"`
+	AccountID         string            `json:"accountId"`
+	KeyArn            string            `json:"keyArn"`
+	EncryptionContext map[string]string `json:"encryptionContext"`
+}
+
+// KMSUsageResponse is the response from GET /_fakecloud/kms/usage.
+type KMSUsageResponse struct {
+	Records []KMSUsageRecord `json:"records"`
+}
+
+// ── CloudFront ─────────────────────────────────────────────────────
+
+// CloudFrontDistributionStatusRequest is the body for
+// POST /_fakecloud/cloudfront/distributions/{id}/status.
+type CloudFrontDistributionStatusRequest struct {
+	Status string `json:"status"`
+}
+
+// ── ELBv2 WAF counts ───────────────────────────────────────────────
+
+// Elbv2WafCountsResponse is the pass-through payload from
+// GET /_fakecloud/elbv2/waf-counts.
+type Elbv2WafCountsResponse struct {
+	Counts json.RawMessage `json:"counts"`
 }

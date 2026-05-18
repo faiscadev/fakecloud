@@ -47,6 +47,17 @@ func (c *ELBv2Client) GetRules(ctx context.Context) (*Elbv2RulesResponse, error)
 	return &out, nil
 }
 
+// GetWafCounts returns the WAF rule-match counters accumulated per
+// load balancer / listener. Payload is passed through as raw JSON so
+// the SDK doesn't need a release every time a new counter is added.
+func (c *ELBv2Client) GetWafCounts(ctx context.Context) (*Elbv2WafCountsResponse, error) {
+	var out Elbv2WafCountsResponse
+	if err := c.fc.doGet(ctx, "/_fakecloud/elbv2/waf-counts", &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // FlushAccessLogsResponse is the response from a `POST` to the
 // /_fakecloud/elbv2/access-logs/flush admin endpoint.
 type FlushAccessLogsResponse struct {

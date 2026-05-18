@@ -1800,6 +1800,108 @@ final class StepFunctionsExecutionsResponse
     }
 }
 
+final class StepFunctionsSyncBillingDetails
+{
+    public function __construct(
+        public readonly int $billedDurationInMilliseconds,
+        public readonly int $billedMemoryUsedInMb,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            (int) $data['billedDurationInMilliseconds'],
+            (int) $data['billedMemoryUsedInMb'],
+        );
+    }
+}
+
+final class StepFunctionsSyncExecution
+{
+    public function __construct(
+        public readonly string $executionArn,
+        public readonly string $stateMachineArn,
+        public readonly string $name,
+        public readonly string $status,
+        public readonly ?string $input,
+        public readonly ?string $output,
+        public readonly string $startedAt,
+        public readonly ?string $stoppedAt,
+        public readonly int $durationMs,
+        public readonly StepFunctionsSyncBillingDetails $billingDetails,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            $data['executionArn'],
+            $data['stateMachineArn'],
+            $data['name'],
+            $data['status'],
+            $data['input'] ?? null,
+            $data['output'] ?? null,
+            $data['startedAt'],
+            $data['stoppedAt'] ?? null,
+            (int) $data['durationMs'],
+            StepFunctionsSyncBillingDetails::fromArray($data['billingDetails']),
+        );
+    }
+}
+
+final class StepFunctionsSyncExecutionsResponse
+{
+    public function __construct(
+        /** @var StepFunctionsSyncExecution[] */
+        public readonly array $executions,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(array_map(StepFunctionsSyncExecution::fromArray(...), $data['executions']));
+    }
+}
+
+final class StepFunctionsExecutionTreeNode
+{
+    public function __construct(
+        public readonly string $arn,
+        public readonly string $stateMachineArn,
+        public readonly string $status,
+        public readonly string $startedAt,
+        public readonly ?string $stoppedAt,
+        /** @var StepFunctionsExecutionTreeNode[] */
+        public readonly array $children,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            $data['arn'],
+            $data['stateMachineArn'],
+            $data['status'],
+            $data['startedAt'],
+            $data['stoppedAt'] ?? null,
+            array_map(self::fromArray(...), $data['children'] ?? []),
+        );
+    }
+}
+
+final class StepFunctionsExecutionTreeResponse
+{
+    public function __construct(
+        public readonly string $rootArn,
+        public readonly StepFunctionsExecutionTreeNode $tree,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            $data['rootArn'],
+            StepFunctionsExecutionTreeNode::fromArray($data['tree']),
+        );
+    }
+}
+
 final class SfnEnqueueActivityTaskRequest
 {
     public function __construct(
@@ -3242,5 +3344,436 @@ final class AthenaNamedQueriesResponse
     public static function fromArray(array $data): self
     {
         return new self(array_map(AthenaNamedQuery::fromArray(...), $data['queries'] ?? []));
+    }
+}
+
+// ── API Gateway v2 WebSocket connections ───────────────────────
+
+final class ApiGatewayV2Connection
+{
+    public function __construct(
+        public readonly string $connectionId,
+        public readonly string $apiId,
+        public readonly string $stage,
+        public readonly string $connectedAt,
+        public readonly string $lastActiveAt,
+        public readonly string $sourceIp,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            (string) ($data['connectionId'] ?? ''),
+            (string) ($data['apiId'] ?? ''),
+            (string) ($data['stage'] ?? ''),
+            (string) ($data['connectedAt'] ?? ''),
+            (string) ($data['lastActiveAt'] ?? ''),
+            (string) ($data['sourceIp'] ?? ''),
+        );
+    }
+}
+
+final class ApiGatewayV2ConnectionsResponse
+{
+    public function __construct(
+        /** @var ApiGatewayV2Connection[] */
+        public readonly array $connections,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(array_map(ApiGatewayV2Connection::fromArray(...), $data['connections'] ?? []));
+    }
+}
+
+// ── RDS aws_lambda extension bridge ────────────────────────────
+
+final class RdsLambdaInvokeRequest
+{
+    public function __construct(
+        public readonly string $functionName,
+        public readonly mixed $payload = null,
+        public readonly ?string $invocationType = null,
+        public readonly ?string $region = null,
+    ) {}
+
+    public function toArray(): array
+    {
+        $out = ['function_name' => $this->functionName];
+        if ($this->payload !== null) {
+            $out['payload'] = $this->payload;
+        }
+        if ($this->invocationType !== null) {
+            $out['invocation_type'] = $this->invocationType;
+        }
+        if ($this->region !== null) {
+            $out['region'] = $this->region;
+        }
+        return $out;
+    }
+}
+
+final class RdsLambdaInvokeResponse
+{
+    public function __construct(
+        public readonly int $statusCode,
+        public readonly mixed $payload = null,
+        public readonly ?string $executedVersion = null,
+        public readonly ?string $logResult = null,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            (int) ($data['status_code'] ?? 0),
+            $data['payload'] ?? null,
+            isset($data['executed_version']) ? (string) $data['executed_version'] : null,
+            isset($data['log_result']) ? (string) $data['log_result'] : null,
+        );
+    }
+}
+
+// ── RDS aws_s3 extension bridge ────────────────────────────────
+
+final class RdsS3ImportRequest
+{
+    public function __construct(
+        public readonly string $bucket,
+        public readonly string $key,
+        public readonly ?string $region = null,
+    ) {}
+
+    public function toArray(): array
+    {
+        $out = ['bucket' => $this->bucket, 'key' => $this->key];
+        if ($this->region !== null) {
+            $out['region'] = $this->region;
+        }
+        return $out;
+    }
+}
+
+final class RdsS3ImportResponse
+{
+    public function __construct(
+        public readonly string $bucket,
+        public readonly string $key,
+        public readonly string $bodyB64,
+        public readonly int $bytesProcessed,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            (string) ($data['bucket'] ?? ''),
+            (string) ($data['key'] ?? ''),
+            (string) ($data['body_b64'] ?? ''),
+            (int) ($data['bytes_processed'] ?? 0),
+        );
+    }
+}
+
+final class RdsS3ExportRequest
+{
+    public function __construct(
+        public readonly string $bucket,
+        public readonly string $key,
+        public readonly string $bodyB64,
+        public readonly ?string $region = null,
+    ) {}
+
+    public function toArray(): array
+    {
+        $out = [
+            'bucket' => $this->bucket,
+            'key' => $this->key,
+            'body_b64' => $this->bodyB64,
+        ];
+        if ($this->region !== null) {
+            $out['region'] = $this->region;
+        }
+        return $out;
+    }
+}
+
+final class RdsS3ExportResponse
+{
+    public function __construct(
+        public readonly string $bucket,
+        public readonly string $key,
+        public readonly int $bytesUploaded,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            (string) ($data['bucket'] ?? ''),
+            (string) ($data['key'] ?? ''),
+            (int) ($data['bytes_uploaded'] ?? 0),
+        );
+    }
+}
+
+// ── Route 53 DNSSEC ────────────────────────────────────────────
+
+final class Route53DnssecMaterialResponse
+{
+    public function __construct(
+        public readonly string $hostedZoneId,
+        public readonly string $keySigningKeyName,
+        public readonly int $algorithm,
+        public readonly int $flags,
+        public readonly int $keyTag,
+        public readonly string $dnskeyPublicKeyB64,
+        public readonly string $dsDigestSha256Hex,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            (string) ($data['hostedZoneId'] ?? ''),
+            (string) ($data['keySigningKeyName'] ?? ''),
+            (int) ($data['algorithm'] ?? 0),
+            (int) ($data['flags'] ?? 0),
+            (int) ($data['keyTag'] ?? 0),
+            (string) ($data['dnskeyPublicKeyB64'] ?? ''),
+            (string) ($data['dsDigestSha256Hex'] ?? ''),
+        );
+    }
+}
+
+final class Route53DnssecSignRequest
+{
+    public function __construct(
+        public readonly string $name,
+        /** Serialised as JSON key `type` (reserved word in PHP). */
+        public readonly string $recordType,
+        public readonly int $ttl,
+        /** @var string[] */
+        public readonly array $rdatas,
+    ) {}
+
+    public function toArray(): array
+    {
+        return [
+            'name' => $this->name,
+            'type' => $this->recordType,
+            'ttl' => $this->ttl,
+            'rdatas' => $this->rdatas,
+        ];
+    }
+}
+
+final class Route53DnssecSignResponse
+{
+    public function __construct(
+        public readonly string $signatureB64,
+        public readonly int $algorithm,
+        public readonly int $keyTag,
+        public readonly string $signerName,
+        public readonly int $inception,
+        public readonly int $expiration,
+        public readonly int $labels,
+        public readonly int $originalTtl,
+        /** Deserialised from JSON key `type`. */
+        public readonly string $rrsetType,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            (string) ($data['signatureB64'] ?? ''),
+            (int) ($data['algorithm'] ?? 0),
+            (int) ($data['keyTag'] ?? 0),
+            (string) ($data['signerName'] ?? ''),
+            (int) ($data['inception'] ?? 0),
+            (int) ($data['expiration'] ?? 0),
+            (int) ($data['labels'] ?? 0),
+            (int) ($data['originalTtl'] ?? 0),
+            (string) ($data['type'] ?? ''),
+        );
+    }
+}
+
+// ── SNS SMS introspection ──────────────────────────────────────
+
+final class SnsSmsMessage
+{
+    public function __construct(
+        public readonly string $phoneNumber,
+        public readonly string $message,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            (string) ($data['phoneNumber'] ?? ''),
+            (string) ($data['message'] ?? ''),
+        );
+    }
+}
+
+final class SnsSmsResponse
+{
+    public function __construct(
+        /** @var SnsSmsMessage[] */
+        public readonly array $messages,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(array_map(SnsSmsMessage::fromArray(...), $data['messages'] ?? []));
+    }
+}
+
+// ── ECS task IAM credentials ───────────────────────────────────
+
+final class EcsTaskCredentialsResponse
+{
+    public function __construct(
+        public readonly string $accessKeyId,
+        public readonly string $secretAccessKey,
+        public readonly string $token,
+        public readonly string $expiration,
+        public readonly string $roleArn,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            (string) ($data['AccessKeyId'] ?? ''),
+            (string) ($data['SecretAccessKey'] ?? ''),
+            (string) ($data['Token'] ?? ''),
+            (string) ($data['Expiration'] ?? ''),
+            (string) ($data['RoleArn'] ?? ''),
+        );
+    }
+}
+
+// ── SSM admin ─────────────────────────────────────────────────────
+
+final class SetSsmCommandStatusResponse
+{
+    public function __construct(
+        public readonly bool $updated,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self((bool) ($data['updated'] ?? false));
+    }
+}
+
+final class FailSsmCommandResponse
+{
+    public function __construct(
+        public readonly int $updatedInvocations,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self((int) ($data['updatedInvocations'] ?? 0));
+    }
+}
+
+final class SsmParameterPolicyEvent
+{
+    public function __construct(
+        public readonly string $parameterName,
+        public readonly string $parameterArn,
+        public readonly string $eventType,
+        public readonly string $message,
+        public readonly string $createdAt,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            (string) ($data['parameterName'] ?? ''),
+            (string) ($data['parameterArn'] ?? ''),
+            (string) ($data['eventType'] ?? ''),
+            (string) ($data['message'] ?? ''),
+            (string) ($data['createdAt'] ?? ''),
+        );
+    }
+}
+
+final class SsmParameterPolicyEventsResponse
+{
+    public function __construct(
+        /** @var SsmParameterPolicyEvent[] */
+        public readonly array $events,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(array_map(SsmParameterPolicyEvent::fromArray(...), $data['events'] ?? []));
+    }
+}
+
+final class InjectSsmSessionResponse
+{
+    public function __construct(
+        public readonly string $sessionId,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self((string) ($data['sessionId'] ?? ''));
+    }
+}
+
+// ── KMS admin ─────────────────────────────────────────────────────
+
+final class KmsUsageRecord
+{
+    public function __construct(
+        public readonly string $timestamp,
+        public readonly string $operation,
+        public readonly ?string $servicePrincipal,
+        public readonly string $accountId,
+        public readonly string $keyArn,
+        /** @var mixed Arbitrary JSON-decoded encryption context (object/null). */
+        public readonly mixed $encryptionContext,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            (string) ($data['timestamp'] ?? ''),
+            (string) ($data['operation'] ?? ''),
+            isset($data['servicePrincipal']) ? (string) $data['servicePrincipal'] : null,
+            (string) ($data['accountId'] ?? ''),
+            (string) ($data['keyArn'] ?? ''),
+            $data['encryptionContext'] ?? null,
+        );
+    }
+}
+
+final class KmsUsageResponse
+{
+    public function __construct(
+        /** @var KmsUsageRecord[] */
+        public readonly array $records,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(array_map(KmsUsageRecord::fromArray(...), $data['records'] ?? []));
+    }
+}
+
+// ── ELBv2 admin ─────────────────────────────────────────────────
+
+final class Elbv2WafCountsResponse
+{
+    public function __construct(
+        /** @var mixed Arbitrary counts payload (server-defined shape). */
+        public readonly mixed $counts,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self($data['counts'] ?? null);
     }
 }

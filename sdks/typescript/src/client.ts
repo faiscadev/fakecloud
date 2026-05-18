@@ -2,6 +2,18 @@ import type {
   AthenaNamedQueriesResponse,
   CreateAdminResponse,
   ApiGatewayV2RequestsResponse,
+  ApiGatewayV2ConnectionsResponse,
+  RdsLambdaInvokeRequest,
+  RdsLambdaInvokeResponse,
+  RdsS3ImportRequest,
+  RdsS3ImportResponse,
+  RdsS3ExportRequest,
+  RdsS3ExportResponse,
+  Route53DnssecMaterialResponse,
+  Route53DnssecSignRequest,
+  Route53DnssecSignResponse,
+  SnsSmsResponse,
+  EcsTaskCredentials,
   BedrockFaultRule,
   BedrockFaultsResponse,
   BedrockInvocationsResponse,
@@ -77,6 +89,8 @@ import type {
   CompromisedPasswordsResponse,
   WebAuthnCredentialsResponse,
   StepFunctionsExecutionsResponse,
+  StepFunctionsSyncExecutionsResponse,
+  StepFunctionsExecutionTreeResponse,
   SfnEnqueueActivityTaskRequest,
   SfnEnqueueActivityTaskResponse,
   EcsClustersResponse,
@@ -91,6 +105,16 @@ import type {
   Elbv2ListenersResponse,
   Elbv2RulesResponse,
   OrganizationsAccountsResponse,
+  SetSsmCommandStatusRequest,
+  SetSsmCommandStatusResponse,
+  FailSsmCommandRequest,
+  FailSsmCommandResponse,
+  SsmParameterPolicyEventsResponse,
+  InjectSsmSessionRequest,
+  InjectSsmSessionResponse,
+  KmsUsageResponse,
+  CloudFrontDistributionStatusRequest,
+  Elbv2WafCountsResponse,
 } from "./types.js";
 
 export class FakeCloudError extends Error {
@@ -135,6 +159,54 @@ export class LambdaClient {
     );
     return parse(resp);
   }
+
+  /**
+   * Download the raw ZIP bytes for a function's code. Pass `"latest"`
+   * (default) to fetch `latest.zip` or a numeric version like `"3"` to
+   * fetch `3.zip`. Returns the ArrayBuffer of the response body.
+   */
+  async downloadFunctionCode(
+    accountId: string,
+    functionName: string,
+    qualifierOrLatest: string = "latest",
+  ): Promise<ArrayBuffer> {
+    const file =
+      qualifierOrLatest === "latest"
+        ? "latest.zip"
+        : `${qualifierOrLatest}.zip`;
+    const resp = await fetch(
+      `${this.baseUrl}/_fakecloud/lambda/function-code/${encodeURIComponent(
+        accountId,
+      )}/${encodeURIComponent(functionName)}/${encodeURIComponent(file)}`,
+    );
+    if (!resp.ok) {
+      const body = await resp.text().catch(() => "");
+      throw new FakeCloudError(resp.status, body);
+    }
+    return resp.arrayBuffer();
+  }
+
+  /**
+   * Download the raw ZIP bytes for a Lambda layer version's content.
+   * Returns the ArrayBuffer of the response body.
+   */
+  async downloadLayerContent(
+    accountId: string,
+    layerName: string,
+    version: string | number,
+  ): Promise<ArrayBuffer> {
+    const file = `${String(version)}.zip`;
+    const resp = await fetch(
+      `${this.baseUrl}/_fakecloud/lambda/layer-content/${encodeURIComponent(
+        accountId,
+      )}/${encodeURIComponent(layerName)}/${encodeURIComponent(file)}`,
+    );
+    if (!resp.ok) {
+      const body = await resp.text().catch(() => "");
+      throw new FakeCloudError(resp.status, body);
+    }
+    return resp.arrayBuffer();
+  }
 }
 
 export class RdsClient {
@@ -142,6 +214,42 @@ export class RdsClient {
 
   async getInstances(): Promise<RdsInstancesResponse> {
     const resp = await fetch(`${this.baseUrl}/_fakecloud/rds/instances`);
+    return parse(resp);
+  }
+
+  /**
+   * Bridge endpoint the PostgreSQL `aws_lambda` extension dispatches
+   * into from inside an RDS DB instance. Body and response use
+   * snake_case to match the Rust types on the wire.
+   */
+  async lambdaInvoke(
+    req: RdsLambdaInvokeRequest,
+  ): Promise<RdsLambdaInvokeResponse> {
+    const resp = await fetch(`${this.baseUrl}/_fakecloud/rds/lambda-invoke`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(req),
+    });
+    return parse(resp);
+  }
+
+  /** Bridge for the PostgreSQL `aws_s3` extension's import path. */
+  async s3Import(req: RdsS3ImportRequest): Promise<RdsS3ImportResponse> {
+    const resp = await fetch(`${this.baseUrl}/_fakecloud/rds/s3-import`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(req),
+    });
+    return parse(resp);
+  }
+
+  /** Bridge for the PostgreSQL `aws_s3` extension's export path. */
+  async s3Export(req: RdsS3ExportRequest): Promise<RdsS3ExportResponse> {
+    const resp = await fetch(`${this.baseUrl}/_fakecloud/rds/s3-export`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(req),
+    });
     return parse(resp);
   }
 }
@@ -340,6 +448,26 @@ export class SnsClient {
         body: JSON.stringify(req),
       },
     );
+    return parse(resp);
+  }
+
+  /**
+   * Returns the PEM-encoded SNS signing certificate used to sign
+   * outbound HTTP/HTTPS notifications. The endpoint returns raw PEM
+   * text, not JSON.
+   */
+  async getCertPem(): Promise<string> {
+    const resp = await fetch(`${this.baseUrl}/_fakecloud/sns/cert.pem`);
+    if (!resp.ok) {
+      const body = await resp.text().catch(() => "");
+      throw new FakeCloudError(resp.status, body);
+    }
+    return resp.text();
+  }
+
+  /** Recorded SMS messages dispatched via `SNS Publish`. */
+  async getSms(): Promise<SnsSmsResponse> {
+    const resp = await fetch(`${this.baseUrl}/_fakecloud/sns/sms`);
     return parse(resp);
   }
 }
@@ -621,6 +749,42 @@ export class ApiGatewayV2Client {
     );
     return parse(resp);
   }
+
+  /** List every live WebSocket connection currently tracked. */
+  async getConnections(): Promise<ApiGatewayV2ConnectionsResponse> {
+    const resp = await fetch(
+      `${this.baseUrl}/_fakecloud/apigatewayv2/connections`,
+    );
+    return parse(resp);
+  }
+
+  /**
+   * Inspect the mTLS trust store / chain configuration for a custom
+   * domain name. The response is free JSON — fakecloud returns
+   * whichever fields the server has wired up.
+   */
+  async getMtlsInfo(domainName: string): Promise<Record<string, unknown>> {
+    const resp = await fetch(
+      `${this.baseUrl}/_fakecloud/apigatewayv2/domain-names/${encodeURIComponent(
+        domainName,
+      )}/mtls-info`,
+    );
+    return parse(resp);
+  }
+
+  /**
+   * Build the `ws://` URL that connects to a WebSocket API stage,
+   * derived from the configured fakecloud base URL. The HTTP scheme is
+   * swapped for `ws://` (or `wss://` when the base URL is `https://`).
+   */
+  wsUrl(apiId: string, stage?: string): string {
+    const wsBase = this.baseUrl.replace(/^http/, "ws");
+    const path = `/_fakecloud/apigatewayv2/ws/${encodeURIComponent(apiId)}`;
+    if (stage === undefined) {
+      return `${wsBase}${path}`;
+    }
+    return `${wsBase}${path}?stage=${encodeURIComponent(stage)}`;
+  }
 }
 
 export class StepFunctionsClient {
@@ -629,6 +793,22 @@ export class StepFunctionsClient {
   async getExecutions(): Promise<StepFunctionsExecutionsResponse> {
     const resp = await fetch(
       `${this.baseUrl}/_fakecloud/stepfunctions/executions`,
+    );
+    return parse(resp);
+  }
+
+  async getSyncExecutions(): Promise<StepFunctionsSyncExecutionsResponse> {
+    const resp = await fetch(
+      `${this.baseUrl}/_fakecloud/stepfunctions/sync-executions`,
+    );
+    return parse(resp);
+  }
+
+  async getExecutionTree(
+    arn: string,
+  ): Promise<StepFunctionsExecutionTreeResponse> {
+    const resp = await fetch(
+      `${this.baseUrl}/_fakecloud/stepfunctions/execution-tree/${encodeURIComponent(arn)}`,
     );
     return parse(resp);
   }
@@ -753,6 +933,147 @@ export class BedrockAgentRuntimeClient {
   }
 }
 
+/**
+ * SSM admin/introspection client. Wraps the deterministic-control
+ * endpoints under `/_fakecloud/ssm/*` that let tests drive command
+ * status, parameter-policy event history, and inject session records
+ * without relying on the periodic execution tick.
+ */
+export class SsmClient {
+  constructor(private baseUrl: string) {}
+
+  /** Flip a Run Command's status synchronously. */
+  async setCommandStatus(
+    commandId: string,
+    req: SetSsmCommandStatusRequest,
+  ): Promise<SetSsmCommandStatusResponse> {
+    const resp = await fetch(
+      `${this.baseUrl}/_fakecloud/ssm/commands/${encodeURIComponent(commandId)}/status`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(req),
+      },
+    );
+    return parse(resp);
+  }
+
+  /**
+   * Mark a Run Command's invocations as failed. When `instanceId` is
+   * omitted, every invocation is flipped; otherwise only the named
+   * instance is affected.
+   */
+  async failCommand(
+    commandId: string,
+    req?: FailSsmCommandRequest,
+  ): Promise<FailSsmCommandResponse> {
+    const resp = await fetch(
+      `${this.baseUrl}/_fakecloud/ssm/commands/${encodeURIComponent(commandId)}/fail`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(req ?? {}),
+      },
+    );
+    return parse(resp);
+  }
+
+  /** List recorded SSM parameter-policy lifecycle events. */
+  async getParameterPolicyEvents(
+    accountId?: string,
+  ): Promise<SsmParameterPolicyEventsResponse> {
+    const qs = accountId ? `?accountId=${encodeURIComponent(accountId)}` : "";
+    const resp = await fetch(
+      `${this.baseUrl}/_fakecloud/ssm/parameter-policy-events${qs}`,
+    );
+    return parse(resp);
+  }
+
+  /**
+   * Inject a fake Session Manager session into state without going
+   * through `StartSession`. Lets tests assert
+   * `DescribeSessions`/`TerminateSession` paths end-to-end.
+   */
+  async injectSession(
+    req: InjectSsmSessionRequest,
+  ): Promise<InjectSsmSessionResponse> {
+    const resp = await fetch(`${this.baseUrl}/_fakecloud/ssm/sessions/inject`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(req),
+    });
+    return parse(resp);
+  }
+}
+
+/**
+ * KMS introspection client. Wraps the usage-record log fakecloud
+ * keeps for every server-side encryption operation routed through a
+ * KMS key.
+ */
+export class KmsClient {
+  constructor(private baseUrl: string) {}
+
+  /** Return every recorded KMS usage record. */
+  async getUsage(): Promise<KmsUsageResponse> {
+    const resp = await fetch(`${this.baseUrl}/_fakecloud/kms/usage`);
+    return parse(resp);
+  }
+}
+
+/**
+ * WAFv2 admin client. The `evaluate` endpoint runs an arbitrary
+ * request payload against fakecloud's WebACL evaluation engine and
+ * returns the raw match decision — both request and response are
+ * pass-through JSON so the SDK does not constrain payload shape.
+ */
+export class WafV2Client {
+  constructor(private baseUrl: string) {}
+
+  /**
+   * Evaluate an arbitrary request payload against the configured
+   * WebACLs. Request and response are opaque JSON bags.
+   */
+  async evaluate(
+    req: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    const resp = await fetch(`${this.baseUrl}/_fakecloud/wafv2/evaluate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(req),
+    });
+    return parse(resp);
+  }
+}
+
+/**
+ * CloudFront admin client. Wraps the per-distribution status flip
+ * endpoint that lets tests force a Distribution synchronously into
+ * `Deployed` or `InProgress` without waiting on the propagation tick.
+ */
+export class CloudFrontClient {
+  constructor(private baseUrl: string) {}
+
+  /** Flip a stored Distribution's status synchronously. */
+  async setDistributionStatus(
+    distributionId: string,
+    req: CloudFrontDistributionStatusRequest,
+  ): Promise<void> {
+    const resp = await fetch(
+      `${this.baseUrl}/_fakecloud/cloudfront/distributions/${encodeURIComponent(distributionId)}/status`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(req),
+      },
+    );
+    if (!resp.ok) {
+      const body = await resp.text().catch(() => "");
+      throw new FakeCloudError(resp.status, body);
+    }
+  }
+}
+
 // ── Main client ────────────────────────────────────────────────────
 
 export class FakeCloud {
@@ -785,6 +1106,10 @@ export class FakeCloud {
   private readonly _applicationAutoscaling: ApplicationAutoScalingClient;
   private readonly _athena: AthenaClient;
   private readonly _organizations: OrganizationsClient;
+  private readonly _ssm: SsmClient;
+  private readonly _kms: KmsClient;
+  private readonly _wafv2: WafV2Client;
+  private readonly _cloudfront: CloudFrontClient;
 
   constructor(baseUrl: string = "http://localhost:4566") {
     this.baseUrl = baseUrl.replace(/\/+$/, "");
@@ -818,6 +1143,10 @@ export class FakeCloud {
     );
     this._athena = new AthenaClient(this.baseUrl);
     this._organizations = new OrganizationsClient(this.baseUrl);
+    this._ssm = new SsmClient(this.baseUrl);
+    this._kms = new KmsClient(this.baseUrl);
+    this._wafv2 = new WafV2Client(this.baseUrl);
+    this._cloudfront = new CloudFrontClient(this.baseUrl);
   }
 
   // ── Health & Reset ─────────────────────────────────────────────
@@ -963,6 +1292,22 @@ export class FakeCloud {
   get organizations(): OrganizationsClient {
     return this._organizations;
   }
+
+  get ssm(): SsmClient {
+    return this._ssm;
+  }
+
+  get kms(): KmsClient {
+    return this._kms;
+  }
+
+  get wafv2(): WafV2Client {
+    return this._wafv2;
+  }
+
+  get cloudfront(): CloudFrontClient {
+    return this._cloudfront;
+  }
 }
 
 export class AthenaClient {
@@ -1092,6 +1437,38 @@ export class EcsClient {
     );
     return parse(resp);
   }
+
+  /**
+   * Return the IMDS-style temporary credentials fakecloud minted for an
+   * ECS task — the same payload a container reads from the credentials
+   * provider URL when running under Fargate.
+   */
+  async getTaskCredentials(taskId: string): Promise<EcsTaskCredentials> {
+    const resp = await fetch(
+      `${this.baseUrl}/_fakecloud/ecs/creds/${encodeURIComponent(taskId)}`,
+    );
+    return parse(resp);
+  }
+
+  /**
+   * v3 task metadata dump (`ECS_CONTAINER_METADATA_URI`). Returns the
+   * raw JSON payload the container would receive — fakecloud does not
+   * impose a typed schema on this surface.
+   */
+  async getTaskMetadataV3(taskId: string): Promise<Record<string, unknown>> {
+    const resp = await fetch(
+      `${this.baseUrl}/_fakecloud/ecs/v3/${encodeURIComponent(taskId)}`,
+    );
+    return parse(resp);
+  }
+
+  /** v4 task metadata dump (`ECS_CONTAINER_METADATA_URI_V4`). */
+  async getTaskMetadataV4(taskId: string): Promise<Record<string, unknown>> {
+    const resp = await fetch(
+      `${this.baseUrl}/_fakecloud/ecs/v4/${encodeURIComponent(taskId)}`,
+    );
+    return parse(resp);
+  }
 }
 
 export class Elbv2Client {
@@ -1130,6 +1507,16 @@ export class Elbv2Client {
         method: "POST",
       },
     );
+    return parse(resp);
+  }
+
+  /**
+   * Pass-through admin endpoint returning the current WAF
+   * association/evaluation counts as recorded by fakecloud's ELBv2
+   * stack. Shape is opaque; treat as data for assertion-by-equality.
+   */
+  async getWafCounts(): Promise<Elbv2WafCountsResponse> {
+    const resp = await fetch(`${this.baseUrl}/_fakecloud/elbv2/waf-counts`);
     return parse(resp);
   }
 }
@@ -1183,6 +1570,43 @@ export class Route53Client {
       const body = await resp.text().catch(() => "");
       throw new FakeCloudError(resp.status, body);
     }
+  }
+
+  /**
+   * Fetch the stable DNSSEC material (DNSKEY public key + DS digest)
+   * derived from the hosted zone's first ACTIVE KSK. 404 when the zone
+   * has no active KSK.
+   */
+  async getDnssecMaterial(
+    zoneId: string,
+  ): Promise<Route53DnssecMaterialResponse> {
+    const resp = await fetch(
+      `${this.baseUrl}/_fakecloud/route53/zones/${encodeURIComponent(
+        zoneId,
+      )}/dnssec`,
+    );
+    return parse(resp);
+  }
+
+  /**
+   * Sign an RRset under the zone's first ACTIVE KSK and return the raw
+   * RRSIG fields so tests can verify against `dnskeyPublicKeyB64`.
+   */
+  async signDnssecRrset(
+    zoneId: string,
+    req: Route53DnssecSignRequest,
+  ): Promise<Route53DnssecSignResponse> {
+    const resp = await fetch(
+      `${this.baseUrl}/_fakecloud/route53/zones/${encodeURIComponent(
+        zoneId,
+      )}/dnssec/sign`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(req),
+      },
+    );
+    return parse(resp);
   }
 }
 

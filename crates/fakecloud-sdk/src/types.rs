@@ -2068,3 +2068,78 @@ pub struct SesMetricsResponse {
 pub struct Elbv2AccessLogsFlushResponse {
     pub flushed: u64,
 }
+
+// ── API Gateway v2 WebSocket connections ────────────────────────────
+
+/// Single active WebSocket connection tracked by the API Gateway v2
+/// fake. Returned by `GET /_fakecloud/apigatewayv2/connections`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiGatewayV2Connection {
+    pub connection_id: String,
+    pub api_id: String,
+    pub stage: String,
+    pub connected_at: String,
+    pub last_active_at: String,
+    pub source_ip: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiGatewayV2ConnectionsResponse {
+    pub connections: Vec<ApiGatewayV2Connection>,
+}
+
+// ── ECS task IAM credentials ────────────────────────────────────────
+
+/// Response shape for `GET /_fakecloud/ecs/creds/{task_id}`. Matches the
+/// real ECS task metadata credential endpoint field casing (PascalCase),
+/// so this type is `Deserialize` only — fakecloud writes the keys
+/// already capitalized.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EcsTaskCredentialsResponse {
+    #[serde(rename = "AccessKeyId")]
+    pub access_key_id: String,
+    #[serde(rename = "SecretAccessKey")]
+    pub secret_access_key: String,
+    #[serde(rename = "Token")]
+    pub token: String,
+    #[serde(rename = "Expiration")]
+    pub expiration: String,
+    #[serde(rename = "RoleArn")]
+    pub role_arn: String,
+}
+
+// ── KMS usage (admin) ───────────────────────────────────────────────
+
+/// One recorded KMS data-plane invocation, exposed by
+/// `GET /_fakecloud/kms/usage`. Fields mirror the JSON payload emitted
+/// by the server's usage recorder.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KmsUsageRecord {
+    pub timestamp: String,
+    pub operation: String,
+    pub service_principal: Option<String>,
+    pub account_id: String,
+    pub key_arn: String,
+    pub encryption_context: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KmsUsageResponse {
+    pub records: Vec<KmsUsageRecord>,
+}
+
+// ── ELBv2 WAF counts (admin) ────────────────────────────────────────
+
+/// Response body for `GET /_fakecloud/elbv2/waf-counts`. The exact
+/// shape of `counts` is service-internal and intentionally left as
+/// free-form JSON so we don't have to track every new dimension in
+/// the SDK.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Elbv2WafCountsResponse {
+    pub counts: serde_json::Value,
+}
