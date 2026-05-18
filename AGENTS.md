@@ -5,7 +5,7 @@ Local AWS cloud emulator. Part of the faisca project family.
 ## Product Context
 
 - FakeCloud is a local AWS emulator focused on high-fidelity behavior and AWS-compatible responses.
-- Current project state: 37 AWS services, 2,482 operations, 86,327/86,327 Smithy conformance variants pass — true 100% across every implemented service, no flake margin. See [the parity matrix](website/content/docs/parity.md) for the full service-by-service breakdown of control-plane vs data-plane coverage and known limitations.
+- Current project state: 39 AWS services, 2,585 operations, 86,327/86,327 Smithy conformance variants pass — true 100% across every implemented service, no flake margin. See [the parity matrix](website/content/docs/parity.md) for the full service-by-service breakdown of control-plane vs data-plane coverage and known limitations.
 - The broader roadmap prioritizes services that LocalStack keeps behind paid tiers, especially ECS, ELB/ALB, CloudFront, CloudWatch Metrics, and EC2.
 - Introspection SDKs (Rust, Python, TypeScript, Go, PHP, Java) are already built and maintained for the `/_fakecloud/*` endpoints.
 

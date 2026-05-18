@@ -14,7 +14,7 @@ The point is to let you run your application code against something that behaves
 
 **Not a production cloud.** It's not designed for scale, durability, multi-tenancy, or production workloads. State is in-memory by default. Persistence is limited to a subset of services. It's single-binary and single-process. Don't put it in front of real users.
 
-**Not a drop-in for all of AWS.** It implements 37 services — the ones most teams actually test against. If you need EKS, Redshift, or SageMaker, fakecloud isn't the right tool (yet).
+**Not a drop-in for all of AWS.** It implements 39 services — the ones most teams actually test against. If you need EKS, Redshift, or SageMaker, fakecloud isn't the right tool (yet).
 
 **Not a mock.** Mocks return predefined values regardless of whether you call them correctly. fakecloud speaks real AWS wire protocols, validates real SigV4 headers (without signature checking), and returns AWS-shaped responses that the real SDK parses and deserializes. If your code assembles the request wrong, fakecloud fails the same way real AWS would.
 
@@ -37,4 +37,4 @@ The point is to let you run your application code against something that behaves
 
 fakecloud exists because testing AWS code well is harder than it should be. Mocks lie. Staging accounts cost money and leak state between tests. Real AWS is slow, rate-limited, and unsuitable for fast CI feedback. The bet is that a correctness-first local emulator — one that matches AWS's actual wire protocol on every documented operation — is a better tradeoff for most testing workflows than any of the alternatives.
 
-That's why the project prioritizes conformance and cross-service wiring over breadth. 37 services at true 100% (86,327/86,327 Smithy variants pass) is more useful than 100 services at 50%.
+That's why the project prioritizes conformance and cross-service wiring over breadth. 39 services at true 100% (86,327/86,327 Smithy variants pass) is more useful than 100 services at 50%.

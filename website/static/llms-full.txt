@@ -6,7 +6,7 @@
 
 fakecloud emulates AWS locally for integration testing and development. It is a single Rust binary (~19 MB, ~500ms startup, ~10 MiB idle memory) — no Docker required to run fakecloud itself, no signup. Point any AWS SDK or the AWS CLI at `http://localhost:4566` with dummy credentials.
 
-**Coverage goal:** 100% of AWS services, each at 100% behavioral conformance, with 100% of cross-service integrations. Approach is depth-first — a service lands when it passes the full Smithy-model test variants and the cross-service wire-ups that matter for it, not when the API surface looks filled in. 37 services (2,482 operations) are shipped today, all at true 100% conformance — 86,327/86,327 generated Smithy variants pass on every commit; more land progressively as they hit the bar.
+**Coverage goal:** 100% of AWS services, each at 100% behavioral conformance, with 100% of cross-service integrations. Approach is depth-first — a service lands when it passes the full Smithy-model test variants and the cross-service wire-ups that matter for it, not when the API surface looks filled in. 39 services (2,585 operations) are shipped today, all at true 100% conformance — 86,327/86,327 generated Smithy variants pass on every commit; more land progressively as they hit the bar.
 
 Key design principles:
 - **Depth-first coverage**: every implemented service targets 100% conformance with real AWS, validated on every commit against AWS's own Smithy models (54,000+ generated test variants). CI also runs upstream `hashicorp/terraform-provider-aws` `TestAcc*` suites against fakecloud.
@@ -80,13 +80,13 @@ Default is `memory` mode — all state lives in RAM, startup is instant,
 shutdown is a no-op. Pass `--storage-mode=persistent --data-path=<dir>` to
 mirror all service state to disk and reload on the next launch.
 
-All 37 services are fully persisted: S3, SQS, SNS, EventBridge,
+All 39 services are fully persisted: S3, SQS, SNS, EventBridge,
 EventBridge Scheduler, Lambda, DynamoDB, IAM, STS, SSM, Secrets Manager,
 CloudWatch Logs, CloudWatch (Metrics & Alarms), KMS, CloudFormation, SES,
 Cognito User Pools, Cognito Identity, Kinesis, Firehose, RDS, ElastiCache,
-Step Functions, API Gateway v1, API Gateway v2, Bedrock, Bedrock Runtime,
-ECR, ECS, Elastic Load Balancing v2, CloudFront, Route 53, WAF v2,
-Application Auto Scaling, Athena, ACM, and Glue. State is
+Step Functions, API Gateway v1, API Gateway v2, Bedrock, Bedrock Agent,
+Bedrock Agent Runtime, Bedrock Runtime, ECR, ECS, Elastic Load Balancing v2,
+CloudFront, Route 53, WAF v2, Application Auto Scaling, Athena, ACM, and Glue. State is
 written to disk on every mutation and reloaded on startup.
 
 The data directory is guarded by `fakecloud.version.toml`. A format mismatch
