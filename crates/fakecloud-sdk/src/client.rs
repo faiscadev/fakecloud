@@ -1364,10 +1364,7 @@ impl EcsClient<'_> {
     /// the `RunTask` response. Returned as raw JSON because the shape
     /// is the aggregated container-metadata document AWS surfaces at
     /// `ECS_CONTAINER_METADATA_URI_V4`.
-    pub async fn get_metadata_by_arn(
-        &self,
-        task_arn: &str,
-    ) -> Result<serde_json::Value, Error> {
+    pub async fn get_metadata_by_arn(&self, task_arn: &str) -> Result<serde_json::Value, Error> {
         let mut encoded = String::with_capacity(task_arn.len());
         for b in task_arn.bytes() {
             match b {
@@ -1548,10 +1545,7 @@ impl EcrClient<'_> {
         let resp = self
             .fc
             .client
-            .get(format!(
-                "{}/_fakecloud/ecr/repositories",
-                self.fc.base_url
-            ))
+            .get(format!("{}/_fakecloud/ecr/repositories", self.fc.base_url))
             .send()
             .await?;
         FakeCloud::parse(resp).await
@@ -1666,10 +1660,7 @@ impl GlueClient<'_> {
 
     /// List Glue JobRun records. Optionally scope to a single job by
     /// name (matches the `job_name` query parameter).
-    pub async fn get_job_runs(
-        &self,
-        job_name: Option<&str>,
-    ) -> Result<GlueJobRunsResponse, Error> {
+    pub async fn get_job_runs(&self, job_name: Option<&str>) -> Result<GlueJobRunsResponse, Error> {
         fn encode(s: &str) -> String {
             let mut out = String::with_capacity(s.len());
             for b in s.bytes() {
