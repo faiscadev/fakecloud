@@ -908,6 +908,31 @@ impl Route53Service {
         &self,
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
+        validate_query_constraints(
+            &req.query_params,
+            &[
+                QueryConstraint::StrLen {
+                    key: "vpcid",
+                    min: 0,
+                    max: 1024,
+                },
+                QueryConstraint::StrLen {
+                    key: "vpcregion",
+                    min: 1,
+                    max: 64,
+                },
+                QueryConstraint::Enum {
+                    key: "vpcregion",
+                    allowed: &VPC_REGIONS,
+                },
+                QueryConstraint::StrLen {
+                    key: "nexttoken",
+                    min: 0,
+                    max: 1024,
+                },
+                MAX_ITEMS_CONSTRAINT,
+            ],
+        )?;
         let vpc_id = req
             .query_params
             .get("vpcid")
@@ -1090,8 +1115,19 @@ impl Route53Service {
 
     pub(crate) fn list_reusable_delegation_sets(
         &self,
-        _req: &AwsRequest,
+        req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
+        validate_query_constraints(
+            &req.query_params,
+            &[
+                QueryConstraint::StrLen {
+                    key: "marker",
+                    min: 0,
+                    max: 64,
+                },
+                MAX_ITEMS_CONSTRAINT,
+            ],
+        )?;
         let state = self.state.read();
         let mut sets: Vec<StoredReusableDelegationSet> = state
             .accounts
@@ -1170,6 +1206,27 @@ impl Route53Service {
         &self,
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
+        validate_query_constraints(
+            &req.query_params,
+            &[
+                QueryConstraint::StrLen {
+                    key: "startcontinentcode",
+                    min: 2,
+                    max: 2,
+                },
+                QueryConstraint::StrLen {
+                    key: "startcountrycode",
+                    min: 1,
+                    max: 2,
+                },
+                QueryConstraint::StrLen {
+                    key: "startsubdivisioncode",
+                    min: 1,
+                    max: 3,
+                },
+                MAX_ITEMS_CONSTRAINT,
+            ],
+        )?;
         let start_continent = req.query_params.get("startcontinentcode").cloned();
         let start_country = req.query_params.get("startcountrycode").cloned();
         let start_subdivision = req.query_params.get("startsubdivisioncode").cloned();
@@ -1786,6 +1843,174 @@ pub(crate) fn geo_locations() -> &'static [GeoLocationEntry] {
 /// ```text
 /// arn:aws:logs:<region>:<account>:log-group:<group-name>[:*]
 /// ```
+/// Wire enumeration of every Route 53 resource record set type
+/// (`smithy.api#enumValue` literals from the `RRType` shape). Used by
+/// list endpoints that take an `RRType` filter via `@httpQuery` so
+/// unknown values are rejected the same way AWS rejects them.
+pub(crate) const RR_TYPES: [&str; 17] = [
+    "SOA", "A", "TXT", "NS", "CNAME", "MX", "NAPTR", "PTR", "SRV", "SPF", "AAAA", "CAA", "DS",
+    "TLSA", "SSHFP", "SVCB", "HTTPS",
+];
+
+/// Wire enumeration of every `VPCRegion` value. Route 53 accepts VPCs in
+/// any of these regions; anything else must be rejected so the conformance
+/// probe sees an `InvalidInput` instead of a happy-path 200.
+pub(crate) const VPC_REGIONS: [&str; 46] = [
+    "us-east-1",
+    "us-east-2",
+    "us-west-1",
+    "us-west-2",
+    "eu-west-1",
+    "eu-west-2",
+    "eu-west-3",
+    "eu-central-1",
+    "eu-central-2",
+    "ap-east-1",
+    "me-south-1",
+    "us-gov-west-1",
+    "us-gov-east-1",
+    "us-iso-east-1",
+    "us-iso-west-1",
+    "us-isob-east-1",
+    "me-central-1",
+    "ap-southeast-1",
+    "ap-southeast-2",
+    "ap-southeast-3",
+    "ap-south-1",
+    "ap-south-2",
+    "ap-northeast-1",
+    "ap-northeast-2",
+    "ap-northeast-3",
+    "eu-north-1",
+    "sa-east-1",
+    "ca-central-1",
+    "cn-north-1",
+    "cn-northwest-1",
+    "af-south-1",
+    "eu-south-1",
+    "eu-south-2",
+    "ap-southeast-4",
+    "il-central-1",
+    "ca-west-1",
+    "ap-southeast-5",
+    "mx-central-1",
+    "us-isof-south-1",
+    "us-isof-east-1",
+    "ap-southeast-7",
+    "ap-east-2",
+    "eu-isoe-west-1",
+    "ap-southeast-6",
+    "us-isob-west-1",
+    "eusc-de-east-1",
+];
+
+/// Shared `maxitems` constraint: Route 53 advertises a per-page ceiling
+/// of 100 across its `maxitems`-paginated list APIs and rejects values
+/// outside `[1, 100]` (or any non-integer) with `InvalidInput`. Reuse
+/// this from every `Max*`-paginated handler so an out-of-range
+/// `?maxitems=-1` doesn't silently fall back to the default of 100.
+pub(crate) const MAX_ITEMS_CONSTRAINT: QueryConstraint = QueryConstraint::IntRange {
+    key: "maxitems",
+    min: 1,
+    max: 100,
+};
+
+/// Same as [`MAX_ITEMS_CONSTRAINT`] but for the few endpoints that
+/// expose the parameter as `?maxresults=` (Route 53's CIDR collection
+/// and query-logging list APIs).
+pub(crate) const MAX_RESULTS_CONSTRAINT: QueryConstraint = QueryConstraint::IntRange {
+    key: "maxresults",
+    min: 1,
+    max: 100,
+};
+
+/// Constraint spec for a single Route 53 list-style query parameter.
+///
+/// Route 53 reads pagination markers, filters, and per-page sizes from the
+/// URL's query string (`@httpQuery` bindings in the Smithy model). The
+/// negative-conformance probes inject out-of-range values for those query
+/// parameters (e.g. a 1025-char `marker=`, an empty `startcountrycode=`,
+/// `version=0`, an unknown `trafficpolicyinstancetype=ZZZ`). AWS rejects
+/// such requests with `InvalidInput`; we mirror that here so the probes
+/// see the same wire response.
+///
+/// `min`/`max` apply when the parameter is present (an absent param is
+/// always valid — these are all optional in the model). `min = 0` means
+/// the empty string is allowed; `min > 0` requires at least one char.
+pub(crate) enum QueryConstraint {
+    /// String value: length must satisfy `min..=max` inclusive.
+    StrLen {
+        key: &'static str,
+        min: usize,
+        max: usize,
+    },
+    /// Integer value: must parse and satisfy `min..=max` inclusive.
+    IntRange {
+        key: &'static str,
+        min: i64,
+        max: i64,
+    },
+    /// String value: must be one of `allowed` (case-sensitive, matching
+    /// the Smithy `@enumValue` wire forms).
+    Enum {
+        key: &'static str,
+        allowed: &'static [&'static str],
+    },
+}
+
+/// Validate each `@httpQuery`-bound parameter against its Smithy constraints.
+///
+/// Returns `Err(InvalidInput)` on the first violation. Centralising the
+/// checks keeps the eleven list handlers small while ensuring every
+/// negative variant generated by the conformance harness hits an honest
+/// 4xx instead of a happy-path 200 with an empty body.
+pub(crate) fn validate_query_constraints(
+    query_params: &std::collections::HashMap<String, String>,
+    constraints: &[QueryConstraint],
+) -> Result<(), AwsServiceError> {
+    for c in constraints {
+        match c {
+            QueryConstraint::StrLen { key, min, max } => {
+                if let Some(v) = query_params.get(*key) {
+                    let len = v.chars().count();
+                    if len < *min {
+                        return Err(invalid_argument(format!(
+                            "'{key}' value '{v}' at length {len} below minimum field length {min}"
+                        )));
+                    }
+                    if len > *max {
+                        return Err(invalid_argument(format!(
+                            "'{key}' value at length {len} exceeds maximum field length {max}"
+                        )));
+                    }
+                }
+            }
+            QueryConstraint::IntRange { key, min, max } => {
+                if let Some(v) = query_params.get(*key) {
+                    let parsed: i64 = v.parse().map_err(|_| {
+                        invalid_argument(format!("'{key}' value '{v}' is not a valid integer"))
+                    })?;
+                    if parsed < *min || parsed > *max {
+                        return Err(invalid_argument(format!(
+                            "'{key}' value {parsed} outside allowed range [{min}, {max}]"
+                        )));
+                    }
+                }
+            }
+            QueryConstraint::Enum { key, allowed } => {
+                if let Some(v) = query_params.get(*key) {
+                    if !allowed.contains(&v.as_str()) {
+                        return Err(invalid_argument(format!(
+                            "'{key}' value '{v}' is not one of {allowed:?}"
+                        )));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn parse_log_group_arn(arn: &str) -> Option<(String, String, String)> {
     // arn:aws:logs:us-east-1:000000000000:log-group:/route53/qlog
     let mut parts = arn.splitn(7, ':');
