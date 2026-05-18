@@ -50,13 +50,13 @@ from fakecloud.types import (
     Elbv2RulesResponse,
     Elbv2TargetGroupsResponse,
     Elbv2WafCountsResponse,
-    FailSsmCommandRequest,
-    FailSsmCommandResponse,
     EventHistoryResponse,
     EvictContainerResponse,
     ExpirationTickResponse,
     ExpireTokensRequest,
     ExpireTokensResponse,
+    FailSsmCommandRequest,
+    FailSsmCommandResponse,
     FireRuleRequest,
     FireRuleResponse,
     FireScheduleResponse,
@@ -578,7 +578,7 @@ class SsmClient:
         """Force a stored ``SendCommand`` command into the given status."""
         req = SetSsmCommandStatusRequest(status=status, account_id=account_id)
         resp = await self._client.post(
-            f"{self._base}/_fakecloud/ssm/commands/{_urlquote(command_id, safe='')}/status",
+            f"{self._base}/_fakecloud/ssm/commands/{_urlquote(command_id, safe='')}/status",  # noqa: E501
             json=req.to_dict(),
         )
         _check(resp)
@@ -592,7 +592,7 @@ class SsmClient:
         """Flip every (or one) invocation on a command to ``Failed``."""
         body = req.to_dict() if req is not None else {}
         resp = await self._client.post(
-            f"{self._base}/_fakecloud/ssm/commands/{_urlquote(command_id, safe='')}/fail",
+            f"{self._base}/_fakecloud/ssm/commands/{_urlquote(command_id, safe='')}/fail",  # noqa: E501
             json=body,
         )
         _check(resp)
@@ -637,7 +637,7 @@ class _SyncSsmClient:
     ) -> SetSsmCommandStatusResponse:
         req = SetSsmCommandStatusRequest(status=status, account_id=account_id)
         resp = self._client.post(
-            f"{self._base}/_fakecloud/ssm/commands/{_urlquote(command_id, safe='')}/status",
+            f"{self._base}/_fakecloud/ssm/commands/{_urlquote(command_id, safe='')}/status",  # noqa: E501
             json=req.to_dict(),
         )
         _check(resp)
@@ -650,7 +650,7 @@ class _SyncSsmClient:
     ) -> FailSsmCommandResponse:
         body = req.to_dict() if req is not None else {}
         resp = self._client.post(
-            f"{self._base}/_fakecloud/ssm/commands/{_urlquote(command_id, safe='')}/fail",
+            f"{self._base}/_fakecloud/ssm/commands/{_urlquote(command_id, safe='')}/fail",  # noqa: E501
             json=body,
         )
         _check(resp)
@@ -744,9 +744,7 @@ class CloudFrontClient:
         self._client = client
         self._base = base_url
 
-    async def set_distribution_status(
-        self, distribution_id: str, status: str
-    ) -> None:
+    async def set_distribution_status(self, distribution_id: str, status: str) -> None:
         """Force a stored CloudFront distribution into a given status.
 
         Returns ``None`` on success (HTTP 204) and raises
@@ -754,7 +752,7 @@ class CloudFrontClient:
         """
         req = CloudFrontDistributionStatusRequest(status=status)
         resp = await self._client.post(
-            f"{self._base}/_fakecloud/cloudfront/distributions/{_urlquote(distribution_id, safe='')}/status",
+            f"{self._base}/_fakecloud/cloudfront/distributions/{_urlquote(distribution_id, safe='')}/status",  # noqa: E501
             json=req.to_dict(),
         )
         _check(resp)
@@ -770,7 +768,7 @@ class _SyncCloudFrontClient:
     def set_distribution_status(self, distribution_id: str, status: str) -> None:
         req = CloudFrontDistributionStatusRequest(status=status)
         resp = self._client.post(
-            f"{self._base}/_fakecloud/cloudfront/distributions/{_urlquote(distribution_id, safe='')}/status",
+            f"{self._base}/_fakecloud/cloudfront/distributions/{_urlquote(distribution_id, safe='')}/status",  # noqa: E501
             json=req.to_dict(),
         )
         _check(resp)

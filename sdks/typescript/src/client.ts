@@ -860,9 +860,7 @@ export class SsmClient {
   async getParameterPolicyEvents(
     accountId?: string,
   ): Promise<SsmParameterPolicyEventsResponse> {
-    const qs = accountId
-      ? `?accountId=${encodeURIComponent(accountId)}`
-      : "";
+    const qs = accountId ? `?accountId=${encodeURIComponent(accountId)}` : "";
     const resp = await fetch(
       `${this.baseUrl}/_fakecloud/ssm/parameter-policy-events${qs}`,
     );
@@ -877,14 +875,11 @@ export class SsmClient {
   async injectSession(
     req: InjectSsmSessionRequest,
   ): Promise<InjectSsmSessionResponse> {
-    const resp = await fetch(
-      `${this.baseUrl}/_fakecloud/ssm/sessions/inject`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(req),
-      },
-    );
+    const resp = await fetch(`${this.baseUrl}/_fakecloud/ssm/sessions/inject`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(req),
+    });
     return parse(resp);
   }
 }

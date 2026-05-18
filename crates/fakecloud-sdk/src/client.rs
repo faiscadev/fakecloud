@@ -1361,10 +1361,7 @@ impl WafV2Client<'_> {
     /// raw verdict JSON. Both request and response shapes are
     /// intentionally free-form so the SDK doesn't have to track every
     /// new field the evaluator emits.
-    pub async fn evaluate(
-        &self,
-        body: &serde_json::Value,
-    ) -> Result<serde_json::Value, Error> {
+    pub async fn evaluate(&self, body: &serde_json::Value) -> Result<serde_json::Value, Error> {
         let resp = self
             .fc
             .client
