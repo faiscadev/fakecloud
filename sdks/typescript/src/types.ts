@@ -631,6 +631,42 @@ export interface StepFunctionsExecutionsResponse {
   executions: StepFunctionsExecution[];
 }
 
+export interface StepFunctionsSyncBillingDetails {
+  billedDurationInMilliseconds: number;
+  billedMemoryUsedInMb: number;
+}
+
+export interface StepFunctionsSyncExecution {
+  executionArn: string;
+  stateMachineArn: string;
+  name: string;
+  status: string;
+  input?: string | null;
+  output?: string | null;
+  startedAt: string;
+  stoppedAt?: string | null;
+  durationMs: number;
+  billingDetails: StepFunctionsSyncBillingDetails;
+}
+
+export interface StepFunctionsSyncExecutionsResponse {
+  executions: StepFunctionsSyncExecution[];
+}
+
+export interface StepFunctionsExecutionTreeNode {
+  arn: string;
+  stateMachineArn: string;
+  status: string;
+  startedAt: string;
+  stoppedAt?: string | null;
+  children: StepFunctionsExecutionTreeNode[];
+}
+
+export interface StepFunctionsExecutionTreeResponse {
+  rootArn: string;
+  tree: StepFunctionsExecutionTreeNode;
+}
+
 export interface SfnEnqueueActivityTaskRequest {
   activityArn: string;
   input?: string;

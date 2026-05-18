@@ -605,6 +605,41 @@ public final class Types {
     @JsonIgnoreProperties(ignoreUnknown = true)
     public record StepFunctionsExecutionsResponse(List<StepFunctionsExecution> executions) {}
 
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record StepFunctionsSyncBillingDetails(
+            long billedDurationInMilliseconds,
+            long billedMemoryUsedInMb) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record StepFunctionsSyncExecution(
+            String executionArn,
+            String stateMachineArn,
+            String name,
+            String status,
+            String input,
+            String output,
+            String startedAt,
+            String stoppedAt,
+            long durationMs,
+            StepFunctionsSyncBillingDetails billingDetails) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record StepFunctionsSyncExecutionsResponse(List<StepFunctionsSyncExecution> executions) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record StepFunctionsExecutionTreeNode(
+            String arn,
+            String stateMachineArn,
+            String status,
+            String startedAt,
+            String stoppedAt,
+            List<StepFunctionsExecutionTreeNode> children) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record StepFunctionsExecutionTreeResponse(
+            String rootArn,
+            StepFunctionsExecutionTreeNode tree) {}
+
     @JsonInclude(JsonInclude.Include.NON_NULL)
     public record SfnEnqueueActivityTaskRequest(
             String activityArn,

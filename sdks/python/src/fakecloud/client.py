@@ -95,6 +95,8 @@ from fakecloud.types import (
     SnsMessagesResponse,
     SqsMessagesResponse,
     StepFunctionsExecutionsResponse,
+    StepFunctionsSyncExecutionsResponse,
+    StepFunctionsExecutionTreeResponse,
     TokensResponse,
     TtlTickResponse,
     UserConfirmationCodes,
@@ -1082,6 +1084,23 @@ class StepFunctionsClient:
         _check(resp)
         return StepFunctionsExecutionsResponse.from_dict(resp.json())
 
+    async def get_sync_executions(self) -> StepFunctionsSyncExecutionsResponse:
+        resp = await self._client.get(
+            f"{self._base}/_fakecloud/stepfunctions/sync-executions"
+        )
+        _check(resp)
+        return StepFunctionsSyncExecutionsResponse.from_dict(resp.json())
+
+    async def get_execution_tree(
+        self, arn: str
+    ) -> StepFunctionsExecutionTreeResponse:
+        encoded = _urlquote(arn, safe="")
+        resp = await self._client.get(
+            f"{self._base}/_fakecloud/stepfunctions/execution-tree/{encoded}"
+        )
+        _check(resp)
+        return StepFunctionsExecutionTreeResponse.from_dict(resp.json())
+
     async def enqueue_activity_task(
         self, req: SfnEnqueueActivityTaskRequest
     ) -> SfnEnqueueActivityTaskResponse:
@@ -1640,6 +1659,21 @@ class _SyncStepFunctionsClient:
         resp = self._client.get(f"{self._base}/_fakecloud/stepfunctions/executions")
         _check(resp)
         return StepFunctionsExecutionsResponse.from_dict(resp.json())
+
+    def get_sync_executions(self) -> StepFunctionsSyncExecutionsResponse:
+        resp = self._client.get(
+            f"{self._base}/_fakecloud/stepfunctions/sync-executions"
+        )
+        _check(resp)
+        return StepFunctionsSyncExecutionsResponse.from_dict(resp.json())
+
+    def get_execution_tree(self, arn: str) -> StepFunctionsExecutionTreeResponse:
+        encoded = _urlquote(arn, safe="")
+        resp = self._client.get(
+            f"{self._base}/_fakecloud/stepfunctions/execution-tree/{encoded}"
+        )
+        _check(resp)
+        return StepFunctionsExecutionTreeResponse.from_dict(resp.json())
 
     def enqueue_activity_task(
         self, req: SfnEnqueueActivityTaskRequest

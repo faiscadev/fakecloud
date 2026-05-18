@@ -222,10 +222,10 @@ type SESMailFromStatusResponse struct {
 
 // SESDkimPublicKey describes the DKIM signing material for an identity.
 type SESDkimPublicKey struct {
-	Identity       string `json:"identity"`
-	Selector       string `json:"selector"`
+	Identity        string `json:"identity"`
+	Selector        string `json:"selector"`
 	PublicKeyBase64 string `json:"publicKeyBase64"`
-	SigningEnabled bool   `json:"signingEnabled"`
+	SigningEnabled  bool   `json:"signingEnabled"`
 }
 
 // SESSandboxRequest toggles sandbox / production access for the account.
@@ -235,8 +235,8 @@ type SESSandboxRequest struct {
 
 // SESSandboxResponse echoes the new sandbox state.
 type SESSandboxResponse struct {
-	Sandbox                  bool `json:"sandbox"`
-	ProductionAccessEnabled  bool `json:"productionAccessEnabled"`
+	Sandbox                 bool `json:"sandbox"`
+	ProductionAccessEnabled bool `json:"productionAccessEnabled"`
 }
 
 // SESBouncedRecipientInfo describes one recipient inside a queued bounce.
@@ -250,14 +250,14 @@ type SESBouncedRecipientInfo struct {
 
 // SESBounce is one bounce queued via SES SendBounce.
 type SESBounce struct {
-	MessageID             string                    `json:"messageId"`
-	BounceType            string                    `json:"bounceType"`
-	BounceSubType         string                    `json:"bounceSubType"`
-	BouncedRecipientInfo  []SESBouncedRecipientInfo `json:"bouncedRecipientInfo"`
-	Explanation           *string                   `json:"explanation,omitempty"`
-	Timestamp             string                    `json:"timestamp"`
-	OriginalMessageID     string                    `json:"originalMessageId"`
-	BounceSender          string                    `json:"bounceSender"`
+	MessageID            string                    `json:"messageId"`
+	BounceType           string                    `json:"bounceType"`
+	BounceSubType        string                    `json:"bounceSubType"`
+	BouncedRecipientInfo []SESBouncedRecipientInfo `json:"bouncedRecipientInfo"`
+	Explanation          *string                   `json:"explanation,omitempty"`
+	Timestamp            string                    `json:"timestamp"`
+	OriginalMessageID    string                    `json:"originalMessageId"`
+	BounceSender         string                    `json:"bounceSender"`
 }
 
 // SESBouncesResponse contains all queued bounces.
@@ -268,12 +268,12 @@ type SESBouncesResponse struct {
 // SESMessageInsightEvent is one delivery / bounce / complaint observation
 // recorded against a sent SES message.
 type SESMessageInsightEvent struct {
-	Destination            string  `json:"destination"`
-	Timestamp              string  `json:"timestamp"`
-	BounceType             *string `json:"bounceType,omitempty"`
-	BounceSubType          *string `json:"bounceSubType,omitempty"`
-	DiagnosticCode         *string `json:"diagnosticCode,omitempty"`
-	ComplaintFeedbackType  *string `json:"complaintFeedbackType,omitempty"`
+	Destination           string  `json:"destination"`
+	Timestamp             string  `json:"timestamp"`
+	BounceType            *string `json:"bounceType,omitempty"`
+	BounceSubType         *string `json:"bounceSubType,omitempty"`
+	DiagnosticCode        *string `json:"diagnosticCode,omitempty"`
+	ComplaintFeedbackType *string `json:"complaintFeedbackType,omitempty"`
 }
 
 // SESMessageInsightsResponse is the per-message MessageInsights shape.
@@ -290,13 +290,13 @@ type SESMessageInsightsResponse struct {
 
 // SESSmtpSubmission is one message accepted via the SES SMTP listener.
 type SESSmtpSubmission struct {
-	MessageID     string   `json:"messageId"`
-	From          string   `json:"from"`
-	To            []string `json:"to"`
-	Subject       *string  `json:"subject,omitempty"`
-	RawSizeBytes  int      `json:"rawSizeBytes"`
-	ReceivedAt    string   `json:"receivedAt"`
-	AuthUser      string   `json:"authUser"`
+	MessageID    string   `json:"messageId"`
+	From         string   `json:"from"`
+	To           []string `json:"to"`
+	Subject      *string  `json:"subject,omitempty"`
+	RawSizeBytes int      `json:"rawSizeBytes"`
+	ReceivedAt   string   `json:"receivedAt"`
+	AuthUser     string   `json:"authUser"`
 }
 
 // SESSmtpSubmissionsResponse contains all SMTP submissions.
@@ -510,14 +510,14 @@ type LifecycleTickResponse struct {
 
 // S3AccessPointEntry describes a single S3 access point.
 type S3AccessPointEntry struct {
-	Name               string  `json:"name"`
-	Alias              string  `json:"alias"`
-	Bucket             string  `json:"bucket"`
-	AccountID          string  `json:"accountId"`
-	NetworkOrigin      string  `json:"networkOrigin"`
-	VpcConfiguration   *string `json:"vpcConfiguration,omitempty"`
-	PublicAccessBlock  *string `json:"publicAccessBlock,omitempty"`
-	CreatedAt          string  `json:"createdAt"`
+	Name              string  `json:"name"`
+	Alias             string  `json:"alias"`
+	Bucket            string  `json:"bucket"`
+	AccountID         string  `json:"accountId"`
+	NetworkOrigin     string  `json:"networkOrigin"`
+	VpcConfiguration  *string `json:"vpcConfiguration,omitempty"`
+	PublicAccessBlock *string `json:"publicAccessBlock,omitempty"`
+	CreatedAt         string  `json:"createdAt"`
 }
 
 // S3AccessPointsResponse holds the S3 access point registry.
@@ -727,6 +727,47 @@ type StepFunctionsExecutionsResponse struct {
 	Executions []StepFunctionsExecution `json:"executions"`
 }
 
+// StepFunctionsSyncBillingDetails captures billed compute for a sync execution.
+type StepFunctionsSyncBillingDetails struct {
+	BilledDurationInMilliseconds int64 `json:"billedDurationInMilliseconds"`
+	BilledMemoryUsedInMb         int64 `json:"billedMemoryUsedInMb"`
+}
+
+// StepFunctionsSyncExecution represents a recorded EXPRESS sync execution.
+type StepFunctionsSyncExecution struct {
+	ExecutionARN    string                          `json:"executionArn"`
+	StateMachineARN string                          `json:"stateMachineArn"`
+	Name            string                          `json:"name"`
+	Status          string                          `json:"status"`
+	Input           *string                         `json:"input,omitempty"`
+	Output          *string                         `json:"output,omitempty"`
+	StartedAt       string                          `json:"startedAt"`
+	StoppedAt       *string                         `json:"stoppedAt,omitempty"`
+	DurationMs      int64                           `json:"durationMs"`
+	BillingDetails  StepFunctionsSyncBillingDetails `json:"billingDetails"`
+}
+
+// StepFunctionsSyncExecutionsResponse contains all recorded sync executions.
+type StepFunctionsSyncExecutionsResponse struct {
+	Executions []StepFunctionsSyncExecution `json:"executions"`
+}
+
+// StepFunctionsExecutionTreeNode is a node in a parent/child execution tree.
+type StepFunctionsExecutionTreeNode struct {
+	ARN             string                           `json:"arn"`
+	StateMachineARN string                           `json:"stateMachineArn"`
+	Status          string                           `json:"status"`
+	StartedAt       string                           `json:"startedAt"`
+	StoppedAt       *string                          `json:"stoppedAt,omitempty"`
+	Children        []StepFunctionsExecutionTreeNode `json:"children"`
+}
+
+// StepFunctionsExecutionTreeResponse is the rooted parent/child tree for an execution.
+type StepFunctionsExecutionTreeResponse struct {
+	RootARN string                         `json:"rootArn"`
+	Tree    StepFunctionsExecutionTreeNode `json:"tree"`
+}
+
 // SfnEnqueueActivityTaskRequest queues a task for an activity worker without
 // running an ASL execution.
 type SfnEnqueueActivityTaskRequest struct {
@@ -840,20 +881,20 @@ type BedrockAgentCollaboratorSummary struct {
 
 // BedrockAgentRow is one Bedrock Agent flattened for introspection.
 type BedrockAgentRow struct {
-	AgentID          string                             `json:"agentId"`
-	AgentName        string                             `json:"agentName"`
-	AgentArn         string                             `json:"agentArn"`
-	AgentStatus      string                             `json:"agentStatus"`
-	FoundationModel  *string                            `json:"foundationModel"`
-	Instruction      *string                            `json:"instruction"`
-	KnowledgeBases   []BedrockAgentKnowledgeBaseSummary `json:"knowledgeBases"`
-	ActionGroups     []any                              `json:"actionGroups"`
-	Collaborators    []BedrockAgentCollaboratorSummary  `json:"collaborators"`
-	Aliases          []BedrockAgentAliasSummary         `json:"aliases"`
-	Versions         []BedrockAgentVersionSummary       `json:"versions"`
-	PromptOverrides  any                                `json:"promptOverrides"`
-	CreatedAt        string                             `json:"createdAt"`
-	UpdatedAt        string                             `json:"updatedAt"`
+	AgentID         string                             `json:"agentId"`
+	AgentName       string                             `json:"agentName"`
+	AgentArn        string                             `json:"agentArn"`
+	AgentStatus     string                             `json:"agentStatus"`
+	FoundationModel *string                            `json:"foundationModel"`
+	Instruction     *string                            `json:"instruction"`
+	KnowledgeBases  []BedrockAgentKnowledgeBaseSummary `json:"knowledgeBases"`
+	ActionGroups    []any                              `json:"actionGroups"`
+	Collaborators   []BedrockAgentCollaboratorSummary  `json:"collaborators"`
+	Aliases         []BedrockAgentAliasSummary         `json:"aliases"`
+	Versions        []BedrockAgentVersionSummary       `json:"versions"`
+	PromptOverrides any                                `json:"promptOverrides"`
+	CreatedAt       string                             `json:"createdAt"`
+	UpdatedAt       string                             `json:"updatedAt"`
 }
 
 // BedrockAgentAgentsResponse is the list-agents response body.
@@ -1226,19 +1267,19 @@ type Elbv2RulesResponse struct {
 // GlueJob describes one Glue Job recorded by CreateJob. Returned by the
 // /_fakecloud/glue/jobs endpoint.
 type GlueJob struct {
-	AccountID         string            `json:"accountId"`
-	Name              string            `json:"name"`
-	Role              string            `json:"role"`
-	Command           json.RawMessage   `json:"command"`
-	DefaultArguments  map[string]string `json:"defaultArguments"`
-	MaxCapacity       *float64          `json:"maxCapacity,omitempty"`
-	MaxRetries        int64             `json:"maxRetries"`
-	Timeout           *int64            `json:"timeout,omitempty"`
-	GlueVersion       *string           `json:"glueVersion,omitempty"`
-	WorkerType        *string           `json:"workerType,omitempty"`
-	NumberOfWorkers   *int64            `json:"numberOfWorkers,omitempty"`
-	CreatedOn         string            `json:"createdOn"`
-	LastModifiedOn    string            `json:"lastModifiedOn"`
+	AccountID        string            `json:"accountId"`
+	Name             string            `json:"name"`
+	Role             string            `json:"role"`
+	Command          json.RawMessage   `json:"command"`
+	DefaultArguments map[string]string `json:"defaultArguments"`
+	MaxCapacity      *float64          `json:"maxCapacity,omitempty"`
+	MaxRetries       int64             `json:"maxRetries"`
+	Timeout          *int64            `json:"timeout,omitempty"`
+	GlueVersion      *string           `json:"glueVersion,omitempty"`
+	WorkerType       *string           `json:"workerType,omitempty"`
+	NumberOfWorkers  *int64            `json:"numberOfWorkers,omitempty"`
+	CreatedOn        string            `json:"createdOn"`
+	LastModifiedOn   string            `json:"lastModifiedOn"`
 }
 
 // GlueJobsResponse contains every Glue Job registered on the server.

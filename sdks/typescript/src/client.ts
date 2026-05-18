@@ -77,6 +77,8 @@ import type {
   CompromisedPasswordsResponse,
   WebAuthnCredentialsResponse,
   StepFunctionsExecutionsResponse,
+  StepFunctionsSyncExecutionsResponse,
+  StepFunctionsExecutionTreeResponse,
   SfnEnqueueActivityTaskRequest,
   SfnEnqueueActivityTaskResponse,
   EcsClustersResponse,
@@ -629,6 +631,22 @@ export class StepFunctionsClient {
   async getExecutions(): Promise<StepFunctionsExecutionsResponse> {
     const resp = await fetch(
       `${this.baseUrl}/_fakecloud/stepfunctions/executions`,
+    );
+    return parse(resp);
+  }
+
+  async getSyncExecutions(): Promise<StepFunctionsSyncExecutionsResponse> {
+    const resp = await fetch(
+      `${this.baseUrl}/_fakecloud/stepfunctions/sync-executions`,
+    );
+    return parse(resp);
+  }
+
+  async getExecutionTree(
+    arn: string,
+  ): Promise<StepFunctionsExecutionTreeResponse> {
+    const resp = await fetch(
+      `${this.baseUrl}/_fakecloud/stepfunctions/execution-tree/${encodeURIComponent(arn)}`,
     );
     return parse(resp);
   }
