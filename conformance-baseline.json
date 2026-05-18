@@ -1,5 +1,5 @@
 {
-  "variants_passed": 86304,
+  "variants_passed": 86327,
   "total_variants": 86327,
   "per_service": {
     "logs": {
@@ -63,7 +63,7 @@
       "total": 3668
     },
     "kinesis": {
-      "passed": 1592,
+      "passed": 1604,
       "total": 1604
     },
     "cognito-identity": {
