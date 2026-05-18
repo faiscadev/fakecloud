@@ -95,8 +95,8 @@ from fakecloud.types import (
     SnsMessagesResponse,
     SqsMessagesResponse,
     StepFunctionsExecutionsResponse,
-    StepFunctionsSyncExecutionsResponse,
     StepFunctionsExecutionTreeResponse,
+    StepFunctionsSyncExecutionsResponse,
     TokensResponse,
     TtlTickResponse,
     UserConfirmationCodes,
@@ -1091,9 +1091,7 @@ class StepFunctionsClient:
         _check(resp)
         return StepFunctionsSyncExecutionsResponse.from_dict(resp.json())
 
-    async def get_execution_tree(
-        self, arn: str
-    ) -> StepFunctionsExecutionTreeResponse:
+    async def get_execution_tree(self, arn: str) -> StepFunctionsExecutionTreeResponse:
         encoded = _urlquote(arn, safe="")
         resp = await self._client.get(
             f"{self._base}/_fakecloud/stepfunctions/execution-tree/{encoded}"

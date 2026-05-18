@@ -1607,9 +1607,7 @@ class StepFunctionsSyncExecutionsResponse:
     executions: List[StepFunctionsSyncExecution]
 
     @classmethod
-    def from_dict(
-        cls, data: Dict[str, Any]
-    ) -> StepFunctionsSyncExecutionsResponse:
+    def from_dict(cls, data: Dict[str, Any]) -> StepFunctionsSyncExecutionsResponse:
         return cls(
             executions=[
                 StepFunctionsSyncExecution.from_dict(e)
@@ -1648,9 +1646,7 @@ class StepFunctionsExecutionTreeResponse:
     tree: StepFunctionsExecutionTreeNode
 
     @classmethod
-    def from_dict(
-        cls, data: Dict[str, Any]
-    ) -> StepFunctionsExecutionTreeResponse:
+    def from_dict(cls, data: Dict[str, Any]) -> StepFunctionsExecutionTreeResponse:
         return cls(
             root_arn=data["rootArn"],
             tree=StepFunctionsExecutionTreeNode.from_dict(data["tree"]),
