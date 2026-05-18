@@ -31,8 +31,8 @@ fakecloud replaces the need for remote infrastructure with a single, ~19MB binar
 - **Binary Size:** ~19MB
 - **Startup Time:** ~500ms
 - **Memory Footprint:** Minimal (runs entirely within standard runner memory)
-- **API Conformance:** 100% across 2,422 operations
-- **Service Coverage:** 33+ core AWS services (S3, Lambda, DynamoDB, SNS, SQS, etc.)
+- **API Conformance:** 100% across 2,592 operations
+- **Service Coverage:** 39 core AWS services (S3, Lambda, DynamoDB, SNS, SQS, etc.)
 
 By running fakecloud locally on the runner, you eliminate the network round-trip to `us-east-1`. Your integration tests run at the speed of local memory, and your security posture improves by removing the need for `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` entirely.
 
@@ -88,18 +88,18 @@ jobs:
         run: npm test
 ```
 
-## Evidence: 100% Conformance Across 2,422 Operations
+## Evidence: 100% Conformance Across 2,592 Operations
 
-Reliability in a local emulator is measured by its ability to handle edge cases. fakecloud is validated against 59,000+ Smithy-model-generated test variants. This ensures that when your application calls `PutItem` on DynamoDB or `Publish` on SNS, the response structure, headers, and error codes exactly match the behavior of the real AWS production environment.
+Reliability in a local emulator is measured by its ability to handle edge cases. fakecloud is validated against 86,327 Smithy-model-generated test variants. This ensures that when your application calls `PutItem` on DynamoDB or `Publish` on SNS, the response structure, headers, and error codes exactly match the behavior of the real AWS production environment.
 
 ### Supported Core Services (Partial List)
 | Service | Operations Supported | Key Features |
 | :--- | :--- | :--- |
-| **S3** | 184 | Multipart uploads, bucket policies, website hosting |
-| **Lambda** | 112 | Container image support, function URLs, layers |
-| **DynamoDB** | 98 | TTL, Global Secondary Indexes, Streams |
-| **SQS/SNS** | 84 | SNS-to-SQS fanout, dead-letter queues |
-| **Bedrock** | 111 | Model invocation, provisioned throughput, agents |
+| **S3** | 107 | Multipart uploads, bucket policies, website hosting |
+| **Lambda** | 70 | Container image support, function URLs, layers |
+| **DynamoDB** | 57 | TTL, Global Secondary Indexes, Streams |
+| **SQS/SNS** | 65 (23+42) | SNS-to-SQS fanout, dead-letter queues |
+| **Bedrock** | 214 (across 4 APIs) | Model invocation, provisioned throughput, agents |
 
 ### Real Cross-Service Integrations
 Unlike simple mocks, fakecloud supports real service triggers. You can upload a file to a local S3 bucket and have it automatically trigger a local Lambda function, which then writes a record to a local DynamoDB table. This allows for testing complex, event-driven architectures entirely within the CI runner.
@@ -108,7 +108,7 @@ Unlike simple mocks, fakecloud supports real service triggers. You can upload a 
 
 As of May 2026, AI development has shifted toward autonomous agents. The recent launch of **Amazon Bedrock AgentCore** (May 11, 2026) introduced managed payment capabilities for AI agents. Testing these workflows usually requires significant spend and complex IAM setup.
 
-fakecloud supports 111 Bedrock operations, allowing you to test agentic workflows, prompt orchestration, and model invocations locally. You can validate your agent's logic and its interaction with other AWS services without incurring model provider costs or managing sensitive API keys during the development phase.
+fakecloud supports 214 Bedrock operations across 4 APIs, allowing you to test agentic workflows, prompt orchestration, and model invocations locally. You can validate your agent's logic and its interaction with other AWS services without incurring model provider costs or managing sensitive API keys during the development phase.
 
 ## The "No" List: Why fakecloud Wins
 
