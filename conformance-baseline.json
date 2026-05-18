@@ -1,5 +1,5 @@
 {
-  "variants_passed": 86286,
+  "variants_passed": 86297,
   "total_variants": 86327,
   "per_service": {
     "logs": {
@@ -103,7 +103,7 @@
       "total": 447
     },
     "cognito-idp": {
-      "passed": 4458,
+      "passed": 4469,
       "total": 4469
     },
     "cloudfront": {
