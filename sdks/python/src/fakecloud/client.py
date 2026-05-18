@@ -9,6 +9,7 @@ import httpx
 
 from fakecloud.types import (
     AcmCertificateChainInfo,
+    ApiGatewayV2ConnectionsResponse,
     ApiGatewayV2RequestsResponse,
     AppAsScheduledTickResponse,
     AppAsTickResponse,
@@ -37,6 +38,7 @@ from fakecloud.types import (
     EcsEventsResponse,
     EcsMarkFailedRequest,
     EcsTask,
+    EcsTaskCredentials,
     EcsTaskLogsResponse,
     EcsTaskMetadataResponse,
     EcsTasksResponse,
@@ -74,9 +76,18 @@ from fakecloud.types import (
     PendingConfirmationsResponse,
     PreTokenGenInvocationsResponse,
     RdsInstancesResponse,
+    RdsLambdaInvokeRequest,
+    RdsLambdaInvokeResponse,
+    RdsS3ExportRequest,
+    RdsS3ExportResponse,
+    RdsS3ImportRequest,
+    RdsS3ImportResponse,
     ResetResponse,
     ResetServiceResponse,
     RotationTickResponse,
+    Route53DnssecMaterial,
+    Route53DnssecSignRequest,
+    Route53DnssecSignResponse,
     S3AccessPointsResponse,
     S3NotificationsResponse,
     S3ObjectLambdaResponsesResponse,
@@ -93,6 +104,7 @@ from fakecloud.types import (
     SfnEnqueueActivityTaskRequest,
     SfnEnqueueActivityTaskResponse,
     SnsMessagesResponse,
+    SnsSmsResponse,
     SqsMessagesResponse,
     StepFunctionsExecutionsResponse,
     TokensResponse,
@@ -151,6 +163,40 @@ class RdsClient:
         resp = await self._client.get(f"{self._base}/_fakecloud/rds/instances")
         _check(resp)
         return RdsInstancesResponse.from_dict(resp.json())
+
+    async def lambda_invoke(
+        self, req: RdsLambdaInvokeRequest
+    ) -> RdsLambdaInvokeResponse:
+        """Invoke a Lambda function via the RDS ``aws_lambda`` bridge.
+
+        Used internally by the PostgreSQL ``aws_lambda`` extension inside
+        RDS containers. The wire format is snake_case to match the
+        extension's calling convention.
+        """
+        resp = await self._client.post(
+            f"{self._base}/_fakecloud/rds/lambda-invoke",
+            json=req.to_dict(),
+        )
+        _check(resp)
+        return RdsLambdaInvokeResponse.from_dict(resp.json())
+
+    async def s3_import(self, req: RdsS3ImportRequest) -> RdsS3ImportResponse:
+        """Fetch an S3 object via the RDS ``aws_s3`` extension bridge."""
+        resp = await self._client.post(
+            f"{self._base}/_fakecloud/rds/s3-import",
+            json=req.to_dict(),
+        )
+        _check(resp)
+        return RdsS3ImportResponse.from_dict(resp.json())
+
+    async def s3_export(self, req: RdsS3ExportRequest) -> RdsS3ExportResponse:
+        """Upload an object via the RDS ``aws_s3`` extension bridge."""
+        resp = await self._client.post(
+            f"{self._base}/_fakecloud/rds/s3-export",
+            json=req.to_dict(),
+        )
+        _check(resp)
+        return RdsS3ExportResponse.from_dict(resp.json())
 
 
 class ElastiCacheClient:
@@ -313,6 +359,27 @@ class EcsClient:
         _check(resp)
         return EcsTaskMetadataResponse.from_dict(resp.json())
 
+    async def get_task_credentials(self, task_id: str) -> EcsTaskCredentials:
+        """Fetch the IAM credentials a running ECS task would see at
+        ``$AWS_CONTAINER_CREDENTIALS_RELATIVE_URI``."""
+        resp = await self._client.get(f"{self._base}/_fakecloud/ecs/creds/{task_id}")
+        _check(resp)
+        return EcsTaskCredentials.from_dict(resp.json())
+
+    async def get_task_metadata_v3(self, task_id: str) -> Dict[str, Any]:
+        """Return the v3 task metadata document. Pass-through dict — the
+        shape mirrors the real ECS v3 metadata endpoint."""
+        resp = await self._client.get(f"{self._base}/_fakecloud/ecs/v3/{task_id}")
+        _check(resp)
+        return cast(Dict[str, Any], resp.json())
+
+    async def get_task_metadata_v4(self, task_id: str) -> Dict[str, Any]:
+        """Return the v4 task metadata document. Pass-through dict — the
+        shape mirrors the real ECS v4 metadata endpoint."""
+        resp = await self._client.get(f"{self._base}/_fakecloud/ecs/v4/{task_id}")
+        _check(resp)
+        return cast(Dict[str, Any], resp.json())
+
 
 class _SyncEcsClient:
     """Sync ECS introspection client."""
@@ -376,6 +443,21 @@ class _SyncEcsClient:
         resp = self._client.get(f"{self._base}/_fakecloud/ecs/metadata/{encoded}")
         _check(resp)
         return EcsTaskMetadataResponse.from_dict(resp.json())
+
+    def get_task_credentials(self, task_id: str) -> EcsTaskCredentials:
+        resp = self._client.get(f"{self._base}/_fakecloud/ecs/creds/{task_id}")
+        _check(resp)
+        return EcsTaskCredentials.from_dict(resp.json())
+
+    def get_task_metadata_v3(self, task_id: str) -> Dict[str, Any]:
+        resp = self._client.get(f"{self._base}/_fakecloud/ecs/v3/{task_id}")
+        _check(resp)
+        return cast(Dict[str, Any], resp.json())
+
+    def get_task_metadata_v4(self, task_id: str) -> Dict[str, Any]:
+        resp = self._client.get(f"{self._base}/_fakecloud/ecs/v4/{task_id}")
+        _check(resp)
+        return cast(Dict[str, Any], resp.json())
 
 
 class Elbv2Client:
@@ -483,6 +565,30 @@ class Route53Client:
         )
         _check(resp)
 
+    async def get_dnssec_material(self, zone_id: str) -> Route53DnssecMaterial:
+        """Return the deterministic DNSSEC KSK material for ``zone_id``.
+
+        Raises ``FakeCloudError`` with status 404 if the zone has no
+        ACTIVE Key Signing Key.
+        """
+        resp = await self._client.get(
+            f"{self._base}/_fakecloud/route53/zones/{zone_id}/dnssec",
+        )
+        _check(resp)
+        return Route53DnssecMaterial.from_dict(resp.json())
+
+    async def sign_dnssec_rrset(
+        self, zone_id: str, req: Route53DnssecSignRequest
+    ) -> Route53DnssecSignResponse:
+        """Sign an RRset under the zone's first ACTIVE KSK and return the
+        raw RRSIG fields. Useful for verifier-side tests."""
+        resp = await self._client.post(
+            f"{self._base}/_fakecloud/route53/zones/{zone_id}/dnssec/sign",
+            json=req.to_dict(),
+        )
+        _check(resp)
+        return Route53DnssecSignResponse.from_dict(resp.json())
+
 
 class _SyncRoute53Client:
     """Sync Route 53 admin client."""
@@ -505,6 +611,23 @@ class _SyncRoute53Client:
             json=body,
         )
         _check(resp)
+
+    def get_dnssec_material(self, zone_id: str) -> Route53DnssecMaterial:
+        resp = self._client.get(
+            f"{self._base}/_fakecloud/route53/zones/{zone_id}/dnssec",
+        )
+        _check(resp)
+        return Route53DnssecMaterial.from_dict(resp.json())
+
+    def sign_dnssec_rrset(
+        self, zone_id: str, req: Route53DnssecSignRequest
+    ) -> Route53DnssecSignResponse:
+        resp = self._client.post(
+            f"{self._base}/_fakecloud/route53/zones/{zone_id}/dnssec/sign",
+            json=req.to_dict(),
+        )
+        _check(resp)
+        return Route53DnssecSignResponse.from_dict(resp.json())
 
 
 def _acm_id(arn_or_id: str) -> str:
@@ -782,6 +905,21 @@ class SnsClient:
         )
         _check(resp)
         return ConfirmSubscriptionResponse.from_dict(resp.json())
+
+    async def get_cert_pem(self) -> str:
+        """Return the SNS signing certificate as a PEM-encoded string.
+
+        The response body is text (``application/x-pem-file``), not JSON.
+        """
+        resp = await self._client.get(f"{self._base}/_fakecloud/sns/cert.pem")
+        _check(resp)
+        return resp.text
+
+    async def get_sms(self) -> SnsSmsResponse:
+        """Return all SMS messages the SNS fake has accepted."""
+        resp = await self._client.get(f"{self._base}/_fakecloud/sns/sms")
+        _check(resp)
+        return SnsSmsResponse.from_dict(resp.json())
 
 
 class SqsClient:
@@ -1067,6 +1205,41 @@ class ApiGatewayV2Client:
         _check(resp)
         return ApiGatewayV2RequestsResponse.from_dict(resp.json())
 
+    async def get_connections(self) -> ApiGatewayV2ConnectionsResponse:
+        """List active WebSocket connections tracked by the API Gateway v2 fake."""
+        resp = await self._client.get(
+            f"{self._base}/_fakecloud/apigatewayv2/connections"
+        )
+        _check(resp)
+        return ApiGatewayV2ConnectionsResponse.from_dict(resp.json())
+
+    async def get_mtls_info(self, domain_name: str) -> Dict[str, Any]:
+        """Return the mTLS trust-store summary for a custom domain.
+
+        The shape is service-internal and may evolve, so this returns a
+        pass-through dict rather than a typed dataclass.
+        """
+        resp = await self._client.get(
+            f"{self._base}/_fakecloud/apigatewayv2/domain-names/{domain_name}/mtls-info"
+        )
+        _check(resp)
+        return cast(Dict[str, Any], resp.json())
+
+    def ws_url(self, api_id: str, stage: Optional[str] = None) -> str:
+        """Build the WebSocket URL for ``api_id`` at ``stage``.
+
+        Switches the scheme from ``http(s)://`` to ``ws(s)://`` and appends
+        the API Gateway v2 WebSocket path. Defaults stage to ``"prod"``.
+        """
+        stage_part = stage if stage is not None else "prod"
+        if self._base.startswith("https://"):
+            ws = "wss://" + self._base[len("https://") :]
+        elif self._base.startswith("http://"):
+            ws = "ws://" + self._base[len("http://") :]
+        else:
+            ws = self._base
+        return f"{ws}/__ws/apigatewayv2/{api_id}/{stage_part}"
+
 
 class StepFunctionsClient:
     """Async Step Functions introspection client."""
@@ -1222,6 +1395,30 @@ class _SyncRdsClient:
         resp = self._client.get(f"{self._base}/_fakecloud/rds/instances")
         _check(resp)
         return RdsInstancesResponse.from_dict(resp.json())
+
+    def lambda_invoke(self, req: RdsLambdaInvokeRequest) -> RdsLambdaInvokeResponse:
+        resp = self._client.post(
+            f"{self._base}/_fakecloud/rds/lambda-invoke",
+            json=req.to_dict(),
+        )
+        _check(resp)
+        return RdsLambdaInvokeResponse.from_dict(resp.json())
+
+    def s3_import(self, req: RdsS3ImportRequest) -> RdsS3ImportResponse:
+        resp = self._client.post(
+            f"{self._base}/_fakecloud/rds/s3-import",
+            json=req.to_dict(),
+        )
+        _check(resp)
+        return RdsS3ImportResponse.from_dict(resp.json())
+
+    def s3_export(self, req: RdsS3ExportRequest) -> RdsS3ExportResponse:
+        resp = self._client.post(
+            f"{self._base}/_fakecloud/rds/s3-export",
+            json=req.to_dict(),
+        )
+        _check(resp)
+        return RdsS3ExportResponse.from_dict(resp.json())
 
 
 class _SyncElastiCacheClient:
@@ -1395,6 +1592,16 @@ class _SyncSnsClient:
         )
         _check(resp)
         return ConfirmSubscriptionResponse.from_dict(resp.json())
+
+    def get_cert_pem(self) -> str:
+        resp = self._client.get(f"{self._base}/_fakecloud/sns/cert.pem")
+        _check(resp)
+        return resp.text
+
+    def get_sms(self) -> SnsSmsResponse:
+        resp = self._client.get(f"{self._base}/_fakecloud/sns/sms")
+        _check(resp)
+        return SnsSmsResponse.from_dict(resp.json())
 
 
 class _SyncSqsClient:
@@ -1629,6 +1836,28 @@ class _SyncApiGatewayV2Client:
         resp = self._client.get(f"{self._base}/_fakecloud/apigatewayv2/requests")
         _check(resp)
         return ApiGatewayV2RequestsResponse.from_dict(resp.json())
+
+    def get_connections(self) -> ApiGatewayV2ConnectionsResponse:
+        resp = self._client.get(f"{self._base}/_fakecloud/apigatewayv2/connections")
+        _check(resp)
+        return ApiGatewayV2ConnectionsResponse.from_dict(resp.json())
+
+    def get_mtls_info(self, domain_name: str) -> Dict[str, Any]:
+        resp = self._client.get(
+            f"{self._base}/_fakecloud/apigatewayv2/domain-names/{domain_name}/mtls-info"
+        )
+        _check(resp)
+        return cast(Dict[str, Any], resp.json())
+
+    def ws_url(self, api_id: str, stage: Optional[str] = None) -> str:
+        stage_part = stage if stage is not None else "prod"
+        if self._base.startswith("https://"):
+            ws = "wss://" + self._base[len("https://") :]
+        elif self._base.startswith("http://"):
+            ws = "ws://" + self._base[len("http://") :]
+        else:
+            ws = self._base
+        return f"{ws}/__ws/apigatewayv2/{api_id}/{stage_part}"
 
 
 class _SyncStepFunctionsClient:

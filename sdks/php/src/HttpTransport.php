@@ -33,6 +33,19 @@ final class HttpTransport
         return $this->send('GET', $path);
     }
 
+    /**
+     * GET a path and return the raw response body as a string. Used for
+     * endpoints that emit non-JSON content (e.g. SNS signing PEM).
+     */
+    public function getText(string $path): string
+    {
+        $response = $this->execute('GET', $path);
+        if ($response['status'] < 200 || $response['status'] >= 300) {
+            throw new FakeCloudError($response['status'], $response['body']);
+        }
+        return $response['body'];
+    }
+
     public function postEmpty(string $path): array
     {
         return $this->send('POST', $path);

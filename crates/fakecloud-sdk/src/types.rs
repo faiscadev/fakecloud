@@ -1972,3 +1972,44 @@ pub struct CloudFrontDistributionStatusRequest {
     /// New distribution status. Typically `"Deployed"` or `"InProgress"`.
     pub status: String,
 }
+
+// ── API Gateway v2 WebSocket connections ────────────────────────────
+
+/// Single active WebSocket connection tracked by the API Gateway v2
+/// fake. Returned by `GET /_fakecloud/apigatewayv2/connections`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiGatewayV2Connection {
+    pub connection_id: String,
+    pub api_id: String,
+    pub stage: String,
+    pub connected_at: String,
+    pub last_active_at: String,
+    pub source_ip: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiGatewayV2ConnectionsResponse {
+    pub connections: Vec<ApiGatewayV2Connection>,
+}
+
+// ── ECS task IAM credentials ────────────────────────────────────────
+
+/// Response shape for `GET /_fakecloud/ecs/creds/{task_id}`. Matches the
+/// real ECS task metadata credential endpoint field casing (PascalCase),
+/// so this type is `Deserialize` only — fakecloud writes the keys
+/// already capitalized.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EcsTaskCredentialsResponse {
+    #[serde(rename = "AccessKeyId")]
+    pub access_key_id: String,
+    #[serde(rename = "SecretAccessKey")]
+    pub secret_access_key: String,
+    #[serde(rename = "Token")]
+    pub token: String,
+    #[serde(rename = "Expiration")]
+    pub expiration: String,
+    #[serde(rename = "RoleArn")]
+    pub role_arn: String,
+}

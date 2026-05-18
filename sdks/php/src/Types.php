@@ -3244,3 +3244,306 @@ final class AthenaNamedQueriesResponse
         return new self(array_map(AthenaNamedQuery::fromArray(...), $data['queries'] ?? []));
     }
 }
+
+// ── API Gateway v2 WebSocket connections ───────────────────────
+
+final class ApiGatewayV2Connection
+{
+    public function __construct(
+        public readonly string $connectionId,
+        public readonly string $apiId,
+        public readonly string $stage,
+        public readonly string $connectedAt,
+        public readonly string $lastActiveAt,
+        public readonly string $sourceIp,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            (string) ($data['connectionId'] ?? ''),
+            (string) ($data['apiId'] ?? ''),
+            (string) ($data['stage'] ?? ''),
+            (string) ($data['connectedAt'] ?? ''),
+            (string) ($data['lastActiveAt'] ?? ''),
+            (string) ($data['sourceIp'] ?? ''),
+        );
+    }
+}
+
+final class ApiGatewayV2ConnectionsResponse
+{
+    public function __construct(
+        /** @var ApiGatewayV2Connection[] */
+        public readonly array $connections,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(array_map(ApiGatewayV2Connection::fromArray(...), $data['connections'] ?? []));
+    }
+}
+
+// ── RDS aws_lambda extension bridge ────────────────────────────
+
+final class RdsLambdaInvokeRequest
+{
+    public function __construct(
+        public readonly string $functionName,
+        public readonly mixed $payload = null,
+        public readonly ?string $invocationType = null,
+        public readonly ?string $region = null,
+    ) {}
+
+    public function toArray(): array
+    {
+        $out = ['function_name' => $this->functionName];
+        if ($this->payload !== null) {
+            $out['payload'] = $this->payload;
+        }
+        if ($this->invocationType !== null) {
+            $out['invocation_type'] = $this->invocationType;
+        }
+        if ($this->region !== null) {
+            $out['region'] = $this->region;
+        }
+        return $out;
+    }
+}
+
+final class RdsLambdaInvokeResponse
+{
+    public function __construct(
+        public readonly int $statusCode,
+        public readonly mixed $payload = null,
+        public readonly ?string $executedVersion = null,
+        public readonly ?string $logResult = null,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            (int) ($data['status_code'] ?? 0),
+            $data['payload'] ?? null,
+            isset($data['executed_version']) ? (string) $data['executed_version'] : null,
+            isset($data['log_result']) ? (string) $data['log_result'] : null,
+        );
+    }
+}
+
+// ── RDS aws_s3 extension bridge ────────────────────────────────
+
+final class RdsS3ImportRequest
+{
+    public function __construct(
+        public readonly string $bucket,
+        public readonly string $key,
+        public readonly ?string $region = null,
+    ) {}
+
+    public function toArray(): array
+    {
+        $out = ['bucket' => $this->bucket, 'key' => $this->key];
+        if ($this->region !== null) {
+            $out['region'] = $this->region;
+        }
+        return $out;
+    }
+}
+
+final class RdsS3ImportResponse
+{
+    public function __construct(
+        public readonly string $bucket,
+        public readonly string $key,
+        public readonly string $bodyB64,
+        public readonly int $bytesProcessed,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            (string) ($data['bucket'] ?? ''),
+            (string) ($data['key'] ?? ''),
+            (string) ($data['body_b64'] ?? ''),
+            (int) ($data['bytes_processed'] ?? 0),
+        );
+    }
+}
+
+final class RdsS3ExportRequest
+{
+    public function __construct(
+        public readonly string $bucket,
+        public readonly string $key,
+        public readonly string $bodyB64,
+        public readonly ?string $region = null,
+    ) {}
+
+    public function toArray(): array
+    {
+        $out = [
+            'bucket' => $this->bucket,
+            'key' => $this->key,
+            'body_b64' => $this->bodyB64,
+        ];
+        if ($this->region !== null) {
+            $out['region'] = $this->region;
+        }
+        return $out;
+    }
+}
+
+final class RdsS3ExportResponse
+{
+    public function __construct(
+        public readonly string $bucket,
+        public readonly string $key,
+        public readonly int $bytesUploaded,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            (string) ($data['bucket'] ?? ''),
+            (string) ($data['key'] ?? ''),
+            (int) ($data['bytes_uploaded'] ?? 0),
+        );
+    }
+}
+
+// ── Route 53 DNSSEC ────────────────────────────────────────────
+
+final class Route53DnssecMaterialResponse
+{
+    public function __construct(
+        public readonly string $hostedZoneId,
+        public readonly string $keySigningKeyName,
+        public readonly int $algorithm,
+        public readonly int $flags,
+        public readonly int $keyTag,
+        public readonly string $dnskeyPublicKeyB64,
+        public readonly string $dsDigestSha256Hex,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            (string) ($data['hostedZoneId'] ?? ''),
+            (string) ($data['keySigningKeyName'] ?? ''),
+            (int) ($data['algorithm'] ?? 0),
+            (int) ($data['flags'] ?? 0),
+            (int) ($data['keyTag'] ?? 0),
+            (string) ($data['dnskeyPublicKeyB64'] ?? ''),
+            (string) ($data['dsDigestSha256Hex'] ?? ''),
+        );
+    }
+}
+
+final class Route53DnssecSignRequest
+{
+    public function __construct(
+        public readonly string $name,
+        /** Serialised as JSON key `type` (reserved word in PHP). */
+        public readonly string $recordType,
+        public readonly int $ttl,
+        /** @var string[] */
+        public readonly array $rdatas,
+    ) {}
+
+    public function toArray(): array
+    {
+        return [
+            'name' => $this->name,
+            'type' => $this->recordType,
+            'ttl' => $this->ttl,
+            'rdatas' => $this->rdatas,
+        ];
+    }
+}
+
+final class Route53DnssecSignResponse
+{
+    public function __construct(
+        public readonly string $signatureB64,
+        public readonly int $algorithm,
+        public readonly int $keyTag,
+        public readonly string $signerName,
+        public readonly int $inception,
+        public readonly int $expiration,
+        public readonly int $labels,
+        public readonly int $originalTtl,
+        /** Deserialised from JSON key `type`. */
+        public readonly string $rrsetType,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            (string) ($data['signatureB64'] ?? ''),
+            (int) ($data['algorithm'] ?? 0),
+            (int) ($data['keyTag'] ?? 0),
+            (string) ($data['signerName'] ?? ''),
+            (int) ($data['inception'] ?? 0),
+            (int) ($data['expiration'] ?? 0),
+            (int) ($data['labels'] ?? 0),
+            (int) ($data['originalTtl'] ?? 0),
+            (string) ($data['type'] ?? ''),
+        );
+    }
+}
+
+// ── SNS SMS introspection ──────────────────────────────────────
+
+final class SnsSmsMessage
+{
+    public function __construct(
+        public readonly string $phoneNumber,
+        public readonly string $message,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            (string) ($data['phoneNumber'] ?? ''),
+            (string) ($data['message'] ?? ''),
+        );
+    }
+}
+
+final class SnsSmsResponse
+{
+    public function __construct(
+        /** @var SnsSmsMessage[] */
+        public readonly array $messages,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(array_map(SnsSmsMessage::fromArray(...), $data['messages'] ?? []));
+    }
+}
+
+// ── ECS task IAM credentials ───────────────────────────────────
+
+final class EcsTaskCredentialsResponse
+{
+    public function __construct(
+        public readonly string $accessKeyId,
+        public readonly string $secretAccessKey,
+        public readonly string $token,
+        public readonly string $expiration,
+        public readonly string $roleArn,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            (string) ($data['AccessKeyId'] ?? ''),
+            (string) ($data['SecretAccessKey'] ?? ''),
+            (string) ($data['Token'] ?? ''),
+            (string) ($data['Expiration'] ?? ''),
+            (string) ($data['RoleArn'] ?? ''),
+        );
+    }
+}

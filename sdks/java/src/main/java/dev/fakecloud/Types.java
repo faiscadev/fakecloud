@@ -1145,4 +1145,109 @@ public final class Types {
             List<OrganizationsAccount> accounts,
             String managementAccountId,
             String masterAccountId) {}
+
+    // ── API Gateway v2 WebSocket connections ────────────────────────
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record ApiGatewayV2Connection(
+            String connectionId,
+            String apiId,
+            String stage,
+            String connectedAt,
+            String lastActiveAt,
+            String sourceIp) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record ApiGatewayV2ConnectionsResponse(List<ApiGatewayV2Connection> connections) {}
+
+    // ── RDS aws_lambda + aws_s3 extension bridges ───────────────────
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record RdsLambdaInvokeRequest(
+            @JsonProperty("function_name") String functionName,
+            @JsonProperty("payload") Object payload,
+            @JsonProperty("invocation_type") String invocationType,
+            @JsonProperty("region") String region) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record RdsLambdaInvokeResponse(
+            @JsonProperty("status_code") int statusCode,
+            @JsonProperty("payload") Object payload,
+            @JsonProperty("executed_version") String executedVersion,
+            @JsonProperty("log_result") String logResult) {}
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record RdsS3ImportRequest(
+            @JsonProperty("bucket") String bucket,
+            @JsonProperty("key") String key,
+            @JsonProperty("region") String region) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record RdsS3ImportResponse(
+            @JsonProperty("bucket") String bucket,
+            @JsonProperty("key") String key,
+            @JsonProperty("body_b64") String bodyB64,
+            @JsonProperty("bytes_processed") long bytesProcessed) {}
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record RdsS3ExportRequest(
+            @JsonProperty("bucket") String bucket,
+            @JsonProperty("key") String key,
+            @JsonProperty("region") String region,
+            @JsonProperty("body_b64") String bodyB64) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record RdsS3ExportResponse(
+            @JsonProperty("bucket") String bucket,
+            @JsonProperty("key") String key,
+            @JsonProperty("bytes_uploaded") long bytesUploaded) {}
+
+    // ── Route 53 DNSSEC ─────────────────────────────────────────────
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record Route53DnssecMaterialResponse(
+            String hostedZoneId,
+            String keySigningKeyName,
+            int algorithm,
+            int flags,
+            int keyTag,
+            String dnskeyPublicKeyB64,
+            String dsDigestSha256Hex) {}
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record Route53DnssecSignRequest(
+            String name,
+            @JsonProperty("type") String recordType,
+            long ttl,
+            List<String> rdatas) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record Route53DnssecSignResponse(
+            String signatureB64,
+            int algorithm,
+            int keyTag,
+            String signerName,
+            long inception,
+            long expiration,
+            int labels,
+            long originalTtl,
+            @JsonProperty("type") String recordType) {}
+
+    // ── SNS SMS ─────────────────────────────────────────────────────
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record SnsSmsMessage(String phoneNumber, String message) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record SnsSmsResponse(List<SnsSmsMessage> messages) {}
+
+    // ── ECS task IAM credentials (PascalCase wire) ──────────────────
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record EcsTaskCredentialsResponse(
+            @JsonProperty("AccessKeyId") String accessKeyId,
+            @JsonProperty("SecretAccessKey") String secretAccessKey,
+            @JsonProperty("Token") String token,
+            @JsonProperty("Expiration") String expiration,
+            @JsonProperty("RoleArn") String roleArn) {}
 }

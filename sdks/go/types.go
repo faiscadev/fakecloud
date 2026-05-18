@@ -222,10 +222,10 @@ type SESMailFromStatusResponse struct {
 
 // SESDkimPublicKey describes the DKIM signing material for an identity.
 type SESDkimPublicKey struct {
-	Identity       string `json:"identity"`
-	Selector       string `json:"selector"`
+	Identity        string `json:"identity"`
+	Selector        string `json:"selector"`
 	PublicKeyBase64 string `json:"publicKeyBase64"`
-	SigningEnabled bool   `json:"signingEnabled"`
+	SigningEnabled  bool   `json:"signingEnabled"`
 }
 
 // SESSandboxRequest toggles sandbox / production access for the account.
@@ -235,8 +235,8 @@ type SESSandboxRequest struct {
 
 // SESSandboxResponse echoes the new sandbox state.
 type SESSandboxResponse struct {
-	Sandbox                  bool `json:"sandbox"`
-	ProductionAccessEnabled  bool `json:"productionAccessEnabled"`
+	Sandbox                 bool `json:"sandbox"`
+	ProductionAccessEnabled bool `json:"productionAccessEnabled"`
 }
 
 // SESBouncedRecipientInfo describes one recipient inside a queued bounce.
@@ -250,14 +250,14 @@ type SESBouncedRecipientInfo struct {
 
 // SESBounce is one bounce queued via SES SendBounce.
 type SESBounce struct {
-	MessageID             string                    `json:"messageId"`
-	BounceType            string                    `json:"bounceType"`
-	BounceSubType         string                    `json:"bounceSubType"`
-	BouncedRecipientInfo  []SESBouncedRecipientInfo `json:"bouncedRecipientInfo"`
-	Explanation           *string                   `json:"explanation,omitempty"`
-	Timestamp             string                    `json:"timestamp"`
-	OriginalMessageID     string                    `json:"originalMessageId"`
-	BounceSender          string                    `json:"bounceSender"`
+	MessageID            string                    `json:"messageId"`
+	BounceType           string                    `json:"bounceType"`
+	BounceSubType        string                    `json:"bounceSubType"`
+	BouncedRecipientInfo []SESBouncedRecipientInfo `json:"bouncedRecipientInfo"`
+	Explanation          *string                   `json:"explanation,omitempty"`
+	Timestamp            string                    `json:"timestamp"`
+	OriginalMessageID    string                    `json:"originalMessageId"`
+	BounceSender         string                    `json:"bounceSender"`
 }
 
 // SESBouncesResponse contains all queued bounces.
@@ -268,12 +268,12 @@ type SESBouncesResponse struct {
 // SESMessageInsightEvent is one delivery / bounce / complaint observation
 // recorded against a sent SES message.
 type SESMessageInsightEvent struct {
-	Destination            string  `json:"destination"`
-	Timestamp              string  `json:"timestamp"`
-	BounceType             *string `json:"bounceType,omitempty"`
-	BounceSubType          *string `json:"bounceSubType,omitempty"`
-	DiagnosticCode         *string `json:"diagnosticCode,omitempty"`
-	ComplaintFeedbackType  *string `json:"complaintFeedbackType,omitempty"`
+	Destination           string  `json:"destination"`
+	Timestamp             string  `json:"timestamp"`
+	BounceType            *string `json:"bounceType,omitempty"`
+	BounceSubType         *string `json:"bounceSubType,omitempty"`
+	DiagnosticCode        *string `json:"diagnosticCode,omitempty"`
+	ComplaintFeedbackType *string `json:"complaintFeedbackType,omitempty"`
 }
 
 // SESMessageInsightsResponse is the per-message MessageInsights shape.
@@ -290,13 +290,13 @@ type SESMessageInsightsResponse struct {
 
 // SESSmtpSubmission is one message accepted via the SES SMTP listener.
 type SESSmtpSubmission struct {
-	MessageID     string   `json:"messageId"`
-	From          string   `json:"from"`
-	To            []string `json:"to"`
-	Subject       *string  `json:"subject,omitempty"`
-	RawSizeBytes  int      `json:"rawSizeBytes"`
-	ReceivedAt    string   `json:"receivedAt"`
-	AuthUser      string   `json:"authUser"`
+	MessageID    string   `json:"messageId"`
+	From         string   `json:"from"`
+	To           []string `json:"to"`
+	Subject      *string  `json:"subject,omitempty"`
+	RawSizeBytes int      `json:"rawSizeBytes"`
+	ReceivedAt   string   `json:"receivedAt"`
+	AuthUser     string   `json:"authUser"`
 }
 
 // SESSmtpSubmissionsResponse contains all SMTP submissions.
@@ -510,14 +510,14 @@ type LifecycleTickResponse struct {
 
 // S3AccessPointEntry describes a single S3 access point.
 type S3AccessPointEntry struct {
-	Name               string  `json:"name"`
-	Alias              string  `json:"alias"`
-	Bucket             string  `json:"bucket"`
-	AccountID          string  `json:"accountId"`
-	NetworkOrigin      string  `json:"networkOrigin"`
-	VpcConfiguration   *string `json:"vpcConfiguration,omitempty"`
-	PublicAccessBlock  *string `json:"publicAccessBlock,omitempty"`
-	CreatedAt          string  `json:"createdAt"`
+	Name              string  `json:"name"`
+	Alias             string  `json:"alias"`
+	Bucket            string  `json:"bucket"`
+	AccountID         string  `json:"accountId"`
+	NetworkOrigin     string  `json:"networkOrigin"`
+	VpcConfiguration  *string `json:"vpcConfiguration,omitempty"`
+	PublicAccessBlock *string `json:"publicAccessBlock,omitempty"`
+	CreatedAt         string  `json:"createdAt"`
 }
 
 // S3AccessPointsResponse holds the S3 access point registry.
@@ -840,20 +840,20 @@ type BedrockAgentCollaboratorSummary struct {
 
 // BedrockAgentRow is one Bedrock Agent flattened for introspection.
 type BedrockAgentRow struct {
-	AgentID          string                             `json:"agentId"`
-	AgentName        string                             `json:"agentName"`
-	AgentArn         string                             `json:"agentArn"`
-	AgentStatus      string                             `json:"agentStatus"`
-	FoundationModel  *string                            `json:"foundationModel"`
-	Instruction      *string                            `json:"instruction"`
-	KnowledgeBases   []BedrockAgentKnowledgeBaseSummary `json:"knowledgeBases"`
-	ActionGroups     []any                              `json:"actionGroups"`
-	Collaborators    []BedrockAgentCollaboratorSummary  `json:"collaborators"`
-	Aliases          []BedrockAgentAliasSummary         `json:"aliases"`
-	Versions         []BedrockAgentVersionSummary       `json:"versions"`
-	PromptOverrides  any                                `json:"promptOverrides"`
-	CreatedAt        string                             `json:"createdAt"`
-	UpdatedAt        string                             `json:"updatedAt"`
+	AgentID         string                             `json:"agentId"`
+	AgentName       string                             `json:"agentName"`
+	AgentArn        string                             `json:"agentArn"`
+	AgentStatus     string                             `json:"agentStatus"`
+	FoundationModel *string                            `json:"foundationModel"`
+	Instruction     *string                            `json:"instruction"`
+	KnowledgeBases  []BedrockAgentKnowledgeBaseSummary `json:"knowledgeBases"`
+	ActionGroups    []any                              `json:"actionGroups"`
+	Collaborators   []BedrockAgentCollaboratorSummary  `json:"collaborators"`
+	Aliases         []BedrockAgentAliasSummary         `json:"aliases"`
+	Versions        []BedrockAgentVersionSummary       `json:"versions"`
+	PromptOverrides any                                `json:"promptOverrides"`
+	CreatedAt       string                             `json:"createdAt"`
+	UpdatedAt       string                             `json:"updatedAt"`
 }
 
 // BedrockAgentAgentsResponse is the list-agents response body.
@@ -1226,19 +1226,19 @@ type Elbv2RulesResponse struct {
 // GlueJob describes one Glue Job recorded by CreateJob. Returned by the
 // /_fakecloud/glue/jobs endpoint.
 type GlueJob struct {
-	AccountID         string            `json:"accountId"`
-	Name              string            `json:"name"`
-	Role              string            `json:"role"`
-	Command           json.RawMessage   `json:"command"`
-	DefaultArguments  map[string]string `json:"defaultArguments"`
-	MaxCapacity       *float64          `json:"maxCapacity,omitempty"`
-	MaxRetries        int64             `json:"maxRetries"`
-	Timeout           *int64            `json:"timeout,omitempty"`
-	GlueVersion       *string           `json:"glueVersion,omitempty"`
-	WorkerType        *string           `json:"workerType,omitempty"`
-	NumberOfWorkers   *int64            `json:"numberOfWorkers,omitempty"`
-	CreatedOn         string            `json:"createdOn"`
-	LastModifiedOn    string            `json:"lastModifiedOn"`
+	AccountID        string            `json:"accountId"`
+	Name             string            `json:"name"`
+	Role             string            `json:"role"`
+	Command          json.RawMessage   `json:"command"`
+	DefaultArguments map[string]string `json:"defaultArguments"`
+	MaxCapacity      *float64          `json:"maxCapacity,omitempty"`
+	MaxRetries       int64             `json:"maxRetries"`
+	Timeout          *int64            `json:"timeout,omitempty"`
+	GlueVersion      *string           `json:"glueVersion,omitempty"`
+	WorkerType       *string           `json:"workerType,omitempty"`
+	NumberOfWorkers  *int64            `json:"numberOfWorkers,omitempty"`
+	CreatedOn        string            `json:"createdOn"`
+	LastModifiedOn   string            `json:"lastModifiedOn"`
 }
 
 // GlueJobsResponse contains every Glue Job registered on the server.
@@ -1318,4 +1318,134 @@ type AthenaNamedQuery struct {
 
 type AthenaNamedQueriesResponse struct {
 	Queries []AthenaNamedQuery `json:"queries"`
+}
+
+// ── API Gateway v2 WebSocket connections ───────────────────────────
+
+// ApiGatewayV2Connection is one live WebSocket connection tracked by
+// the fake API Gateway v2 runtime.
+type ApiGatewayV2Connection struct {
+	ConnectionID string `json:"connectionId"`
+	ApiID        string `json:"apiId"`
+	Stage        string `json:"stage"`
+	ConnectedAt  string `json:"connectedAt"`
+	LastActiveAt string `json:"lastActiveAt"`
+	SourceIP     string `json:"sourceIp"`
+}
+
+// ApiGatewayV2ConnectionsResponse wraps the list of live WebSocket
+// connections.
+type ApiGatewayV2ConnectionsResponse struct {
+	Connections []ApiGatewayV2Connection `json:"connections"`
+}
+
+// ── RDS bridges (aws_lambda / aws_s3 extensions) ───────────────────
+
+// RdsLambdaInvokeRequest is the body for POST /_fakecloud/rds/lambda-invoke.
+type RdsLambdaInvokeRequest struct {
+	FunctionName   string          `json:"function_name"`
+	Payload        json.RawMessage `json:"payload,omitempty"`
+	InvocationType string          `json:"invocation_type,omitempty"`
+	Region         string          `json:"region,omitempty"`
+}
+
+// RdsLambdaInvokeResponse mirrors what aws_lambda.invoke() returns to
+// SQL callers.
+type RdsLambdaInvokeResponse struct {
+	StatusCode      int32           `json:"status_code"`
+	Payload         json.RawMessage `json:"payload,omitempty"`
+	ExecutedVersion string          `json:"executed_version,omitempty"`
+	LogResult       string          `json:"log_result,omitempty"`
+}
+
+// RdsS3ImportRequest is the body for POST /_fakecloud/rds/s3-import.
+type RdsS3ImportRequest struct {
+	Bucket string `json:"bucket"`
+	Key    string `json:"key"`
+	Region string `json:"region,omitempty"`
+}
+
+// RdsS3ImportResponse returns the fetched object body base64-encoded.
+type RdsS3ImportResponse struct {
+	Bucket         string `json:"bucket"`
+	Key            string `json:"key"`
+	BodyB64        string `json:"body_b64"`
+	BytesProcessed int64  `json:"bytes_processed"`
+}
+
+// RdsS3ExportRequest is the body for POST /_fakecloud/rds/s3-export.
+type RdsS3ExportRequest struct {
+	Bucket  string `json:"bucket"`
+	Key     string `json:"key"`
+	Region  string `json:"region,omitempty"`
+	BodyB64 string `json:"body_b64"`
+}
+
+// RdsS3ExportResponse returns the byte count uploaded to S3.
+type RdsS3ExportResponse struct {
+	Bucket        string `json:"bucket"`
+	Key           string `json:"key"`
+	BytesUploaded int64  `json:"bytes_uploaded"`
+}
+
+// ── Route 53 DNSSEC ────────────────────────────────────────────────
+
+// Route53DnssecMaterialResponse exposes the active KSK material for a
+// hosted zone so tests can verify DNSSEC signatures.
+type Route53DnssecMaterialResponse struct {
+	HostedZoneID       string `json:"hostedZoneId"`
+	KeySigningKeyName  string `json:"keySigningKeyName"`
+	Algorithm          uint8  `json:"algorithm"`
+	Flags              uint16 `json:"flags"`
+	KeyTag             uint16 `json:"keyTag"`
+	DnskeyPublicKeyB64 string `json:"dnskeyPublicKeyB64"`
+	DsDigestSha256Hex  string `json:"dsDigestSha256Hex"`
+}
+
+// Route53DnssecSignRequest signs an RRset under the zone's first ACTIVE
+// KSK. The wire field name is "type"; the Go field is RecordType.
+type Route53DnssecSignRequest struct {
+	Name       string   `json:"name"`
+	RecordType string   `json:"type"`
+	TTL        uint32   `json:"ttl"`
+	Rdatas     []string `json:"rdatas"`
+}
+
+// Route53DnssecSignResponse returns the raw RRSIG fields.
+type Route53DnssecSignResponse struct {
+	SignatureB64 string `json:"signatureB64"`
+	Algorithm    uint8  `json:"algorithm"`
+	KeyTag       uint16 `json:"keyTag"`
+	SignerName   string `json:"signerName"`
+	Inception    uint32 `json:"inception"`
+	Expiration   uint32 `json:"expiration"`
+	Labels       uint8  `json:"labels"`
+	OriginalTTL  uint32 `json:"originalTtl"`
+	RRsetType    string `json:"type"`
+}
+
+// ── SNS SMS ────────────────────────────────────────────────────────
+
+// SnsSmsMessage is one SMS that was "sent" through the fake SNS SMS
+// publisher.
+type SnsSmsMessage struct {
+	PhoneNumber string `json:"phoneNumber"`
+	Message     string `json:"message"`
+}
+
+// SnsSmsResponse wraps the list of recorded SMS messages.
+type SnsSmsResponse struct {
+	Messages []SnsSmsMessage `json:"messages"`
+}
+
+// ── ECS task IAM credentials ───────────────────────────────────────
+
+// EcsTaskCredentials mirrors the JSON the ECS container credentials
+// endpoint serves at AWS_CONTAINER_CREDENTIALS_RELATIVE_URI.
+type EcsTaskCredentials struct {
+	AccessKeyID     string `json:"AccessKeyId"`
+	SecretAccessKey string `json:"SecretAccessKey"`
+	Token           string `json:"Token"`
+	Expiration      string `json:"Expiration"`
+	RoleArn         string `json:"RoleArn"`
 }

@@ -173,6 +173,28 @@ func (fc *FakeCloud) doGet(ctx context.Context, path string, out interface{}) er
 	return fc.do(req, out)
 }
 
+// doGetText fetches a path and returns the raw response body as a
+// string. Used for endpoints that serve non-JSON payloads (e.g. PEM).
+func (fc *FakeCloud) doGetText(ctx context.Context, path string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fc.BaseURL+path, nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := fc.client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", &APIError{StatusCode: resp.StatusCode, Body: string(body)}
+	}
+	return string(body), nil
+}
+
 func (fc *FakeCloud) doPostText(ctx context.Context, path string, text string, out interface{}) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, fc.BaseURL+path, strings.NewReader(text))
 	if err != nil {

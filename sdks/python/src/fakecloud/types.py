@@ -2728,3 +2728,268 @@ class AthenaNamedQueriesResponse:
         return cls(
             queries=[AthenaNamedQuery.from_dict(q) for q in d.get("queries", [])],
         )
+
+
+# ── API Gateway v2 WebSocket connections ────────────────────────────
+
+
+@dataclass
+class ApiGatewayV2Connection:
+    """Single active WebSocket connection tracked by the API Gateway v2 fake."""
+
+    connection_id: str
+    api_id: str
+    stage: str
+    connected_at: str
+    last_active_at: str
+    source_ip: str
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> ApiGatewayV2Connection:
+        d = _convert_keys(data)
+        return cls(**d)
+
+
+@dataclass
+class ApiGatewayV2ConnectionsResponse:
+    connections: List[ApiGatewayV2Connection]
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> ApiGatewayV2ConnectionsResponse:
+        return cls(
+            connections=[
+                ApiGatewayV2Connection.from_dict(c)
+                for c in data.get("connections", [])
+            ],
+        )
+
+
+# ── RDS aws_lambda / aws_s3 extension bridges ───────────────────────
+
+
+@dataclass
+class RdsLambdaInvokeRequest:
+    """Body for ``POST /_fakecloud/rds/lambda-invoke``.
+
+    The wire format is snake_case (not camelCase) so the field names match
+    this dataclass exactly — the bridge sits behind the PostgreSQL
+    ``aws_lambda`` extension and follows that crate's naming, not the
+    rest of the introspection API.
+    """
+
+    function_name: str
+    payload: Optional[Any] = None
+    invocation_type: Optional[str] = None
+    region: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        out: Dict[str, Any] = {"function_name": self.function_name}
+        if self.payload is not None:
+            out["payload"] = self.payload
+        if self.invocation_type is not None:
+            out["invocation_type"] = self.invocation_type
+        if self.region is not None:
+            out["region"] = self.region
+        return out
+
+
+@dataclass
+class RdsLambdaInvokeResponse:
+    status_code: int
+    payload: Optional[Any] = None
+    executed_version: Optional[str] = None
+    log_result: Optional[str] = None
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> RdsLambdaInvokeResponse:
+        # Wire is already snake_case — do NOT run _convert_keys, which would
+        # noop on snake_case but the call is unnecessary.
+        return cls(
+            status_code=int(data["status_code"]),
+            payload=data.get("payload"),
+            executed_version=data.get("executed_version"),
+            log_result=data.get("log_result"),
+        )
+
+
+@dataclass
+class RdsS3ImportRequest:
+    bucket: str
+    key: str
+    region: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        out: Dict[str, Any] = {"bucket": self.bucket, "key": self.key}
+        if self.region is not None:
+            out["region"] = self.region
+        return out
+
+
+@dataclass
+class RdsS3ImportResponse:
+    bucket: str
+    key: str
+    body_b64: str
+    bytes_processed: int
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> RdsS3ImportResponse:
+        return cls(
+            bucket=data["bucket"],
+            key=data["key"],
+            body_b64=data["body_b64"],
+            bytes_processed=int(data["bytes_processed"]),
+        )
+
+
+@dataclass
+class RdsS3ExportRequest:
+    bucket: str
+    key: str
+    body_b64: str
+    region: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        out: Dict[str, Any] = {
+            "bucket": self.bucket,
+            "key": self.key,
+            "body_b64": self.body_b64,
+        }
+        if self.region is not None:
+            out["region"] = self.region
+        return out
+
+
+@dataclass
+class RdsS3ExportResponse:
+    bucket: str
+    key: str
+    bytes_uploaded: int
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> RdsS3ExportResponse:
+        return cls(
+            bucket=data["bucket"],
+            key=data["key"],
+            bytes_uploaded=int(data["bytes_uploaded"]),
+        )
+
+
+# ── Route 53 DNSSEC admin ───────────────────────────────────────────
+
+
+@dataclass
+class Route53DnssecMaterial:
+    """Material returned by ``GET /_fakecloud/route53/zones/{id}/dnssec``."""
+
+    hosted_zone_id: str
+    key_signing_key_name: str
+    algorithm: int
+    flags: int
+    key_tag: int
+    dnskey_public_key_b64: str
+    ds_digest_sha256_hex: str
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> Route53DnssecMaterial:
+        d = _convert_keys(data)
+        return cls(**d)
+
+
+@dataclass
+class Route53DnssecSignRequest:
+    """Body for ``POST /_fakecloud/route53/zones/{id}/dnssec/sign``."""
+
+    name: str
+    record_type: str
+    ttl: int
+    rdatas: List[str]
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "name": self.name,
+            "type": self.record_type,
+            "ttl": self.ttl,
+            "rdatas": list(self.rdatas),
+        }
+
+
+@dataclass
+class Route53DnssecSignResponse:
+    signature_b64: str
+    algorithm: int
+    key_tag: int
+    signer_name: str
+    inception: int
+    expiration: int
+    labels: int
+    original_ttl: int
+    record_type: str
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> Route53DnssecSignResponse:
+        d = _convert_keys(data)
+        return cls(
+            signature_b64=d["signature_b64"],
+            algorithm=int(d["algorithm"]),
+            key_tag=int(d["key_tag"]),
+            signer_name=d["signer_name"],
+            inception=int(d["inception"]),
+            expiration=int(d["expiration"]),
+            labels=int(d["labels"]),
+            original_ttl=int(d["original_ttl"]),
+            record_type=d["type"],
+        )
+
+
+# ── SNS SMS introspection ───────────────────────────────────────────
+
+
+@dataclass
+class SnsSmsMessage:
+    phone_number: str
+    message: str
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> SnsSmsMessage:
+        d = _convert_keys(data)
+        return cls(**d)
+
+
+@dataclass
+class SnsSmsResponse:
+    messages: List[SnsSmsMessage]
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> SnsSmsResponse:
+        return cls(
+            messages=[SnsSmsMessage.from_dict(m) for m in data.get("messages", [])],
+        )
+
+
+# ── ECS task IAM credentials ────────────────────────────────────────
+
+
+@dataclass
+class EcsTaskCredentials:
+    """Response shape for ``GET /_fakecloud/ecs/creds/{task_id}``.
+
+    Wire keys are PascalCase to match the real ECS task metadata
+    credential endpoint, so the dataclass converts them explicitly.
+    """
+
+    access_key_id: str
+    secret_access_key: str
+    token: str
+    expiration: str
+    role_arn: str
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> EcsTaskCredentials:
+        return cls(
+            access_key_id=data["AccessKeyId"],
+            secret_access_key=data["SecretAccessKey"],
+            token=data["Token"],
+            expiration=data["Expiration"],
+            role_arn=data["RoleArn"],
+        )

@@ -35,3 +35,28 @@ func (c *Route53Client) SetHealthCheckStatus(
 	path := fmt.Sprintf("/_fakecloud/route53/health-checks/%s/status", healthCheckID)
 	return c.fc.doPost(ctx, path, req, nil)
 }
+
+// GetDnssecMaterial returns the active KSK material for a hosted zone
+// so tests can verify DNSSEC signatures locally. Returns an error
+// (typically *APIError with StatusCode 404) when the zone has no
+// active KSK.
+func (c *Route53Client) GetDnssecMaterial(ctx context.Context, hostedZoneID string) (*Route53DnssecMaterialResponse, error) {
+	var out Route53DnssecMaterialResponse
+	path := fmt.Sprintf("/_fakecloud/route53/zones/%s/dnssec", hostedZoneID)
+	if err := c.fc.doGet(ctx, path, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// SignRRset signs an RRset under the zone's first ACTIVE KSK and
+// returns the raw RRSIG fields so tests can verify the signature
+// against the zone's published DNSKEY material.
+func (c *Route53Client) SignRRset(ctx context.Context, hostedZoneID string, req *Route53DnssecSignRequest) (*Route53DnssecSignResponse, error) {
+	var out Route53DnssecSignResponse
+	path := fmt.Sprintf("/_fakecloud/route53/zones/%s/dnssec/sign", hostedZoneID)
+	if err := c.fc.doPost(ctx, path, req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}

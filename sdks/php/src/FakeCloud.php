@@ -184,6 +184,41 @@ final class RdsClient
             $this->http->get('/_fakecloud/rds/instances')
         );
     }
+
+    /**
+     * Bridge endpoint the PostgreSQL `aws_lambda` extension calls into
+     * from inside an RDS DB container. Wire format is snake_case; the
+     * SDK preserves it verbatim rather than auto-converting.
+     */
+    public function lambdaInvoke(RdsLambdaInvokeRequest $req): RdsLambdaInvokeResponse
+    {
+        return RdsLambdaInvokeResponse::fromArray(
+            $this->http->postJson('/_fakecloud/rds/lambda-invoke', $req->toArray())
+        );
+    }
+
+    /**
+     * Bridge endpoint for the PostgreSQL `aws_s3` extension: fetch a
+     * fakecloud S3 object. Body is base64-encoded so the JSON transport
+     * stays text-only. snake_case on the wire.
+     */
+    public function s3Import(RdsS3ImportRequest $req): RdsS3ImportResponse
+    {
+        return RdsS3ImportResponse::fromArray(
+            $this->http->postJson('/_fakecloud/rds/s3-import', $req->toArray())
+        );
+    }
+
+    /**
+     * Bridge equivalent of an S3 PutObject driven from inside the DB
+     * container. snake_case on the wire.
+     */
+    public function s3Export(RdsS3ExportRequest $req): RdsS3ExportResponse
+    {
+        return RdsS3ExportResponse::fromArray(
+            $this->http->postJson('/_fakecloud/rds/s3-export', $req->toArray())
+        );
+    }
 }
 
 final class ElastiCacheClient
@@ -377,6 +412,28 @@ final class SnsClient
     {
         return ConfirmSubscriptionResponse::fromArray(
             $this->http->postJson('/_fakecloud/sns/confirm-subscription', $req->toArray())
+        );
+    }
+
+    /**
+     * Fetch the PEM-encoded signing certificate fakecloud uses to sign
+     * SNS HTTP delivery payloads. Returned as a raw PEM string —
+     * subscribers fetch this via `SigningCertURL` on real SNS.
+     */
+    public function getSigningCertPem(): string
+    {
+        return $this->http->getText('/_fakecloud/sns/cert.pem');
+    }
+
+    /**
+     * List captured SMS messages. SNS SMS Publish calls don't hit a real
+     * carrier under fakecloud; this returns the destination phone number
+     * and message body so tests can assert delivery.
+     */
+    public function getSmsMessages(): SnsSmsResponse
+    {
+        return SnsSmsResponse::fromArray(
+            $this->http->get('/_fakecloud/sns/sms')
         );
     }
 }
@@ -680,6 +737,47 @@ final class ApiGatewayV2Client
             $this->http->get('/_fakecloud/apigatewayv2/requests')
         );
     }
+
+    /**
+     * List currently-active WebSocket connections across every
+     * WebSocket API the server has seen.
+     */
+    public function getConnections(): ApiGatewayV2ConnectionsResponse
+    {
+        return ApiGatewayV2ConnectionsResponse::fromArray(
+            $this->http->get('/_fakecloud/apigatewayv2/connections')
+        );
+    }
+
+    /**
+     * Fetch the mTLS configuration recorded for a custom domain name
+     * (truststore bundle, version, validity). Pass-through JSON — the
+     * server-side shape can evolve, so this returns the decoded array
+     * unmodified.
+     */
+    public function mtlsInfo(string $domainName): array
+    {
+        return $this->http->get(
+            '/_fakecloud/apigatewayv2/domain-names/'
+            . HttpTransport::encodePath($domainName)
+            . '/mtls-info'
+        );
+    }
+
+    /**
+     * Build the WebSocket upgrade URL for `apiId`. The SDK doesn't open
+     * the socket itself — pair this with any PHP WebSocket client
+     * (e.g. Ratchet, Workerman) in test code. `$stage` is accepted for
+     * symmetry with other SDKs but is not part of the path today.
+     */
+    public function wsUrl(string $apiId, ?string $stage = null): string
+    {
+        unset($stage);
+        $base = $this->http->baseUrl();
+        $base = preg_replace('#^https://#', 'wss://', $base, 1);
+        $base = preg_replace('#^http://#', 'ws://', $base, 1);
+        return $base . '/_fakecloud/apigatewayv2/ws/' . HttpTransport::encodePath($apiId);
+    }
 }
 
 final class StepFunctionsClient
@@ -884,6 +982,37 @@ final class EcsClient
             )
         );
     }
+
+    /**
+     * Fetch the IAM credentials fakecloud minted for a task. Mirrors
+     * what `AWS_CONTAINER_CREDENTIALS_RELATIVE_URI` exposes inside a
+     * real ECS task container. Field casing is PascalCase on the wire;
+     * the returned object exposes camelCase properties.
+     */
+    public function getTaskCredentials(string $taskId): EcsTaskCredentialsResponse
+    {
+        return EcsTaskCredentialsResponse::fromArray(
+            $this->http->get('/_fakecloud/ecs/creds/' . HttpTransport::encodePath($taskId))
+        );
+    }
+
+    /**
+     * Fetch the v3 task metadata dump (the legacy endpoint exposed via
+     * `ECS_CONTAINER_METADATA_URI`). Pass-through JSON.
+     */
+    public function getTaskMetadataV3(string $taskId): array
+    {
+        return $this->http->get('/_fakecloud/ecs/v3/' . HttpTransport::encodePath($taskId));
+    }
+
+    /**
+     * Fetch the v4 task metadata dump (the endpoint exposed via
+     * `ECS_CONTAINER_METADATA_URI_V4`). Pass-through JSON.
+     */
+    public function getTaskMetadataV4(string $taskId): array
+    {
+        return $this->http->get('/_fakecloud/ecs/v4/' . HttpTransport::encodePath($taskId));
+    }
 }
 
 final class Elbv2Client
@@ -958,6 +1087,35 @@ final class Route53Client
         $this->http->postJsonNoContent(
             '/_fakecloud/route53/health-checks/' . HttpTransport::encodePath($healthCheckId) . '/status',
             $body
+        );
+    }
+
+    /**
+     * Fetch the DNSSEC key material fakecloud derived for a hosted
+     * zone's first ACTIVE Key Signing Key. Throws {@see FakeCloudError}
+     * with status 404 if the zone has no active KSK.
+     */
+    public function getDnssecMaterial(string $zoneId): Route53DnssecMaterialResponse
+    {
+        return Route53DnssecMaterialResponse::fromArray(
+            $this->http->get(
+                '/_fakecloud/route53/zones/' . HttpTransport::encodePath($zoneId) . '/dnssec'
+            )
+        );
+    }
+
+    /**
+     * Sign an RRset under the hosted zone's first ACTIVE KSK and return
+     * the raw RRSIG fields so tests can verify the signature against
+     * the material returned by {@see getDnssecMaterial()}.
+     */
+    public function signDnssec(string $zoneId, Route53DnssecSignRequest $req): Route53DnssecSignResponse
+    {
+        return Route53DnssecSignResponse::fromArray(
+            $this->http->postJson(
+                '/_fakecloud/route53/zones/' . HttpTransport::encodePath($zoneId) . '/dnssec/sign',
+                $req->toArray()
+            )
         );
     }
 }

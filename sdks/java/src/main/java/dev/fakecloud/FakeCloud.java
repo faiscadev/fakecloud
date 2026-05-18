@@ -264,6 +264,35 @@ public final class FakeCloud {
         public RdsInstancesResponse getInstances() {
             return http.get("/_fakecloud/rds/instances", RdsInstancesResponse.class);
         }
+
+        /**
+         * Bridge endpoint the PostgreSQL {@code aws_lambda} extension calls
+         * into from inside an RDS DB instance container. Normally not driven
+         * by user code directly.
+         */
+        public Types.RdsLambdaInvokeResponse lambdaInvoke(Types.RdsLambdaInvokeRequest req) {
+            return http.postJson(
+                    "/_fakecloud/rds/lambda-invoke", req, Types.RdsLambdaInvokeResponse.class);
+        }
+
+        /**
+         * Bridge endpoint the PostgreSQL {@code aws_s3} extension calls into
+         * to fetch an object from a fakecloud bucket. Body is returned base64
+         * encoded so JSON transport stays text-only.
+         */
+        public Types.RdsS3ImportResponse s3Import(Types.RdsS3ImportRequest req) {
+            return http.postJson(
+                    "/_fakecloud/rds/s3-import", req, Types.RdsS3ImportResponse.class);
+        }
+
+        /**
+         * Bridge equivalent of an S3 PutObject driven from inside the DB
+         * container.
+         */
+        public Types.RdsS3ExportResponse s3Export(Types.RdsS3ExportRequest req) {
+            return http.postJson(
+                    "/_fakecloud/rds/s3-export", req, Types.RdsS3ExportResponse.class);
+        }
     }
 
     public static final class ElastiCacheClient {
@@ -416,6 +445,19 @@ public final class FakeCloud {
         public ConfirmSubscriptionResponse confirmSubscription(ConfirmSubscriptionRequest req) {
             return http.postJson(
                     "/_fakecloud/sns/confirm-subscription", req, ConfirmSubscriptionResponse.class);
+        }
+
+        /**
+         * Returns the PEM-encoded SNS signing certificate used by message
+         * signature validators (e.g. {@code aws-sns-validator}).
+         */
+        public String getCertPem() {
+            return http.getText("/_fakecloud/sns/cert.pem");
+        }
+
+        /** List captured SMS messages SNS has "delivered". */
+        public Types.SnsSmsResponse getSmsMessages() {
+            return http.get("/_fakecloud/sns/sms", Types.SnsSmsResponse.class);
         }
     }
 
@@ -680,6 +722,49 @@ public final class FakeCloud {
             return http.get(
                     "/_fakecloud/apigatewayv2/requests", ApiGatewayV2RequestsResponse.class);
         }
+
+        /** List every active WebSocket connection tracked by API Gateway v2. */
+        public Types.ApiGatewayV2ConnectionsResponse getConnections() {
+            return http.get(
+                    "/_fakecloud/apigatewayv2/connections",
+                    Types.ApiGatewayV2ConnectionsResponse.class);
+        }
+
+        /**
+         * Fetch the mTLS truststore info for a custom domain name. Returns
+         * a raw JSON map so the surface stays forward-compatible with
+         * server-side additions.
+         */
+        @SuppressWarnings("unchecked")
+        public Map<String, Object> getDomainNameMtlsInfo(String domainName) {
+            return http.get(
+                    "/_fakecloud/apigatewayv2/domain-names/"
+                            + encodePath(domainName)
+                            + "/mtls-info",
+                    Map.class);
+        }
+
+        /**
+         * Build the WebSocket URL fakecloud serves for the given API id on
+         * the default {@code "$default"} stage.
+         */
+        public String wsUrl(String apiId) {
+            return wsUrl(apiId, "$default");
+        }
+
+        /** Build the WebSocket URL for the given API id and stage. */
+        public String wsUrl(String apiId, String stage) {
+            String base = http.baseUrl();
+            String wsBase;
+            if (base.startsWith("https://")) {
+                wsBase = "wss://" + base.substring("https://".length());
+            } else if (base.startsWith("http://")) {
+                wsBase = "ws://" + base.substring("http://".length());
+            } else {
+                wsBase = base;
+            }
+            return wsBase + "/apigatewayv2/" + encodePath(apiId) + "/" + encodePath(stage);
+        }
     }
 
     public static final class StepFunctionsClient {
@@ -839,6 +924,41 @@ public final class FakeCloud {
                     "/_fakecloud/ecs/metadata/" + encodePath(taskArn),
                     EcsTaskMetadataResponse.class);
         }
+
+        /**
+         * Return short-lived IAM credentials for a task. Matches the wire
+         * shape ECS exposes via the task metadata credentials endpoint
+         * (PascalCase keys).
+         */
+        public Types.EcsTaskCredentialsResponse getCredentials(String taskId) {
+            return http.get(
+                    "/_fakecloud/ecs/creds/" + encodePath(taskId),
+                    Types.EcsTaskCredentialsResponse.class);
+        }
+
+        /**
+         * Return the raw v3 task metadata document for the task. The
+         * server response is a free-form JSON object that mirrors what
+         * {@code ECS_CONTAINER_METADATA_URI} would expose; returned as a
+         * {@code Map<String, Object>} pass-through to stay
+         * forward-compatible.
+         */
+        @SuppressWarnings("unchecked")
+        public Map<String, Object> getMetadataV3(String taskId) {
+            return http.get(
+                    "/_fakecloud/ecs/v3/" + encodePath(taskId), Map.class);
+        }
+
+        /**
+         * Return the raw v4 task metadata document for the task. Returned
+         * as a {@code Map<String, Object>} pass-through to stay
+         * forward-compatible.
+         */
+        @SuppressWarnings("unchecked")
+        public Map<String, Object> getMetadataV4(String taskId) {
+            return http.get(
+                    "/_fakecloud/ecs/v4/" + encodePath(taskId), Map.class);
+        }
     }
 
     public static final class Elbv2Client {
@@ -893,6 +1013,31 @@ public final class FakeCloud {
             http.postJsonNoContent(
                     "/_fakecloud/route53/health-checks/" + encodePath(healthCheckId) + "/status",
                     new SetHealthCheckStatusRequest(status, reason));
+        }
+
+        /**
+         * Fetch the deterministic DNSSEC material (DNSKEY + DS digest) for
+         * a hosted zone with at least one ACTIVE Key Signing Key. Throws
+         * {@link FakeCloudError} with status 404 when the zone has no
+         * active KSK.
+         */
+        public Types.Route53DnssecMaterialResponse getDnssecMaterial(String zoneId) {
+            return http.get(
+                    "/_fakecloud/route53/zones/" + encodePath(zoneId) + "/dnssec",
+                    Types.Route53DnssecMaterialResponse.class);
+        }
+
+        /**
+         * Sign an RRset under the zone's first ACTIVE KSK. Returns raw
+         * RRSIG fields so tests can verify the signature against the
+         * DNSKEY public key from {@link #getDnssecMaterial(String)}.
+         */
+        public Types.Route53DnssecSignResponse signDnssec(
+                String zoneId, Types.Route53DnssecSignRequest req) {
+            return http.postJson(
+                    "/_fakecloud/route53/zones/" + encodePath(zoneId) + "/dnssec/sign",
+                    req,
+                    Types.Route53DnssecSignResponse.class);
         }
     }
 
