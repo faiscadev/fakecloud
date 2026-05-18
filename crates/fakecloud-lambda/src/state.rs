@@ -343,7 +343,17 @@ pub struct EventInvokeConfig {
     pub function_arn: String,
     pub maximum_event_age: i64,
     pub maximum_retry_attempts: i64,
-    pub destination_config: serde_json::Value,
+    /// `None` -> input omitted `DestinationConfig` entirely; AWS responds
+    /// with `{OnSuccess:{}, OnFailure:{}}` (per `@examples` for
+    /// `PutFunctionEventInvokeConfig`).
+    ///
+    /// `Some({})` -> caller explicitly sent `{}`; AWS echoes `{}` verbatim
+    /// (round-trip semantics).
+    ///
+    /// `Some({...})` -> half-populated; AWS backfills the missing half as
+    /// `{}` (per `@examples` for `UpdateFunctionEventInvokeConfig`).
+    #[serde(default)]
+    pub destination_config: Option<serde_json::Value>,
     pub last_modified: DateTime<Utc>,
 }
 

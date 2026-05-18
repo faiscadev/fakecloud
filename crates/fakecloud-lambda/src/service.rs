@@ -1758,7 +1758,7 @@ impl LambdaService {
         state
             .event_invoke_configs
             .get(&key)
-            .map(|cfg| cfg.destination_config.clone())
+            .and_then(|cfg| cfg.destination_config.clone())
             .filter(|v| !v.is_null() && !v.as_object().map(|o| o.is_empty()).unwrap_or(false))
     }
 

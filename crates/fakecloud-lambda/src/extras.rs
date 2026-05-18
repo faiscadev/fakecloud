@@ -1983,7 +1983,7 @@ impl LambdaService {
             function_arn: function_arn.clone(),
             maximum_event_age: event_age,
             maximum_retry_attempts: retries,
-            destination_config: body.get("DestinationConfig").cloned().unwrap_or(json!({})),
+            destination_config: body.get("DestinationConfig").cloned(),
             last_modified: Utc::now(),
         };
         let mut accounts = self.state.write();
@@ -2725,18 +2725,28 @@ fn code_signing_json(c: &CodeSigningConfig) -> Value {
 }
 
 fn event_invoke_json(c: &EventInvokeConfig) -> Value {
-    // AWS always emits `DestinationConfig` with both `OnSuccess` and
-    // `OnFailure` populated (possibly empty objects). Backfill missing
-    // halves so strict shape validators and SDK destructuring don't
-    // trip on absent fields.
-    let mut destination = c.destination_config.clone();
-    if !destination.is_object() {
-        destination = json!({});
-    }
-    if let Some(map) = destination.as_object_mut() {
-        map.entry("OnSuccess".to_string()).or_insert(json!({}));
-        map.entry("OnFailure".to_string()).or_insert(json!({}));
-    }
+    // `DestinationConfig` serialization mirrors the three AWS behaviours
+    // documented in the Smithy `@examples` for Put/UpdateFunctionEventInvokeConfig
+    // and asserted by the conformance round-trip strategy:
+    //
+    //   stored `None`          (input omitted entirely)
+    //       -> emit `{OnSuccess:{}, OnFailure:{}}`  (Put example)
+    //   stored `Some({})`      (caller sent `{}`)
+    //       -> echo `{}` verbatim                    (round-trip strategy)
+    //   stored `Some({half})`  (one side configured)
+    //       -> backfill the other half as `{}`       (Update example)
+    let destination = match &c.destination_config {
+        None => json!({"OnSuccess": {}, "OnFailure": {}}),
+        Some(v) if !v.is_object() => json!({}),
+        Some(v) => {
+            let mut map = v.as_object().cloned().unwrap_or_default();
+            if !map.is_empty() {
+                map.entry("OnSuccess".to_string()).or_insert(json!({}));
+                map.entry("OnFailure".to_string()).or_insert(json!({}));
+            }
+            Value::Object(map)
+        }
+    };
     json!({
         "FunctionArn": c.function_arn,
         "MaximumEventAgeInSeconds": c.maximum_event_age,
