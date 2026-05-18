@@ -1414,7 +1414,7 @@ fn expect_err(result: Result<AwsResponse, AwsServiceError>) -> AwsServiceError {
 }
 
 #[test]
-fn start_session_returns_internal_error_without_echo_mode() {
+fn start_session_returns_target_not_connected_without_echo_mode() {
     // Belt-and-braces in case a parallel test polluted the env. The
     // module guards `serial_test` aren't on the workspace dev-deps yet,
     // so we just remove and verify the default path.
@@ -1423,18 +1423,18 @@ fn start_session_returns_internal_error_without_echo_mode() {
     let svc = make_service();
     let req = make_request("StartSession", json!({ "Target": "i-001" }));
     let err = expect_err(svc.start_session(&req));
-    // We use InternalServerError (declared in the SSM Smithy model) instead
-    // of a fakecloud-specific error code so SDK clients deserialize a known
-    // shape and conformance variants stay green.
-    assert_eq!(err.status(), http::StatusCode::INTERNAL_SERVER_ERROR);
-    assert_eq!(err.code(), "InternalServerError");
+    // We use `TargetNotConnected` because it's declared on StartSession in
+    // the SSM Smithy model and it's the most honest reading of fakecloud's
+    // state: there is no SSM agent attached to the target.
+    assert_eq!(err.status(), http::StatusCode::BAD_REQUEST);
+    assert_eq!(err.code(), "TargetNotConnected");
     // The error message must point at the documented escape hatches.
     assert!(err.message().contains("FAKECLOUD_SSM_SESSION_ECHO"));
     assert!(err.message().contains("/_fakecloud/ssm/sessions/inject"));
 }
 
 #[test]
-fn resume_session_returns_internal_error_without_echo_mode() {
+fn resume_session_returns_does_not_exist_without_echo_mode() {
     std::env::remove_var("FAKECLOUD_SSM_SESSION_ECHO");
 
     let svc = make_service();
@@ -1443,8 +1443,10 @@ fn resume_session_returns_internal_error_without_echo_mode() {
         json!({ "SessionId": "session-000000000001" }),
     );
     let err = expect_err(svc.resume_session(&req));
-    assert_eq!(err.status(), http::StatusCode::INTERNAL_SERVER_ERROR);
-    assert_eq!(err.code(), "InternalServerError");
+    // ResumeSession declares `DoesNotExistException`; outside echo mode the
+    // session doesn't exist on any data plane, so this is the honest code.
+    assert_eq!(err.status(), http::StatusCode::BAD_REQUEST);
+    assert_eq!(err.code(), "DoesNotExistException");
 }
 
 #[test]
@@ -3642,17 +3644,32 @@ fn get_maintenance_window_not_found() {
 }
 
 #[test]
-fn delete_maintenance_window_is_idempotent() {
-    // DeleteMaintenanceWindow's Smithy errors list is just
-    // InternalServerError — AWS docs explicitly state the op is
-    // idempotent on a missing WindowId, so fakecloud now mirrors that.
+fn delete_maintenance_window_is_idempotent_for_well_formed_id() {
+    // DeleteMaintenanceWindow is idempotent in AWS for well-formed but
+    // unknown WindowIds (its Smithy errors list is just
+    // InternalServerError; AWS docs state the op is idempotent). A
+    // malformed id — wrong @length, missing field — is rejected at the
+    // wire layer instead. We mirror that: a 20-char "mw-..." that
+    // happens to refer to no window returns 200, but a short stub like
+    // "mw-ghost" gets a 400.
     let svc = make_service();
-    let req = make_request("DeleteMaintenanceWindow", json!({"WindowId": "mw-ghost"}));
+    let req = make_request(
+        "DeleteMaintenanceWindow",
+        json!({"WindowId": "mw-ffffffffffffffff0"}),
+    );
     let resp = svc
         .delete_maintenance_window(&req)
-        .expect("delete on missing id should succeed");
+        .expect("delete on missing well-formed id should succeed");
     let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
-    assert_eq!(body["WindowId"], "mw-ghost");
+    assert_eq!(body["WindowId"], "mw-ffffffffffffffff0");
+}
+
+#[test]
+fn delete_maintenance_window_rejects_malformed_id() {
+    let svc = make_service();
+    let req = make_request("DeleteMaintenanceWindow", json!({"WindowId": "mw-ghost"}));
+    let err = expect_err(svc.delete_maintenance_window(&req));
+    assert_eq!(err.code(), "ValidationException");
 }
 
 #[test]

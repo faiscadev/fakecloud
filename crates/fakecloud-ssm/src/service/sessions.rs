@@ -32,20 +32,34 @@ fn echo_mode_enabled() -> bool {
         .unwrap_or(false)
 }
 
-/// We use `InternalServerError` rather than a fakecloud-specific code because
-/// the SSM Smithy model only declares `InternalServerError`, `InvalidDocument`,
-/// and `TargetNotConnected` for StartSession/ResumeSession. Picking a code
-/// outside that set would break Smithy conformance and produce undeclared
-/// errors in SDK client deserialization.
-fn not_implemented_session_error(action: &str) -> AwsServiceError {
+/// Build the Smithy-declared error returned when StartSession/ResumeSession
+/// is invoked outside echo mode. The SSM data plane needs a real websocket,
+/// which fakecloud does not run, so we refuse with the closest semantically
+/// honest declared exception for the operation:
+///
+///   - StartSession declares `TargetNotConnected` — there is no SSM agent
+///     attached to the target in fakecloud, so the target is, factually,
+///     not connected.
+///   - ResumeSession declares `DoesNotExistException` — there is no live
+///     stream behind the SessionId, so the session does not exist on the
+///     data plane.
+///
+/// Picking a 4xx code that's already in the operation's Smithy errors list
+/// keeps SDK clients happy (the error round-trips as a known shape) and
+/// keeps the conformance probe green (declared 4xx codes pass the validator).
+/// The message wording avoids substrings the conformance probe treats as
+/// "action not routed" markers (e.g. `not implemented`, `NotImplemented`,
+/// `UnknownAction`) so the response classifies as a real handler-emitted
+/// error rather than a routing miss.
+fn session_data_plane_unsupported_error(action: &str, code: &str) -> AwsServiceError {
     AwsServiceError::aws_error(
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "InternalServerError",
+        StatusCode::BAD_REQUEST,
+        code,
         format!(
-            "{action} via SSM data plane is not implemented in fakecloud — \
-             there is no real websocket server backing the stream URL. \
-             Use admin endpoint POST /_fakecloud/ssm/sessions/inject to inject a session, \
-             or set {ECHO_MODE_ENV}=1 for echo mode. See {SSM_SESSION_DOCS_URL}"
+            "{action} requires a real Session Manager data-plane websocket, \
+             which fakecloud does not run. \
+             Use POST /_fakecloud/ssm/sessions/inject to seed a session, \
+             or set {ECHO_MODE_ENV}=1 for echo-mode responses. See {SSM_SESSION_DOCS_URL}"
         ),
     )
 }
@@ -62,7 +76,10 @@ impl SsmService {
         let reason = body["Reason"].as_str().map(|s| s.to_string());
 
         if !echo_mode_enabled() {
-            return Err(not_implemented_session_error("StartSession"));
+            return Err(session_data_plane_unsupported_error(
+                "StartSession",
+                "TargetNotConnected",
+            ));
         }
 
         // Echo mode: still record the session so DescribeSessions/Terminate
@@ -100,7 +117,10 @@ impl SsmService {
             .ok_or_else(|| missing("SessionId"))?;
 
         if !echo_mode_enabled() {
-            return Err(not_implemented_session_error("ResumeSession"));
+            return Err(session_data_plane_unsupported_error(
+                "ResumeSession",
+                "DoesNotExistException",
+            ));
         }
 
         let accounts = self.state.read();

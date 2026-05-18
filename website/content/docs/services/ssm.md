@@ -40,14 +40,15 @@ curl -X POST "$ENDPOINT/_fakecloud/ssm/commands/$CMD_ID/fail" \
 
 ## Session Manager
 
-`StartSession` and `ResumeSession` return `500 InternalServerError` by default.
-fakecloud doesn't run a real SSM data-plane websocket, and returning a fake
-stream URL would lull integration tests into thinking the session was live.
-We use `InternalServerError` rather than a fakecloud-specific error code
-because the SSM Smithy model only declares `InternalServerError`,
-`InvalidDocument`, and `TargetNotConnected` for these operations — picking a
-code outside that set would break SDK error deserialization. The error
-message points at the escape hatches:
+`StartSession` returns `400 TargetNotConnected` and `ResumeSession` returns
+`400 DoesNotExistException` by default. fakecloud doesn't run a real SSM
+data-plane websocket, and returning a fake stream URL would lull integration
+tests into thinking the session was live. Each operation's error code is
+the closest semantically honest exception that's already declared on it in
+the SSM Smithy model (StartSession declares `TargetNotConnected`,
+ResumeSession declares `DoesNotExistException`) so SDK clients deserialize
+a known shape and the error round-trips cleanly. The error message points
+at the escape hatches:
 
 **Echo mode** — set `FAKECLOUD_SSM_SESSION_ECHO=1` to make `StartSession` /
 `ResumeSession` succeed with a sentinel token (`fakecloud-echo-mode-not-real-websocket`).
@@ -89,7 +90,7 @@ assert that the subsequent `PutParameter` errors rather than persisting.
 
 ## Limitations
 
-- `StartSession` returns a clear `501 Not Implemented` with a documentation pointer rather than opening a real websocket. The Session Manager data plane is not implemented; tests that depend on live port-forwarding should use the `POST /_fakecloud/ssm/sessions/{id}/inject` admin endpoint to simulate a websocket session.
+- `StartSession` returns the Smithy-declared `TargetNotConnected` (and `ResumeSession` returns `DoesNotExistException`) with a documentation pointer rather than opening a real websocket. The Session Manager data plane is not implemented; tests that depend on live port-forwarding should use the `POST /_fakecloud/ssm/sessions/{id}/inject` admin endpoint to simulate a websocket session.
 
 ## Source
 
