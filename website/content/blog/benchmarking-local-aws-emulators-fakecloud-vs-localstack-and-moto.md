@@ -17,7 +17,7 @@ This benchmark evaluates [fakecloud](https://github.com/faiscadev/fakecloud) aga
 
 Every second added to a test suite or a local environment start time is a tax on focus. If your local AWS environment takes 10 seconds to start, you stop running tests after every change. If it requires an auth token or an internet connection to verify a license, your workflow is tethered to external systems. 
 
-[fakecloud](https://github.com/faiscadev/fakecloud) is built on a "depth-first" philosophy. Instead of offering partial coverage for hundreds of services, it provides 100% API conformance for 33 core AWS services. It does this through a single, 19MB static binary that starts in approximately 500ms. 
+[fakecloud](https://github.com/faiscadev/fakecloud) is built on a "depth-first" philosophy. Instead of offering partial coverage for hundreds of services, it provides 100% API conformance for 39 core AWS services. It does this through a single, 19MB static binary that starts in approximately 500ms. 
 
 ### Performance by the Numbers
 
@@ -32,21 +32,21 @@ The following table compares the resource requirements and startup performance o
 | **Internet Required** | No | Yes (for initial auth) | No |
 | **License** | AGPL-3.0 | Proprietary / Tiered | Apache 2.0 |
 
-## API Conformance: 2,422 Operations and 59,000 Smithy Tests
+## API Conformance: 2,592 Operations and 86,327 Smithy Tests
 
 An emulator is only as good as its fidelity to the real AWS API. If `PutItem` works but `ConditionExpression` behaves differently than it does in us-east-1, your local tests are lying to you. 
 
-[fakecloud](https://github.com/faiscadev/fakecloud) achieves 100% conformance across its 33 supported services by using AWS's own Smithy models. On every commit, the fakecloud engine is validated against 59,000+ generated test variants. This ensures that field presence, waiter behavior, and error codes match the official AWS specification exactly.
+[fakecloud](https://github.com/faiscadev/fakecloud) achieves 100% conformance across its 39 supported services by using AWS's own Smithy models. On every commit, the fakecloud engine is validated against 86,327 generated test variants. This ensures that field presence, waiter behavior, and error codes match the official AWS specification exactly.
 
 ### Supported Services and Operations
 
-As of May 13, 2026, [fakecloud](https://github.com/faiscadev/fakecloud) supports 2,422 operations across 33 services, including:
+As of May 13, 2026, [fakecloud](https://github.com/faiscadev/fakecloud) supports 2,592 operations across 39 services, including:
 
-*   **Compute:** Lambda (23 runtimes), ECS, ECR (OCI v2 compatible).
+*   **Compute:** Lambda (70 ops, 23 runtimes), ECS, ECR (OCI v2 compatible).
 *   **Storage:** S3 (including multipart uploads and lifecycle policies), EBS.
 *   **Database:** DynamoDB (full expression support), RDS (Postgres, MySQL, MariaDB, Oracle, SQL Server), ElastiCache (Redis, Valkey, Memcached).
 *   **Messaging:** SQS, SNS (with fan-out and filter policies), EventBridge.
-*   **AI/ML:** Bedrock and Bedrock Runtime (111 operations).
+*   **AI/ML:** Bedrock surface (214 operations across 4 APIs: Bedrock, Bedrock Runtime, Bedrock Agent, Bedrock Agent Runtime).
 *   **Security:** IAM, STS, Secrets Manager, KMS, WAF v2.
 *   **Networking:** API Gateway v1/v2, ELBv2 (ALB/NLB), Route 53, CloudFront.
 
@@ -88,7 +88,7 @@ One of the primary weaknesses of traditional mocks is the lack of a real statefu
 
 For teams building AI-native applications, local emulation of LLM providers is critical. As of May 13, 2026, [fakecloud](https://github.com/faiscadev/fakecloud) provides the most comprehensive local Bedrock implementation available. 
 
-While LocalStack's Ultimate tier supports 4 Bedrock operations backed by Ollama, [fakecloud](https://github.com/faiscadev/fakecloud) supports the full surface of 111 operations. This includes not just `InvokeModel` and `Converse` (with streaming), but also the full control plane: guardrails, custom model jobs, and prompt management. 
+While LocalStack's Ultimate tier supports 4 Bedrock operations backed by Ollama, [fakecloud](https://github.com/faiscadev/fakecloud) supports the full Bedrock surface of 214 operations across 4 APIs. This includes not just `InvokeModel` and `Converse` (with streaming), but also the full control plane: guardrails, custom model jobs, and prompt management. 
 
 ### Bedrock Local Testing Example
 
@@ -145,7 +145,7 @@ The transition of LocalStack to a proprietary, account-based model in early 2026
 
 Moto remains a viable option for simple Python unit tests that don't require a real HTTP server. LocalStack remains the choice for teams that need its massive breadth of 100+ services and are willing to pay the "token tax" and subscription fees. 
 
-However, for the 33 core services that power the vast majority of cloud-native applications, [fakecloud](https://github.com/faiscadev/fakecloud) provides a faster, smaller, and more conformant alternative. Its ~500ms startup time and 19MB binary footprint make it the ideal choice for both local development and high-speed CI/CD pipelines.
+However, for the 39 core services that power the vast majority of cloud-native applications, [fakecloud](https://github.com/faiscadev/fakecloud) provides a faster, smaller, and more conformant alternative. Its ~500ms startup time and 19MB binary footprint make it the ideal choice for both local development and high-speed CI/CD pipelines.
 
 To verify these benchmarks in your own environment, run the following command to install the fakecloud binary and start your first local AWS session:
 
