@@ -1277,12 +1277,13 @@ impl CloudFrontService {
             )));
         }
         if let Some(max_items) = parse_query_value(&req.raw_query, "MaxItems") {
-            if let Ok(n) = max_items.parse::<i64>() {
-                if n > 100 {
-                    return Err(invalid_argument(format!(
-                        "MaxItems {n} exceeds maximum 100"
-                    )));
-                }
+            let n: i64 = max_items.parse().map_err(|_| {
+                invalid_argument(format!("MaxItems must be an integer, got '{max_items}'"))
+            })?;
+            if n > 100 {
+                return Err(invalid_argument(format!(
+                    "MaxItems {n} exceeds maximum 100"
+                )));
             }
         }
         // We never produce conflicts because every alias is owned by one
