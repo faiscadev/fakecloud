@@ -10,9 +10,10 @@ use crate::state::{SsmSession, SsmState};
 
 use super::{missing, SsmService};
 
-/// Documentation pointer returned in the StartSession 501 message so callers
-/// learn about the admin-inject + echo-mode escape hatches without having to
-/// dig through the source.
+/// Documentation pointer returned in the StartSession / ResumeSession
+/// data-plane-unsupported error message so callers learn about the
+/// admin-inject + echo-mode escape hatches without having to dig
+/// through the source.
 const SSM_SESSION_DOCS_URL: &str =
     "https://fakecloud.dev/docs/reference/limitations/#ssm-session-manager-data-plane";
 
@@ -22,8 +23,9 @@ pub(crate) const ECHO_TOKEN_SENTINEL: &str = "fakecloud-echo-mode-not-real-webso
 
 /// Env var that opts a session into "echo mode": StartSession/ResumeSession
 /// return canned-but-honest responses (with the sentinel token) instead of
-/// the 501 error. Tests that don't actually drive the websocket can flip
-/// this on to keep their existing flow working.
+/// the Smithy-declared `TargetNotConnected` / `DoesNotExistException`
+/// errors. Tests that don't actually drive the websocket can flip this on
+/// to keep their existing flow working.
 const ECHO_MODE_ENV: &str = "FAKECLOUD_SSM_SESSION_ECHO";
 
 fn echo_mode_enabled() -> bool {

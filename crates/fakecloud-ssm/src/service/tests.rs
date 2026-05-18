@@ -1488,8 +1488,8 @@ fn injected_session_round_trips_describe_and_terminate() {
 fn echo_mode_full_lifecycle() {
     // Drive the legacy lifecycle path with echo mode flipped on. We have
     // to set + unset the env var inline since this test mutates global
-    // process state; the explicit `remove_var` calls in the 501 tests
-    // above keep them isolated regardless of run order.
+    // process state; the explicit `remove_var` calls in the default-mode
+    // tests above keep them isolated regardless of run order.
     std::env::set_var("FAKECLOUD_SSM_SESSION_ECHO", "1");
 
     let svc = make_service();
