@@ -103,6 +103,12 @@ impl SsmService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
+        // ResourceType is `@required` in the SSM model — match
+        // RemoveTagsFromResource and reject the missing-field case
+        // instead of silently defaulting to "Parameter" (which made the
+        // negative `omit_ResourceType` conformance variant a silent pass
+        // whenever a default Parameter happened to exist in state).
+        validate_required("ResourceType", &body["ResourceType"])?;
         let resource_type = body["ResourceType"].as_str().unwrap_or("Parameter");
         let resource_id = body["ResourceId"]
             .as_str()

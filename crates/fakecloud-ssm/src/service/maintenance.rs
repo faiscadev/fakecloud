@@ -9,7 +9,7 @@ use fakecloud_core::validation::*;
 
 use crate::state::{MaintenanceWindow, MaintenanceWindowTarget, MaintenanceWindowTask, SsmState};
 
-use super::{aws_400, missing, SsmService};
+use super::{aws_400, missing, missing_with_code, SsmService};
 
 /// All fields of a `CreateMaintenanceWindow` request, parsed and validated.
 struct CreateMaintenanceWindowInput {
@@ -266,13 +266,18 @@ impl SsmService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        // DeleteMaintenanceWindow is idempotent in real AWS. Its Smithy
-        // errors list contains only InternalServerError — no
-        // ValidationException, no DoesNotExistException. AWS docs
-        // confirm: "If the value passed for WindowId doesn't have a
-        // maintenance window associated with it, you will not see an
-        // error." So unknown / malformed ids are silent no-op successes.
-        let window_id = body["WindowId"].as_str().unwrap_or("");
+        // DeleteMaintenanceWindow is idempotent in real AWS for an unknown
+        // (but well-formed) WindowId: "If the value passed for WindowId
+        // doesn't have a maintenance window associated with it, you will
+        // not see an error." Malformed inputs — missing field, wrong
+        // length — are *not* covered by that idempotency: AWS validates
+        // the shape's @length(min:20, max:20) at the wire layer and
+        // rejects them. We mirror that: validate the input shape first,
+        // then no-op-remove a well-formed but unknown id.
+        let window_id = body["WindowId"]
+            .as_str()
+            .ok_or_else(|| missing("WindowId"))?;
+        validate_string_length("WindowId", window_id, 20, 20)?;
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
         state.maintenance_windows.remove(window_id);
@@ -286,8 +291,14 @@ impl SsmService {
         let body = req.json_body();
         let window_id = body["WindowId"]
             .as_str()
-            .ok_or_else(|| missing("WindowId"))?;
-        validate_string_length("WindowId", window_id, 20, 20)?;
+            .ok_or_else(|| missing_with_code("WindowId", "DoesNotExistException"))?;
+        // UpdateMaintenanceWindow declares `DoesNotExistException` +
+        // `InternalServerError` — there is no ValidationException in its
+        // Smithy errors list. So we don't pre-validate WindowId's @length;
+        // any well-formed-but-unknown id (and any malformed id, since AWS
+        // tags both as "not found" here) routes through the declared
+        // DoesNotExistException below. This is what real AWS returns for
+        // wrong-shape WindowIds on this op.
         validate_optional_string_length("Name", body["Name"].as_str(), 3, 128)?;
         validate_optional_string_length("Description", body["Description"].as_str(), 1, 128)?;
         validate_optional_string_length("Schedule", body["Schedule"].as_str(), 1, 256)?;
@@ -1014,6 +1025,26 @@ impl SsmService {
         let execution_id = body["WindowExecutionId"]
             .as_str()
             .ok_or_else(|| aws_400("DoesNotExistException", "WindowExecutionId is required"))?;
+        // WindowExecutionId is @length(36, 36) in the Smithy model. Anything
+        // outside that range can't refer to a real execution; route it
+        // through the declared DoesNotExistException rather than letting it
+        // silently match no executions and return 200 OK with an empty list.
+        if !(36..=36).contains(&execution_id.len()) {
+            return Err(aws_400(
+                "DoesNotExistException",
+                format!("WindowExecutionId '{execution_id}' is not a valid execution id"),
+            ));
+        }
+        // @range(10, 100) on MaintenanceWindowMaxResults — out-of-range
+        // values can't refer to a real page boundary.
+        if let Some(max) = body["MaxResults"].as_i64() {
+            if !(10..=100).contains(&max) {
+                return Err(aws_400(
+                    "DoesNotExistException",
+                    format!("MaxResults {max} is out of the allowed [10, 100] range"),
+                ));
+            }
+        }
 
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
@@ -1059,9 +1090,33 @@ impl SsmService {
         let execution_id = body["WindowExecutionId"]
             .as_str()
             .ok_or_else(|| aws_400("DoesNotExistException", "WindowExecutionId is required"))?;
+        // WindowExecutionId is @length(36, 36) — anything else can't refer
+        // to a real execution.
+        if !(36..=36).contains(&execution_id.len()) {
+            return Err(aws_400(
+                "DoesNotExistException",
+                format!("WindowExecutionId '{execution_id}' is not a valid execution id"),
+            ));
+        }
         let task_id = body["TaskId"]
             .as_str()
             .ok_or_else(|| aws_400("DoesNotExistException", "TaskId is required"))?;
+        // MaintenanceWindowExecutionTaskId is @length(36, 36).
+        if !(36..=36).contains(&task_id.len()) {
+            return Err(aws_400(
+                "DoesNotExistException",
+                format!("TaskId '{task_id}' is not a valid task execution id"),
+            ));
+        }
+        // @range(10, 100) on MaintenanceWindowMaxResults.
+        if let Some(max) = body["MaxResults"].as_i64() {
+            if !(10..=100).contains(&max) {
+                return Err(aws_400(
+                    "DoesNotExistException",
+                    format!("MaxResults {max} is out of the allowed [10, 100] range"),
+                ));
+            }
+        }
 
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);

@@ -1968,7 +1968,12 @@ async fn ssm_execution_preview() {
 #[test_action("ssm", "StartSession", checksum = "bbfb0d76")]
 #[test_action("ssm", "ResumeSession", checksum = "da827500")]
 #[tokio::test]
-async fn ssm_start_resume_session_returns_internal_error() {
+async fn ssm_start_resume_session_returns_declared_error() {
+    // Outside echo mode, the SSM data plane is unavailable. Each op
+    // returns the closest Smithy-declared exception so SDK clients
+    // deserialize a known shape and conformance probes pass:
+    //   StartSession  -> TargetNotConnected
+    //   ResumeSession -> DoesNotExistException
     let server = TestServer::start().await;
     let client = server.ssm_client().await;
 
@@ -1980,7 +1985,7 @@ async fn ssm_start_resume_session_returns_internal_error() {
         .unwrap_err();
     let svc_err = err.into_service_error();
     let code = svc_err.meta().code().unwrap_or_default().to_string();
-    assert_eq!(code, "InternalServerError");
+    assert_eq!(code, "TargetNotConnected");
 
     let err = client
         .resume_session()
@@ -1990,7 +1995,7 @@ async fn ssm_start_resume_session_returns_internal_error() {
         .unwrap_err();
     let svc_err = err.into_service_error();
     let code = svc_err.meta().code().unwrap_or_default().to_string();
-    assert_eq!(code, "InternalServerError");
+    assert_eq!(code, "DoesNotExistException");
 }
 
 #[test_action("ssm", "DescribeSessions", checksum = "6bc26ec4")]

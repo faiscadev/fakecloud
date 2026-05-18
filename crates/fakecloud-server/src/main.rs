@@ -3993,9 +3993,10 @@ async fn main() {
         )
         .route(
             // Drop a fake SSM session record into state. StartSession
-            // returns 501 by default (no real websocket data plane); this
-            // endpoint lets tests still exercise DescribeSessions /
-            // TerminateSession without flipping FAKECLOUD_SSM_SESSION_ECHO.
+            // returns the Smithy-declared `TargetNotConnected` by default
+            // (no real websocket data plane); this endpoint lets tests
+            // still exercise DescribeSessions / TerminateSession without
+            // flipping FAKECLOUD_SSM_SESSION_ECHO.
             "/_fakecloud/ssm/sessions/inject",
             axum::routing::post({
                 let ss = ssm_state_for_session_inject;

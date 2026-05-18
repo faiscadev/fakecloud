@@ -525,7 +525,8 @@ pub struct SsmParameterPolicyEventsResponse {
 
 /// Body shape for `POST /_fakecloud/ssm/sessions/inject`. Drops a fake
 /// session record into state without going through StartSession (which
-/// returns 501 unless `FAKECLOUD_SSM_SESSION_ECHO=1`). Lets tests assert
+/// returns the Smithy-declared `TargetNotConnected` unless
+/// `FAKECLOUD_SSM_SESSION_ECHO=1`). Lets tests assert
 /// `DescribeSessions`/`TerminateSession` paths work end-to-end.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

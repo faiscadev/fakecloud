@@ -17,7 +17,7 @@ fakecloud implements **37 AWS services** with **2,482 operations**. Every operat
 | [DynamoDB](@/docs/services/dynamodb.md) | 57 | JSON 1.1 | Full | Full | — |
 | [IAM](@/docs/services/iam.md) | 176 | JSON 1.1 (Query) | Full | Full | — |
 | [STS](@/docs/services/sts.md) | 11 | JSON 1.1 (Query) | Full | Full | — |
-| [SSM](@/docs/services/ssm.md) | 146 | JSON 1.1 | Full | Partial | `StartSession` returns a clear 501 with documentation pointer rather than opening a real websocket. Session Manager data plane is not implemented. |
+| [SSM](@/docs/services/ssm.md) | 146 | JSON 1.1 | Full | Partial | `StartSession` returns the model's `TargetNotConnected` and `ResumeSession` returns `DoesNotExistException` with a documentation pointer rather than opening a real websocket. Session Manager data plane is not implemented. |
 | [Secrets Manager](@/docs/services/secretsmanager.md) | 23 | JSON 1.1 | Full | Full | — |
 | [CloudWatch Logs](@/docs/services/logs.md) | 113 | JSON 1.1 | Full | Full | `StartLiveTail` returns streamed results with real `GetLogObject` pointer resolution. `GetLogFields` persists and aggregates JSON keys observed across the source's events. Delivery configuration persists with standard AWS templates. Log event export to S3 and Firehose is real. Metric filters extract metrics from ingested logs. |
 | [KMS](@/docs/services/kms.md) | 53 | JSON 1.1 | Full | Full | Real ECDSA P-256, P-384, and P-521 signing. |

@@ -1601,13 +1601,13 @@ async fn ssm_automation_execution_lifecycle() {
 // ── Sessions ──────────────────────────────────────────────────
 
 #[tokio::test]
-async fn ssm_start_session_returns_internal_error() {
+async fn ssm_start_session_returns_target_not_connected() {
     // Real fakecloud behavior: no websocket data plane, so StartSession
     // and ResumeSession refuse loud rather than handing back a fake
-    // stream URL. We use InternalServerError (declared in the SSM Smithy
-    // model) so the error round-trips through the SDK as a known shape.
-    // The test is the user-facing contract: callers see a typed error
-    // pointing at the documented escape hatches.
+    // stream URL. We use the closest Smithy-declared exception for each
+    // operation (`TargetNotConnected` on StartSession, `DoesNotExistException`
+    // on ResumeSession) so the error round-trips through the SDK as a known
+    // shape and conformance variants stay green.
     let server = TestServer::start().await;
     let client = server.ssm_client().await;
 
@@ -1619,7 +1619,7 @@ async fn ssm_start_session_returns_internal_error() {
         .unwrap_err();
     let svc_err = err.into_service_error();
     let code = svc_err.meta().code().unwrap_or_default();
-    assert_eq!(code, "InternalServerError");
+    assert_eq!(code, "TargetNotConnected");
     let msg = svc_err.meta().message().unwrap_or_default();
     assert!(
         msg.contains("FAKECLOUD_SSM_SESSION_ECHO"),
@@ -1639,7 +1639,7 @@ async fn ssm_start_session_returns_internal_error() {
     let svc_err = err.into_service_error();
     assert_eq!(
         svc_err.meta().code().unwrap_or_default(),
-        "InternalServerError"
+        "DoesNotExistException"
     );
 }
 

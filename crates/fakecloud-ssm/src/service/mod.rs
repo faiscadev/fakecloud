@@ -168,7 +168,8 @@ impl SsmService {
 
     /// Admin: inject a fake SSM session record so DescribeSessions /
     /// TerminateSession round-trip without going through StartSession (which
-    /// returns 501 unless `FAKECLOUD_SSM_SESSION_ECHO=1`). The injected
+    /// returns the Smithy-declared `TargetNotConnected` unless
+    /// `FAKECLOUD_SSM_SESSION_ECHO=1`). The injected
     /// session is otherwise indistinguishable from one created by StartSession
     /// in echo mode. Returns the assigned `SessionId`.
     #[allow(clippy::too_many_arguments)]
