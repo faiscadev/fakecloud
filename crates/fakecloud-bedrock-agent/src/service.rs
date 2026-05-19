@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use fakecloud_aws::arn::Arn;
 use http::{Method, StatusCode};
 use parking_lot::RwLock;
 use serde_json::{json, Value};
@@ -1128,11 +1129,17 @@ fn prompt_summary_json(p: &Prompt, region: &str, account_id: &str) -> Value {
 }
 
 fn flow_arn(flow_id: &str, region: &str, account_id: &str) -> String {
-    format!("arn:aws:bedrock:{region}:{account_id}:flow/{flow_id}")
+    Arn::new("bedrock", region, account_id, &format!("flow/{flow_id}")).to_string()
 }
 
 fn prompt_arn(prompt_id: &str, region: &str, account_id: &str) -> String {
-    format!("arn:aws:bedrock:{region}:{account_id}:prompt/{prompt_id}")
+    Arn::new(
+        "bedrock",
+        region,
+        account_id,
+        &format!("prompt/{prompt_id}"),
+    )
+    .to_string()
 }
 
 fn flow_json(f: &Flow) -> Value {
