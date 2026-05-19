@@ -185,7 +185,26 @@ pub(crate) fn list_advanced_prompt_optimization_jobs(
     let s = accts.get(&req.account_id).unwrap_or(&empty);
     let mut items: Vec<&AdvancedPromptOptimizationJob> =
         s.advanced_prompt_optimization_jobs.values().collect();
-    items.sort_by(|a, b| a.job_arn.cmp(&b.job_arn));
+    let sort_by = req
+        .query_params
+        .get("sortBy")
+        .map(|s| s.as_str())
+        .unwrap_or("CreationTime");
+    let descending = matches!(
+        req.query_params.get("sortOrder").map(|s| s.as_str()),
+        Some("Descending")
+    );
+    items.sort_by(|a, b| {
+        let ord = match sort_by {
+            "CreationTime" => a.creation_time.cmp(&b.creation_time),
+            _ => a.job_arn.cmp(&b.job_arn),
+        };
+        if descending {
+            ord.reverse()
+        } else {
+            ord
+        }
+    });
 
     let start = if let Some(token) = next_token {
         items
