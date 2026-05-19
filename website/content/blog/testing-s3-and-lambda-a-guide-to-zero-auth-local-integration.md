@@ -23,7 +23,7 @@ fakecloud solves this by providing a local AWS environment that requires:
 - No internet connection
 - No paid subscriptions
 
-It is a standalone binary (~19MB) that starts in approximately 500ms, giving you a 100% conformant API surface for 33 core AWS services.
+It is a standalone binary (~19MB) that starts in approximately 500ms, giving you a 100% conformant API surface for 39 AWS services.
 
 ## Solution: Real Cross-Service Integration
 
@@ -36,15 +36,15 @@ To maintain engineering pragmatism, we explicitly eliminate the following requir
 - **No IAM Management**: While fakecloud supports IAM operations, it defaults to a permissive state for local development, so you aren't fighting `AccessDenied` errors while trying to fix a bug.
 - **No Latency**: The sub-second startup and local execution mean your test suite runs as fast as your CPU allows.
 
-## 100% Conformance Across 2,422 Operations
+## 100% Conformance Across 2,591 Operations
 
-Reliability in an emulator is measured by its conformance to the official AWS API. fakecloud is built on top of 59,000+ Smithy-model-generated test variants. This ensures that when your application calls `s3:PutBucketNotificationConfiguration`, the request and response shapes are identical to what you would see in `us-east-1`.
+Reliability in an emulator is measured by its conformance to the official AWS API. fakecloud is built on top of 86,327 Smithy-model-generated test variants. This ensures that when your application calls `s3:PutBucketNotificationConfiguration`, the request and response shapes are identical to what you would see in `us-east-1`.
 
 | Feature | fakecloud | Traditional Mocks | Cloud-First |
 | :--- | :--- | :--- | :--- |
 | **Startup Time** | ~500ms | <100ms | Minutes |
 | **Auth Required** | None | None | IAM/SSO |
-| **API Conformance** | 100% (2,422 ops) | Low/Manual | 100% |
+| **API Conformance** | 100% (2,591 ops) | Low/Manual | 100% |
 | **Cross-Service Triggers** | Yes (S3, SNS, SQS) | No | Yes |
 | **Binary Size** | ~19MB | N/A | N/A |
 

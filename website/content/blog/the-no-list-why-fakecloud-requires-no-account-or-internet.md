@@ -63,7 +63,7 @@ fakecloud operations happen in sub-millisecond timeframes.
 
 This speed allows for a "test-driven" workflow where the entire infrastructure is destroyed and recreated for every single test case, ensuring total isolation without the time penalty.
 
-## 4. High Fidelity: 100% API Conformance Across 2,422 Operations
+## 4. High Fidelity: 100% API Conformance Across 2,591 Operations
 
 "Local" often implies "limited." Many developers resort to mocks or simplified stubs that behave differently than the real AWS API. This leads to the "Works on My Machine" syndrome, where code passes locally but fails in production due to subtle API differences.
 
@@ -72,8 +72,8 @@ fakecloud solves this through rigorous conformance. We don't just "guess" how th
 ### The Numbers of Reliability
 
 *   **33+ Core AWS Services:** Including S3, Lambda, DynamoDB, SQS, SNS, IAM, and Bedrock.
-*   **2,422 Operations:** Every operation is mapped to the official AWS specification.
-*   **59,000+ Test Variants:** Our conformance suite runs tens of thousands of generated tests to ensure that error codes, headers, and payload structures match the real AWS environment exactly.
+*   **2,591 Operations:** Every operation is mapped to the official AWS specification.
+*   **86,327 Test Variants:** Our conformance suite runs tens of thousands of generated tests to ensure that error codes, headers, and payload structures match the real AWS environment exactly.
 
 ### Real Cross-Service Integrations
 
