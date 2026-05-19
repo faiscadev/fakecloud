@@ -11,7 +11,7 @@ impl ResourceProvisioner {
         let state = accounts.get_or_create(&self.account_id);
         let bucket = state.buckets.get(physical_id)?;
         match attribute {
-            "Arn" => Some(format!("arn:aws:s3:::{}", bucket.name)),
+            "Arn" => Some(Arn::s3(&bucket.name).to_string()),
             "DomainName" => Some(format!("{}.s3.amazonaws.com", bucket.name)),
             "RegionalDomainName" => {
                 Some(format!("{}.s3.{}.amazonaws.com", bucket.name, self.region))
@@ -46,7 +46,7 @@ impl ResourceProvisioner {
         let bucket = S3Bucket::new(bucket_name, &state.region, &state.account_id);
         state.buckets.insert(bucket_name.to_string(), bucket);
 
-        let arn = format!("arn:aws:s3:::{bucket_name}");
+        let arn = Arn::s3(&bucket_name).to_string();
         let domain_name = format!("{bucket_name}.s3.amazonaws.com");
         let regional_domain_name = format!("{bucket_name}.s3.{region}.amazonaws.com");
         let dual_stack_domain_name = format!("{bucket_name}.s3.dualstack.{region}.amazonaws.com");
