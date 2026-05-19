@@ -415,8 +415,20 @@ impl RdsService {
         };
 
         // Runtime check moved past lookup so a missing snapshot surfaces
-        // the declared `DBSnapshotNotFoundFault` first.
-        let runtime = self.require_runtime()?;
+        // the declared `DBSnapshotNotFoundFault` first. If the runtime
+        // isn't configured we have to roll back the pending instance
+        // creation marker first — otherwise the slot stays reserved
+        // and the next attempt hits DBInstanceAlreadyExists.
+        let runtime = match self.require_runtime() {
+            Ok(r) => r,
+            Err(e) => {
+                self.state
+                    .write()
+                    .get_or_create(&request.account_id)
+                    .cancel_instance_creation(&db_instance_identifier);
+                return Err(e);
+            }
+        };
 
         let db_name = snapshot
             .db_name

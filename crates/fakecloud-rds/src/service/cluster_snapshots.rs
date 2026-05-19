@@ -84,7 +84,13 @@ impl RdsService {
                 .get("clusters")
                 .and_then(|m| m.get(&cluster_id))
                 .cloned()
-                .unwrap_or_else(|| json!({}));
+                .ok_or_else(|| {
+                    AwsServiceError::aws_error(
+                        StatusCode::NOT_FOUND,
+                        "DBClusterNotFoundFault",
+                        format!("DBCluster {cluster_id} not found."),
+                    )
+                })?;
             if let Some(obj) = entry.as_object_mut() {
                 obj.insert(
                     "DBClusterSnapshotIdentifier".to_string(),
@@ -168,29 +174,17 @@ impl RdsService {
                     format!("DBClusterSnapshot {snapshot_id} not found."),
                 )
             })?;
-        let source_cluster_id = snapshot
-            .get("DBClusterIdentifier")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
         let pending_dump_b64 = snapshot
             .get("DumpDataB64")
             .and_then(|v| v.as_str())
             .map(str::to_string);
 
-        let mut entry = state
-            .extras
-            .get("clusters")
-            .and_then(|m| m.get(&source_cluster_id))
-            .cloned()
-            .unwrap_or_else(|| {
-                json!({
-                    "Engine": optional_query_param(request, "Engine").unwrap_or_else(|| "aurora-postgresql".to_string()),
-                    "EngineVersion": optional_query_param(request, "EngineVersion").unwrap_or_else(|| "15.3".to_string()),
-                    "MasterUsername": "postgres",
-                    "Port": 5432,
-                })
-            });
+        // Hydrate the restored cluster entry from the snapshot directly,
+        // not from the current `clusters` map — the snapshot is the
+        // point-in-time the caller wants to roll back to. CreateDBClusterSnapshot
+        // copies the source cluster JSON into the snapshot, so this carries
+        // engine/version/network/parameter-group/etc.
+        let mut entry = snapshot.clone();
         if let Some(obj) = entry.as_object_mut() {
             obj.insert("DBClusterIdentifier".to_string(), json!(target));
             obj.insert("DBClusterArn".to_string(), json!(arn));
