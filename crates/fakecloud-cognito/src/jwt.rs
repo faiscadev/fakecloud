@@ -167,18 +167,6 @@ pub fn verify_rs256(token: &str, private_key_pem: &str) -> Result<(Value, Value)
     Ok((header, payload))
 }
 
-/// SubjectPublicKeyInfo PEM for callers that want the raw public half
-/// without parsing the JWKS document.
-#[allow(dead_code)]
-pub(crate) fn public_key_pem(private_key_pem: &str) -> Option<String> {
-    use rsa::pkcs8::DecodePrivateKey;
-    let private_key = RsaPrivateKey::from_pkcs8_pem(private_key_pem).ok()?;
-    let public_key = RsaPublicKey::from(&private_key);
-    public_key
-        .to_public_key_pem(rsa::pkcs8::LineEnding::LF)
-        .ok()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
