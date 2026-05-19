@@ -7,18 +7,81 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use crate::state::{AdvancedPromptOptimizationJob, SharedBedrockState};
 
+fn validation(msg: impl Into<String>) -> AwsServiceError {
+    AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "ValidationException", msg)
+}
+
+fn check_str_len(field: &str, val: &str, min: usize, max: usize) -> Result<(), AwsServiceError> {
+    if val.len() < min || val.len() > max {
+        return Err(validation(format!(
+            "{field} length must be in [{min},{max}], got {}",
+            val.len()
+        )));
+    }
+    Ok(())
+}
+
+fn check_optional_str_len(
+    field: &str,
+    v: Option<&str>,
+    min: usize,
+    max: usize,
+) -> Result<(), AwsServiceError> {
+    if let Some(s) = v {
+        check_str_len(field, s, min, max)?;
+    }
+    Ok(())
+}
+
+fn check_optional_enum(
+    field: &str,
+    v: Option<&str>,
+    allowed: &[&str],
+) -> Result<(), AwsServiceError> {
+    if let Some(s) = v {
+        if !allowed.contains(&s) {
+            return Err(validation(format!(
+                "{field} must be one of {allowed:?}, got '{s}'"
+            )));
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn create_advanced_prompt_optimization_job(
     state: &SharedBedrockState,
     req: &AwsRequest,
     body: &Value,
 ) -> Result<AwsResponse, AwsServiceError> {
-    let job_name = body["jobName"].as_str().ok_or_else(|| {
-        AwsServiceError::aws_error(
-            StatusCode::BAD_REQUEST,
-            "ValidationException",
-            "jobName is required",
-        )
-    })?;
+    let job_name = body["jobName"]
+        .as_str()
+        .ok_or_else(|| validation("jobName is required"))?;
+    check_str_len("jobName", job_name, 1, 100)?;
+    check_optional_str_len("jobDescription", body["jobDescription"].as_str(), 1, 500)?;
+    check_optional_str_len("clientToken", body["clientToken"].as_str(), 1, 256)?;
+    check_optional_str_len(
+        "encryptionKeyArn",
+        body["encryptionKeyArn"].as_str(),
+        1,
+        2048,
+    )?;
+    if body.get("inputConfig").map(|v| v.is_null()).unwrap_or(true) {
+        return Err(validation("inputConfig is required"));
+    }
+    if body
+        .get("outputConfig")
+        .map(|v| v.is_null())
+        .unwrap_or(true)
+    {
+        return Err(validation("outputConfig is required"));
+    }
+    if body
+        .get("modelConfigurations")
+        .map(|v| v.is_null())
+        .unwrap_or(true)
+    {
+        return Err(validation("modelConfigurations is required"));
+    }
 
     let job_id = Uuid::new_v4().to_string();
     let job_arn = format!(
@@ -82,6 +145,33 @@ pub(crate) fn list_advanced_prompt_optimization_jobs(
     state: &SharedBedrockState,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
+    if let Some(s) = req.query_params.get("maxResults") {
+        let n: i64 = s
+            .parse()
+            .map_err(|_| validation("maxResults must be int"))?;
+        if !(1..=1000).contains(&n) {
+            return Err(validation(format!(
+                "maxResults must be in [1,1000], got {n}"
+            )));
+        }
+    }
+    check_optional_str_len(
+        "nextToken",
+        req.query_params.get("nextToken").map(|s| s.as_str()),
+        1,
+        2048,
+    )?;
+    check_optional_enum(
+        "sortBy",
+        req.query_params.get("sortBy").map(|s| s.as_str()),
+        &["CreationTime"],
+    )?;
+    check_optional_enum(
+        "sortOrder",
+        req.query_params.get("sortOrder").map(|s| s.as_str()),
+        &["Ascending", "Descending"],
+    )?;
+
     let max_results = req
         .query_params
         .get("maxResults")
@@ -95,7 +185,26 @@ pub(crate) fn list_advanced_prompt_optimization_jobs(
     let s = accts.get(&req.account_id).unwrap_or(&empty);
     let mut items: Vec<&AdvancedPromptOptimizationJob> =
         s.advanced_prompt_optimization_jobs.values().collect();
-    items.sort_by(|a, b| a.job_arn.cmp(&b.job_arn));
+    let sort_by = req
+        .query_params
+        .get("sortBy")
+        .map(|s| s.as_str())
+        .unwrap_or("CreationTime");
+    let descending = matches!(
+        req.query_params.get("sortOrder").map(|s| s.as_str()),
+        Some("Descending")
+    );
+    items.sort_by(|a, b| {
+        let ord = match sort_by {
+            "CreationTime" => a.creation_time.cmp(&b.creation_time),
+            _ => a.job_arn.cmp(&b.job_arn),
+        };
+        if descending {
+            ord.reverse()
+        } else {
+            ord
+        }
+    });
 
     let start = if let Some(token) = next_token {
         items
@@ -261,6 +370,15 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
 
+    fn full_body(name: &str) -> Value {
+        json!({
+            "jobName": name,
+            "inputConfig": {"s3Uri": "s3://b/in"},
+            "outputConfig": {"s3Uri": "s3://b/out"},
+            "modelConfigurations": {"targetModel": "anthropic.claude-3-sonnet"}
+        })
+    }
+
     fn shared() -> SharedBedrockState {
         Arc::new(RwLock::new(
             fakecloud_core::multi_account::MultiAccountState::new(
@@ -324,7 +442,7 @@ mod tests {
     #[test]
     fn get_by_arn_or_name_or_id() {
         let s = shared();
-        create_advanced_prompt_optimization_job(&s, &req(), &json!({"jobName": "n1"})).unwrap();
+        create_advanced_prompt_optimization_job(&s, &req(), &full_body("n1")).unwrap();
         let arn = s
             .read()
             .default_ref()
@@ -343,12 +461,8 @@ mod tests {
     fn list_paginates() {
         let s = shared();
         for i in 0..3 {
-            create_advanced_prompt_optimization_job(
-                &s,
-                &req(),
-                &json!({"jobName": format!("j{i}")}),
-            )
-            .unwrap();
+            create_advanced_prompt_optimization_job(&s, &req(), &full_body(&format!("j{i}")))
+                .unwrap();
         }
         let mut r = req();
         r.query_params
@@ -363,7 +477,7 @@ mod tests {
     #[test]
     fn stop_transitions_to_stopped() {
         let s = shared();
-        create_advanced_prompt_optimization_job(&s, &req(), &json!({"jobName": "j"})).unwrap();
+        create_advanced_prompt_optimization_job(&s, &req(), &full_body("j")).unwrap();
         let arn = s
             .read()
             .default_ref()
@@ -382,7 +496,7 @@ mod tests {
     #[test]
     fn stop_already_stopped_returns_conflict() {
         let s = shared();
-        create_advanced_prompt_optimization_job(&s, &req(), &json!({"jobName": "j"})).unwrap();
+        create_advanced_prompt_optimization_job(&s, &req(), &full_body("j")).unwrap();
         let arn = s
             .read()
             .default_ref()
@@ -401,8 +515,8 @@ mod tests {
     #[test]
     fn batch_delete_removes_matches_collects_errors() {
         let s = shared();
-        create_advanced_prompt_optimization_job(&s, &req(), &json!({"jobName": "a"})).unwrap();
-        create_advanced_prompt_optimization_job(&s, &req(), &json!({"jobName": "b"})).unwrap();
+        create_advanced_prompt_optimization_job(&s, &req(), &full_body("a")).unwrap();
+        create_advanced_prompt_optimization_job(&s, &req(), &full_body("b")).unwrap();
         let body = json!({"jobIdentifiers": ["a", "missing"]});
         let resp = batch_delete_advanced_prompt_optimization_job(&s, &req(), &body).unwrap();
         let v: Value =
