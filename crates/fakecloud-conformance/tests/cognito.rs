@@ -2130,8 +2130,8 @@ async fn cognito_resend_confirmation_code() {
 // MFA / Software Tokens
 // ---------------------------------------------------------------------------
 
-#[test_action("cognito-idp", "SetUserPoolMfaConfig", checksum = "590320fb")]
-#[test_action("cognito-idp", "GetUserPoolMfaConfig", checksum = "de56204f")]
+#[test_action("cognito-idp", "SetUserPoolMfaConfig", checksum = "5088405f")]
+#[test_action("cognito-idp", "GetUserPoolMfaConfig", checksum = "685386f6")]
 #[tokio::test]
 async fn cognito_set_get_user_pool_mfa_config() {
     let server = TestServer::start().await;
@@ -2170,7 +2170,7 @@ async fn cognito_set_get_user_pool_mfa_config() {
     );
 }
 
-#[test_action("cognito-idp", "AdminSetUserMFAPreference", checksum = "e45639ae")]
+#[test_action("cognito-idp", "AdminSetUserMFAPreference", checksum = "98a9d568")]
 #[tokio::test]
 async fn cognito_admin_set_user_mfa_preference() {
     let server = TestServer::start().await;
@@ -2207,7 +2207,7 @@ async fn cognito_admin_set_user_mfa_preference() {
         .unwrap();
 }
 
-#[test_action("cognito-idp", "SetUserMFAPreference", checksum = "c0f29c1b")]
+#[test_action("cognito-idp", "SetUserMFAPreference", checksum = "a6f56143")]
 #[tokio::test]
 async fn cognito_set_user_mfa_preference() {
     let server = TestServer::start().await;
@@ -3999,7 +3999,7 @@ async fn cognito_delete_managed_login_branding() {
 // Terms
 // ---------------------------------------------------------------------------
 
-#[test_action("cognito-idp", "CreateTerms", checksum = "b7975c85")]
+#[test_action("cognito-idp", "CreateTerms", checksum = "90fa360e")]
 #[tokio::test]
 async fn cognito_create_terms() {
     let server = TestServer::start().await;
@@ -4037,7 +4037,7 @@ async fn cognito_create_terms() {
     assert_eq!(body["Terms"]["TermsName"].as_str().unwrap(), "test-terms");
 }
 
-#[test_action("cognito-idp", "DescribeTerms", checksum = "a01327c5")]
+#[test_action("cognito-idp", "DescribeTerms", checksum = "e32983f6")]
 #[tokio::test]
 async fn cognito_describe_terms() {
     let server = TestServer::start().await;
@@ -4147,7 +4147,7 @@ async fn cognito_list_terms() {
     assert_eq!(terms.len(), 2);
 }
 
-#[test_action("cognito-idp", "UpdateTerms", checksum = "fa5f729e")]
+#[test_action("cognito-idp", "UpdateTerms", checksum = "831f5b6c")]
 #[tokio::test]
 async fn cognito_update_terms() {
     let server = TestServer::start().await;

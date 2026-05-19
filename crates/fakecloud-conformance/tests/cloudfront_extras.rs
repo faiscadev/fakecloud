@@ -206,7 +206,7 @@ async fn cf_list_anycast_ip_lists() {
 
 // ─── Trust Store ──────────────────────────────────────────────────────
 
-#[test_action("cloudfront", "CreateTrustStore", checksum = "c948b38a")]
+#[test_action("cloudfront", "CreateTrustStore", checksum = "f5851e5b")]
 #[tokio::test]
 async fn cf_create_trust_store() {
     let server = TestServer::start().await;
@@ -219,7 +219,7 @@ async fn cf_create_trust_store() {
         .unwrap();
 }
 
-#[test_action("cloudfront", "GetTrustStore", checksum = "047bc959")]
+#[test_action("cloudfront", "GetTrustStore", checksum = "ff3e6c6e")]
 #[tokio::test]
 async fn cf_get_trust_store() {
     let server = TestServer::start().await;
@@ -235,7 +235,7 @@ async fn cf_get_trust_store() {
     cf.get_trust_store().identifier(&id).send().await.unwrap();
 }
 
-#[test_action("cloudfront", "UpdateTrustStore", checksum = "ecda6a70")]
+#[test_action("cloudfront", "UpdateTrustStore", checksum = "a43ad917")]
 #[tokio::test]
 async fn cf_update_trust_store() {
     let server = TestServer::start().await;

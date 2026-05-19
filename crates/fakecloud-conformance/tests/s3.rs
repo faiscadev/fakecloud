@@ -6,10 +6,10 @@ use helpers::TestServer;
 
 // -- Bucket lifecycle --
 
-#[test_action("s3", "CreateBucket", checksum = "15accf87")]
+#[test_action("s3", "CreateBucket", checksum = "56299072")]
 #[test_action("s3", "ListBuckets", checksum = "80b1347a")]
 #[test_action("s3", "HeadBucket", checksum = "803cc873")]
-#[test_action("s3", "GetBucketLocation", checksum = "c6da5a3c")]
+#[test_action("s3", "GetBucketLocation", checksum = "f7a8bca0")]
 #[test_action("s3", "DeleteBucket", checksum = "05abd839")]
 #[tokio::test]
 async fn s3_bucket_lifecycle() {
@@ -50,9 +50,9 @@ async fn s3_bucket_lifecycle() {
 
 // -- Object CRUD --
 
-#[test_action("s3", "PutObject", checksum = "e9dbbbaa")]
-#[test_action("s3", "GetObject", checksum = "cd0afbe3")]
-#[test_action("s3", "HeadObject", checksum = "dd127249")]
+#[test_action("s3", "PutObject", checksum = "8ecba706")]
+#[test_action("s3", "GetObject", checksum = "7430c0ca")]
+#[test_action("s3", "HeadObject", checksum = "0c13fed3")]
 #[test_action("s3", "DeleteObject", checksum = "b50d71d4")]
 #[tokio::test]
 async fn s3_object_crud() {
@@ -104,7 +104,7 @@ async fn s3_object_crud() {
 
 // -- CopyObject --
 
-#[test_action("s3", "CopyObject", checksum = "03812378")]
+#[test_action("s3", "CopyObject", checksum = "66cd7130")]
 #[tokio::test]
 async fn s3_copy_object() {
     let server = TestServer::start().await;
@@ -137,7 +137,7 @@ async fn s3_copy_object() {
 
 // -- DeleteObjects (batch) --
 
-#[test_action("s3", "DeleteObjects", checksum = "b48fe2d0")]
+#[test_action("s3", "DeleteObjects", checksum = "0cd53c56")]
 #[tokio::test]
 async fn s3_delete_objects() {
     let server = TestServer::start().await;
@@ -188,8 +188,8 @@ async fn s3_delete_objects() {
 
 // -- ListObjectsV2 + ListObjects --
 
-#[test_action("s3", "ListObjectsV2", checksum = "0b2ea04f")]
-#[test_action("s3", "ListObjects", checksum = "e0e01f68")]
+#[test_action("s3", "ListObjectsV2", checksum = "b31ed33c")]
+#[test_action("s3", "ListObjects", checksum = "99d4301b")]
 #[tokio::test]
 async fn s3_list_objects() {
     let server = TestServer::start().await;
@@ -229,7 +229,7 @@ async fn s3_list_objects() {
 
 // -- ListObjectVersions --
 
-#[test_action("s3", "ListObjectVersions", checksum = "6371c49f")]
+#[test_action("s3", "ListObjectVersions", checksum = "026c9a1c")]
 #[tokio::test]
 async fn s3_list_object_versions() {
     let server = TestServer::start().await;
@@ -251,7 +251,7 @@ async fn s3_list_object_versions() {
 
 // -- GetObjectAttributes --
 
-#[test_action("s3", "GetObjectAttributes", checksum = "1b2f99bd")]
+#[test_action("s3", "GetObjectAttributes", checksum = "0adf2c26")]
 #[tokio::test]
 async fn s3_get_object_attributes() {
     let server = TestServer::start().await;
@@ -289,7 +289,7 @@ async fn s3_get_object_attributes() {
 
 // -- RestoreObject --
 
-#[test_action("s3", "RestoreObject", checksum = "51dbe951")]
+#[test_action("s3", "RestoreObject", checksum = "3c027442")]
 #[tokio::test]
 async fn s3_restore_object() {
     let server = TestServer::start().await;
@@ -327,7 +327,7 @@ async fn s3_restore_object() {
 
 // -- Object tagging --
 
-#[test_action("s3", "PutObjectTagging", checksum = "80e8c9eb")]
+#[test_action("s3", "PutObjectTagging", checksum = "dd9548bb")]
 #[test_action("s3", "GetObjectTagging", checksum = "e0ede0a2")]
 #[test_action("s3", "DeleteObjectTagging", checksum = "bdabe7c6")]
 #[tokio::test]
@@ -390,7 +390,7 @@ async fn s3_object_tagging() {
 
 // -- Object ACL --
 
-#[test_action("s3", "PutObjectAcl", checksum = "a1356c24")]
+#[test_action("s3", "PutObjectAcl", checksum = "d76f6ff6")]
 #[test_action("s3", "GetObjectAcl", checksum = "aa4c2112")]
 #[tokio::test]
 async fn s3_object_acl() {
@@ -432,7 +432,7 @@ async fn s3_object_acl() {
 
 // -- Object retention + legal hold --
 
-#[test_action("s3", "PutObjectRetention", checksum = "278f33b6")]
+#[test_action("s3", "PutObjectRetention", checksum = "16e8bfef")]
 #[test_action("s3", "GetObjectRetention", checksum = "cd7095c1")]
 #[tokio::test]
 async fn s3_object_retention() {
@@ -477,7 +477,7 @@ async fn s3_object_retention() {
         .ok();
 }
 
-#[test_action("s3", "PutObjectLegalHold", checksum = "4707c231")]
+#[test_action("s3", "PutObjectLegalHold", checksum = "508ddfd0")]
 #[test_action("s3", "GetObjectLegalHold", checksum = "2d6979f4")]
 #[tokio::test]
 async fn s3_object_legal_hold() {
@@ -523,7 +523,7 @@ async fn s3_object_legal_hold() {
 
 // -- Bucket tagging --
 
-#[test_action("s3", "PutBucketTagging", checksum = "5ad8a3c6")]
+#[test_action("s3", "PutBucketTagging", checksum = "f54b26ed")]
 #[test_action("s3", "GetBucketTagging", checksum = "2257d3d6")]
 #[test_action("s3", "DeleteBucketTagging", checksum = "e3fe5dcd")]
 #[tokio::test]
@@ -575,7 +575,7 @@ async fn s3_bucket_tagging() {
 
 // -- Bucket ACL --
 
-#[test_action("s3", "PutBucketAcl", checksum = "2b56bf7d")]
+#[test_action("s3", "PutBucketAcl", checksum = "c3732dfd")]
 #[test_action("s3", "GetBucketAcl", checksum = "54d254cd")]
 #[tokio::test]
 async fn s3_bucket_acl() {
@@ -607,7 +607,7 @@ async fn s3_bucket_acl() {
 
 // -- Bucket versioning --
 
-#[test_action("s3", "PutBucketVersioning", checksum = "0b8739d5")]
+#[test_action("s3", "PutBucketVersioning", checksum = "ebf678c4")]
 #[test_action("s3", "GetBucketVersioning", checksum = "2a2834a0")]
 #[tokio::test]
 async fn s3_bucket_versioning() {
@@ -647,7 +647,7 @@ async fn s3_bucket_versioning() {
 
 // -- Bucket CORS --
 
-#[test_action("s3", "PutBucketCors", checksum = "d45fcf4a")]
+#[test_action("s3", "PutBucketCors", checksum = "65016ca1")]
 #[test_action("s3", "GetBucketCors", checksum = "ca2bd57e")]
 #[test_action("s3", "DeleteBucketCors", checksum = "81962aad")]
 #[tokio::test]
@@ -730,7 +730,7 @@ async fn s3_bucket_notification() {
 
 // -- Bucket website --
 
-#[test_action("s3", "PutBucketWebsite", checksum = "d64c97c0")]
+#[test_action("s3", "PutBucketWebsite", checksum = "330597aa")]
 #[test_action("s3", "GetBucketWebsite", checksum = "02acea7a")]
 #[test_action("s3", "DeleteBucketWebsite", checksum = "892d5b36")]
 #[tokio::test]
@@ -779,7 +779,7 @@ async fn s3_bucket_website() {
 
 // -- Bucket accelerate --
 
-#[test_action("s3", "PutBucketAccelerateConfiguration", checksum = "9c5d6ce0")]
+#[test_action("s3", "PutBucketAccelerateConfiguration", checksum = "e71d606a")]
 #[test_action("s3", "GetBucketAccelerateConfiguration", checksum = "33fcae8e")]
 #[tokio::test]
 async fn s3_bucket_accelerate() {
@@ -815,7 +815,7 @@ async fn s3_bucket_accelerate() {
 
 // -- Public access block --
 
-#[test_action("s3", "PutPublicAccessBlock", checksum = "ddccd75d")]
+#[test_action("s3", "PutPublicAccessBlock", checksum = "1c1f6372")]
 #[test_action("s3", "GetPublicAccessBlock", checksum = "66149497")]
 #[test_action("s3", "DeletePublicAccessBlock", checksum = "5fd2aac6")]
 #[tokio::test]
@@ -859,7 +859,7 @@ async fn s3_public_access_block() {
 
 // -- Bucket encryption --
 
-#[test_action("s3", "PutBucketEncryption", checksum = "bfeb2d44")]
+#[test_action("s3", "PutBucketEncryption", checksum = "c030aecc")]
 #[test_action("s3", "GetBucketEncryption", checksum = "d7326b12")]
 #[test_action("s3", "DeleteBucketEncryption", checksum = "897fff80")]
 #[tokio::test]
@@ -913,7 +913,7 @@ async fn s3_bucket_encryption() {
 
 // -- Bucket lifecycle --
 
-#[test_action("s3", "PutBucketLifecycleConfiguration", checksum = "29af802c")]
+#[test_action("s3", "PutBucketLifecycleConfiguration", checksum = "21fcd15c")]
 #[test_action("s3", "GetBucketLifecycleConfiguration", checksum = "73010677")]
 #[test_action("s3", "DeleteBucketLifecycle", checksum = "335ed098")]
 #[tokio::test]
@@ -974,7 +974,7 @@ async fn s3_bucket_lifecycle_config() {
 
 // -- Bucket logging --
 
-#[test_action("s3", "PutBucketLogging", checksum = "50be50fa")]
+#[test_action("s3", "PutBucketLogging", checksum = "ed386eb1")]
 #[test_action("s3", "GetBucketLogging", checksum = "a7325831")]
 #[tokio::test]
 async fn s3_bucket_logging() {
@@ -1006,7 +1006,7 @@ async fn s3_bucket_logging() {
 
 // -- Bucket policy --
 
-#[test_action("s3", "PutBucketPolicy", checksum = "dd80bd6c")]
+#[test_action("s3", "PutBucketPolicy", checksum = "1b9c9417")]
 #[test_action("s3", "GetBucketPolicy", checksum = "d34ae983")]
 #[test_action("s3", "DeleteBucketPolicy", checksum = "90cdf847")]
 #[tokio::test]
@@ -1048,7 +1048,7 @@ async fn s3_bucket_policy() {
 
 // -- Object lock configuration --
 
-#[test_action("s3", "PutObjectLockConfiguration", checksum = "5ee132b3")]
+#[test_action("s3", "PutObjectLockConfiguration", checksum = "36a5a1a7")]
 #[test_action("s3", "GetObjectLockConfiguration", checksum = "8cbd3dcf")]
 #[tokio::test]
 async fn s3_object_lock_configuration() {
@@ -1084,7 +1084,7 @@ async fn s3_object_lock_configuration() {
 
 // -- Bucket replication --
 
-#[test_action("s3", "PutBucketReplication", checksum = "03741feb")]
+#[test_action("s3", "PutBucketReplication", checksum = "737a9131")]
 #[test_action("s3", "GetBucketReplication", checksum = "5aa6062b")]
 #[test_action("s3", "DeleteBucketReplication", checksum = "6b0e2b2e")]
 #[tokio::test]
@@ -1154,7 +1154,7 @@ async fn s3_bucket_replication() {
 
 // -- Bucket ownership controls --
 
-#[test_action("s3", "PutBucketOwnershipControls", checksum = "aa269fa6")]
+#[test_action("s3", "PutBucketOwnershipControls", checksum = "c72a3773")]
 #[test_action("s3", "GetBucketOwnershipControls", checksum = "5d7346cb")]
 #[test_action("s3", "DeleteBucketOwnershipControls", checksum = "9727d2b1")]
 #[tokio::test]
@@ -1273,11 +1273,11 @@ async fn s3_bucket_inventory() {
 
 // -- Multipart upload --
 
-#[test_action("s3", "CreateMultipartUpload", checksum = "84f77436")]
-#[test_action("s3", "UploadPart", checksum = "de83c026")]
-#[test_action("s3", "CompleteMultipartUpload", checksum = "0df95972")]
-#[test_action("s3", "ListParts", checksum = "61616240")]
-#[test_action("s3", "ListMultipartUploads", checksum = "9f3daa98")]
+#[test_action("s3", "CreateMultipartUpload", checksum = "2107d532")]
+#[test_action("s3", "UploadPart", checksum = "40b8899a")]
+#[test_action("s3", "CompleteMultipartUpload", checksum = "c7812f62")]
+#[test_action("s3", "ListParts", checksum = "a9fcbf29")]
+#[test_action("s3", "ListMultipartUploads", checksum = "9378e74e")]
 #[tokio::test]
 async fn s3_multipart_upload() {
     let server = TestServer::start().await;
@@ -1385,7 +1385,7 @@ async fn s3_abort_multipart_upload() {
 
 // -- UploadPartCopy --
 
-#[test_action("s3", "UploadPartCopy", checksum = "49d22a26")]
+#[test_action("s3", "UploadPartCopy", checksum = "268db2f3")]
 #[tokio::test]
 async fn s3_upload_part_copy() {
     let server = TestServer::start().await;
@@ -1676,7 +1676,7 @@ async fn s3_list_bucket_inventory_configurations() {
         .unwrap();
 }
 
-#[test_action("s3", "PutBucketRequestPayment", checksum = "d7cda2b5")]
+#[test_action("s3", "PutBucketRequestPayment", checksum = "4825aa35")]
 #[test_action("s3", "GetBucketRequestPayment", checksum = "e4a2cc80")]
 #[tokio::test]
 async fn s3_request_payment_round_trip() {
@@ -1709,7 +1709,7 @@ async fn s3_request_payment_round_trip() {
     assert_eq!(resp.payer().unwrap().as_str(), "Requester");
 }
 
-#[test_action("s3", "PutBucketAbac", checksum = "9157ac21")]
+#[test_action("s3", "PutBucketAbac", checksum = "796c51dc")]
 #[test_action("s3", "GetBucketAbac", checksum = "19f51e30")]
 #[tokio::test]
 async fn s3_abac_round_trip() {
@@ -1821,18 +1821,18 @@ async fn raw_delete(server: &TestServer, path: &str) {
     );
 }
 
-#[test_action("s3", "CreateBucketMetadataConfiguration", checksum = "7ad0ace5")]
+#[test_action("s3", "CreateBucketMetadataConfiguration", checksum = "55f9905d")]
 #[test_action("s3", "GetBucketMetadataConfiguration", checksum = "b35095ce")]
 #[test_action("s3", "DeleteBucketMetadataConfiguration", checksum = "00b73c78")]
 #[test_action(
     "s3",
     "UpdateBucketMetadataInventoryTableConfiguration",
-    checksum = "0441c32c"
+    checksum = "90e7c0b1"
 )]
 #[test_action(
     "s3",
     "UpdateBucketMetadataJournalTableConfiguration",
-    checksum = "c35239c4"
+    checksum = "09888cd8"
 )]
 #[tokio::test]
 async fn s3_metadata_configuration_lifecycle() {
@@ -1869,7 +1869,7 @@ async fn s3_metadata_configuration_lifecycle() {
     raw_delete(&server, "/md-bkt?metadataConfiguration").await;
 }
 
-#[test_action("s3", "CreateBucketMetadataTableConfiguration", checksum = "960d2c14")]
+#[test_action("s3", "CreateBucketMetadataTableConfiguration", checksum = "0f66631c")]
 #[test_action("s3", "GetBucketMetadataTableConfiguration", checksum = "a59031ff")]
 #[test_action("s3", "DeleteBucketMetadataTableConfiguration", checksum = "e6472b69")]
 #[tokio::test]
@@ -2024,7 +2024,7 @@ async fn s3_select_object_content() {
     assert_eq!(String::from_utf8_lossy(&records), "1,2\n");
 }
 
-#[test_action("s3", "UpdateObjectEncryption", checksum = "6cdb3788")]
+#[test_action("s3", "UpdateObjectEncryption", checksum = "32f05360")]
 #[tokio::test]
 async fn s3_update_object_encryption() {
     // The aws-sdk-s3 1.119 release predates UpdateObjectEncryption, so
@@ -2057,7 +2057,7 @@ async fn s3_update_object_encryption() {
     assert!(resp.status().is_success(), "status={:?}", resp.status());
 }
 
-#[test_action("s3", "WriteGetObjectResponse", checksum = "5d3fff2d")]
+#[test_action("s3", "WriteGetObjectResponse", checksum = "51fb114f")]
 #[tokio::test]
 async fn s3_write_get_object_response() {
     // The SDK signs WriteGetObjectResponse against an Object Lambda
