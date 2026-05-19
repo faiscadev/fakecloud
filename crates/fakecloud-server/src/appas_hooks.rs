@@ -9,7 +9,7 @@ use fakecloud_application_autoscaling::hooks::{
     DynamoDbCapacityHook, EcsServiceHook, MetricReader,
 };
 use fakecloud_cloudwatch::SharedCloudWatchState;
-use fakecloud_dynamodb::state::SharedDynamoDbState;
+use fakecloud_dynamodb::SharedDynamoDbState;
 use fakecloud_ecs::SharedEcsState;
 
 /// Reads from in-process CloudWatch metric and alarm state.

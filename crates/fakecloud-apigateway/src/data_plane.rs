@@ -3491,27 +3491,26 @@ mod tests {
         };
 
         // Seed ELBv2 state with a load balancer that has a bound port.
-        let mut elbv2_accounts = fakecloud_elbv2::state::Elbv2Accounts::new();
+        let mut elbv2_accounts = fakecloud_elbv2::Elbv2Accounts::new();
         let elbv2_state = elbv2_accounts.get_or_create(TEST_ACCOUNT);
         let lb_arn = "arn:aws:elasticloadbalancing:us-east-1:000000000000:loadbalancer/app/my-nlb/50dc6c495c0c9188";
-        let mut lb: fakecloud_elbv2::state::LoadBalancer =
-            serde_json::from_value(serde_json::json!({
-                "arn": lb_arn,
-                "name": "my-nlb",
-                "dns_name": "my-nlb-123.elb.us-east-1.amazonaws.com",
-                "canonical_hosted_zone_id": "Z35SXDOTRQ7X7K",
-                "created_time": "2024-01-01T00:00:00Z",
-                "scheme": "internal",
-                "vpc_id": "vpc-123",
-                "state_code": "active",
-                "lb_type": "application",
-                "availability_zones": [],
-                "security_groups": [],
-                "ip_address_type": "ipv4",
-                "tags": [],
-                "attributes": {}
-            }))
-            .unwrap();
+        let mut lb: fakecloud_elbv2::LoadBalancer = serde_json::from_value(serde_json::json!({
+            "arn": lb_arn,
+            "name": "my-nlb",
+            "dns_name": "my-nlb-123.elb.us-east-1.amazonaws.com",
+            "canonical_hosted_zone_id": "Z35SXDOTRQ7X7K",
+            "created_time": "2024-01-01T00:00:00Z",
+            "scheme": "internal",
+            "vpc_id": "vpc-123",
+            "state_code": "active",
+            "lb_type": "application",
+            "availability_zones": [],
+            "security_groups": [],
+            "ip_address_type": "ipv4",
+            "tags": [],
+            "attributes": {}
+        }))
+        .unwrap();
         lb.bound_port = Some(54321);
         elbv2_state.load_balancers.insert(lb_arn.to_string(), lb);
         let shared_elbv2 = Arc::new(parking_lot::RwLock::new(elbv2_accounts));

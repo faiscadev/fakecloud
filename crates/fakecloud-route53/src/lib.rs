@@ -9,7 +9,7 @@ pub mod dnssec;
 pub mod model;
 pub mod router;
 pub(crate) mod service;
-pub mod state;
+pub(crate) mod state;
 pub mod xml_io;
 
 pub const API_VERSION: &str = "2013-04-01";

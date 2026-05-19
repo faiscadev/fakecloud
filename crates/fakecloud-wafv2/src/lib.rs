@@ -1,7 +1,7 @@
 pub mod evaluator;
 pub mod inspection;
 pub(crate) mod service;
-pub mod state;
+pub(crate) mod state;
 
 pub use evaluator::{
     evaluate, evaluate_detailed, evaluate_web_acl, RateLimiter, WafAction, WafEvaluation,
