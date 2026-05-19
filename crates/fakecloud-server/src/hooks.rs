@@ -211,11 +211,11 @@ impl fakecloud_core::delivery::Elbv2TargetRegistration for Elbv2TargetRegistrati
         };
         for (id, port) in targets {
             tg.targets.retain(|t| t.id != id);
-            tg.targets.push(fakecloud_elbv2::state::TargetDescription {
+            tg.targets.push(fakecloud_elbv2::TargetDescription {
                 id,
                 port: port.map(|p| p as i32),
                 availability_zone: None,
-                health: fakecloud_elbv2::state::TargetHealth {
+                health: fakecloud_elbv2::TargetHealth {
                     state: "initial".into(),
                     reason: None,
                     description: None,

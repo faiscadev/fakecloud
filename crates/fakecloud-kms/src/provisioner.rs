@@ -16,6 +16,7 @@
 use std::collections::BTreeMap;
 
 use chrono::Utc;
+use fakecloud_aws::arn::Arn;
 use uuid::Uuid;
 
 use super::asym;
@@ -156,7 +157,7 @@ pub fn build_kms_key(
     } else {
         Uuid::new_v4().to_string()
     };
-    let arn = format!("arn:aws:kms:{region}:{account_id}:key/{key_id}");
+    let arn = Arn::new("kms", region, account_id, &format!("key/{key_id}")).to_string();
     let now = Utc::now().timestamp() as f64;
 
     let signing_algs = if input.key_usage == "SIGN_VERIFY" {
@@ -280,7 +281,8 @@ pub fn provision_replica_key(
     }
 
     let replica_key_id = format!("mrk-replica-{}", Uuid::new_v4().as_simple());
-    let replica_arn = format!("arn:aws:kms:{region}:{account_id}:key/{replica_key_id}");
+    let replica_arn =
+        Arn::new("kms", &region, account_id, &format!("key/{replica_key_id}")).to_string();
     let mut replica = source;
     replica.key_id = replica_key_id.clone();
     replica.arn = replica_arn.clone();
@@ -342,7 +344,7 @@ pub fn provision_alias(
     } else {
         return Err(format!("KMS key '{target_input}' does not exist"));
     };
-    let alias_arn = format!("arn:aws:kms:{}:{}:{}", s.region, s.account_id, alias_name);
+    let alias_arn = Arn::new("kms", &s.region, &s.account_id, alias_name).to_string();
     let alias = KmsAlias {
         alias_name: alias_name.to_string(),
         alias_arn,

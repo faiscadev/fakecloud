@@ -5835,7 +5835,7 @@ async fn main() {
                         // Index children by parent arn for O(N) tree build.
                         let mut children_by_parent: std::collections::HashMap<
                             String,
-                            Vec<&fakecloud_stepfunctions::state::Execution>,
+                            Vec<&fakecloud_stepfunctions::Execution>,
                         > = std::collections::HashMap::new();
                         for exec in state.executions.values() {
                             if let Some(parent) = exec.parent_execution_arn.as_ref() {
@@ -5846,10 +5846,10 @@ async fn main() {
                             }
                         }
                         fn build_node(
-                            exec: &fakecloud_stepfunctions::state::Execution,
+                            exec: &fakecloud_stepfunctions::Execution,
                             children_by_parent: &std::collections::HashMap<
                                 String,
-                                Vec<&fakecloud_stepfunctions::state::Execution>,
+                                Vec<&fakecloud_stepfunctions::Execution>,
                             >,
                         ) -> types::StepFunctionsExecutionTreeNode {
                             let kids = children_by_parent

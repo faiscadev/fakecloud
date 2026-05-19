@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use base64::Engine;
 use bytes::Bytes;
 use chrono::Utc;
+use fakecloud_aws::arn::Arn;
 use http::StatusCode;
 use parking_lot::RwLock;
 use serde_json::{json, Value};
@@ -170,7 +171,13 @@ fn s3_destination_json(dest: &S3Destination) -> Value {
 }
 
 fn arn_for(region: &str, account: &str, name: &str) -> String {
-    format!("arn:aws:firehose:{region}:{account}:deliverystream/{name}")
+    Arn::new(
+        "firehose",
+        region,
+        account,
+        &format!("deliverystream/{name}"),
+    )
+    .to_string()
 }
 
 fn bucket_name_from_arn(arn: &str) -> Option<&str> {

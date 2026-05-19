@@ -16,7 +16,7 @@ pub mod facade;
 pub mod lambda_proxy;
 pub mod model_validation;
 pub(crate) mod service;
-pub mod state;
+pub(crate) mod state;
 pub(crate) mod validation;
 pub mod vtl;
 
