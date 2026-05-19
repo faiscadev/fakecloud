@@ -63,6 +63,7 @@ pub(crate) fn create_capacity_provider(
         .as_str()
         .ok_or_else(|| validation("CapacityProviderName is required"))?
         .to_string();
+    check_len("CapacityProviderName", &name, 1, 140)?;
     let vpc = body
         .get("VpcConfig")
         .filter(|v| !v.is_null())
@@ -139,6 +140,17 @@ pub(crate) fn list_capacity_providers(
     state: &SharedLambdaState,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
+    if let Some(s) = req.query_params.get("MaxItems") {
+        let n: i64 = s.parse().map_err(|_| validation("MaxItems must be int"))?;
+        if !(1..=50).contains(&n) {
+            return Err(validation(format!("MaxItems must be in [1,50], got {n}")));
+        }
+    }
+    if let Some(st) = req.query_params.get("State") {
+        if !matches!(st.as_str(), "Pending" | "Active" | "Failed" | "Deleting") {
+            return Err(validation(format!("State enum invalid: {st}")));
+        }
+    }
     let accts = state.read();
     let empty = crate::state::LambdaState::new(&req.account_id, &req.region);
     let s = accts.get(&req.account_id).unwrap_or(&empty);
@@ -198,10 +210,17 @@ pub(crate) fn delete_capacity_provider(
     check_len("CapacityProviderName", name, 1, 140)?;
     let mut accts = state.write();
     let s = accts.get_or_create(&req.account_id);
-    s.capacity_providers
+    let cp = s
+        .capacity_providers
         .remove(name)
         .ok_or_else(|| not_found(format!("Capacity provider {name} not found")))?;
-    Ok(AwsResponse::json(StatusCode::ACCEPTED, "{}".to_string()))
+    let mut deleted = cp;
+    deleted.state = "Deleting".to_string();
+    deleted.last_modified = Utc::now();
+    Ok(AwsResponse::json_value(
+        StatusCode::ACCEPTED,
+        json!({ "CapacityProvider": capacity_provider_json(&deleted) }),
+    ))
 }
 
 pub(crate) fn list_function_versions_by_capacity_provider(
@@ -251,6 +270,15 @@ pub(crate) fn list_durable_executions_by_function(
     function_name: &str,
 ) -> Result<AwsResponse, AwsServiceError> {
     check_len("FunctionName", function_name, 1, 170)?;
+    if let Some(n) = req.query_params.get("DurableExecutionName") {
+        check_len("DurableExecutionName", n, 1, 64)?;
+    }
+    if let Some(s) = req.query_params.get("MaxItems") {
+        let n: i64 = s.parse().map_err(|_| validation("MaxItems must be int"))?;
+        if !(0..=1000).contains(&n) {
+            return Err(validation(format!("MaxItems must be in [0,1000], got {n}")));
+        }
+    }
     let accts = state.read();
     let empty = crate::state::LambdaState::new(&req.account_id, &req.region);
     let s = accts.get(&req.account_id).unwrap_or(&empty);
