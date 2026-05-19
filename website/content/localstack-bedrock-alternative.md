@@ -7,7 +7,7 @@ template = "page.html"
 Looking for a free, open-source alternative to LocalStack's Ultimate-tier Bedrock? Use [fakecloud](https://github.com/faiscadev/fakecloud). 214 Bedrock-family operations (Bedrock + Bedrock Runtime + Bedrock Agent + Bedrock Agent Runtime), full control plane, deterministic responses, free.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash
+curl -fsSL https://fakecloud.dev/install.sh | bash
 fakecloud
 ```
 
@@ -98,7 +98,7 @@ Full operation surface across 27 modules:
 
 ## Links
 
-- **Install**: `curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash`
+- **Install**: `curl -fsSL https://fakecloud.dev/install.sh | bash`
 - **Repo**: [github.com/faiscadev/fakecloud](https://github.com/faiscadev/fakecloud)
 - **Deep dive**: [How to test Bedrock code locally, for free, deterministically](/blog/bedrock-local-testing/)
 - **Related**: [Bedrock emulator](/bedrock-emulator/), [Test Bedrock locally](/test-bedrock-locally/), [LocalStack alternative (all services)](/localstack-alternative/)

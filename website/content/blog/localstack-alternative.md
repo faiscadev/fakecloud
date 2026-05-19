@@ -83,7 +83,7 @@ When tests fail, we fix the behavior. We don't stub responses or return fake suc
 Install and run fakecloud:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash
+curl -fsSL https://fakecloud.dev/install.sh | bash
 fakecloud
 ```
 
@@ -150,6 +150,6 @@ Coming next:
 
 - **Repo:** [github.com/faiscadev/fakecloud](https://github.com/faiscadev/fakecloud)
 - **Site:** [fakecloud.dev](https://fakecloud.dev)
-- **Install:** `curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash`
+- **Install:** `curl -fsSL https://fakecloud.dev/install.sh | bash`
 
 If you find a case where fakecloud behaves differently from AWS, [open an issue](https://github.com/faiscadev/fakecloud/issues) — that's a bug, and we'll fix it.

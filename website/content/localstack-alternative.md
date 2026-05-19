@@ -9,7 +9,7 @@ LocalStack replaced its open-source Community Edition with a proprietary image i
 **fakecloud is a free, open-source replacement.** Single static binary, no account, no token, no paid tier, AGPL-3.0.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash
+curl -fsSL https://fakecloud.dev/install.sh | bash
 fakecloud
 ```
 
@@ -81,7 +81,7 @@ services:
 For CI without Docker:
 
 ```yaml
-- run: curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash
+- run: curl -fsSL https://fakecloud.dev/install.sh | bash
 - run: fakecloud &
 - run: sleep 1 && aws --endpoint-url http://localhost:4566 s3 ls  # verify
 ```
@@ -124,7 +124,7 @@ No. fakecloud is written from scratch in Rust. No LocalStack code was used. Loca
 
 ## Get started
 
-- **Install:** `curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash`
+- **Install:** `curl -fsSL https://fakecloud.dev/install.sh | bash`
 - **Docker:** `docker run --rm -p 4566:4566 ghcr.io/faiscadev/fakecloud`
 - **Cargo:** `cargo install fakecloud`
 - **Repo:** [github.com/faiscadev/fakecloud](https://github.com/faiscadev/fakecloud)

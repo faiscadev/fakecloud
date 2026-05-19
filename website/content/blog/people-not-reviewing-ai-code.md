@@ -111,7 +111,7 @@ That's why fakecloud exists:
 
 - **Repo:** [github.com/faiscadev/fakecloud](https://github.com/faiscadev/fakecloud)
 - **Site:** [fakecloud.dev](https://fakecloud.dev)
-- **Install:** `curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash`
+- **Install:** `curl -fsSL https://fakecloud.dev/install.sh | bash`
 
 If you're writing AWS code with Claude, Cursor, or any AI tool, you need automated guardrails that verify correctness without you in the loop. Because if I'm right, people are already skipping manual review—and the only thing standing between them and production bugs is the quality of their automated tests.
 

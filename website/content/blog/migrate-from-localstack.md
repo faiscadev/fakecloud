@@ -30,7 +30,7 @@ Pick one:
 
 ```sh
 # Option A: single binary, no Docker
-curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash
+curl -fsSL https://fakecloud.dev/install.sh | bash
 fakecloud
 
 # Option B: Docker
@@ -158,7 +158,7 @@ services:
 
 ```yaml
 steps:
-  - run: curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash
+  - run: curl -fsSL https://fakecloud.dev/install.sh | bash
   - run: fakecloud &
   - run: |
       for i in $(seq 1 30); do
@@ -296,7 +296,7 @@ For mission-critical pre-prod validation where you need the full production-pari
 
 ## Links
 
-- Install: `curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash`
+- Install: `curl -fsSL https://fakecloud.dev/install.sh | bash`
 - Repo: [github.com/faiscadev/fakecloud](https://github.com/faiscadev/fakecloud)
 - Site: [fakecloud.dev](https://fakecloud.dev)
 - Comparison: [fakecloud vs LocalStack, MiniStack, floci, Moto](/blog/localstack-alternatives-compared/)

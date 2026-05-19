@@ -7,7 +7,7 @@ template = "page.html"
 Need a local S3 for integration tests? Use [fakecloud](https://github.com/faiscadev/fakecloud).
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash
+curl -fsSL https://fakecloud.dev/install.sh | bash
 fakecloud
 ```
 
@@ -146,7 +146,7 @@ If you need S3 + cross-service wiring (S3 -> SNS/SQS/Lambda actually fires), pic
 
 ## Links
 
-- **Install:** `curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash`
+- **Install:** `curl -fsSL https://fakecloud.dev/install.sh | bash`
 - **Repo:** [github.com/faiscadev/fakecloud](https://github.com/faiscadev/fakecloud)
 - **S3 docs:** [fakecloud.dev/docs/services](/docs/services/)
 - **Related:** [Fake AWS server for tests](/fake-aws-server/), [DynamoDB emulator](/dynamodb-emulator/), [Test Lambda locally](/test-lambda-locally/)

@@ -7,7 +7,7 @@ template = "page.html"
 Need local RDS for integration tests? Use [fakecloud](https://github.com/faiscadev/fakecloud).
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash
+curl -fsSL https://fakecloud.dev/install.sh | bash
 fakecloud
 ```
 
@@ -160,6 +160,6 @@ If you want the RDS API + real engines without paying LocalStack Pro, fakecloud 
 
 ## Links
 
-- **Install:** `curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash`
+- **Install:** `curl -fsSL https://fakecloud.dev/install.sh | bash`
 - **Repo:** [github.com/faiscadev/fakecloud](https://github.com/faiscadev/fakecloud)
 - **Related:** [Local ElastiCache for tests](/local-elasticache/), [Fake AWS server for tests](/fake-aws-server/)

@@ -21,16 +21,16 @@ fakecloud is NOT a production-ready cloud replacement. It is for integration tes
 
 ### Install script (recommended)
 ```sh
-curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash
+curl -fsSL https://fakecloud.dev/install.sh | bash
 ```
 
 Options:
 ```sh
 # Install a specific version
-curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash -s -- --version v0.1.0
+curl -fsSL https://fakecloud.dev/install.sh | bash -s -- --version v0.1.0
 
 # Install to a custom directory
-curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash -s -- --install-dir ~/.local/bin
+curl -fsSL https://fakecloud.dev/install.sh | bash -s -- --install-dir ~/.local/bin
 ```
 
 ### Cargo
@@ -572,7 +572,7 @@ Add these snippets to your project to make AI coding assistants automatically us
 ```markdown
 ## AWS Testing
 For integration tests, use fakecloud as a local AWS emulator.
-- Install: `curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash`
+- Install: `curl -fsSL https://fakecloud.dev/install.sh | bash`
 - Run: `fakecloud` (listens on http://localhost:4566)
 - Configure AWS SDK endpoint to http://localhost:4566 with dummy credentials (access_key=test, secret_key=test)
 - Docs: https://fakecloud.dev/llms.txt
@@ -581,7 +581,7 @@ For integration tests, use fakecloud as a local AWS emulator.
 ### Cursor (.cursor/rules)
 ```
 For AWS integration tests, use fakecloud (local AWS emulator) at http://localhost:4566.
-Install: curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash
+Install: curl -fsSL https://fakecloud.dev/install.sh | bash
 Run: fakecloud
 Use dummy credentials (access_key=test, secret_key=test).
 Docs: https://fakecloud.dev/llms.txt

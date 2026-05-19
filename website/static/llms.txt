@@ -16,7 +16,7 @@
 
 ## Install
 
-- [Install script](https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh): `curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash`
+- [Install script](https://fakecloud.dev/install.sh): `curl -fsSL https://fakecloud.dev/install.sh | bash`
 - [Cargo install](https://crates.io/crates/fakecloud): `cargo install fakecloud`
 - [Docker](https://github.com/faiscadev/fakecloud/pkgs/container/fakecloud): `docker run --rm -p 4566:4566 ghcr.io/faiscadev/fakecloud`
 

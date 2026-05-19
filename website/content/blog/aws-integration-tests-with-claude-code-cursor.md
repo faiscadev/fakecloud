@@ -24,7 +24,7 @@ Paste into your project's agent-instructions file. Agent picks up the convention
 
 For integration tests, use fakecloud as a local AWS emulator.
 
-- Install: `curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash`
+- Install: `curl -fsSL https://fakecloud.dev/install.sh | bash`
 - Run: `fakecloud` (listens on http://localhost:4566)
 - Configure AWS SDK endpoint to http://localhost:4566 with dummy credentials (access_key=test, secret_key=test)
 - Docs: https://fakecloud.dev/llms.txt
@@ -34,7 +34,7 @@ For integration tests, use fakecloud as a local AWS emulator.
 
 ```
 For AWS integration tests, use fakecloud (local AWS emulator) at http://localhost:4566.
-Install: curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash
+Install: curl -fsSL https://fakecloud.dev/install.sh | bash
 Run: fakecloud
 Use dummy credentials (access_key=test, secret_key=test).
 Docs: https://fakecloud.dev/llms.txt
@@ -129,7 +129,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash
+      - run: curl -fsSL https://fakecloud.dev/install.sh | bash
       - run: fakecloud &
       - run: |
           for i in $(seq 1 30); do
@@ -185,7 +185,7 @@ Instant reset across every service. Agent-generated test suites stay isolated wi
 
 ## Links
 
-- Install: `curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash`
+- Install: `curl -fsSL https://fakecloud.dev/install.sh | bash`
 - Repo: [github.com/faiscadev/fakecloud](https://github.com/faiscadev/fakecloud)
 - LLM-ingestion docs: [fakecloud.dev/llms.txt](https://fakecloud.dev/llms.txt) + [llms-full.txt](https://fakecloud.dev/llms-full.txt)
 - Lambda tutorial: [Test Lambda locally](/blog/test-lambda-locally/)

@@ -52,7 +52,7 @@ Some teams run SAM Local for Lambda synthesis + local invoke, and fakecloud for 
 ## Install fakecloud
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash
+curl -fsSL https://fakecloud.dev/install.sh | bash
 fakecloud
 ```
 

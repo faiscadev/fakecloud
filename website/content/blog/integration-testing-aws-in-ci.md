@@ -41,7 +41,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install fakecloud
-        run: curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash
+        run: curl -fsSL https://fakecloud.dev/install.sh | bash
 
       - name: Start fakecloud
         run: fakecloud &
@@ -230,7 +230,7 @@ fakecloud's goal is every AWS service at 100% conformance with 100% of cross-ser
 
 ## Links
 
-- Install: `curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash`
+- Install: `curl -fsSL https://fakecloud.dev/install.sh | bash`
 - Repo: [github.com/faiscadev/fakecloud](https://github.com/faiscadev/fakecloud)
 - Migration from LocalStack: [Migrating from LocalStack to fakecloud](/blog/migrate-from-localstack/)
 - Lambda tutorial: [How to test Lambda locally](/blog/test-lambda-locally/)

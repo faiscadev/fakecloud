@@ -14,7 +14,7 @@ This guide walks through local Terraform development for AWS with [fakecloud](ht
 ## Install fakecloud
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash
+curl -fsSL https://fakecloud.dev/install.sh | bash
 fakecloud
 ```
 
@@ -199,7 +199,7 @@ jobs:
 
       - name: Start fakecloud
         run: |
-          curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash
+          curl -fsSL https://fakecloud.dev/install.sh | bash
           fakecloud &
           for i in $(seq 1 30); do curl -sf http://localhost:4566/_fakecloud/health && break; sleep 1; done
           curl -sf http://localhost:4566/_fakecloud/health
@@ -249,7 +249,7 @@ If a Terraform flow that works against real AWS doesn't work against fakecloud, 
 
 ## Links
 
-- Install: `curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash`
+- Install: `curl -fsSL https://fakecloud.dev/install.sh | bash`
 - Repo: [github.com/faiscadev/fakecloud](https://github.com/faiscadev/fakecloud)
 - LocalStack migration guide: [Migrating from LocalStack to fakecloud](/blog/migrate-from-localstack/)
 - CI guide: [Integration testing AWS in GitHub Actions](/blog/integration-testing-aws-in-ci/)

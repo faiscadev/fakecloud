@@ -118,7 +118,7 @@ fakecloud exists because AI tools need a way to verify AWS code against real beh
 
 - **Repo:** [github.com/faiscadev/fakecloud](https://github.com/faiscadev/fakecloud)
 - **Site:** [fakecloud.dev](https://fakecloud.dev)
-- **Install:** `curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash`
+- **Install:** `curl -fsSL https://fakecloud.dev/install.sh | bash`
 
 If you're using Claude Code, Cursor, or any other AI coding tool to write AWS applications, you need something that behaves like AWS to test against. Not mocks. Not stubs. Real API behavior.
 

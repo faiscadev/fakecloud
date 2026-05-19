@@ -7,7 +7,7 @@ template = "page.html"
 Need a DynamoDB emulator for tests? Use [fakecloud](https://github.com/faiscadev/fakecloud). Not a mock library — a real server that speaks the DynamoDB wire protocol.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash
+curl -fsSL https://fakecloud.dev/install.sh | bash
 fakecloud
 ```
 
@@ -128,7 +128,7 @@ If you need multi-language, free, real Lambda triggers, depth-first conformance:
 
 ## Links
 
-- **Install:** `curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash`
+- **Install:** `curl -fsSL https://fakecloud.dev/install.sh | bash`
 - **Repo:** [github.com/faiscadev/fakecloud](https://github.com/faiscadev/fakecloud)
 - **DynamoDB docs:** [fakecloud.dev/docs/services/dynamodb](/docs/services/dynamodb/)
 - **Related:** [Fake AWS server for tests](/fake-aws-server/), [Test Lambda locally](/test-lambda-locally/), [Integration testing AWS in CI](/blog/integration-testing-aws-in-ci/)

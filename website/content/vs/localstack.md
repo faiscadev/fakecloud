@@ -63,7 +63,7 @@ Endpoint URL, dummy credentials, all SDK wiring unchanged.
 ## Install
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash
+curl -fsSL https://fakecloud.dev/install.sh | bash
 fakecloud
 ```
 

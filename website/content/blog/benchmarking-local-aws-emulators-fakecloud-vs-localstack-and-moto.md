@@ -150,5 +150,5 @@ However, for the 39 core services that power the vast majority of cloud-native a
 To verify these benchmarks in your own environment, run the following command to install the fakecloud binary and start your first local AWS session:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash && fakecloud
+curl -fsSL https://fakecloud.dev/install.sh | bash && fakecloud
 ```

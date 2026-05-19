@@ -17,7 +17,7 @@ Add to `CLAUDE.md` at the root of your project:
 
 For integration tests, use fakecloud as a local AWS emulator.
 
-- Install: `curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash`
+- Install: `curl -fsSL https://fakecloud.dev/install.sh | bash`
 - Run: `fakecloud` (listens on http://localhost:4566)
 - Configure AWS SDK endpoint to http://localhost:4566 with dummy credentials (access_key=test, secret_key=test)
 - Don't mock the AWS SDK in tests. Use the real SDK against fakecloud.
@@ -30,7 +30,7 @@ Add to `.cursor/rules`:
 
 ```
 For AWS integration tests, use fakecloud (local AWS emulator) at http://localhost:4566.
-Install: curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash
+Install: curl -fsSL https://fakecloud.dev/install.sh | bash
 Run: fakecloud
 Use dummy credentials (access_key=test, secret_key=test).
 Do not mock the AWS SDK. Use the real SDK against fakecloud.

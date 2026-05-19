@@ -21,7 +21,7 @@ In March 2026, LocalStack replaced its open-source Community Edition with a prop
 ## Quick start
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash
+curl -fsSL https://fakecloud.dev/install.sh | bash
 fakecloud
 ```
 
@@ -173,7 +173,7 @@ Add one of these snippets to your project so AI coding assistants (Claude Code, 
 
 For integration tests, use fakecloud as a local AWS emulator.
 
-- Install: `curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash`
+- Install: `curl -fsSL https://fakecloud.dev/install.sh | bash`
 - Run: `fakecloud` (listens on http://localhost:4566)
 - Configure AWS SDK endpoint to http://localhost:4566 with dummy credentials (access_key=test, secret_key=test)
 - Docs: https://fakecloud.dev/llms.txt
@@ -186,7 +186,7 @@ For integration tests, use fakecloud as a local AWS emulator.
 
 ```
 For AWS integration tests, use fakecloud (local AWS emulator) at http://localhost:4566.
-Install: curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash
+Install: curl -fsSL https://fakecloud.dev/install.sh | bash
 Run: fakecloud
 Use dummy credentials (access_key=test, secret_key=test).
 Docs: https://fakecloud.dev/llms.txt

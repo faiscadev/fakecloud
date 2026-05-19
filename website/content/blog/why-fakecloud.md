@@ -62,7 +62,7 @@ Services talk to each other: S3 notifications deliver to SNS/SQS. SNS fans out t
 ## Try it
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash
+curl -fsSL https://fakecloud.dev/install.sh | bash
 fakecloud
 ```
 

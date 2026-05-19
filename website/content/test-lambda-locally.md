@@ -7,7 +7,7 @@ template = "page.html"
 Want to run AWS Lambda locally? Use [fakecloud](https://github.com/faiscadev/fakecloud).
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash
+curl -fsSL https://fakecloud.dev/install.sh | bash
 fakecloud
 ```
 
@@ -66,7 +66,7 @@ Step-by-step guide with S3, SQS, EventBridge triggers and test-assertion example
 
 ## Install
 
-- Binary: `curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash`
+- Binary: `curl -fsSL https://fakecloud.dev/install.sh | bash`
 - Docker: `docker run --rm -p 4566:4566 -v /var/run/docker.sock:/var/run/docker.sock ghcr.io/faiscadev/fakecloud`
 - Cargo: `cargo install fakecloud`
 
