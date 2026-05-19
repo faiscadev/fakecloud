@@ -1125,10 +1125,14 @@ impl LambdaService {
                     _ => None,
                 };
             }
-            if segs.len() == 3
+            // Empty-name recovery: only when the wire path literally has
+            // `//function-versions` (collapsed middle segment), not when
+            // a provider is genuinely named "function-versions" — see
+            // Cubic on PR #1474.
+            if req
+                .raw_path
+                .contains("/capacity-providers//function-versions")
                 && req.method == Method::GET
-                && req.raw_path.ends_with("/function-versions")
-                && segs.get(2).map(|s| s.as_str()) == Some("function-versions")
             {
                 return Some((
                     "ListFunctionVersionsByCapacityProvider",
@@ -1157,19 +1161,17 @@ impl LambdaService {
             let collection = segs.get(1).map(|s| s.as_str());
             let arn = segs.get(2).map(|s| s.to_string());
             let action = segs.get(3).map(|s| s.as_str());
-            // Empty path label (negative-omit / negative-too-short probes
-            // substitute an empty string into the URI template). Without
-            // these recoveries the request falls through to None and
-            // returns 501, but the Smithy contract declares only
-            // InvalidParameterValueException — so route to the right
-            // handler with an empty identifier and let the validation
-            // layer surface a 400 with the declared shape.
-            //
-            // The pattern matches both the trailing-slash collapse
-            // (`/durable-executions/`) and the empty-middle collapse
-            // (`/durable-executions//stop`) — filtered segments hide
-            // either form behind the same shortened `segs` vector.
-            if req.raw_path.contains("/durable-executions/") && segs.len() < 4 {
+            // Empty path label recovery: a negative-omit / negative-too-short
+            // probe substituted an empty string into the URI template,
+            // leaving a literal `//` in the wire path. The dispatcher's
+            // segment splitter filters those out, hiding the bug behind a
+            // shortened `segs` vector and a 501 ActionNotImplemented. We
+            // catch the literal `//` form so the request reaches the right
+            // handler with an empty identifier and the validation layer
+            // surfaces a declared 400 InvalidParameterValueException —
+            // without shadowing legitimate identifiers like "history" or
+            // "state" (an ARN named "history" is rare but allowed).
+            if req.raw_path.contains("/durable-executions//") {
                 if req.raw_path.ends_with("/checkpoint") && req.method == Method::POST {
                     return Some(("CheckpointDurableExecution", Some(String::new())));
                 }
@@ -1182,11 +1184,11 @@ impl LambdaService {
                 if req.raw_path.ends_with("/state") && req.method == Method::GET {
                     return Some(("GetDurableExecutionState", Some(String::new())));
                 }
-                if req.raw_path.ends_with("/durable-executions/") && req.method == Method::GET {
-                    return Some(("GetDurableExecution", Some(String::new())));
-                }
             }
-            if req.raw_path.contains("/durable-execution-callbacks/") && segs.len() < 4 {
+            if req.raw_path.ends_with("/durable-executions/") && req.method == Method::GET {
+                return Some(("GetDurableExecution", Some(String::new())));
+            }
+            if req.raw_path.contains("/durable-execution-callbacks//") {
                 if req.raw_path.ends_with("/succeed") && req.method == Method::POST {
                     return Some(("SendDurableExecutionCallbackSuccess", Some(String::new())));
                 }
@@ -1197,10 +1199,7 @@ impl LambdaService {
                     return Some(("SendDurableExecutionCallbackHeartbeat", Some(String::new())));
                 }
             }
-            if req.raw_path.contains("/functions/")
-                && req.raw_path.ends_with("/durable-executions")
-                && req.method == Method::GET
-                && segs.len() == 3
+            if req.raw_path.contains("/functions//durable-executions") && req.method == Method::GET
             {
                 return Some(("ListDurableExecutionsByFunction", Some(String::new())));
             }
