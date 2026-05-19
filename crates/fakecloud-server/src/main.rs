@@ -70,10 +70,12 @@ use fakecloud_sqs::SqsService;
 use fakecloud_ssm::SsmService;
 use fakecloud_stepfunctions::StepFunctionsService;
 
+mod hooks;
+use hooks::*;
+
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
-
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_new(&cli.log_level)
@@ -81,14 +83,11 @@ async fn main() {
         )
         .with_writer(std::io::stderr)
         .init();
-
     install_panic_hook();
-
     let persistence_config = match cli.persistence_config() {
         Ok(cfg) => cfg,
         Err(err) => fatal_exit(format_args!("invalid persistence configuration: {err}")),
     };
-
     if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
         if let Some(ref data_path) = persistence_config.data_path {
             if let Err(err) = std::fs::create_dir_all(data_path) {
@@ -108,7 +107,6 @@ async fn main() {
             }
         }
     }
-
     // Bind early so we know the actual port before initialising service state.
     // When the caller passes `--addr 0.0.0.0:0` the OS assigns a free port
     // atomically, eliminating the race between find-a-free-port and bind that
@@ -116,7 +114,6 @@ async fn main() {
     let (listener, bound_addr) = bind_listener(&cli.addr)
         .await
         .unwrap_or_else(|e| fatal_exit(format_args!("failed to bind {}: {e}", cli.addr)));
-
     // Announce the bound port to stdout so test harnesses (fakecloud-testkit)
     // can discover the OS-assigned port when `--addr :0` is used. The prefix
     // makes the line self-identifying: if anything ever prints to stdout
@@ -125,12 +122,10 @@ async fn main() {
         fatal_exit(format_args!("failed to announce bound port: {e}"));
     }
     tracing::info!(addr = %bound_addr, "fakecloud is ready");
-
     // Build the endpoint URL from the *actual* bound address so that port 0
     // resolves to the real OS-assigned port in all internal resource URLs
     // (SQS queue URLs, SNS ARNs, etc.).
     let endpoint_url = endpoint_url_from_addr(bound_addr);
-
     // Shared state
     let iam_state = Arc::new(parking_lot::RwLock::new(
         fakecloud_core::multi_account::MultiAccountState::new(
@@ -184,11 +179,9 @@ async fn main() {
             &endpoint_url,
         ),
     ));
-
     // Reap any backing containers left behind by a previous fakecloud process
     // that was killed before it could run its own cleanup (SIGKILL, crash, OOM).
     reaper::reap_stale_containers();
-
     // Auto-detect Docker/Podman for Lambda execution
     let container_runtime =
         fakecloud_lambda::runtime::ContainerRuntime::new(bound_addr.port()).map(Arc::new);
@@ -200,7 +193,6 @@ async fn main() {
     } else {
         tracing::info!("Docker/Podman not available — Lambda Invoke will return errors for functions with code");
     }
-
     let secretsmanager_state = Arc::new(parking_lot::RwLock::new(
         fakecloud_core::multi_account::MultiAccountState::new(
             &cli.account_id,
@@ -284,7 +276,6 @@ async fn main() {
             &endpoint_url,
         ),
     ));
-
     let stepfunctions_state = Arc::new(parking_lot::RwLock::new(
         fakecloud_core::multi_account::MultiAccountState::new(
             &cli.account_id,
@@ -292,7 +283,6 @@ async fn main() {
             &endpoint_url,
         ),
     ));
-
     // Deferred-fill handle to the central ServiceRegistry. We construct
     // the cell up front, hand it to StepFunctionsService and the
     // EventBridge/Scheduler-side StepFunctionsDelivery impls, then
@@ -302,7 +292,6 @@ async fn main() {
     // executions never touch it.
     let sfn_registry_handle: fakecloud_stepfunctions::SharedServiceRegistry =
         Arc::new(std::sync::OnceLock::new());
-
     let apigatewayv2_state = Arc::new(parking_lot::RwLock::new(
         fakecloud_core::multi_account::MultiAccountState::new(
             &cli.account_id,
@@ -310,11 +299,9 @@ async fn main() {
             &endpoint_url,
         ),
     ));
-
     let apigatewayv2_ws_registry: fakecloud_apigatewayv2::SharedWebSocketRegistry = Arc::new(
         parking_lot::RwLock::new(fakecloud_apigatewayv2::WebSocketRegistry::default()),
     );
-
     let apigatewayv1_state = Arc::new(parking_lot::RwLock::new(
         fakecloud_core::multi_account::MultiAccountState::new(
             &cli.account_id,
@@ -322,7 +309,6 @@ async fn main() {
             &endpoint_url,
         ),
     ));
-
     let ecr_state = Arc::new(parking_lot::RwLock::new(
         fakecloud_core::multi_account::MultiAccountState::new(
             &cli.account_id,
@@ -330,7 +316,6 @@ async fn main() {
             &endpoint_url,
         ),
     ));
-
     let ecs_state: fakecloud_ecs::SharedEcsState = Arc::new(parking_lot::RwLock::new(
         fakecloud_core::multi_account::MultiAccountState::new(
             &cli.account_id,
@@ -338,7 +323,6 @@ async fn main() {
             &endpoint_url,
         ),
     ));
-
     // CloudFront is a global REST-XML service. Constructed up-front (rather
     // than next to its `registry.register` call further down) so it can
     // join `ResetState` and have its in-memory state cleared by the
@@ -347,19 +331,15 @@ async fn main() {
     let cloudfront_state: fakecloud_cloudfront::SharedCloudFrontState = Arc::new(
         parking_lot::RwLock::new(fakecloud_cloudfront::CloudFrontAccounts::new()),
     );
-
     let route53_state: fakecloud_route53::SharedRoute53State = Arc::new(parking_lot::RwLock::new(
         fakecloud_route53::Route53Accounts::new(),
     ));
-
     let acm_state: fakecloud_acm::SharedAcmState =
         Arc::new(parking_lot::RwLock::new(fakecloud_acm::AcmAccounts::new()));
-
     let app_autoscaling_state: fakecloud_application_autoscaling::SharedApplicationAutoScalingState =
         Arc::new(parking_lot::RwLock::new(
             fakecloud_application_autoscaling::ApplicationAutoScalingAccounts::new(),
         ));
-
     let wafv2_state: fakecloud_wafv2::SharedWafv2State = Arc::new(parking_lot::RwLock::new(
         fakecloud_wafv2::Wafv2Accounts::new(),
     ));
@@ -368,11 +348,9 @@ async fn main() {
     // `/_fakecloud/wafv2/evaluate` admin endpoint share their state.
     let wafv2_rate_limiter: Arc<fakecloud_wafv2::RateLimiter> =
         Arc::new(fakecloud_wafv2::RateLimiter::new());
-
     let athena_state: fakecloud_athena::SharedAthenaState = Arc::new(parking_lot::RwLock::new(
         fakecloud_athena::AthenaAccounts::new(),
     ));
-
     let bedrock_state = Arc::new(parking_lot::RwLock::new(
         fakecloud_core::multi_account::MultiAccountState::new(
             &cli.account_id,
@@ -380,20 +358,16 @@ async fn main() {
             &endpoint_url,
         ),
     ));
-
     let bedrock_agent_state: fakecloud_bedrock_agent::SharedBedrockAgentState = Arc::new(
         parking_lot::RwLock::new(fakecloud_bedrock_agent::BedrockAgentAccounts::new()),
     );
-
     let bedrock_agent_runtime_state: fakecloud_bedrock_agent_runtime::SharedBedrockAgentRuntimeState = Arc::new(
         parking_lot::RwLock::new(fakecloud_bedrock_agent_runtime::BedrockAgentRuntimeAccounts::new()),
     );
-
     // Organizations state is a global singleton (one org per fakecloud
     // process) — not wrapped in MultiAccountState because an AWS org is
     // a cross-account construct. `None` until CreateOrganization runs.
     let organizations_state: SharedOrganizationsState = Arc::new(parking_lot::RwLock::new(None));
-
     let scheduler_state: fakecloud_scheduler::SharedSchedulerState = Arc::new(
         parking_lot::RwLock::new(fakecloud_core::multi_account::MultiAccountState::new(
             &cli.account_id,
@@ -401,7 +375,6 @@ async fn main() {
             &endpoint_url,
         )),
     );
-
     let rds_runtime = fakecloud_rds::runtime::RdsRuntime::new(bound_addr.port()).map(Arc::new);
     if let Some(ref rt) = rds_runtime {
         tracing::info!(
@@ -411,7 +384,6 @@ async fn main() {
     } else {
         tracing::info!("Docker/Podman not available — RDS CreateDBInstance will return errors");
     }
-
     let elasticache_runtime =
         fakecloud_elasticache::runtime::ElastiCacheRuntime::new().map(Arc::new);
     if let Some(ref rt) = elasticache_runtime {
@@ -424,20 +396,17 @@ async fn main() {
             "Docker/Podman not available — ElastiCache CreateReplicationGroup will return errors"
         );
     }
-
     // ECS runtime is constructed below, after the EventBridge + CloudWatch
     // Logs wiring is in place. Placeholder kept here so downstream blocks
     // that reference `ecs_runtime` don't need reordering — see the
     // `ecs_runtime = ...` assignment after the delivery bus setup.
     let ecs_runtime: Option<Arc<fakecloud_ecs::runtime::EcsRuntime>>;
-
     // Cross-service delivery bus
     // Step 1: SQS delivery (SNS and EventBridge can push messages into SQS queues)
     let sqs_delivery = Arc::new(
         fakecloud_sqs::delivery::SqsDeliveryImpl::new(sqs_state.clone())
             .with_kms_hook(kms_hook_for_services.clone()),
     );
-
     // Lambda delivery (SNS can invoke Lambda functions via container runtime)
     let lambda_delivery: Option<Arc<dyn fakecloud_core::delivery::LambdaDelivery>> =
         container_runtime.as_ref().map(|rt| {
@@ -446,7 +415,6 @@ async fn main() {
                 rt.clone(),
             )) as Arc<dyn fakecloud_core::delivery::LambdaDelivery>
         });
-
     let delivery_for_sns = {
         let mut bus = DeliveryBus::new().with_sqs(sqs_delivery.clone());
         if let Some(ref ld) = lambda_delivery {
@@ -454,7 +422,6 @@ async fn main() {
         }
         Arc::new(bus)
     };
-
     // Step 2: SNS delivery (EventBridge can publish to SNS topics, which then fan out to SQS)
     let sns_delivery = Arc::new(fakecloud_sns::delivery::SnsDeliveryImpl::new(
         sns_state.clone(),
@@ -462,7 +429,6 @@ async fn main() {
     ));
     let kinesis_delivery_for_eb =
         fakecloud_kinesis::delivery::KinesisDeliveryImpl::new(kinesis_state.clone());
-
     // Step Functions delivery (EventBridge/Scheduler can start executions)
     let sfn_delivery_for_eb: Arc<dyn fakecloud_core::delivery::StepFunctionsDelivery> = {
         // Build a full delivery bus for the SFN interpreter so task states
@@ -497,7 +463,6 @@ async fn main() {
             .with_registry(sfn_registry_handle.clone()),
         )
     };
-
     let delivery_for_eb = Arc::new(
         DeliveryBus::new()
             .with_sqs(sqs_delivery.clone())
@@ -505,7 +470,6 @@ async fn main() {
             .with_kinesis(kinesis_delivery_for_eb.clone())
             .with_stepfunctions(sfn_delivery_for_eb),
     );
-
     // Step 3: S3 delivery (S3 notifications can push to SQS, SNS, Lambda, and EventBridge)
     let sns_delivery_for_ses = sns_delivery.clone();
     let sns_delivery_for_cf = sns_delivery.clone();
@@ -529,13 +493,11 @@ async fn main() {
         }
         Arc::new(bus)
     };
-
     // CloudWatch state must be constructed before logs delivery so
     // CloudWatch Logs metric filters can publish data points into it.
     let cloudwatch_state: fakecloud_cloudwatch::SharedCloudWatchState = Arc::new(
         parking_lot::RwLock::new(fakecloud_cloudwatch::CloudWatchAccounts::new()),
     );
-
     // Step 4: Logs delivery (subscription filters can push to SQS, Lambda, and Kinesis;
     // metric filters publish CloudWatch metric data points)
     let sqs_delivery_for_ses = sqs_delivery.clone();
@@ -572,11 +534,9 @@ async fn main() {
         delivery_for_logs = delivery_for_logs.with_lambda(ld.clone());
     }
     let delivery_for_logs = Arc::new(delivery_for_logs);
-
     // Step 4b: DynamoDB delivery (Kinesis streaming destinations)
     let delivery_for_dynamodb =
         Arc::new(DeliveryBus::new().with_kinesis(kinesis_delivery_for_dynamodb));
-
     // Step 4c: ECS runtime, wired with EventBridge + CloudWatch Logs so
     // task state transitions emit `aws.ecs` events and `awslogs`-driver
     // output forwards to CloudWatch Logs. Built here so `sqs_delivery`
@@ -613,7 +573,6 @@ async fn main() {
     } else {
         tracing::info!("Docker/Podman not available — ECS RunTask will return TaskFailedToStart");
     }
-
     // Clone state refs for internal endpoints
     let lambda_invocations_state = lambda_state.clone();
     let ses_emails_state = ses_state.clone();
@@ -633,7 +592,6 @@ async fn main() {
     let ecs_introspection_state = ecs_state.clone();
     let dynamodb_ttl_state = dynamodb_state.clone();
     let secretsmanager_rotation_state = secretsmanager_state.clone();
-
     // Clone state refs for simulation endpoints
     let sqs_sim_expiration_state = sqs_state.clone();
     let sqs_sim_force_dlq_state = sqs_state.clone();
@@ -649,7 +607,6 @@ async fn main() {
     let lambda_layer_content_state = lambda_state.clone();
     let sns_sim_pending_state = sns_state.clone();
     let sns_sim_confirm_state = sns_state.clone();
-
     // Clone state refs for Cognito simulation endpoints
     let cognito_codes_state = cognito_state.clone();
     let cognito_confirm_state = cognito_state.clone();
@@ -662,10 +619,8 @@ async fn main() {
     let cognito_userinfo_state = cognito_state.clone();
     let cognito_revoke_state = cognito_state.clone();
     let cognito_authorize_state = cognito_state.clone();
-
     let glue_state: fakecloud_glue::SharedGlueState =
         Arc::new(parking_lot::RwLock::new(fakecloud_glue::GlueAccounts::new()));
-
     // Clone state for reset endpoint before moving into services
     let reset_state = ResetState {
         iam: iam_state.clone(),
@@ -709,7 +664,6 @@ async fn main() {
         elasticache_runtime: elasticache_runtime.clone(),
         ecs_runtime: ecs_runtime.clone(),
     };
-
     // Step 5: CloudFormation delivery (custom resources can invoke Lambda)
     let delivery_for_cf = {
         let mut bus = DeliveryBus::new().with_sns(sns_delivery_for_cf);
@@ -718,7 +672,6 @@ async fn main() {
         }
         Arc::new(bus)
     };
-
     // Register services
     let mut registry = ServiceRegistry::new();
     let cloudformation_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
@@ -1015,7 +968,6 @@ async fn main() {
         eb_service = eb_service.with_snapshot_store(store);
     }
     registry.register(Arc::new(eb_service));
-
     // Spawn the EventBridge scheduler as a background task
     let eb_state_for_ses = eb_state.clone();
     let eb_state_for_sfn = eb_state.clone();
@@ -1470,7 +1422,6 @@ async fn main() {
     if let Some(store) = kms_snapshot_store {
         kms_hook_adapter.set_snapshot_store(store);
     }
-
     registry.register(Arc::new(OrganizationsService::new(
         organizations_state.clone(),
     )));
@@ -2036,7 +1987,6 @@ async fn main() {
     // RDS #1338 for the original bug class.
     elasticache_service.recover_persisted_containers().await;
     registry.register(Arc::new(elasticache_service));
-
     let ecr_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
         if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
             let data_path = persistence_config
@@ -2088,7 +2038,6 @@ async fn main() {
         ecr_service = ecr_service.with_snapshot_store(store);
     }
     registry.register(Arc::new(ecr_service));
-
     // Periodic re-evaluation of ECR lifecycle policies. The ticker
     // re-runs the prune evaluator on every repository with a policy
     // set so time-based selections (e.g. `sinceImagePushed`) take
@@ -2096,7 +2045,6 @@ async fn main() {
     // is a cheap read-only scan when no policies are set.
     let ecr_lifecycle_ticker = fakecloud_ecr::LifecycleTicker::new(ecr_state.clone());
     tokio::spawn(ecr_lifecycle_ticker.run());
-
     let ecs_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
         if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
             let data_path = persistence_config
@@ -2162,7 +2110,6 @@ async fn main() {
     let ecs_service = Arc::new(ecs_service);
     let ecs_service_for_scheduler = ecs_service.clone();
     registry.register(ecs_service);
-
     let elbv2_introspection_state = elbv2_state.clone();
     // Wire an S3-only delivery bus so the ALB dataplane can flush
     // gzipped access-log + connection-log batches to the bucket
@@ -2180,10 +2127,8 @@ async fn main() {
     elbv2_service.start_dataplane();
     let elbv2_service_for_admin = elbv2_service.clone();
     registry.register(elbv2_service);
-
     let cloudfront_service = Arc::new(CloudFrontService::new(cloudfront_state.clone()));
     registry.register(cloudfront_service.clone());
-
     let route53_service = Arc::new(
         fakecloud_route53::Route53Service::new(route53_state.clone())
             .with_logs(logs_state.clone())
@@ -2192,37 +2137,29 @@ async fn main() {
             .with_s3(s3_state.clone()),
     );
     registry.register(route53_service.clone());
-
     let acm_service = Arc::new(fakecloud_acm::AcmService::new(acm_state.clone()));
     registry.register(acm_service.clone());
-
     let firehose_service =
         fakecloud_firehose::FirehoseService::new(firehose_state.clone()).with_s3(s3_state.clone());
     registry.register(Arc::new(firehose_service));
-
     let glue_service = fakecloud_glue::GlueService::new(glue_state.clone());
     registry.register(Arc::new(glue_service));
-
     let cloudwatch_service = fakecloud_cloudwatch::CloudWatchService::new(cloudwatch_state.clone());
     registry.register(Arc::new(cloudwatch_service));
-
     let app_autoscaling_service =
         fakecloud_application_autoscaling::ApplicationAutoScalingService::new(
             app_autoscaling_state.clone(),
         );
     registry.register(Arc::new(app_autoscaling_service));
-
     let wafv2_service = fakecloud_wafv2::Wafv2Service::with_rate_limiter(
         wafv2_state.clone(),
         wafv2_rate_limiter.clone(),
     );
     registry.register(Arc::new(wafv2_service));
-
     let athena_service = fakecloud_athena::AthenaService::new(athena_state.clone())
         .with_glue(glue_state.clone())
         .with_s3(s3_state.clone());
     registry.register(Arc::new(athena_service));
-
     let mut sfn_service = StepFunctionsService::new(stepfunctions_state.clone());
     let sfn_delivery_bus = {
         let mut sns_eb_bus = DeliveryBus::new().with_sqs(sqs_delivery.clone());
@@ -2324,7 +2261,6 @@ async fn main() {
         sfn_service = sfn_service.with_snapshot_store(store);
     }
     registry.register(Arc::new(sfn_service));
-
     let apigw_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
         if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
             let data_path = persistence_config
@@ -2401,7 +2337,6 @@ async fn main() {
     }
     let apigatewayv2_service = Arc::new(apigw_service);
     let v2_arc: Arc<dyn fakecloud_core::service::AwsService> = apigatewayv2_service.clone();
-
     // v1 (REST APIs) shares the SigV4 service identifier `apigateway`
     // with v2; the registry is keyed by that identifier so we wrap
     // both behind a facade that routes by URL prefix.
@@ -2541,7 +2476,6 @@ async fn main() {
         BedrockAgentRuntimeService::new(bedrock_agent_runtime_state.clone())
             .with_agent_state(bedrock_agent_state.clone()),
     ));
-
     let scheduler_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
         if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
             let data_path = persistence_config
@@ -2569,7 +2503,6 @@ async fn main() {
         scheduler_service = scheduler_service.with_snapshot_store(store);
     }
     registry.register(Arc::new(scheduler_service));
-
     // Spawn the Scheduler firing loop as a background task. Mirrors
     // EventBridge's delivery bus so every target type Scheduler
     // routes (`:sqs:`, `:sns:`, `:lambda:`, `:states:`, `:events:`)
@@ -2664,37 +2597,31 @@ async fn main() {
     let scheduler_ticker =
         fakecloud_scheduler::ticker::Ticker::new(scheduler_state.clone(), delivery_for_scheduler);
     tokio::spawn(scheduler_ticker.run());
-
     // Spawn background tasks
     let lifecycle_processor = fakecloud_s3::lifecycle::LifecycleProcessor::new(s3_state.clone());
     tokio::spawn(lifecycle_processor.run());
-
     let mut sqs_lambda_poller = SqsLambdaPoller::new(sqs_state.clone(), lambda_state.clone())
         .with_kms_hook(kms_hook_for_services.clone());
     if let Some(ref ld) = lambda_delivery {
         sqs_lambda_poller = sqs_lambda_poller.with_lambda_delivery(ld.clone());
     }
     tokio::spawn(sqs_lambda_poller.run());
-
     let mut kinesis_lambda_poller =
         KinesisLambdaPoller::new(kinesis_state, lambda_invocations_state.clone());
     if let Some(ref ld) = lambda_delivery {
         kinesis_lambda_poller = kinesis_lambda_poller.with_lambda_delivery(ld.clone());
     }
     tokio::spawn(kinesis_lambda_poller.run());
-
     let mut dynamodb_streams_poller =
         DynamoDbStreamsLambdaPoller::new(dynamodb_state.clone(), lambda_invocations_state.clone());
     if let Some(ref ld) = lambda_delivery {
         dynamodb_streams_poller = dynamodb_streams_poller.with_lambda_delivery(ld.clone());
     }
     tokio::spawn(Arc::new(dynamodb_streams_poller).run());
-
     if let Some(ref rt) = container_runtime {
         let rt = rt.clone();
         tokio::spawn(rt.run_cleanup_loop(std::time::Duration::from_secs(300)));
     }
-
     // Application Auto Scaling watcher: ticks every 15s, walks all
     // DynamoDB scaling targets/policies, reads CloudWatch metrics, and
     // applies capacity changes via the DDB capacity hook. Tests can
@@ -2727,7 +2654,6 @@ async fn main() {
         .with_interval(std::time::Duration::from_secs(15));
         tokio::spawn(watcher.run());
     }
-
     // Application Auto Scaling scheduled action executor: ticks every
     // 30s, walks all ScheduledActions, fires the ones whose Schedule
     // expression is due and applies the configured ScalableTargetAction
@@ -2753,10 +2679,8 @@ async fn main() {
         .with_interval(std::time::Duration::from_secs(30));
         tokio::spawn(executor.run());
     }
-
     let services: Vec<&str> = registry.service_names();
     tracing::info!(services = ?services, "registered services");
-
     let iam_mode = cli.iam_mode();
     if iam_mode.is_enabled() || cli.verify_sigv4 {
         tracing::warn!(
@@ -2773,7 +2697,6 @@ async fn main() {
             "IAM enforcement surface: listed `enforced` services evaluate policies; `skipped` services are not yet wired for enforcement"
         );
     }
-
     let config = DispatchConfig {
         region: cli.region.clone(),
         account_id: cli.account_id.clone(),
@@ -2818,13 +2741,11 @@ async fn main() {
             ),
         ),
     };
-
     let service_names: Vec<String> = registry
         .service_names()
         .iter()
         .map(|s| s.to_string())
         .collect();
-
     let app = Router::new()
         .route(
             "/_fakecloud/health",
@@ -3218,7 +3139,6 @@ async fn main() {
                             &body.subject,
                             &body.body,
                         );
-
                     // AddHeader actions are processed inline first so
                     // downstream S3 / Lambda / SNS payloads see the new
                     // headers (matches AWS evaluation order: AddHeader is
@@ -3243,7 +3163,6 @@ async fn main() {
                             .join("\r\n");
                         format!("{header_block}\r\n{}", body.body)
                     };
-
                     // Execute actions for real
                     for (_rule, action) in &actions {
                         match action {
@@ -3259,7 +3178,6 @@ async fn main() {
                                 let data = bytes::Bytes::from(augmented_body.clone());
                                 let size = data.len() as u64;
                                 let etag = format!("\"{:x}\"", md5::Md5::digest(&data));
-
                                 // Encrypt via KMS when KmsKeyArn is configured.
                                 let (body_bytes, sse_algorithm, sse_kms_key_id) =
                                     if let Some(kms_key) = kms_key_arn {
@@ -3295,7 +3213,6 @@ async fn main() {
                                     } else {
                                         (data.clone(), None, None)
                                     };
-
                                 let obj = fakecloud_s3::S3Object {
                                     key: key.clone(),
                                     body: fakecloud_persistence::BodyRef::Memory(body_bytes.clone()),
@@ -3578,7 +3495,6 @@ async fn main() {
                             fakecloud_ses::ReceiptAction::AddHeader { .. } => {}
                         }
                     }
-
                     let actions_executed = actions
                         .iter()
                         .map(|(rule, action)| types::InboundActionExecuted {
@@ -3599,7 +3515,6 @@ async fn main() {
                             .to_string(),
                         })
                         .collect();
-
                     axum::Json(types::InboundEmailResponse {
                         message_id,
                         matched_rules,
@@ -4026,7 +3941,6 @@ async fn main() {
                 let container_runtime = eb_sim_container_runtime;
                 move |axum::Json(body): axum::Json<types::FireRuleRequest>| async move {
                     let bus_name = body.bus_name.as_deref().unwrap_or("default");
-
                     let ctx = fakecloud_eventbridge::simulation::FireRuleContext {
                         state: &es,
                         delivery: &delivery,
@@ -4429,30 +4343,25 @@ async fn main() {
                         let mut mas = cs.write();
                         let state = mas.default_mut();
                         let mut expired = 0usize;
-
                         let matches = |p: &str, u: &str| -> bool {
                             body.user_pool_id.as_ref().is_none_or(|pid| pid == p)
                                 && body.username.as_ref().is_none_or(|un| un == u)
                         };
-
                         let before_access = state.access_tokens.len();
                         state
                             .access_tokens
                             .retain(|_, v| !matches(&v.user_pool_id, &v.username));
                         expired += before_access - state.access_tokens.len();
-
                         let before_refresh = state.refresh_tokens.len();
                         state
                             .refresh_tokens
                             .retain(|_, v| !matches(&v.user_pool_id, &v.username));
                         expired += before_refresh - state.refresh_tokens.len();
-
                         let before_sessions = state.sessions.len();
                         state
                             .sessions
                             .retain(|_, v| !matches(&v.user_pool_id, &v.username));
                         expired += before_sessions - state.sessions.len();
-
                         axum::Json(types::ExpireTokensResponse {
                             expired_tokens: expired as u64,
                         })
@@ -4997,7 +4906,6 @@ async fn main() {
                             .as_deref()
                             .unwrap_or("RequestResponse")
                             .to_string();
-
                         if invocation_type == "Event" {
                             let arn = function_arn.clone();
                             let payload = payload_str.clone();
@@ -5014,7 +4922,6 @@ async fn main() {
                                 })),
                             );
                         }
-
                         match ld.invoke_lambda(&function_arn, &payload_str).await {
                             Ok(bytes) => {
                                 let payload_value = serde_json::from_slice::<serde_json::Value>(
@@ -6063,7 +5970,6 @@ async fn main() {
                             .and_then(|v| v.to_str().ok())
                             .map(|s| s.to_string());
                         let source_ip = addr.ip().to_string();
-
                         let mut header_map = std::collections::HashMap::new();
                         for (k, v) in &headers {
                             if let Ok(s) = v.to_str() {
@@ -6074,7 +5980,6 @@ async fn main() {
                             .into_iter()
                             .filter(|(k, _)| k != "stage")
                             .collect();
-
                         ws.on_upgrade(move |socket| async move {
                             let (conn_id, rx) = fakecloud_apigatewayv2::websocket::register(
                                 reg.clone(),
@@ -6085,7 +5990,6 @@ async fn main() {
                             );
                             let conn_id_for_lifecycle = conn_id.clone();
                             let connected_at = chrono::Utc::now();
-
                             // Dispatch $connect route
                             fakecloud_apigatewayv2::websocket_dispatch::dispatch_websocket_event(
                                 &apigw_state,
@@ -6105,7 +6009,6 @@ async fn main() {
                                 Some(&query_map),
                             )
                             .await;
-
                             let on_disconnect = {
                                 let apigw_state = apigw_state.clone();
                                 let lambda_delivery = lambda_delivery.clone();
@@ -6138,7 +6041,6 @@ async fn main() {
                                     .await;
                                 }
                             };
-
                             let on_message = {
                                 let apigw_state = apigw_state.clone();
                                 let lambda_delivery = lambda_delivery.clone();
@@ -6169,7 +6071,6 @@ async fn main() {
                                             BASE64_STANDARD.encode(&bytes)
                                         };
                                         let is_base64 = !is_text;
-
                                         // Resolve route key via RouteSelectionExpression
                                         let route_key = {
                                             let accounts = apigw_state.read();
@@ -6190,7 +6091,6 @@ async fn main() {
                                                 )
                                             }
                                         };
-
                                         fakecloud_apigatewayv2::websocket_dispatch::dispatch_websocket_event(
                                             &apigw_state,
                                             lambda_delivery.as_ref(),
@@ -6212,7 +6112,6 @@ async fn main() {
                                     }
                                 }
                             };
-
                             fakecloud_apigatewayv2::websocket::run_lifecycle_tracked_with_disconnect(
                                 socket,
                                 rx,
@@ -7100,7 +6999,6 @@ async fn main() {
         })
         .layer(Extension(Arc::new(config)))
         .layer(TraceLayer::new_for_http());
-
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
@@ -7108,7 +7006,6 @@ async fn main() {
     .with_graceful_shutdown(shutdown_signal())
     .await
     .unwrap();
-
     // Clean up Lambda containers on shutdown
     if let Some(rt) = container_runtime {
         rt.stop_all().await;
@@ -7120,14 +7017,12 @@ async fn main() {
         rt.stop_all().await;
     }
 }
-
 async fn shutdown_signal() {
     let ctrl_c = async {
         tokio::signal::ctrl_c()
             .await
             .expect("failed to install Ctrl+C handler");
     };
-
     #[cfg(unix)]
     let terminate = async {
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
@@ -7135,123 +7030,17 @@ async fn shutdown_signal() {
             .recv()
             .await;
     };
-
     #[cfg(not(unix))]
     let terminate = std::future::pending::<()>();
-
     tokio::select! {
         _ = ctrl_c => {},
         _ = terminate => {},
     }
-
     tracing::info!("shutting down");
 }
-
 /// Adapter that exposes the `fakecloud-kms` hook through the
 /// `fakecloud-core::delivery::KmsHook` trait so non-KMS services can
 /// call into KMS without a direct crate dependency.
-struct KmsHookAdapter {
-    inner: fakecloud_kms::hook::KmsServiceHook,
-    /// Shared KMS state — used to snapshot after the hook auto-provisions
-    /// an `aws/<service>` AWS-managed key on first use, so the new key
-    /// survives a server restart and the corresponding ciphertext stays
-    /// decryptable.
-    state: fakecloud_kms::SharedKmsState,
-    snapshot_store: std::sync::OnceLock<Arc<dyn fakecloud_persistence::SnapshotStore>>,
-}
-
-impl KmsHookAdapter {
-    fn new(
-        state: fakecloud_kms::SharedKmsState,
-        usage: fakecloud_kms::hook::SharedKmsUsageState,
-    ) -> Self {
-        Self {
-            inner: fakecloud_kms::hook::KmsServiceHook::new(state.clone(), usage),
-            state,
-            snapshot_store: std::sync::OnceLock::new(),
-        }
-    }
-
-    fn set_snapshot_store(&self, store: Arc<dyn fakecloud_persistence::SnapshotStore>) {
-        let _ = self.snapshot_store.set(store);
-    }
-
-    fn key_count(&self) -> usize {
-        self.state.read().iter().map(|(_, s)| s.keys.len()).sum()
-    }
-
-    fn save_snapshot_blocking(&self) {
-        let Some(store) = self.snapshot_store.get() else {
-            return;
-        };
-        let snapshot = fakecloud_kms::KmsSnapshot {
-            schema_version: fakecloud_kms::KMS_SNAPSHOT_SCHEMA_VERSION,
-            accounts: Some(self.state.read().clone()),
-            state: None,
-        };
-        match serde_json::to_vec(&snapshot) {
-            Ok(bytes) => {
-                if let Err(err) = store.save(&bytes) {
-                    tracing::error!(%err, "kms hook snapshot save failed");
-                }
-            }
-            Err(err) => tracing::error!(%err, "kms hook snapshot serialize failed"),
-        }
-    }
-}
-
-impl fakecloud_core::delivery::KmsHook for KmsHookAdapter {
-    fn encrypt(
-        &self,
-        account_id: &str,
-        region: &str,
-        key_id: &str,
-        plaintext: &[u8],
-        service_principal: &str,
-        encryption_context: std::collections::HashMap<String, String>,
-    ) -> Result<String, String> {
-        let before = self.key_count();
-        let result = self
-            .inner
-            .encrypt(
-                account_id,
-                region,
-                key_id,
-                plaintext,
-                service_principal,
-                encryption_context,
-            )
-            .map_err(|e| e.to_string());
-        // Auto-provisioned a new AWS-managed key — persist immediately so
-        // a restart can still decrypt its ciphertext.
-        if result.is_ok() && self.key_count() > before {
-            self.save_snapshot_blocking();
-        }
-        result
-    }
-
-    fn decrypt(
-        &self,
-        account_id: &str,
-        ciphertext_b64: &str,
-        service_principal: &str,
-        encryption_context: std::collections::HashMap<String, String>,
-    ) -> Result<Vec<u8>, String> {
-        self.inner
-            .decrypt(
-                account_id,
-                ciphertext_b64,
-                service_principal,
-                encryption_context,
-            )
-            .map_err(|e| e.to_string())
-    }
-}
-
-/// Parse a `Authorization: Basic <b64(client_id:client_secret)>` header
-/// into `(client_id, client_secret)`. Returns `None` when the header is
-/// absent, malformed, or the credential pair doesn't contain a colon.
-/// Tolerates URL-encoded credentials per RFC 6749 §2.3.1 by treating
 /// the raw decoded form as the canonical pair.
 fn parse_basic_auth(headers: &axum::http::HeaderMap) -> Option<(String, String)> {
     use base64::Engine as _;
@@ -7269,7 +7058,6 @@ fn parse_basic_auth(headers: &axum::http::HeaderMap) -> Option<(String, String)>
     let (id, secret) = raw.split_once(':')?;
     Some((id.to_string(), secret.to_string()))
 }
-
 /// Emit a fatal error through the tracing pipeline, flush stderr so the
 /// message survives `process::exit`, and terminate with code 1.
 fn fatal_exit(args: std::fmt::Arguments<'_>) -> ! {
@@ -7278,7 +7066,6 @@ fn fatal_exit(args: std::fmt::Arguments<'_>) -> ! {
     let _ = std::io::stderr().flush();
     std::process::exit(1);
 }
-
 /// Route panics through `tracing::error!` so they show up in CI logs with
 /// the same formatting as regular errors. Runs the default hook afterwards
 /// so the process keeps its usual backtrace behaviour for developers
@@ -7301,12 +7088,10 @@ fn install_panic_hook() {
         default(info);
     }));
 }
-
 /// Prefix used to announce the bound port on stdout. `fakecloud-testkit`
 /// scans stdout for the first line starting with this prefix to discover
 /// the OS-assigned port when the server was launched with `--addr :0`.
 const PORT_HANDSHAKE_PREFIX: &str = "FAKECLOUD_PORT=";
-
 /// Body shape accepted by `POST /_fakecloud/wafv2/evaluate`:
 ///
 /// ```json
@@ -7338,14 +7123,12 @@ fn wafv2_evaluate_admin(
     body: &serde_json::Value,
 ) -> (axum::http::StatusCode, axum::Json<serde_json::Value>) {
     use axum::http::StatusCode;
-
     let bad = |msg: &str| -> (StatusCode, axum::Json<serde_json::Value>) {
         (
             StatusCode::BAD_REQUEST,
             axum::Json(serde_json::json!({"error": msg})),
         )
     };
-
     let Some(arn) = body.get("webAclArn").and_then(|v| v.as_str()) else {
         return bad("`webAclArn` is required");
     };
@@ -7357,7 +7140,6 @@ fn wafv2_evaluate_admin(
         .get("request")
         .cloned()
         .unwrap_or(serde_json::json!({}));
-
     let method = req_obj
         .get("method")
         .and_then(|v| v.as_str())
@@ -7380,7 +7162,6 @@ fn wafv2_evaluate_admin(
     let Ok(source_ip) = source_ip_str.parse::<std::net::IpAddr>() else {
         return bad("`request.sourceIp` is not a valid IP address");
     };
-
     // Headers come in as either [[name, val], ...] or {name: val} for ergonomics.
     let mut headers: Vec<(String, String)> = Vec::new();
     if let Some(arr) = req_obj.get("headers").and_then(|v| v.as_array()) {
@@ -7407,7 +7188,6 @@ fn wafv2_evaluate_admin(
             }
         }
     }
-
     // Body: prefer raw `body` string, fall back to base64-encoded `bodyB64`.
     let body_bytes: Vec<u8> = if let Some(b64) = req_obj.get("bodyB64").and_then(|v| v.as_str()) {
         match base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64) {
@@ -7423,7 +7203,6 @@ fn wafv2_evaluate_admin(
         .get("bodySize")
         .and_then(|v| v.as_u64())
         .unwrap_or(body_bytes.len() as u64);
-
     // Country override precedence: explicit `country` field, else the
     // `x-fakecloud-geo-country` header on the synthetic request.
     let country_explicit = req_obj
@@ -7435,7 +7214,6 @@ fn wafv2_evaluate_admin(
         .find(|(k, _)| k.eq_ignore_ascii_case(fakecloud_wafv2::FAKECLOUD_GEO_COUNTRY_HEADER))
         .map(|(_, v)| v.clone());
     let country = country_explicit.or(country_header);
-
     let now_epoch_secs = req_obj
         .get("nowEpochSecs")
         .and_then(|v| v.as_i64())
@@ -7445,7 +7223,6 @@ fn wafv2_evaluate_admin(
                 .map(|d| d.as_secs() as i64)
                 .unwrap_or(0)
         });
-
     // Snapshot the WebACL plus the IpSets and RegexPatternSets it might
     // reference. We hold the read lock only long enough to clone what we
     // need — evaluation itself does not need the lock.
@@ -7472,7 +7249,6 @@ fn wafv2_evaluate_admin(
     let Some(acl) = acl else {
         return bad("WebACL not found");
     };
-
     let request = fakecloud_wafv2::WafRequest {
         method: &method,
         uri: &uri,
@@ -7491,7 +7267,6 @@ fn wafv2_evaluate_admin(
         rate_limiter,
         now_epoch_secs,
     );
-
     (
         StatusCode::OK,
         axum::Json(serde_json::json!({
@@ -7505,201 +7280,20 @@ fn wafv2_evaluate_admin(
         })),
     )
 }
-
 /// Bind a `TcpListener` and return the listener together with the address
 /// Email dispatcher used by Cognito's verification flow: append a
 /// `SentEmail` to the SES state for the right account so the email is
 /// observable through the standard `/_fakecloud/ses/sent` introspection.
-struct SesEmailDispatcher {
-    state: fakecloud_ses::SharedSesState,
-}
-
-impl fakecloud_core::delivery::EmailDispatcher for SesEmailDispatcher {
-    fn send_email(
-        &self,
-        account_id: &str,
-        from: &str,
-        to: &str,
-        subject: &str,
-        body_text: &str,
-        body_html: Option<&str>,
-    ) {
-        let mut accounts = self.state.write();
-        let state = accounts.get_or_create(account_id);
-        state.sent_emails.push(fakecloud_ses::SentEmail {
-            message_id: format!("cognito-{}", uuid::Uuid::new_v4()),
-            from: from.to_string(),
-            to: vec![to.to_string()],
-            cc: Vec::new(),
-            bcc: Vec::new(),
-            subject: Some(subject.to_string()),
-            html_body: body_html.map(|s| s.to_string()),
-            text_body: Some(body_text.to_string()),
-            raw_data: None,
-            template_name: None,
-            template_data: None,
-            dkim_signature: None,
-            headers: Vec::new(),
-            timestamp: chrono::Utc::now(),
-            email_tags: Vec::new(),
-            delivery_insights: Vec::new(),
-        });
-    }
-}
-
-/// SES SendEmail dispatcher for cross-service universal targets
-/// (EventBridge Scheduler `arn:aws:scheduler:::aws-sdk:sesv2:sendEmail`,
-/// EventBridge Rules with SES targets). Distinct from `SesEmailDispatcher`
-/// which is the single-recipient primitive Cognito uses — this one
-/// preserves multi-recipient + subject + html semantics that real callers
-/// pass via the SES API shape.
-struct SesSendEmailDispatcherImpl {
-    state: fakecloud_ses::SharedSesState,
-}
-
-impl fakecloud_core::delivery::SesSendEmailDispatcher for SesSendEmailDispatcherImpl {
-    #[allow(clippy::too_many_arguments)]
-    fn send_email(
-        &self,
-        account_id: &str,
-        from: &str,
-        to: Vec<String>,
-        cc: Vec<String>,
-        bcc: Vec<String>,
-        subject: Option<&str>,
-        text_body: Option<&str>,
-        html_body: Option<&str>,
-    ) -> Result<(), String> {
-        if to.is_empty() && cc.is_empty() && bcc.is_empty() {
-            return Err("at least one recipient required".to_string());
-        }
-        let mut accounts = self.state.write();
-        let state = accounts.get_or_create(account_id);
-        state.sent_emails.push(fakecloud_ses::SentEmail {
-            message_id: format!("scheduler-{}", uuid::Uuid::new_v4()),
-            from: from.to_string(),
-            to,
-            cc,
-            bcc,
-            subject: subject.map(String::from),
-            html_body: html_body.map(String::from),
-            text_body: text_body.map(String::from),
-            raw_data: None,
-            template_name: None,
-            template_data: None,
-            dkim_signature: None,
-            headers: Vec::new(),
-            timestamp: chrono::Utc::now(),
-            email_tags: Vec::new(),
-            delivery_insights: Vec::new(),
-        });
-        Ok(())
-    }
-}
-
-/// ELBv2 target registration/deregistration from ECS runtime.
-struct Elbv2TargetRegistrationImpl {
-    state: fakecloud_elbv2::SharedElbv2State,
-}
-
-impl fakecloud_core::delivery::Elbv2TargetRegistration for Elbv2TargetRegistrationImpl {
-    fn register_targets(
-        &self,
-        account_id: &str,
-        target_group_arn: &str,
-        targets: Vec<(String, Option<i64>)>,
-    ) {
-        let mut accounts = self.state.write();
-        let st = accounts.get_or_create(account_id);
-        let Some(tg) = st.target_groups.get_mut(target_group_arn) else {
-            return;
-        };
-        for (id, port) in targets {
-            tg.targets.retain(|t| t.id != id);
-            tg.targets.push(fakecloud_elbv2::TargetDescription {
-                id,
-                port: port.map(|p| p as i32),
-                availability_zone: None,
-                health: fakecloud_elbv2::TargetHealth {
-                    state: "initial".into(),
-                    reason: None,
-                    description: None,
-                },
-                consecutive_success: 0,
-                consecutive_failure: 0,
-                last_probe_at: None,
-            });
-        }
-    }
-
-    fn deregister_targets(
-        &self,
-        account_id: &str,
-        target_group_arn: &str,
-        targets: Vec<(String, Option<i64>)>,
-    ) {
-        let mut accounts = self.state.write();
-        let st = accounts.get_or_create(account_id);
-        let Some(tg) = st.target_groups.get_mut(target_group_arn) else {
-            return;
-        };
-        for (id, _port) in targets {
-            tg.targets.retain(|t| t.id != id);
-        }
-    }
-}
-
-/// ECS RunTask runner for cross-service universal targets. Wraps an
-/// `Arc<EcsService>` so the call goes through the same validation +
-/// runtime spawn path as a direct ECS RunTask request.
-struct EcsTaskRunnerImpl {
-    service: Arc<fakecloud_ecs::EcsService>,
-}
-
-impl fakecloud_core::delivery::EcsTaskRunner for EcsTaskRunnerImpl {
-    fn run_task(
-        &self,
-        account_id: &str,
-        cluster: &str,
-        task_definition: &str,
-        launch_type: Option<&str>,
-        count: usize,
-    ) -> Result<(), String> {
-        self.service
-            .run_task_external(account_id, cluster, task_definition, launch_type, count)
-    }
-}
-
-/// SMS dispatcher used by Cognito's verification flow: append to the SNS
-/// account's `sms_messages` so test code can assert on what landed.
-struct SnsSmsDispatcher {
-    state: fakecloud_sns::SharedSnsState,
-}
-
-impl fakecloud_core::delivery::SmsDispatcher for SnsSmsDispatcher {
-    fn send_sms(&self, account_id: &str, phone_number: &str, message: &str) {
-        let mut accounts = self.state.write();
-        let state = accounts.get_or_create(account_id);
-        state
-            .sms_messages
-            .push((phone_number.to_string(), message.to_string()));
-    }
-}
-
-/// the OS actually chose. Separated from `main` so the happy/error paths
-/// are reachable from unit tests.
 async fn bind_listener(addr: &str) -> std::io::Result<(TcpListener, std::net::SocketAddr)> {
     let listener = TcpListener::bind(addr).await?;
     let bound = listener.local_addr()?;
     Ok((listener, bound))
 }
-
 /// Emit the port-handshake line used by test harnesses. Taking a generic
 /// writer keeps this testable without capturing process stdout.
 fn announce_bound_port<W: std::io::Write>(port: u16, writer: &mut W) -> std::io::Result<()> {
     writeln!(writer, "{PORT_HANDSHAKE_PREFIX}{port}")
 }
-
 /// Build a public-facing endpoint URL from the address the server actually
 /// bound to. Wildcard hosts (``0.0.0.0`` / ``[::]``) are rewritten to
 /// ``localhost`` so the URL is useful when embedded in resource identifiers
@@ -7716,35 +7310,29 @@ fn endpoint_url_from_addr(addr: std::net::SocketAddr) -> String {
     };
     format!("http://{host_str}:{port}")
 }
-
 #[cfg(test)]
 mod endpoint_url_tests {
     use super::*;
-
     #[test]
     fn wildcard_v4_resolves_to_localhost() {
         let addr: std::net::SocketAddr = "0.0.0.0:4566".parse().unwrap();
         assert_eq!(endpoint_url_from_addr(addr), "http://localhost:4566");
     }
-
     #[test]
     fn wildcard_v6_resolves_to_localhost() {
         let addr: std::net::SocketAddr = "[::]:4566".parse().unwrap();
         assert_eq!(endpoint_url_from_addr(addr), "http://localhost:4566");
     }
-
     #[test]
     fn explicit_loopback_is_preserved() {
         let addr: std::net::SocketAddr = "127.0.0.1:9000".parse().unwrap();
         assert_eq!(endpoint_url_from_addr(addr), "http://127.0.0.1:9000");
     }
-
     #[test]
     fn explicit_ipv6_loopback_is_bracketed() {
         let addr: std::net::SocketAddr = "[::1]:9000".parse().unwrap();
         assert_eq!(endpoint_url_from_addr(addr), "http://[::1]:9000");
     }
-
     #[test]
     fn os_assigned_port_is_reflected() {
         // Simulate the common test-harness case: bind on :0 and check that
@@ -7759,32 +7347,27 @@ mod endpoint_url_tests {
         assert!(port > 0);
     }
 }
-
 #[cfg(test)]
 mod startup_tests {
     use super::*;
-
     #[test]
     fn announce_bound_port_uses_tagged_prefix() {
         let mut buf: Vec<u8> = Vec::new();
         announce_bound_port(4566, &mut buf).unwrap();
         assert_eq!(String::from_utf8(buf).unwrap(), "FAKECLOUD_PORT=4566\n",);
     }
-
     #[test]
     fn announce_bound_port_prefix_matches_constant() {
         // Guard against accidental drift between the constant and the
         // literal parser in fakecloud-testkit.
         assert_eq!(PORT_HANDSHAKE_PREFIX, "FAKECLOUD_PORT=");
     }
-
     #[tokio::test]
     async fn bind_listener_reports_os_assigned_port() {
         let (_listener, bound) = bind_listener("127.0.0.1:0").await.unwrap();
         assert!(bound.port() > 0);
         assert_eq!(bound.ip().to_string(), "127.0.0.1");
     }
-
     #[tokio::test]
     async fn bind_listener_errors_on_invalid_addr() {
         assert!(bind_listener("not-a-socket-addr").await.is_err());
