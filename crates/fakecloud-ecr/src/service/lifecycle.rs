@@ -138,6 +138,7 @@ impl EcrService {
             .get_mut(&name)
             .ok_or_else(|| repository_not_found(&name))?;
         let _prune = evaluate_lifecycle_policy(repo, &policy);
+        repo.lifecycle_policy_preview = Some(policy.clone());
         repo.lifecycle_policy_last_evaluated_at = Some(Utc::now());
         let registry_id = repo.registry_id.clone();
         Ok(AwsResponse::ok_json(json!({
@@ -164,8 +165,9 @@ impl EcrService {
             .get(&name)
             .ok_or_else(|| repository_not_found(&name))?;
         let policy = repo
-            .lifecycle_policy
+            .lifecycle_policy_preview
             .clone()
+            .or_else(|| repo.lifecycle_policy.clone())
             .ok_or_else(|| lifecycle_policy_not_found(&name))?;
         let prune = evaluate_lifecycle_policy(repo, &policy);
         let results: Vec<Value> = prune

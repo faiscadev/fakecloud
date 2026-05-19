@@ -127,21 +127,24 @@ impl ApiGatewayV2Service {
         let empty = ApiGatewayV2State::new(&req.account_id, &req.region);
         let state = accounts.get(&req.account_id).unwrap_or(&empty);
 
-        let stages = state.stages.get(api_id).ok_or_else(|| {
-            AwsServiceError::aws_error(
+        if !state.apis.contains_key(api_id) {
+            return Err(AwsServiceError::aws_error(
                 StatusCode::NOT_FOUND,
                 "NotFoundException",
                 format!("API not found: {}", api_id),
-            )
-        })?;
-
-        let stage = stages.get(stage_name).ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::NOT_FOUND,
-                "NotFoundException",
-                format!("Stage not found: {}", stage_name),
-            )
-        })?;
+            ));
+        }
+        let stage = state
+            .stages
+            .get(api_id)
+            .and_then(|s| s.get(stage_name))
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::NOT_FOUND,
+                    "NotFoundException",
+                    format!("Stage not found: {}", stage_name),
+                )
+            })?;
 
         Ok(AwsResponse::ok_json(json!(stage)))
     }
@@ -209,21 +212,24 @@ impl ApiGatewayV2Service {
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
 
-        let stages = state.stages.get_mut(api_id).ok_or_else(|| {
-            AwsServiceError::aws_error(
+        if !state.apis.contains_key(api_id) {
+            return Err(AwsServiceError::aws_error(
                 StatusCode::NOT_FOUND,
                 "NotFoundException",
                 format!("API not found: {}", api_id),
-            )
-        })?;
-
-        let stage = stages.get_mut(stage_name).ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::NOT_FOUND,
-                "NotFoundException",
-                format!("Stage not found: {}", stage_name),
-            )
-        })?;
+            ));
+        }
+        let stage = state
+            .stages
+            .get_mut(api_id)
+            .and_then(|s| s.get_mut(stage_name))
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::NOT_FOUND,
+                    "NotFoundException",
+                    format!("Stage not found: {}", stage_name),
+                )
+            })?;
 
         if let Some(description) = body["description"].as_str() {
             stage.description = Some(description.to_string());
@@ -291,13 +297,14 @@ impl ApiGatewayV2Service {
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
 
-        let stages = state.stages.get_mut(api_id).ok_or_else(|| {
-            AwsServiceError::aws_error(
+        if !state.apis.contains_key(api_id) {
+            return Err(AwsServiceError::aws_error(
                 StatusCode::NOT_FOUND,
                 "NotFoundException",
                 format!("API not found: {}", api_id),
-            )
-        })?;
+            ));
+        }
+        let stages = state.stages.entry(api_id.to_string()).or_default();
 
         stages.remove(stage_name).ok_or_else(|| {
             AwsServiceError::aws_error(
