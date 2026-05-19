@@ -21,7 +21,7 @@ pub mod policies;
 pub mod policies_service;
 pub mod router;
 pub(crate) mod service;
-pub mod state;
+pub(crate) mod state;
 pub mod streaming;
 pub mod streaming_service;
 pub mod tenants;
@@ -33,4 +33,4 @@ pub const API_PREFIX: &str = "/2020-05-31";
 pub const NAMESPACE: &str = "http://cloudfront.amazonaws.com/doc/2020-05-31/";
 
 pub use service::CloudFrontService;
-pub use state::{CloudFrontAccounts, SharedCloudFrontState};
+pub use state::{CloudFrontAccounts, SharedCloudFrontState, StoredDistribution};

@@ -1,6 +1,6 @@
 pub mod delivery;
-pub mod service;
-pub mod state;
+pub(crate) mod service;
+pub(crate) mod state;
 
 pub use delivery::CloudwatchDeliveryImpl;
 pub use service::CloudWatchService;

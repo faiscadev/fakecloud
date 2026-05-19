@@ -936,7 +936,7 @@ mod tests {
 
     use chrono::Utc;
     use fakecloud_core::service::AwsRequest;
-    use fakecloud_glue::state::Column;
+    use fakecloud_glue::Column;
     use fakecloud_glue::{Database, GlueAccounts, SharedGlueState, StorageDescriptor, Table};
     use parking_lot::RwLock;
     use serde_json::json;

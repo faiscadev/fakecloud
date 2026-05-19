@@ -367,10 +367,6 @@ pub(crate) fn parse_query_list_param(
 /// `ReplicaConfiguration.ConfigureShard.N.{NodeGroupId,NewReplicaCount}`.
 /// Used by IncreaseReplicaCount + DecreaseReplicaCount.
 pub(crate) struct ConfigureShard {
-    /// Captured from the request so future per-shard placement can target a
-    /// specific NodeGroupId; today we apply NewReplicaCount uniformly.
-    #[allow(dead_code)]
-    pub node_group_id: String,
     pub new_replica_count: i32,
 }
 
@@ -394,7 +390,7 @@ pub(crate) fn parse_replica_configuration(
     for idx in indices {
         let id_key = format!("{prefix}{idx}.NodeGroupId");
         let count_key = format!("{prefix}{idx}.NewReplicaCount");
-        let node_group_id = req.query_params.get(&id_key).ok_or_else(|| {
+        req.query_params.get(&id_key).ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "MissingParameter",
@@ -417,10 +413,7 @@ pub(crate) fn parse_replica_configuration(
                 ),
             )
         })?;
-        out.push(ConfigureShard {
-            node_group_id: node_group_id.clone(),
-            new_replica_count,
-        });
+        out.push(ConfigureShard { new_replica_count });
     }
     Ok(out)
 }

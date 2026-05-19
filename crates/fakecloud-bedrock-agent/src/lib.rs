@@ -1,5 +1,5 @@
-pub mod service;
-pub mod state;
+pub(crate) mod service;
+pub(crate) mod state;
 
 pub use service::BedrockAgentService;
 pub use state::{

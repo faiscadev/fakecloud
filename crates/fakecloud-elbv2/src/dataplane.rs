@@ -23,7 +23,7 @@ use fakecloud_core::delivery::DeliveryBus;
 use fakecloud_wafv2::evaluator::{
     evaluate_detailed as waf_evaluate_detailed, WafAction, WafRequest,
 };
-use fakecloud_wafv2::state::{IpSet, RegexPatternSet, SharedWafv2State, WebAcl};
+use fakecloud_wafv2::{IpSet, RegexPatternSet, SharedWafv2State, WebAcl};
 use http::{HeaderMap, HeaderName, HeaderValue, Method, Request, Response, StatusCode};
 use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
@@ -1291,7 +1291,7 @@ fn short_id() -> String {
 mod waf_tests {
     use super::*;
     use chrono::Utc;
-    use fakecloud_wafv2::state::{AccountState, Wafv2Accounts, WebAcl};
+    use fakecloud_wafv2::{AccountState, Wafv2Accounts, WebAcl};
     use http::Uri;
     use parking_lot::RwLock;
     use serde_json::{json, Value};

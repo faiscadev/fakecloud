@@ -5928,7 +5928,7 @@ async fn main() {
                         // Index children by parent arn for O(N) tree build.
                         let mut children_by_parent: std::collections::HashMap<
                             String,
-                            Vec<&fakecloud_stepfunctions::state::Execution>,
+                            Vec<&fakecloud_stepfunctions::Execution>,
                         > = std::collections::HashMap::new();
                         for exec in state.executions.values() {
                             if let Some(parent) = exec.parent_execution_arn.as_ref() {
@@ -5939,10 +5939,10 @@ async fn main() {
                             }
                         }
                         fn build_node(
-                            exec: &fakecloud_stepfunctions::state::Execution,
+                            exec: &fakecloud_stepfunctions::Execution,
                             children_by_parent: &std::collections::HashMap<
                                 String,
-                                Vec<&fakecloud_stepfunctions::state::Execution>,
+                                Vec<&fakecloud_stepfunctions::Execution>,
                             >,
                         ) -> types::StepFunctionsExecutionTreeNode {
                             let kids = children_by_parent
@@ -7616,11 +7616,11 @@ impl fakecloud_core::delivery::Elbv2TargetRegistration for Elbv2TargetRegistrati
         };
         for (id, port) in targets {
             tg.targets.retain(|t| t.id != id);
-            tg.targets.push(fakecloud_elbv2::state::TargetDescription {
+            tg.targets.push(fakecloud_elbv2::TargetDescription {
                 id,
                 port: port.map(|p| p as i32),
                 availability_zone: None,
-                health: fakecloud_elbv2::state::TargetHealth {
+                health: fakecloud_elbv2::TargetHealth {
                     state: "initial".into(),
                     reason: None,
                     description: None,

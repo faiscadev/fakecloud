@@ -272,12 +272,6 @@ fn identity_to_json(identity: &FederatedIdentity) -> Value {
     })
 }
 
-/// Compose the `IdentityPoolId` ARN that tag operations use.
-/// Format: `arn:aws:cognito-identity:<region>:<account>:identitypool/<pool-id>`.
-fn identity_pool_arn(region: &str, account_id: &str, pool_id: &str) -> String {
-    format!("arn:aws:cognito-identity:{region}:{account_id}:identitypool/{pool_id}")
-}
-
 impl CognitoIdentityService {
     // --- pool CRUD ---------------------------------------------------------
 
@@ -1245,12 +1239,4 @@ impl CognitoIdentityService {
             "PrincipalTags": principal_tags,
         })))
     }
-}
-
-// `identity_pool_arn` is exposed for future ops (CFN tag inheritance,
-// SCP scoping) but isn't called yet — keep it warning-free without
-// stripping it from the API surface.
-#[allow(dead_code)]
-fn _identity_pool_arn_keepalive(region: &str, account_id: &str, pool_id: &str) -> String {
-    identity_pool_arn(region, account_id, pool_id)
 }
