@@ -235,7 +235,7 @@ async fn cf_get_managed_certificate_details() {
 #[test_action(
     "cloudfront",
     "UpdateDistributionWithStagingConfig",
-    checksum = "5275ba50"
+    checksum = "502897dc"
 )]
 #[tokio::test]
 async fn cf_update_distribution_with_staging_config() {

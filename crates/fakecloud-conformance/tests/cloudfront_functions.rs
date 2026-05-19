@@ -81,7 +81,7 @@ fn dist_cfg(caller_ref: &str) -> DistributionConfig {
 
 // ─── Functions ────────────────────────────────────────────────────────
 
-#[test_action("cloudfront", "CreateFunction", checksum = "4fda7892")]
+#[test_action("cloudfront", "CreateFunction", checksum = "f9ca76f8")]
 #[tokio::test]
 async fn cf_create_function() {
     let server = TestServer::start().await;
@@ -444,7 +444,7 @@ async fn cf_list_key_groups() {
 
 // ─── Key Value Stores ─────────────────────────────────────────────────
 
-#[test_action("cloudfront", "CreateKeyValueStore", checksum = "309cfcdc")]
+#[test_action("cloudfront", "CreateKeyValueStore", checksum = "09d950c6")]
 #[tokio::test]
 async fn cf_create_key_value_store() {
     let server = TestServer::start().await;

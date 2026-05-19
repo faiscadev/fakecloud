@@ -42,7 +42,7 @@ fn minimal_config(caller_ref: &str) -> DistributionConfig {
         .unwrap()
 }
 
-#[test_action("cloudfront", "CreateDistribution", checksum = "cc494d00")]
+#[test_action("cloudfront", "CreateDistribution", checksum = "bcbc8e42")]
 #[tokio::test]
 async fn cloudfront_create_distribution() {
     let server = TestServer::start().await;
@@ -58,7 +58,7 @@ async fn cloudfront_create_distribution() {
     assert!(dist.arn().contains(":distribution/"));
 }
 
-#[test_action("cloudfront", "GetDistribution", checksum = "41cdb29b")]
+#[test_action("cloudfront", "GetDistribution", checksum = "2e5def23")]
 #[tokio::test]
 async fn cloudfront_get_distribution() {
     let server = TestServer::start().await;
@@ -74,7 +74,7 @@ async fn cloudfront_get_distribution() {
     assert_eq!(resp.distribution().unwrap().id(), id);
 }
 
-#[test_action("cloudfront", "GetDistributionConfig", checksum = "4cefbb8b")]
+#[test_action("cloudfront", "GetDistributionConfig", checksum = "4299a175")]
 #[tokio::test]
 async fn cloudfront_get_distribution_config() {
     let server = TestServer::start().await;
@@ -93,7 +93,7 @@ async fn cloudfront_get_distribution_config() {
     );
 }
 
-#[test_action("cloudfront", "UpdateDistribution", checksum = "7efc228e")]
+#[test_action("cloudfront", "UpdateDistribution", checksum = "c007953d")]
 #[tokio::test]
 async fn cloudfront_update_distribution() {
     let server = TestServer::start().await;
@@ -163,7 +163,7 @@ async fn cloudfront_delete_distribution() {
         .unwrap();
 }
 
-#[test_action("cloudfront", "ListDistributions", checksum = "d8bc86e7")]
+#[test_action("cloudfront", "ListDistributions", checksum = "7a63818a")]
 #[tokio::test]
 async fn cloudfront_list_distributions() {
     let server = TestServer::start().await;
@@ -402,7 +402,7 @@ async fn make_dist(server: &TestServer, caller_ref: &str) -> String {
     create.distribution().unwrap().id().to_string()
 }
 
-#[test_action("cloudfront", "CreateDistributionWithTags", checksum = "7c7b9e91")]
+#[test_action("cloudfront", "CreateDistributionWithTags", checksum = "ad37fba0")]
 #[tokio::test]
 async fn cloudfront_create_distribution_with_tags() {
     let server = TestServer::start().await;
@@ -423,7 +423,7 @@ async fn cloudfront_create_distribution_with_tags() {
         .unwrap();
 }
 
-#[test_action("cloudfront", "CopyDistribution", checksum = "bfdbe0c0")]
+#[test_action("cloudfront", "CopyDistribution", checksum = "f0499eac")]
 #[tokio::test]
 async fn cloudfront_copy_distribution() {
     let server = TestServer::start().await;
@@ -532,7 +532,7 @@ async fn cloudfront_list_dist_by_key_group() {
         .unwrap();
 }
 
-#[test_action("cloudfront", "ListDistributionsByWebACLId", checksum = "1c6d1942")]
+#[test_action("cloudfront", "ListDistributionsByWebACLId", checksum = "d461ccad")]
 #[tokio::test]
 async fn cloudfront_list_dist_by_web_acl_id() {
     let server = TestServer::start().await;
@@ -559,7 +559,7 @@ async fn cloudfront_list_dist_by_vpc_origin_id() {
 #[test_action(
     "cloudfront",
     "ListDistributionsByAnycastIpListId",
-    checksum = "b33414cb"
+    checksum = "1297d0e2"
 )]
 #[tokio::test]
 async fn cloudfront_list_dist_by_anycast_ip_list_id() {
@@ -575,7 +575,7 @@ async fn cloudfront_list_dist_by_anycast_ip_list_id() {
 #[test_action(
     "cloudfront",
     "ListDistributionsByConnectionMode",
-    checksum = "81cf0669"
+    checksum = "62257154"
 )]
 #[tokio::test]
 async fn cloudfront_list_dist_by_connection_mode() {
@@ -604,7 +604,7 @@ async fn cloudfront_list_dist_by_owned_resource() {
         .unwrap();
 }
 
-#[test_action("cloudfront", "ListDistributionsByTrustStore", checksum = "85eee3eb")]
+#[test_action("cloudfront", "ListDistributionsByTrustStore", checksum = "326f1fd0")]
 #[tokio::test]
 async fn cloudfront_list_dist_by_trust_store() {
     let server = TestServer::start().await;
@@ -619,7 +619,7 @@ async fn cloudfront_list_dist_by_trust_store() {
 #[test_action(
     "cloudfront",
     "ListDistributionsByRealtimeLogConfig",
-    checksum = "e9954bf8"
+    checksum = "68015f4f"
 )]
 #[tokio::test]
 async fn cloudfront_list_dist_by_realtime_log_config() {
@@ -635,7 +635,7 @@ async fn cloudfront_list_dist_by_realtime_log_config() {
 #[test_action(
     "cloudfront",
     "ListDistributionsByConnectionFunction",
-    checksum = "40b924ce"
+    checksum = "37d12109"
 )]
 #[tokio::test]
 async fn cloudfront_list_dist_by_connection_function() {

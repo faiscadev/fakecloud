@@ -431,8 +431,8 @@ async fn logs_destinations() {
 
 // -- Queries --
 
-#[test_action("logs", "StartQuery", checksum = "a61f0343")]
-#[test_action("logs", "GetQueryResults", checksum = "0312b275")]
+#[test_action("logs", "StartQuery", checksum = "9936a5f2")]
+#[test_action("logs", "GetQueryResults", checksum = "e27a8ac8")]
 #[test_action("logs", "DescribeQueries", checksum = "fb7f2a3c")]
 #[tokio::test]
 async fn logs_queries() {
@@ -599,9 +599,9 @@ async fn logs_delivery_destination_policy() {
 
 // -- Delivery sources --
 
-#[test_action("logs", "PutDeliverySource", checksum = "9e3b97b5")]
-#[test_action("logs", "GetDeliverySource", checksum = "a9ee52ac")]
-#[test_action("logs", "DescribeDeliverySources", checksum = "0c5b2fc9")]
+#[test_action("logs", "PutDeliverySource", checksum = "6c90e054")]
+#[test_action("logs", "GetDeliverySource", checksum = "12f6bbbd")]
+#[test_action("logs", "DescribeDeliverySources", checksum = "7a5d7868")]
 #[test_action("logs", "DeleteDeliverySource", checksum = "69db1c4e")]
 #[tokio::test]
 async fn logs_delivery_sources() {
@@ -1399,7 +1399,7 @@ async fn logs_start_live_tail() {
         .ok();
 }
 
-#[test_action("logs", "ListLogGroups", checksum = "949ce2bd")]
+#[test_action("logs", "ListLogGroups", checksum = "726eb2db")]
 #[tokio::test]
 async fn logs_list_log_groups() {
     let server = TestServer::start().await;
@@ -1525,7 +1525,7 @@ async fn logs_get_log_fields() {
 // -- S3 table integration stubs --
 
 #[test_action("logs", "AssociateSourceToS3TableIntegration", checksum = "93c113e9")]
-#[test_action("logs", "ListSourcesForS3TableIntegration", checksum = "7998343b")]
+#[test_action("logs", "ListSourcesForS3TableIntegration", checksum = "115c0dd7")]
 #[test_action(
     "logs",
     "DisassociateSourceFromS3TableIntegration",
@@ -1617,7 +1617,7 @@ async fn logs_update_delivery_configuration() {
 
 // -- Configuration templates --
 
-#[test_action("logs", "DescribeConfigurationTemplates", checksum = "3a59505f")]
+#[test_action("logs", "DescribeConfigurationTemplates", checksum = "96114b8c")]
 #[tokio::test]
 async fn logs_describe_configuration_templates() {
     let server = TestServer::start().await;
