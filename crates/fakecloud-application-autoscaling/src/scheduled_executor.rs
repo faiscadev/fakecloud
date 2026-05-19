@@ -517,7 +517,6 @@ mod tests {
         ApplicationAutoScalingAccounts, ScalableTarget, ScalableTargetAction, ScheduledAction,
     };
     use parking_lot::RwLock;
-    use std::collections::BTreeMap;
     use std::sync::atomic::{AtomicI64, Ordering};
     use std::sync::Mutex;
 
@@ -746,9 +745,4 @@ mod tests {
         let exec = ScheduledActionExecutor::new(state.clone(), ddb.clone(), "us-east-1");
         assert_eq!(exec.tick_once(), 0);
     }
-
-    // Dummy use of BTreeMap to silence unused-import warning if the
-    // test fixtures stop needing it.
-    #[allow(dead_code)]
-    fn _btreemap_used(_: BTreeMap<String, String>) {}
 }
