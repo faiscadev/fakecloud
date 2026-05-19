@@ -121,6 +121,13 @@ pub struct Repository {
     pub policy: Option<String>,
     /// Repository-level lifecycle policy document JSON.
     pub lifecycle_policy: Option<String>,
+    /// Last lifecycle-policy document passed to
+    /// `StartLifecyclePolicyPreview` — distinct from the active
+    /// `lifecycle_policy` so a preview against an alternate document
+    /// doesn't corrupt the live policy. `GetLifecyclePolicyPreview`
+    /// reads from this field.
+    #[serde(default)]
+    pub lifecycle_policy_preview: Option<String>,
     /// Last time the lifecycle policy was evaluated against this
     /// repository's images. `None` until the policy has been applied
     /// at least once. Surfaced through `GetLifecyclePolicy`'s
@@ -188,6 +195,7 @@ impl Repository {
             tags: BTreeMap::new(),
             policy: None,
             lifecycle_policy: None,
+            lifecycle_policy_preview: None,
             lifecycle_policy_last_evaluated_at: None,
             scan_findings: BTreeMap::new(),
             images: BTreeMap::new(),
