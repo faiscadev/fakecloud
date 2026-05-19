@@ -35,7 +35,10 @@ pub(crate) fn create_advanced_prompt_optimization_job(
         input_config: body.get("inputConfig").cloned().unwrap_or(json!({})),
         output_config: body.get("outputConfig").cloned().unwrap_or(json!({})),
         encryption_key_arn: body["encryptionKeyArn"].as_str().map(String::from),
-        model_configurations: body.get("modelConfigurations").cloned().unwrap_or(json!({})),
+        model_configurations: body
+            .get("modelConfigurations")
+            .cloned()
+            .unwrap_or(json!({})),
         creation_time: now,
         last_modified_time: now,
     };
@@ -301,7 +304,10 @@ mod tests {
         let resp = create_advanced_prompt_optimization_job(&s, &req(), &body).unwrap();
         assert_eq!(resp.status, StatusCode::CREATED);
         assert_eq!(
-            s.read().default_ref().advanced_prompt_optimization_jobs.len(),
+            s.read()
+                .default_ref()
+                .advanced_prompt_optimization_jobs
+                .len(),
             1
         );
     }
@@ -398,13 +404,15 @@ mod tests {
         create_advanced_prompt_optimization_job(&s, &req(), &json!({"jobName": "a"})).unwrap();
         create_advanced_prompt_optimization_job(&s, &req(), &json!({"jobName": "b"})).unwrap();
         let body = json!({"jobIdentifiers": ["a", "missing"]});
-        let resp =
-            batch_delete_advanced_prompt_optimization_job(&s, &req(), &body).unwrap();
+        let resp = batch_delete_advanced_prompt_optimization_job(&s, &req(), &body).unwrap();
         let v: Value =
             serde_json::from_str(std::str::from_utf8(resp.body.expect_bytes()).unwrap()).unwrap();
         assert_eq!(v["errors"].as_array().unwrap().len(), 1);
         assert_eq!(
-            s.read().default_ref().advanced_prompt_optimization_jobs.len(),
+            s.read()
+                .default_ref()
+                .advanced_prompt_optimization_jobs
+                .len(),
             1
         );
     }

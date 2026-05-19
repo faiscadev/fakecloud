@@ -963,7 +963,11 @@ impl LambdaService {
         // /2025-11-30/capacity-providers — Lambda Workflows.
         if prefix == "2025-11-30" && segs.get(1).map(|s| s.as_str()) == Some("capacity-providers") {
             let name = segs.get(2).map(|s| s.to_string());
-            return match (req.method.clone(), segs.len(), segs.get(3).map(|s| s.as_str())) {
+            return match (
+                req.method.clone(),
+                segs.len(),
+                segs.get(3).map(|s| s.as_str()),
+            ) {
                 (Method::POST, 2, _) => Some(("CreateCapacityProvider", None)),
                 (Method::GET, 2, _) => Some(("ListCapacityProviders", None)),
                 (Method::GET, 3, _) => Some(("GetCapacityProvider", name)),
@@ -2352,19 +2356,15 @@ impl AwsService for LambdaService {
             "DeleteEventSourceMapping" => {
                 self.delete_event_source_mapping(resource_name.as_deref().unwrap_or(""), aid)
             }
-            "CreateCapacityProvider" => crate::workflows::create_capacity_provider(
-                &self.state,
-                &req,
-                &req.json_body(),
-            ),
+            "CreateCapacityProvider" => {
+                crate::workflows::create_capacity_provider(&self.state, &req, &req.json_body())
+            }
             "GetCapacityProvider" => crate::workflows::get_capacity_provider(
                 &self.state,
                 &req,
                 resource_name.as_deref().unwrap_or(""),
             ),
-            "ListCapacityProviders" => {
-                crate::workflows::list_capacity_providers(&self.state, &req)
-            }
+            "ListCapacityProviders" => crate::workflows::list_capacity_providers(&self.state, &req),
             "UpdateCapacityProvider" => crate::workflows::update_capacity_provider(
                 &self.state,
                 &req,

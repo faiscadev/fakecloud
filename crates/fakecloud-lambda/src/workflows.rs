@@ -244,7 +244,8 @@ pub(crate) fn list_durable_executions_by_function(
         .values()
         .filter(|e| {
             e.function_name == function_name
-                || e.function_arn.ends_with(&format!(":function:{function_name}"))
+                || e.function_arn
+                    .ends_with(&format!(":function:{function_name}"))
         })
         .map(execution_json)
         .collect();
@@ -582,7 +583,9 @@ mod tests {
         let s = shared();
         let arn = "arn:aws:lambda:us-east-1:123456789012:durable-execution/e1";
         seed_execution(&s, arn, "fn1", "Stopped");
-        let err = checkpoint_durable_execution(&s, &req(), arn, &json!({})).err().unwrap();
+        let err = checkpoint_durable_execution(&s, &req(), arn, &json!({}))
+            .err()
+            .unwrap();
         assert_eq!(err.status(), StatusCode::CONFLICT);
     }
 

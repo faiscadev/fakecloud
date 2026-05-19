@@ -912,7 +912,11 @@ async fn lambda_tag_resource_lifecycle() {
 #[test_action("lambda", "ListCapacityProviders", checksum = "dae35ca3")]
 #[test_action("lambda", "UpdateCapacityProvider", checksum = "5d2bbc06")]
 #[test_action("lambda", "DeleteCapacityProvider", checksum = "555e0456")]
-#[test_action("lambda", "ListFunctionVersionsByCapacityProvider", checksum = "d51f5143")]
+#[test_action(
+    "lambda",
+    "ListFunctionVersionsByCapacityProvider",
+    checksum = "d51f5143"
+)]
 #[tokio::test]
 async fn lambda_capacity_provider_lifecycle() {
     let server = TestServer::start().await;
@@ -977,7 +981,11 @@ async fn lambda_capacity_provider_lifecycle() {
 #[test_action("lambda", "ListDurableExecutionsByFunction", checksum = "7e7ba943")]
 #[test_action("lambda", "SendDurableExecutionCallbackSuccess", checksum = "2ff17f12")]
 #[test_action("lambda", "SendDurableExecutionCallbackFailure", checksum = "4f3d7101")]
-#[test_action("lambda", "SendDurableExecutionCallbackHeartbeat", checksum = "a797352f")]
+#[test_action(
+    "lambda",
+    "SendDurableExecutionCallbackHeartbeat",
+    checksum = "a797352f"
+)]
 #[tokio::test]
 async fn lambda_durable_execution_lifecycle() {
     let server = TestServer::start().await;

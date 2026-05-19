@@ -267,13 +267,11 @@ impl BedrockService {
             (Method::GET, 1) if segs[0] == "advanced-prompt-optimization-jobs" => {
                 Some(("ListAdvancedPromptOptimizationJobs", None, None))
             }
-            (Method::GET, 2) if segs[0] == "advanced-prompt-optimization-jobs" => {
-                Some((
-                    "GetAdvancedPromptOptimizationJob",
-                    Some(decode(&segs[1])),
-                    None,
-                ))
-            }
+            (Method::GET, 2) if segs[0] == "advanced-prompt-optimization-jobs" => Some((
+                "GetAdvancedPromptOptimizationJob",
+                Some(decode(&segs[1])),
+                None,
+            )),
             (Method::POST, 3)
                 if segs[0] == "advanced-prompt-optimization-jobs" && segs[2] == "stop" =>
             {

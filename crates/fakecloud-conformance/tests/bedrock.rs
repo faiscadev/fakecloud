@@ -1815,11 +1815,19 @@ async fn bedrock_evaluation_job_lifecycle() {
     assert_eq!(resp.status(), 200);
 }
 
-#[test_action("bedrock", "CreateAdvancedPromptOptimizationJob", checksum = "888adcdb")]
+#[test_action(
+    "bedrock",
+    "CreateAdvancedPromptOptimizationJob",
+    checksum = "888adcdb"
+)]
 #[test_action("bedrock", "GetAdvancedPromptOptimizationJob", checksum = "9b661c72")]
 #[test_action("bedrock", "ListAdvancedPromptOptimizationJobs", checksum = "20f8a055")]
 #[test_action("bedrock", "StopAdvancedPromptOptimizationJob", checksum = "24036f24")]
-#[test_action("bedrock", "BatchDeleteAdvancedPromptOptimizationJob", checksum = "c7411a71")]
+#[test_action(
+    "bedrock",
+    "BatchDeleteAdvancedPromptOptimizationJob",
+    checksum = "c7411a71"
+)]
 #[tokio::test]
 async fn bedrock_advanced_prompt_optimization_lifecycle() {
     let server = TestServer::start().await;

@@ -54,7 +54,10 @@ fn generate_rsa(bits: usize) -> Result<KeyPair, AsymError> {
     Ok((priv_der, pub_der))
 }
 
-fn cached_rsa(slot: &'static std::sync::OnceLock<KeyPair>, bits: usize) -> Result<KeyPair, AsymError> {
+fn cached_rsa(
+    slot: &'static std::sync::OnceLock<KeyPair>,
+    bits: usize,
+) -> Result<KeyPair, AsymError> {
     if let Some(kp) = slot.get() {
         return Ok(kp.clone());
     }
