@@ -41,8 +41,7 @@ use fakecloud_cloudfront::{
         OriginRequestPolicyQueryStringsConfig, ResponseHeadersPolicyConfig, StoredCachePolicy,
         StoredOriginAccessControl, StoredOriginRequestPolicy, StoredResponseHeadersPolicy,
     },
-    state::StoredDistribution,
-    SharedCloudFrontState,
+    SharedCloudFrontState, StoredDistribution,
 };
 use fakecloud_cloudwatch::{AlarmState, Dashboard, MetricAlarm, SharedCloudWatchState};
 use fakecloud_cognito::{
@@ -73,7 +72,7 @@ use fakecloud_elbv2::{
 use fakecloud_eventbridge::{
     ApiDestination, Archive, Connection, Endpoint, EventBus, EventRule, SharedEventBridgeState,
 };
-use fakecloud_firehose::state::{DeliveryStream, S3Destination};
+use fakecloud_firehose::{DeliveryStream, S3Destination};
 use fakecloud_iam::{
     IamAccessKey, IamGroup, IamInstanceProfile, IamPolicy, IamRole, IamUser, OidcProvider,
     PolicyVersion, SamlProvider, SharedIamState, Tag, VirtualMfaDevice,
@@ -5563,7 +5562,7 @@ impl ResourceProvisioner {
         &self,
         resource: &ResourceDefinition,
     ) -> Result<ProvisionResult, String> {
-        use fakecloud_ecr::state::{
+        use fakecloud_ecr::{
             ReplicationConfiguration, ReplicationDestination, ReplicationRule, RepositoryFilter,
         };
         let cfg = resource
@@ -5641,7 +5640,7 @@ impl ResourceProvisioner {
         &self,
         resource: &ResourceDefinition,
     ) -> Result<ProvisionResult, String> {
-        use fakecloud_ecr::state::PullThroughCacheRule;
+        use fakecloud_ecr::PullThroughCacheRule;
         let props = &resource.properties;
         let prefix = props
             .get("EcrRepositoryPrefix")
@@ -5763,7 +5762,7 @@ impl ResourceProvisioner {
         &self,
         resource: &ResourceDefinition,
     ) -> Result<ProvisionResult, String> {
-        use fakecloud_ecr::state::{
+        use fakecloud_ecr::{
             RegistryScanningConfiguration, RegistryScanningRule, RepositoryFilter,
         };
         let props = &resource.properties;
@@ -5818,7 +5817,7 @@ impl ResourceProvisioner {
     }
 
     fn delete_ecr_registry_scanning_configuration(&self) -> Result<(), String> {
-        use fakecloud_ecr::state::RegistryScanningConfiguration;
+        use fakecloud_ecr::RegistryScanningConfiguration;
         let mut accounts = self.ecr_state.write();
         let state = accounts.get_or_create(&self.account_id);
         // CFN delete reverts to the AWS default (BASIC, no rules).
