@@ -3169,6 +3169,30 @@ class EcsTaskCredentials:
 
 
 @dataclass
+class InjectSsmSessionRequest:
+    target: str
+    account_id: Optional[str] = None
+    status: Optional[str] = None
+    owner: Optional[str] = None
+    reason: Optional[str] = None
+    session_id: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        d: Dict[str, Any] = {"target": self.target}
+        if self.account_id is not None:
+            d["accountId"] = self.account_id
+        if self.status is not None:
+            d["status"] = self.status
+        if self.owner is not None:
+            d["owner"] = self.owner
+        if self.reason is not None:
+            d["reason"] = self.reason
+        if self.session_id is not None:
+            d["sessionId"] = self.session_id
+        return d
+
+
+@dataclass
 class InjectSsmSessionResponse:
     session_id: str
 
