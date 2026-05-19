@@ -42,7 +42,7 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
-def _wait_for_ready(url: str, timeout: float = 15.0) -> None:
+def _wait_for_ready(url: str, timeout: float = 30.0) -> None:
     """Poll the health endpoint until fakecloud is ready."""
     import httpx
 
@@ -52,7 +52,9 @@ def _wait_for_ready(url: str, timeout: float = 15.0) -> None:
             r = httpx.get(f"{url}/_fakecloud/health", timeout=2.0)
             if r.status_code == 200:
                 return
-        except httpx.ConnectError:
+        except httpx.HTTPError:
+            # ConnectError, ReadTimeout, ConnectTimeout — server still
+            # warming up. Retry until deadline.
             pass
         time.sleep(0.1)
     raise RuntimeError(f"fakecloud did not become ready at {url} within {timeout}s")
