@@ -226,6 +226,13 @@ impl ElastiCacheService {
                 },
             ));
         }
+        if new_replica_count.is_some() && !replica_configuration.is_empty() {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterCombination",
+                format!("{action} accepts NewReplicaCount or ReplicaConfiguration, not both."),
+            ));
+        }
         if let Some(n) = new_replica_count {
             if increase && n < 1 {
                 return Err(AwsServiceError::aws_error(

@@ -460,6 +460,10 @@ impl ElastiCacheService {
             ));
         }
         snap.snapshot_name = target.clone();
+        snap.arn = format!(
+            "arn:aws:elasticache:{}:{}:snapshot:{}",
+            state.region, state.account_id, target
+        );
         snap.snapshot_status = "creating".to_string();
         snap.snapshot_source = "manual".to_string();
         let xml = snapshot_xml(&snap);
@@ -502,6 +506,10 @@ impl ElastiCacheService {
                 )
             })?;
         snap.serverless_cache_snapshot_name = target.clone();
+        snap.arn = format!(
+            "arn:aws:elasticache:{}:{}:serverlesssnapshot:{}",
+            state.region, state.account_id, target
+        );
         snap.status = "creating".to_string();
         let xml = serverless_cache_snapshot_xml(&snap);
         state.serverless_cache_snapshots.insert(target, snap);

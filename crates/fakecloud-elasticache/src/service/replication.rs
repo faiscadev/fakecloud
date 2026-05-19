@@ -931,7 +931,19 @@ impl ElastiCacheService {
             }
         }
 
-        let primary_group = state.replication_groups[&primary_replication_group_id].clone();
+        let primary_group = state
+            .replication_groups
+            .get(&primary_replication_group_id)
+            .cloned()
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::NOT_FOUND,
+                    "ReplicationGroupNotFoundFault",
+                    format!(
+                        "ReplicationGroup {primary_replication_group_id} not found for GlobalReplicationGroup {global_replication_group_id}."
+                    ),
+                )
+            })?;
         let group = state
             .global_replication_groups
             .get_mut(&global_replication_group_id)
