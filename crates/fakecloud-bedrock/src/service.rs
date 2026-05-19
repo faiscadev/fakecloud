@@ -41,6 +41,8 @@ fn is_read_only_action(action: &str) -> bool {
             | "ListModelInvocationJobs"
             | "GetEvaluationJob"
             | "ListEvaluationJobs"
+            | "GetAdvancedPromptOptimizationJob"
+            | "ListAdvancedPromptOptimizationJobs"
             | "GetInferenceProfile"
             | "ListInferenceProfiles"
             | "GetPromptRouter"
@@ -256,6 +258,33 @@ impl BedrockService {
             }
             (Method::POST, 3) if segs[0] == "model-invocation-job" && segs[2] == "stop" => {
                 Some(("StopModelInvocationJob", Some(decode(&segs[1])), None))
+            }
+
+            // Advanced prompt optimization jobs
+            (Method::POST, 1) if segs[0] == "advanced-prompt-optimization-jobs" => {
+                Some(("CreateAdvancedPromptOptimizationJob", None, None))
+            }
+            (Method::GET, 1) if segs[0] == "advanced-prompt-optimization-jobs" => {
+                Some(("ListAdvancedPromptOptimizationJobs", None, None))
+            }
+            (Method::GET, 2) if segs[0] == "advanced-prompt-optimization-jobs" => Some((
+                "GetAdvancedPromptOptimizationJob",
+                Some(decode(&segs[1])),
+                None,
+            )),
+            (Method::POST, 3)
+                if segs[0] == "advanced-prompt-optimization-jobs" && segs[2] == "stop" =>
+            {
+                Some((
+                    "StopAdvancedPromptOptimizationJob",
+                    Some(decode(&segs[1])),
+                    None,
+                ))
+            }
+            (Method::POST, 2)
+                if segs[0] == "advanced-prompt-optimization-job" && segs[1] == "batch-delete" =>
+            {
+                Some(("BatchDeleteAdvancedPromptOptimizationJob", None, None))
             }
 
             // Evaluation jobs
@@ -1072,6 +1101,42 @@ impl AwsService for BedrockService {
                 &req,
                 &resource_id.unwrap_or_default(),
             ),
+            // Advanced prompt optimization
+            "CreateAdvancedPromptOptimizationJob" => {
+                crate::advanced_prompt_optimization::create_advanced_prompt_optimization_job(
+                    &self.state,
+                    &req,
+                    &body,
+                )
+            }
+            "GetAdvancedPromptOptimizationJob" => {
+                crate::advanced_prompt_optimization::get_advanced_prompt_optimization_job(
+                    &self.state,
+                    &req,
+                    &resource_id.unwrap_or_default(),
+                )
+            }
+            "ListAdvancedPromptOptimizationJobs" => {
+                crate::advanced_prompt_optimization::list_advanced_prompt_optimization_jobs(
+                    &self.state,
+                    &req,
+                )
+            }
+            "StopAdvancedPromptOptimizationJob" => {
+                crate::advanced_prompt_optimization::stop_advanced_prompt_optimization_job(
+                    &self.state,
+                    &req,
+                    &resource_id.unwrap_or_default(),
+                )
+            }
+            "BatchDeleteAdvancedPromptOptimizationJob" => {
+                crate::advanced_prompt_optimization::batch_delete_advanced_prompt_optimization_job(
+                    &self.state,
+                    &req,
+                    &body,
+                )
+            }
+
             // Evaluation jobs
             "CreateEvaluationJob" => {
                 crate::evaluation::create_evaluation_job(&self.state, &req, &body)
@@ -1667,6 +1732,11 @@ impl AwsService for BedrockService {
             "ListEvaluationJobs",
             "StopEvaluationJob",
             "BatchDeleteEvaluationJob",
+            "CreateAdvancedPromptOptimizationJob",
+            "GetAdvancedPromptOptimizationJob",
+            "ListAdvancedPromptOptimizationJobs",
+            "StopAdvancedPromptOptimizationJob",
+            "BatchDeleteAdvancedPromptOptimizationJob",
             "CreateInferenceProfile",
             "GetInferenceProfile",
             "ListInferenceProfiles",

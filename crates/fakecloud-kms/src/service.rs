@@ -65,6 +65,7 @@ const VALID_SIGNING_ALGORITHMS: &[&str] = &[
 static KMS_ACTIONS: &[&str] = &[
     "CreateKey",
     "DescribeKey",
+    "GetKeyLastUsage",
     "ListKeys",
     "EnableKey",
     "DisableKey",
@@ -176,6 +177,7 @@ impl AwsService for KmsService {
         let result = match req.action.as_str() {
             "CreateKey" => self.create_key(&req),
             "DescribeKey" => self.describe_key(&req),
+            "GetKeyLastUsage" => self.get_key_last_usage(&req),
             "ListKeys" => self.list_keys(&req),
             "EnableKey" => self.enable_key(&req),
             "DisableKey" => self.disable_key(&req),
@@ -630,6 +632,49 @@ impl KmsService {
         Ok(AwsResponse::json(
             StatusCode::OK,
             serde_json::to_string(&json!({ "KeyMetadata": metadata })).unwrap(),
+        ))
+    }
+
+    fn get_key_last_usage(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let key_id_input = body["KeyId"].as_str().ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ValidationException",
+                "KeyId is required",
+            )
+        })?;
+
+        let accounts = self.state.read();
+        let empty = KmsState::new(&req.account_id, &req.region);
+        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+
+        let resolved = Self::resolve_key_id_with_state(state, key_id_input).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "NotFoundException",
+                format!("Key '{key_id_input}' does not exist"),
+            )
+        })?;
+        let key = state.keys.get(&resolved).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "NotFoundException",
+                format!("Key '{key_id_input}' does not exist"),
+            )
+        })?;
+
+        // KMS started tracking on the key's creation date. We don't yet
+        // record per-op timestamps, so KeyLastUsage is omitted — the AWS
+        // spec explicitly allows this when no tracked op has run.
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            serde_json::to_string(&json!({
+                "KeyId": key.key_id,
+                "KeyCreationDate": key.creation_date,
+                "TrackingStartDate": key.creation_date,
+            }))
+            .unwrap(),
         ))
     }
 

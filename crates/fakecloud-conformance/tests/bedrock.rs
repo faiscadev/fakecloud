@@ -1815,6 +1815,97 @@ async fn bedrock_evaluation_job_lifecycle() {
     assert_eq!(resp.status(), 200);
 }
 
+#[test_action(
+    "bedrock",
+    "CreateAdvancedPromptOptimizationJob",
+    checksum = "888adcdb"
+)]
+#[test_action("bedrock", "GetAdvancedPromptOptimizationJob", checksum = "9b661c72")]
+#[test_action("bedrock", "ListAdvancedPromptOptimizationJobs", checksum = "20f8a055")]
+#[test_action("bedrock", "StopAdvancedPromptOptimizationJob", checksum = "24036f24")]
+#[test_action(
+    "bedrock",
+    "BatchDeleteAdvancedPromptOptimizationJob",
+    checksum = "c7411a71"
+)]
+#[tokio::test]
+async fn bedrock_advanced_prompt_optimization_lifecycle() {
+    let server = TestServer::start().await;
+    let http_client = reqwest::Client::new();
+    let auth = "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20260411/us-east-1/bedrock/aws4_request, SignedHeaders=host, Signature=fake";
+
+    let body = serde_json::json!({
+        "jobName": "conf-apo-job",
+        "inputConfig": {"s3Uri": "s3://bucket/in/"},
+        "outputConfig": {"s3Uri": "s3://bucket/out/"},
+        "modelConfigurations": {"targetModel": "anthropic.claude-3-sonnet"}
+    });
+    let resp = http_client
+        .post(format!(
+            "{}/advanced-prompt-optimization-jobs",
+            server.endpoint()
+        ))
+        .header("content-type", "application/json")
+        .header("authorization", auth)
+        .body(serde_json::to_string(&body).unwrap())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+    let result: serde_json::Value = resp.json().await.unwrap();
+    let job_arn = result["jobArn"].as_str().unwrap().to_string();
+    let job_id = job_arn.rsplit('/').next().unwrap();
+
+    let resp = http_client
+        .get(format!(
+            "{}/advanced-prompt-optimization-jobs/{}",
+            server.endpoint(),
+            job_id
+        ))
+        .header("authorization", auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let resp = http_client
+        .get(format!(
+            "{}/advanced-prompt-optimization-jobs",
+            server.endpoint()
+        ))
+        .header("authorization", auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let resp = http_client
+        .post(format!(
+            "{}/advanced-prompt-optimization-jobs/{}/stop",
+            server.endpoint(),
+            job_id
+        ))
+        .header("authorization", auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let body = serde_json::json!({"jobIdentifiers": [job_arn]});
+    let resp = http_client
+        .post(format!(
+            "{}/advanced-prompt-optimization-job/batch-delete",
+            server.endpoint()
+        ))
+        .header("content-type", "application/json")
+        .header("authorization", auth)
+        .body(serde_json::to_string(&body).unwrap())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+}
+
 // ---------------------------------------------------------------------------
 // Model Import
 // ---------------------------------------------------------------------------

@@ -1302,6 +1302,7 @@ async fn rds_route(server: &TestServer, action: &str, params: &[(&str, &str)]) {
 #[test_action("rds", "DescribePendingMaintenanceActions", checksum = "e86b55fb")]
 #[test_action("rds", "DescribeReservedDBInstances", checksum = "faf1da16")]
 #[test_action("rds", "DescribeReservedDBInstancesOfferings", checksum = "2cec5eb9")]
+#[test_action("rds", "DescribeServerlessV2PlatformVersions", checksum = "54118063")]
 #[test_action("rds", "DescribeSourceRegions", checksum = "cf1cb01e")]
 #[test_action("rds", "DescribeTenantDatabases", checksum = "344d46b9")]
 #[test_action("rds", "DescribeValidDBInstanceModifications", checksum = "68488f81")]
@@ -2187,6 +2188,12 @@ async fn rds_closure_routes_exist() {
     rds_route(&server, "DescribeEventCategories", &[]).await;
     rds_route(&server, "DescribeEvents", &[]).await;
     rds_route(&server, "DescribeSourceRegions", &[]).await;
+    rds_route(
+        &server,
+        "DescribeServerlessV2PlatformVersions",
+        &[("Engine", "aurora-mysql")],
+    )
+    .await;
     rds_route(
         &server,
         "DescribeDBLogFiles",

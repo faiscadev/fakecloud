@@ -266,6 +266,59 @@ pub struct LambdaState {
     /// Account settings (single per-account record).
     #[serde(default)]
     pub account_settings: Option<AccountSettings>,
+    /// Capacity providers (Lambda Workflows, 2025-11-30 API) keyed by name.
+    #[serde(default)]
+    pub capacity_providers: BTreeMap<String, CapacityProvider>,
+    /// Durable executions (Lambda Workflows, 2025-12-01 API) keyed by ARN.
+    #[serde(default)]
+    pub durable_executions: BTreeMap<String, DurableExecution>,
+    /// Durable execution callbacks keyed by callback id. Each callback
+    /// belongs to one execution and records its outcome on Send*Callback*.
+    #[serde(default)]
+    pub durable_execution_callbacks: BTreeMap<String, DurableExecutionCallback>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CapacityProvider {
+    pub name: String,
+    pub arn: String,
+    pub state: String,
+    pub vpc_config: serde_json::Value,
+    pub permissions_config: serde_json::Value,
+    pub instance_requirements: Option<serde_json::Value>,
+    pub scaling_config: Option<serde_json::Value>,
+    pub kms_key_arn: Option<String>,
+    pub tags: BTreeMap<String, String>,
+    pub last_modified: DateTime<Utc>,
+    /// Function versions associated with the capacity provider, as
+    /// `function_name:qualifier` strings. Populated implicitly when a
+    /// function version references the provider; we don't yet write
+    /// from `CreateFunction`, but `ListFunctionVersionsByCapacityProvider`
+    /// can read whatever is staged here.
+    #[serde(default)]
+    pub function_versions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DurableExecution {
+    pub arn: String,
+    pub function_name: String,
+    pub function_arn: String,
+    pub status: String,
+    pub input: serde_json::Value,
+    pub started_at: DateTime<Utc>,
+    pub stopped_at: Option<DateTime<Utc>>,
+    pub last_modified: DateTime<Utc>,
+    pub history: Vec<serde_json::Value>,
+    pub state: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DurableExecutionCallback {
+    pub callback_id: String,
+    pub execution_arn: String,
+    pub outcome: String,
+    pub recorded_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -405,6 +458,9 @@ impl LambdaState {
             scaling_configs: BTreeMap::new(),
             recursion_configs: BTreeMap::new(),
             account_settings: None,
+            capacity_providers: BTreeMap::new(),
+            durable_executions: BTreeMap::new(),
+            durable_execution_callbacks: BTreeMap::new(),
         }
     }
 
@@ -426,6 +482,9 @@ impl LambdaState {
         self.scaling_configs.clear();
         self.recursion_configs.clear();
         self.account_settings = None;
+        self.capacity_providers.clear();
+        self.durable_executions.clear();
+        self.durable_execution_callbacks.clear();
     }
 }
 

@@ -960,6 +960,63 @@ impl LambdaService {
         // NOTE: 2021-10-31/functions/{name}/url and ListFunctionUrlConfigs
         // are handled by the prefix-agnostic blocks above.
 
+        // /2025-11-30/capacity-providers — Lambda Workflows.
+        if prefix == "2025-11-30" && segs.get(1).map(|s| s.as_str()) == Some("capacity-providers") {
+            let name = segs.get(2).map(|s| s.to_string());
+            return match (
+                req.method.clone(),
+                segs.len(),
+                segs.get(3).map(|s| s.as_str()),
+            ) {
+                (Method::POST, 2, _) => Some(("CreateCapacityProvider", None)),
+                (Method::GET, 2, _) => Some(("ListCapacityProviders", None)),
+                (Method::GET, 3, _) => Some(("GetCapacityProvider", name)),
+                (Method::PUT, 3, _) => Some(("UpdateCapacityProvider", name)),
+                (Method::DELETE, 3, _) => Some(("DeleteCapacityProvider", name)),
+                (Method::GET, 4, Some("function-versions")) => {
+                    Some(("ListFunctionVersionsByCapacityProvider", name))
+                }
+                _ => None,
+            };
+        }
+
+        // /2025-12-01/durable-executions and durable-execution-callbacks.
+        if prefix == "2025-12-01" {
+            let collection = segs.get(1).map(|s| s.as_str());
+            let arn = segs.get(2).map(|s| s.to_string());
+            let action = segs.get(3).map(|s| s.as_str());
+            match (req.method.clone(), collection, segs.len(), action) {
+                (Method::GET, Some("durable-executions"), 3, _) => {
+                    return Some(("GetDurableExecution", arn));
+                }
+                (Method::GET, Some("durable-executions"), 4, Some("history")) => {
+                    return Some(("GetDurableExecutionHistory", arn));
+                }
+                (Method::GET, Some("durable-executions"), 4, Some("state")) => {
+                    return Some(("GetDurableExecutionState", arn));
+                }
+                (Method::POST, Some("durable-executions"), 4, Some("checkpoint")) => {
+                    return Some(("CheckpointDurableExecution", arn));
+                }
+                (Method::POST, Some("durable-executions"), 4, Some("stop")) => {
+                    return Some(("StopDurableExecution", arn));
+                }
+                (Method::POST, Some("durable-execution-callbacks"), 4, Some("succeed")) => {
+                    return Some(("SendDurableExecutionCallbackSuccess", arn));
+                }
+                (Method::POST, Some("durable-execution-callbacks"), 4, Some("fail")) => {
+                    return Some(("SendDurableExecutionCallbackFailure", arn));
+                }
+                (Method::POST, Some("durable-execution-callbacks"), 4, Some("heartbeat")) => {
+                    return Some(("SendDurableExecutionCallbackHeartbeat", arn));
+                }
+                (Method::GET, Some("functions"), 4, Some("durable-executions")) => {
+                    return Some(("ListDurableExecutionsByFunction", arn));
+                }
+                _ => {}
+            }
+        }
+
         if prefix != "2015-03-31" {
             return None;
         }
@@ -2299,6 +2356,81 @@ impl AwsService for LambdaService {
             "DeleteEventSourceMapping" => {
                 self.delete_event_source_mapping(resource_name.as_deref().unwrap_or(""), aid)
             }
+            "CreateCapacityProvider" => {
+                crate::workflows::create_capacity_provider(&self.state, &req, &req.json_body())
+            }
+            "GetCapacityProvider" => crate::workflows::get_capacity_provider(
+                &self.state,
+                &req,
+                resource_name.as_deref().unwrap_or(""),
+            ),
+            "ListCapacityProviders" => crate::workflows::list_capacity_providers(&self.state, &req),
+            "UpdateCapacityProvider" => crate::workflows::update_capacity_provider(
+                &self.state,
+                &req,
+                resource_name.as_deref().unwrap_or(""),
+                &req.json_body(),
+            ),
+            "DeleteCapacityProvider" => crate::workflows::delete_capacity_provider(
+                &self.state,
+                &req,
+                resource_name.as_deref().unwrap_or(""),
+            ),
+            "ListFunctionVersionsByCapacityProvider" => {
+                crate::workflows::list_function_versions_by_capacity_provider(
+                    &self.state,
+                    &req,
+                    resource_name.as_deref().unwrap_or(""),
+                )
+            }
+            "GetDurableExecution" => crate::workflows::get_durable_execution(
+                &self.state,
+                &req,
+                resource_name.as_deref().unwrap_or(""),
+            ),
+            "GetDurableExecutionHistory" => crate::workflows::get_durable_execution_history(
+                &self.state,
+                &req,
+                resource_name.as_deref().unwrap_or(""),
+            ),
+            "GetDurableExecutionState" => crate::workflows::get_durable_execution_state(
+                &self.state,
+                &req,
+                resource_name.as_deref().unwrap_or(""),
+            ),
+            "ListDurableExecutionsByFunction" => {
+                crate::workflows::list_durable_executions_by_function(
+                    &self.state,
+                    &req,
+                    resource_name.as_deref().unwrap_or(""),
+                )
+            }
+            "CheckpointDurableExecution" => crate::workflows::checkpoint_durable_execution(
+                &self.state,
+                &req,
+                resource_name.as_deref().unwrap_or(""),
+                &req.json_body(),
+            ),
+            "StopDurableExecution" => crate::workflows::stop_durable_execution(
+                &self.state,
+                &req,
+                resource_name.as_deref().unwrap_or(""),
+            ),
+            "SendDurableExecutionCallbackSuccess" => crate::workflows::send_callback_success(
+                &self.state,
+                &req,
+                resource_name.as_deref().unwrap_or(""),
+            ),
+            "SendDurableExecutionCallbackFailure" => crate::workflows::send_callback_failure(
+                &self.state,
+                &req,
+                resource_name.as_deref().unwrap_or(""),
+            ),
+            "SendDurableExecutionCallbackHeartbeat" => crate::workflows::send_callback_heartbeat(
+                &self.state,
+                &req,
+                resource_name.as_deref().unwrap_or(""),
+            ),
             other => {
                 self.handle_extra(other, resource_name.as_deref(), &req)
                     .await
@@ -2382,6 +2514,21 @@ impl AwsService for LambdaService {
             "TagResource",
             "UntagResource",
             "ListTags",
+            "CreateCapacityProvider",
+            "GetCapacityProvider",
+            "ListCapacityProviders",
+            "UpdateCapacityProvider",
+            "DeleteCapacityProvider",
+            "ListFunctionVersionsByCapacityProvider",
+            "GetDurableExecution",
+            "GetDurableExecutionHistory",
+            "GetDurableExecutionState",
+            "ListDurableExecutionsByFunction",
+            "CheckpointDurableExecution",
+            "StopDurableExecution",
+            "SendDurableExecutionCallbackSuccess",
+            "SendDurableExecutionCallbackFailure",
+            "SendDurableExecutionCallbackHeartbeat",
         ]
     }
 

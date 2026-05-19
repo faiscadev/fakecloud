@@ -117,6 +117,8 @@ pub struct BedrockState {
     pub model_invocation_jobs: BTreeMap<String, ModelInvocationJob>,
     /// Evaluation jobs keyed by job ARN.
     pub evaluation_jobs: BTreeMap<String, EvaluationJob>,
+    /// Advanced prompt optimization jobs keyed by job ARN.
+    pub advanced_prompt_optimization_jobs: BTreeMap<String, AdvancedPromptOptimizationJob>,
     /// Inference profiles keyed by ARN.
     pub inference_profiles: BTreeMap<String, InferenceProfile>,
     /// Prompt routers keyed by ARN.
@@ -170,6 +172,7 @@ impl BedrockState {
             model_copy_jobs: BTreeMap::new(),
             model_invocation_jobs: BTreeMap::new(),
             evaluation_jobs: BTreeMap::new(),
+            advanced_prompt_optimization_jobs: BTreeMap::new(),
             inference_profiles: BTreeMap::new(),
             prompt_routers: BTreeMap::new(),
             resource_policies: BTreeMap::new(),
@@ -204,6 +207,7 @@ impl BedrockState {
         self.model_copy_jobs.clear();
         self.model_invocation_jobs.clear();
         self.evaluation_jobs.clear();
+        self.advanced_prompt_optimization_jobs.clear();
         self.inference_profiles.clear();
         self.prompt_routers.clear();
         self.resource_policies.clear();
@@ -406,6 +410,20 @@ pub struct ModelInvocationJob {
     pub submit_time: DateTime<Utc>,
     pub last_modified_time: DateTime<Utc>,
     pub end_time: Option<DateTime<Utc>>,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct AdvancedPromptOptimizationJob {
+    pub job_arn: String,
+    pub job_name: String,
+    pub job_description: Option<String>,
+    pub status: String,
+    pub input_config: serde_json::Value,
+    pub output_config: serde_json::Value,
+    pub encryption_key_arn: Option<String>,
+    pub model_configurations: serde_json::Value,
+    pub creation_time: DateTime<Utc>,
+    pub last_modified_time: DateTime<Utc>,
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]

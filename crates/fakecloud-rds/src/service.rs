@@ -121,6 +121,7 @@ const SUPPORTED_ACTIONS: &[&str] = &[
     "DescribePendingMaintenanceActions",
     "DescribeReservedDBInstances",
     "DescribeReservedDBInstancesOfferings",
+    "DescribeServerlessV2PlatformVersions",
     "DescribeSourceRegions",
     "DescribeTenantDatabases",
     "DescribeValidDBInstanceModifications",

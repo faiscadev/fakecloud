@@ -1325,6 +1325,36 @@ impl RdsService {
             "DescribeEvents" => self.describe_events(req, &rid),
             "DescribeSourceRegions" => Ok(xml_response("DescribeSourceRegions", "    <SourceRegions/>".to_string(), &rid)),
             "DescribeDBMajorEngineVersions" => Ok(xml_response("DescribeDBMajorEngineVersions", "    <DBMajorEngineVersions/>".to_string(), &rid)),
+            "DescribeServerlessV2PlatformVersions" => {
+                let engine = get_param(req, "Engine").unwrap_or_else(|| "aurora-mysql".to_string());
+                let version_filter = get_param(req, "ServerlessV2PlatformVersion");
+                let all = [
+                    ("4", true, "Version 4 offering scaling up to 256 ACUs", 256.0_f64),
+                    ("3", false, "Version 3 offering scaling up to 256 ACUs", 256.0),
+                    ("2", false, "Version 2 offering scaling up to 256 ACUs", 256.0),
+                    ("1", false, "Version 1 offering scaling up to 128 ACUs", 128.0),
+                ];
+                let body = all
+                    .iter()
+                    .filter(|(v, ..)| version_filter.as_deref().is_none_or(|f| f == *v))
+                    .map(|(v, is_default, desc, max)| {
+                        format!(
+                            "      <member>\n        <Engine>{e}</Engine>\n        <IsDefault>{d}</IsDefault>\n        <ServerlessV2PlatformVersion>{v}</ServerlessV2PlatformVersion>\n        <ServerlessV2PlatformVersionDescription>{desc}</ServerlessV2PlatformVersionDescription>\n        <Status>enabled</Status>\n        <ServerlessV2FeaturesSupport>\n          <MinCapacity>0.0</MinCapacity>\n          <MaxCapacity>{max:.1}</MaxCapacity>\n        </ServerlessV2FeaturesSupport>\n      </member>",
+                            e = xml_escape(&engine),
+                            d = is_default,
+                            v = v,
+                            desc = xml_escape(desc),
+                            max = max,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                Ok(xml_response(
+                    "DescribeServerlessV2PlatformVersions",
+                    format!("    <ServerlessV2PlatformVersions>\n{body}\n    </ServerlessV2PlatformVersions>"),
+                    &rid,
+                ))
+            }
             "DescribeValidDBInstanceModifications" => Ok(xml_response("DescribeValidDBInstanceModifications", "    <ValidDBInstanceModificationsMessage>\n      <ValidProcessorFeatures/>\n      <Storage/>\n    </ValidDBInstanceModificationsMessage>".to_string(), &rid)),
             "ModifyCurrentDBClusterCapacity" => Ok(xml_response("ModifyCurrentDBClusterCapacity", "    <DBClusterIdentifier>x</DBClusterIdentifier>\n    <CurrentCapacity>4</CurrentCapacity>".to_string(), &rid)),
             "DisableHttpEndpoint" => Ok(xml_response("DisableHttpEndpoint", "    <HttpEndpointEnabled>false</HttpEndpointEnabled>".to_string(), &rid)),
