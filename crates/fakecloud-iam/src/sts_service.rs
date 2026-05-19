@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use http::StatusCode;
 
+use fakecloud_aws::arn::Arn;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 use fakecloud_core::validation::*;
 use fakecloud_persistence::SnapshotStore;
@@ -457,7 +458,7 @@ impl StsService {
             let caller_principal = match req.principal.as_ref() {
                 Some(p) => p.clone(),
                 None => Principal {
-                    arn: format!("arn:aws:iam::{}:root", req.account_id),
+                    arn: Arn::global("iam", &req.account_id, "root").to_string(),
                     user_id: req.account_id.clone(),
                     account_id: req.account_id.clone(),
                     principal_type: PrincipalType::Root,
