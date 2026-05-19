@@ -7,7 +7,7 @@ template = "page.html"
 Need local ECS for integration tests? Use [fakecloud](https://github.com/faiscadev/fakecloud).
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash
+curl -fsSL https://fakecloud.dev/install.sh | bash
 fakecloud
 ```
 

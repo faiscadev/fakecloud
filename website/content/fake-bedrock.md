@@ -7,7 +7,7 @@ template = "page.html"
 Need a fake Bedrock? Use [fakecloud](https://github.com/faiscadev/fakecloud). Real HTTP server that speaks the Bedrock wire protocol and returns whatever you tell it to. 214 operations across the full Bedrock family (Bedrock + Bedrock Runtime + Bedrock Agent + Bedrock Agent Runtime), deterministic, free.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash
+curl -fsSL https://fakecloud.dev/install.sh | bash
 fakecloud
 ```
 
@@ -109,7 +109,7 @@ Assert your code handles every Bedrock error code you read in the docs. No more 
 
 ## Links
 
-- **Install**: `curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash`
+- **Install**: `curl -fsSL https://fakecloud.dev/install.sh | bash`
 - **Repo**: [github.com/faiscadev/fakecloud](https://github.com/faiscadev/fakecloud)
 - **Tutorial**: [How to test Bedrock code locally](/blog/bedrock-local-testing/)
 - **Related**: [Bedrock emulator](/bedrock-emulator/), [Test Bedrock locally](/test-bedrock-locally/), [Fake AWS server](/fake-aws-server/)

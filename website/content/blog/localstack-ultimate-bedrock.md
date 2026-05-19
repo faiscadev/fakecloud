@@ -119,7 +119,7 @@ If you want to understand why "just use Ollama" doesn't work as a test strategy,
 
 ## Links
 
-- **Install fakecloud**: `curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash`
+- **Install fakecloud**: `curl -fsSL https://fakecloud.dev/install.sh | bash`
 - **LocalStack Bedrock docs (cited)**: [docs.localstack.cloud/aws/services/bedrock](https://docs.localstack.cloud/aws/services/bedrock/)
 - **Bedrock emulator landing**: [/bedrock-emulator/](/bedrock-emulator/)
 - **Migration landing**: [/localstack-bedrock-alternative/](/localstack-bedrock-alternative/)

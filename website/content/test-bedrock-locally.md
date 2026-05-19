@@ -7,7 +7,7 @@ template = "page.html"
 Want to test code that calls Bedrock, without spending real tokens or hitting a real LLM? Use [fakecloud](https://github.com/faiscadev/fakecloud). Real Bedrock-wire-protocol server. Deterministic responses. Millisecond latency. Free.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash
+curl -fsSL https://fakecloud.dev/install.sh | bash
 fakecloud
 ```
 
@@ -147,7 +147,7 @@ expect(chunks).toEqual(["Once ", "upon ", "a ", "time"]);
 
 ## Links
 
-- **Install**: `curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash`
+- **Install**: `curl -fsSL https://fakecloud.dev/install.sh | bash`
 - **Repo**: [github.com/faiscadev/fakecloud](https://github.com/faiscadev/fakecloud)
 - **Full tutorial**: [How to test Bedrock code locally, for free, deterministically](/blog/bedrock-local-testing/)
 - **Related**: [Bedrock emulator](/bedrock-emulator/), [LocalStack Bedrock alternative](/localstack-bedrock-alternative/), [Testing LLM guardrails](/blog/llm-guardrails/)

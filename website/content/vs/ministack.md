@@ -47,7 +47,7 @@ These are philosophies, not rankings. Breadth-first and depth-first are differen
 ## Install fakecloud
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash
+curl -fsSL https://fakecloud.dev/install.sh | bash
 fakecloud
 ```
 

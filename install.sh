@@ -1,7 +1,7 @@
 #!/bin/sh
 # FakeCloud installer — downloads pre-built binaries from GitHub Releases.
-# Usage: curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash
-#    or: curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash -s -- --version v0.1.0
+# Usage: curl -fsSL https://fakecloud.dev/install.sh | bash
+#    or: curl -fsSL https://fakecloud.dev/install.sh | bash -s -- --version v0.1.0
 
 set -eu
 

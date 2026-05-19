@@ -9,7 +9,7 @@ fakecloud ships as a single ~19 MB binary. Pick whichever install path fits your
 ## Install script (recommended)
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash
+curl -fsSL https://fakecloud.dev/install.sh | bash
 fakecloud
 ```
 

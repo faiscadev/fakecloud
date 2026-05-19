@@ -26,7 +26,7 @@ We'll use [fakecloud](https://github.com/faiscadev/fakecloud) — a free, open-s
 ## Install fakecloud
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash
+curl -fsSL https://fakecloud.dev/install.sh | bash
 fakecloud
 ```
 
@@ -228,7 +228,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash
+      - run: curl -fsSL https://fakecloud.dev/install.sh | bash
       - run: fakecloud &
       - run: |
           for i in $(seq 1 30); do
@@ -251,7 +251,7 @@ fakecloud runs your function code in the real AWS Lambda runtime containers, so 
 
 ## Links
 
-- Install: `curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash`
+- Install: `curl -fsSL https://fakecloud.dev/install.sh | bash`
 - Repo: [github.com/faiscadev/fakecloud](https://github.com/faiscadev/fakecloud)
 - Lambda docs: [fakecloud.dev/docs/services/lambda](https://fakecloud.dev/docs/services/lambda)
 - SDKs: [fakecloud.dev/docs/sdks](https://fakecloud.dev/docs/sdks)

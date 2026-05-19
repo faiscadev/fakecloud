@@ -47,7 +47,7 @@ Yes, end-to-end. When an object is created in S3, any Lambda subscribed via buck
 One-line install script:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash
+curl -fsSL https://fakecloud.dev/install.sh | bash
 fakecloud
 ```
 
@@ -115,7 +115,7 @@ GitHub issues: [github.com/faiscadev/fakecloud/issues](https://github.com/faisca
     {"@type": "Question", "name": "Does fakecloud run real databases for RDS?", "acceptedAnswer": {"@type": "Answer", "text": "Yes. RDS emulation pulls real PostgreSQL, MySQL, MariaDB, Oracle, SQL Server, and Db2 Docker images and runs them as the DB instance."}},
     {"@type": "Question", "name": "Does fakecloud run real Redis for ElastiCache?", "acceptedAnswer": {"@type": "Answer", "text": "Yes. ElastiCache runs real Redis, Valkey, and Memcached Docker images, so all Redis commands including streams, pub/sub, and Lua scripts work, and the full memcached text protocol works."}},
     {"@type": "Question", "name": "Do S3 notifications fire Lambda?", "acceptedAnswer": {"@type": "Answer", "text": "Yes, end-to-end. When an object is created in S3, any Lambda subscribed via bucket notification fires for real in a runtime container. Same for SNS and SQS subscriptions."}},
-    {"@type": "Question", "name": "How do I install fakecloud?", "acceptedAnswer": {"@type": "Answer", "text": "One-line install script: curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash. Or Docker: docker run --rm -p 4566:4566 ghcr.io/faiscadev/fakecloud. Or cargo install fakecloud."}},
+    {"@type": "Question", "name": "How do I install fakecloud?", "acceptedAnswer": {"@type": "Answer", "text": "One-line install script: curl -fsSL https://fakecloud.dev/install.sh | bash. Or Docker: docker run --rm -p 4566:4566 ghcr.io/faiscadev/fakecloud. Or cargo install fakecloud."}},
     {"@type": "Question", "name": "Does fakecloud work with Terraform?", "acceptedAnswer": {"@type": "Answer", "text": "Yes. CI runs the upstream hashicorp/terraform-provider-aws TestAcc suites against fakecloud on every commit."}},
     {"@type": "Question", "name": "Does fakecloud work with CDK?", "acceptedAnswer": {"@type": "Answer", "text": "Yes. Use the plain cdk binary with AWS_ENDPOINT_URL=http://localhost:4566, or the cdklocal wrapper."}},
     {"@type": "Question", "name": "Can I use fakecloud in CI?", "acceptedAnswer": {"@type": "Answer", "text": "Yes. Fits as a GitHub Actions service container, GitLab CI service, CircleCI service, or install-and-run background step. ~500ms startup means negligible CI overhead."}},

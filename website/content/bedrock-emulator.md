@@ -7,7 +7,7 @@ template = "page.html"
 Need a Bedrock emulator? Use [fakecloud](https://github.com/faiscadev/fakecloud). Not a mock library. Not a real LLM. A real server that speaks the Bedrock wire protocol and returns exactly what you tell it to.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash
+curl -fsSL https://fakecloud.dev/install.sh | bash
 fakecloud
 ```
 
@@ -127,7 +127,7 @@ rt.apply_guardrail(guardrailIdentifier=g['guardrailId'],
 
 ## Links
 
-- **Install**: `curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash`
+- **Install**: `curl -fsSL https://fakecloud.dev/install.sh | bash`
 - **Repo**: [github.com/faiscadev/fakecloud](https://github.com/faiscadev/fakecloud)
 - **Deep dive**: [How to test Bedrock code locally, for free, deterministically](/blog/bedrock-local-testing/)
 - **LLM Guardrails**: [Testing LLM guardrails locally](/blog/llm-guardrails/)

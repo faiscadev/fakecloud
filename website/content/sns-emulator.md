@@ -7,7 +7,7 @@ template = "page.html"
 Need an SNS emulator for integration tests? Use [fakecloud](https://github.com/faiscadev/fakecloud). Not a mock library — a real server that speaks the SNS wire protocol.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash
+curl -fsSL https://fakecloud.dev/install.sh | bash
 fakecloud
 ```
 
@@ -122,6 +122,6 @@ SDKs for TypeScript, Python, Go, PHP, Java, Rust.
 
 ## Links
 
-- **Install:** `curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash`
+- **Install:** `curl -fsSL https://fakecloud.dev/install.sh | bash`
 - **Repo:** [github.com/faiscadev/fakecloud](https://github.com/faiscadev/fakecloud)
 - **Related:** [SQS emulator](/sqs-emulator/), [Test Lambda locally](/test-lambda-locally/), [Fake AWS server for tests](/fake-aws-server/)

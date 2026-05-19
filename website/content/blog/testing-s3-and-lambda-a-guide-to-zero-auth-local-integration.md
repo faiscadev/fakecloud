@@ -148,4 +148,4 @@ Stop fighting with auth tokens and cloud latency. You can have a full AWS enviro
 
 Run the following command to install the latest version of fakecloud and start your local environment:
 
-`curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash && fakecloud`
+`curl -fsSL https://fakecloud.dev/install.sh | bash && fakecloud`

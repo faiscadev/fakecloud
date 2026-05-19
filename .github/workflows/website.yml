@@ -3,7 +3,7 @@ name: Website
 on:
   push:
     branches: [main]
-    paths: [website/**]
+    paths: [website/**, install.sh]
   schedule:
     - cron: "0 4,8,12,16,20,0 * * *"  # every 4 hours — publishes scheduled posts
   workflow_dispatch:

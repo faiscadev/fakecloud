@@ -26,7 +26,7 @@ The server on the other end handles all the ceremony: signing verification (opti
 ## Installing fakecloud
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash
+curl -fsSL https://fakecloud.dev/install.sh | bash
 fakecloud
 ```
 
@@ -245,7 +245,7 @@ Moto and fakecloud are not really competitive — they solve slightly different 
 
 ## Links
 
-- Install: `curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash`
+- Install: `curl -fsSL https://fakecloud.dev/install.sh | bash`
 - Repo: [github.com/faiscadev/fakecloud](https://github.com/faiscadev/fakecloud)
 - Moto: [github.com/getmoto/moto](https://github.com/getmoto/moto)
 - Language SDK docs: [fakecloud.dev/docs/sdks](https://fakecloud.dev/docs/sdks)

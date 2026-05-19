@@ -7,7 +7,7 @@ template = "page.html"
 Need local ElastiCache for integration tests? Use [fakecloud](https://github.com/faiscadev/fakecloud).
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash
+curl -fsSL https://fakecloud.dev/install.sh | bash
 fakecloud
 ```
 
@@ -137,6 +137,6 @@ test('app caches via real redis behind ElastiCache emulation', async () => {
 
 ## Links
 
-- **Install:** `curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash`
+- **Install:** `curl -fsSL https://fakecloud.dev/install.sh | bash`
 - **Repo:** [github.com/faiscadev/fakecloud](https://github.com/faiscadev/fakecloud)
 - **Related:** [Local RDS for tests](/local-rds/), [Fake AWS server for tests](/fake-aws-server/)

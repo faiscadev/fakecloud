@@ -7,7 +7,7 @@ template = "page.html"
 Need a fake AWS server to point your tests at? That's what [fakecloud](https://github.com/faiscadev/fakecloud) is.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash
+curl -fsSL https://fakecloud.dev/install.sh | bash
 fakecloud
 ```
 
@@ -83,7 +83,7 @@ A fake AWS server on localhost is language-agnostic (any SDK works), runs real c
 
 ## Install options
 
-- Binary: `curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash`
+- Binary: `curl -fsSL https://fakecloud.dev/install.sh | bash`
 - Docker: `docker run --rm -p 4566:4566 ghcr.io/faiscadev/fakecloud`
 - Cargo: `cargo install fakecloud`
 - Docker Compose and source builds: [docs](/docs/getting-started/)

@@ -118,7 +118,7 @@ Things that were hard or impossible before, that are now just tests:
 ## Try it
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash
+curl -fsSL https://fakecloud.dev/install.sh | bash
 fakecloud
 ```
 

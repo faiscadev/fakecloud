@@ -7,7 +7,7 @@ template = "page.html"
 Need a local Application Load Balancer, Network Load Balancer, or Gateway Load Balancer for integration tests? Use [fakecloud](https://github.com/faiscadev/fakecloud).
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash
+curl -fsSL https://fakecloud.dev/install.sh | bash
 fakecloud
 ```
 

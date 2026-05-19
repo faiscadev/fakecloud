@@ -7,7 +7,7 @@ template = "page.html"
 Need a SES emulator for integration tests? Use [fakecloud](https://github.com/faiscadev/fakecloud). Not a mock library — a real server that speaks the SES wire protocol.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash
+curl -fsSL https://fakecloud.dev/install.sh | bash
 fakecloud
 ```
 
@@ -166,6 +166,6 @@ Real inbound receipt rule execution is the big differentiator — critical if yo
 
 ## Links
 
-- **Install:** `curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash`
+- **Install:** `curl -fsSL https://fakecloud.dev/install.sh | bash`
 - **Repo:** [github.com/faiscadev/fakecloud](https://github.com/faiscadev/fakecloud)
 - **Related:** [Fake AWS server for tests](/fake-aws-server/), [Test Lambda locally](/test-lambda-locally/)
