@@ -1112,6 +1112,29 @@ impl LambdaService {
         // /2025-11-30/capacity-providers — Lambda Workflows.
         if prefix == "2025-11-30" && segs.get(1).map(|s| s.as_str()) == Some("capacity-providers") {
             let name = segs.get(2).map(|s| s.to_string());
+            // Empty CapacityProviderName label (negative-omit probe) reaches
+            // here with one fewer segment than the model URI implies. Route
+            // each method to its real op with an empty name so the validation
+            // layer surfaces a declared InvalidParameterValueException
+            // rather than degrading silently into List or returning 501.
+            if segs.len() == 2 && req.raw_path.ends_with("/capacity-providers/") {
+                return match req.method {
+                    Method::GET => Some(("GetCapacityProvider", Some(String::new()))),
+                    Method::PUT => Some(("UpdateCapacityProvider", Some(String::new()))),
+                    Method::DELETE => Some(("DeleteCapacityProvider", Some(String::new()))),
+                    _ => None,
+                };
+            }
+            if segs.len() == 3
+                && req.method == Method::GET
+                && req.raw_path.ends_with("/function-versions")
+                && segs.get(2).map(|s| s.as_str()) == Some("function-versions")
+            {
+                return Some((
+                    "ListFunctionVersionsByCapacityProvider",
+                    Some(String::new()),
+                ));
+            }
             return match (
                 req.method.clone(),
                 segs.len(),
@@ -1134,6 +1157,53 @@ impl LambdaService {
             let collection = segs.get(1).map(|s| s.as_str());
             let arn = segs.get(2).map(|s| s.to_string());
             let action = segs.get(3).map(|s| s.as_str());
+            // Empty path label (negative-omit / negative-too-short probes
+            // substitute an empty string into the URI template). Without
+            // these recoveries the request falls through to None and
+            // returns 501, but the Smithy contract declares only
+            // InvalidParameterValueException — so route to the right
+            // handler with an empty identifier and let the validation
+            // layer surface a 400 with the declared shape.
+            //
+            // The pattern matches both the trailing-slash collapse
+            // (`/durable-executions/`) and the empty-middle collapse
+            // (`/durable-executions//stop`) — filtered segments hide
+            // either form behind the same shortened `segs` vector.
+            if req.raw_path.contains("/durable-executions/") && segs.len() < 4 {
+                if req.raw_path.ends_with("/checkpoint") && req.method == Method::POST {
+                    return Some(("CheckpointDurableExecution", Some(String::new())));
+                }
+                if req.raw_path.ends_with("/stop") && req.method == Method::POST {
+                    return Some(("StopDurableExecution", Some(String::new())));
+                }
+                if req.raw_path.ends_with("/history") && req.method == Method::GET {
+                    return Some(("GetDurableExecutionHistory", Some(String::new())));
+                }
+                if req.raw_path.ends_with("/state") && req.method == Method::GET {
+                    return Some(("GetDurableExecutionState", Some(String::new())));
+                }
+                if req.raw_path.ends_with("/durable-executions/") && req.method == Method::GET {
+                    return Some(("GetDurableExecution", Some(String::new())));
+                }
+            }
+            if req.raw_path.contains("/durable-execution-callbacks/") && segs.len() < 4 {
+                if req.raw_path.ends_with("/succeed") && req.method == Method::POST {
+                    return Some(("SendDurableExecutionCallbackSuccess", Some(String::new())));
+                }
+                if req.raw_path.ends_with("/fail") && req.method == Method::POST {
+                    return Some(("SendDurableExecutionCallbackFailure", Some(String::new())));
+                }
+                if req.raw_path.ends_with("/heartbeat") && req.method == Method::POST {
+                    return Some(("SendDurableExecutionCallbackHeartbeat", Some(String::new())));
+                }
+            }
+            if req.raw_path.contains("/functions/")
+                && req.raw_path.ends_with("/durable-executions")
+                && req.method == Method::GET
+                && segs.len() == 3
+            {
+                return Some(("ListDurableExecutionsByFunction", Some(String::new())));
+            }
             match (req.method.clone(), collection, segs.len(), action) {
                 (Method::GET, Some("durable-executions"), 3, _) => {
                     return Some(("GetDurableExecution", arn));

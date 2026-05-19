@@ -27,6 +27,16 @@ fn not_found(msg: impl Into<String>) -> AwsServiceError {
     AwsServiceError::aws_error(StatusCode::NOT_FOUND, "ResourceNotFoundException", msg)
 }
 
+fn check_len(field: &str, v: &str, min: usize, max: usize) -> Result<(), AwsServiceError> {
+    if v.len() < min || v.len() > max {
+        return Err(validation(format!(
+            "{field} length must be in [{min},{max}], got {}",
+            v.len()
+        )));
+    }
+    Ok(())
+}
+
 fn arn_for_capacity_provider(region: &str, account: &str, name: &str) -> String {
     format!("arn:aws:lambda:{region}:{account}:capacity-provider/{name}")
 }
@@ -111,6 +121,7 @@ pub(crate) fn get_capacity_provider(
     req: &AwsRequest,
     name: &str,
 ) -> Result<AwsResponse, AwsServiceError> {
+    check_len("CapacityProviderName", name, 1, 140)?;
     let accts = state.read();
     let empty = crate::state::LambdaState::new(&req.account_id, &req.region);
     let s = accts.get(&req.account_id).unwrap_or(&empty);
@@ -148,6 +159,7 @@ pub(crate) fn update_capacity_provider(
     name: &str,
     body: &Value,
 ) -> Result<AwsResponse, AwsServiceError> {
+    check_len("CapacityProviderName", name, 1, 140)?;
     let mut accts = state.write();
     let s = accts.get_or_create(&req.account_id);
     let cp = s
@@ -183,6 +195,7 @@ pub(crate) fn delete_capacity_provider(
     req: &AwsRequest,
     name: &str,
 ) -> Result<AwsResponse, AwsServiceError> {
+    check_len("CapacityProviderName", name, 1, 140)?;
     let mut accts = state.write();
     let s = accts.get_or_create(&req.account_id);
     s.capacity_providers
@@ -196,6 +209,7 @@ pub(crate) fn list_function_versions_by_capacity_provider(
     req: &AwsRequest,
     name: &str,
 ) -> Result<AwsResponse, AwsServiceError> {
+    check_len("CapacityProviderName", name, 1, 140)?;
     let accts = state.read();
     let empty = crate::state::LambdaState::new(&req.account_id, &req.region);
     let s = accts.get(&req.account_id).unwrap_or(&empty);
@@ -236,6 +250,7 @@ pub(crate) fn list_durable_executions_by_function(
     req: &AwsRequest,
     function_name: &str,
 ) -> Result<AwsResponse, AwsServiceError> {
+    check_len("FunctionName", function_name, 1, 170)?;
     let accts = state.read();
     let empty = crate::state::LambdaState::new(&req.account_id, &req.region);
     let s = accts.get(&req.account_id).unwrap_or(&empty);
@@ -269,6 +284,7 @@ pub(crate) fn get_durable_execution(
     req: &AwsRequest,
     arn: &str,
 ) -> Result<AwsResponse, AwsServiceError> {
+    check_len("DurableExecutionArn", arn, 1, 1024)?;
     let accts = state.read();
     let empty = crate::state::LambdaState::new(&req.account_id, &req.region);
     let s = accts.get(&req.account_id).unwrap_or(&empty);
@@ -283,6 +299,7 @@ pub(crate) fn get_durable_execution_history(
     req: &AwsRequest,
     arn: &str,
 ) -> Result<AwsResponse, AwsServiceError> {
+    check_len("DurableExecutionArn", arn, 1, 1024)?;
     let accts = state.read();
     let empty = crate::state::LambdaState::new(&req.account_id, &req.region);
     let s = accts.get(&req.account_id).unwrap_or(&empty);
@@ -297,10 +314,16 @@ pub(crate) fn get_durable_execution_state(
     req: &AwsRequest,
     arn: &str,
 ) -> Result<AwsResponse, AwsServiceError> {
+    check_len("DurableExecutionArn", arn, 1, 1024)?;
+    // GetDurableExecutionState's Smithy declares only InvalidParameterValueException
+    // for client errors (no ResourceNotFoundException), so map missing arn there.
     let accts = state.read();
     let empty = crate::state::LambdaState::new(&req.account_id, &req.region);
     let s = accts.get(&req.account_id).unwrap_or(&empty);
-    let exec = ensure_execution(s, arn)?;
+    let exec = s
+        .durable_executions
+        .get(arn)
+        .ok_or_else(|| validation(format!("Durable execution {arn} not found")))?;
     Ok(AwsResponse::ok_json(json!({
         "State": exec.state.clone(),
     })))
@@ -312,12 +335,18 @@ pub(crate) fn checkpoint_durable_execution(
     arn: &str,
     body: &Value,
 ) -> Result<AwsResponse, AwsServiceError> {
+    check_len("DurableExecutionArn", arn, 1, 1024)?;
+    if let Some(token) = body.get("CheckpointToken").and_then(|v| v.as_str()) {
+        check_len("CheckpointToken", token, 1, 2048)?;
+    }
+    // CheckpointDurableExecution Smithy doesn't declare ResourceNotFoundException;
+    // map missing arn to InvalidParameterValueException.
     let mut accts = state.write();
     let s = accts.get_or_create(&req.account_id);
     let exec = s
         .durable_executions
         .get_mut(arn)
-        .ok_or_else(|| not_found(format!("Durable execution {arn} not found")))?;
+        .ok_or_else(|| validation(format!("Durable execution {arn} not found")))?;
     if exec.status != "Running" && exec.status != "Pending" {
         return Err(AwsServiceError::aws_error(
             StatusCode::CONFLICT,
@@ -340,6 +369,7 @@ pub(crate) fn stop_durable_execution(
     req: &AwsRequest,
     arn: &str,
 ) -> Result<AwsResponse, AwsServiceError> {
+    check_len("DurableExecutionArn", arn, 1, 1024)?;
     let mut accts = state.write();
     let s = accts.get_or_create(&req.account_id);
     let exec = s
@@ -366,6 +396,7 @@ fn record_callback(
     callback_id: &str,
     outcome: &str,
 ) -> Result<AwsResponse, AwsServiceError> {
+    check_len("CallbackId", callback_id, 1, 1024)?;
     let mut accts = state.write();
     let s = accts.get_or_create(&req.account_id);
     let existing_execution = s
