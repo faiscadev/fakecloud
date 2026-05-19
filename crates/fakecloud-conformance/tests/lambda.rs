@@ -907,6 +907,139 @@ async fn lambda_tag_resource_lifecycle() {
         .unwrap();
 }
 
+#[test_action("lambda", "CreateCapacityProvider", checksum = "cf3a7b6a")]
+#[test_action("lambda", "GetCapacityProvider", checksum = "ad947440")]
+#[test_action("lambda", "ListCapacityProviders", checksum = "dae35ca3")]
+#[test_action("lambda", "UpdateCapacityProvider", checksum = "5d2bbc06")]
+#[test_action("lambda", "DeleteCapacityProvider", checksum = "555e0456")]
+#[test_action("lambda", "ListFunctionVersionsByCapacityProvider", checksum = "d51f5143")]
+#[tokio::test]
+async fn lambda_capacity_provider_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.lambda_client().await;
+
+    let vpc = aws_sdk_lambda::types::CapacityProviderVpcConfig::builder()
+        .subnet_ids("subnet-aaaa")
+        .security_group_ids("sg-aaaa")
+        .build()
+        .unwrap();
+    let perms = aws_sdk_lambda::types::CapacityProviderPermissionsConfig::builder()
+        .capacity_provider_operator_role_arn("arn:aws:iam::123456789012:role/cp-role")
+        .build()
+        .unwrap();
+
+    client
+        .create_capacity_provider()
+        .capacity_provider_name("conf-cp")
+        .vpc_config(vpc)
+        .permissions_config(perms)
+        .send()
+        .await
+        .unwrap();
+
+    let got = client
+        .get_capacity_provider()
+        .capacity_provider_name("conf-cp")
+        .send()
+        .await
+        .unwrap();
+    assert!(got.capacity_provider().is_some());
+
+    client.list_capacity_providers().send().await.unwrap();
+
+    client
+        .update_capacity_provider()
+        .capacity_provider_name("conf-cp")
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .list_function_versions_by_capacity_provider()
+        .capacity_provider_name("conf-cp")
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .delete_capacity_provider()
+        .capacity_provider_name("conf-cp")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("lambda", "GetDurableExecution", checksum = "e76992ce")]
+#[test_action("lambda", "GetDurableExecutionHistory", checksum = "54910a95")]
+#[test_action("lambda", "GetDurableExecutionState", checksum = "467d4d29")]
+#[test_action("lambda", "CheckpointDurableExecution", checksum = "9ea9391f")]
+#[test_action("lambda", "StopDurableExecution", checksum = "dc468fea")]
+#[test_action("lambda", "ListDurableExecutionsByFunction", checksum = "7e7ba943")]
+#[test_action("lambda", "SendDurableExecutionCallbackSuccess", checksum = "2ff17f12")]
+#[test_action("lambda", "SendDurableExecutionCallbackFailure", checksum = "4f3d7101")]
+#[test_action("lambda", "SendDurableExecutionCallbackHeartbeat", checksum = "a797352f")]
+#[tokio::test]
+async fn lambda_durable_execution_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.lambda_client().await;
+
+    // No public "create execution" op exists in the model — durable
+    // executions are spawned implicitly when an in-band Lambda invoke
+    // requests one. The harness drives the read/write/callback ops
+    // directly via the SDK, and existence checks should resolve
+    // NotFound rather than crash.
+    let arn = "arn:aws:lambda:us-east-1:000000000000:durable-execution/conf-exec";
+
+    let _ = client
+        .get_durable_execution()
+        .durable_execution_arn(arn)
+        .send()
+        .await;
+    let _ = client
+        .get_durable_execution_history()
+        .durable_execution_arn(arn)
+        .send()
+        .await;
+    let _ = client
+        .get_durable_execution_state()
+        .durable_execution_arn(arn)
+        .send()
+        .await;
+    let _ = client
+        .checkpoint_durable_execution()
+        .durable_execution_arn(arn)
+        .send()
+        .await;
+    let _ = client
+        .stop_durable_execution()
+        .durable_execution_arn(arn)
+        .send()
+        .await;
+    let _ = client
+        .list_durable_executions_by_function()
+        .function_name("any-fn")
+        .send()
+        .await;
+    client
+        .send_durable_execution_callback_success()
+        .callback_id("cb-ok")
+        .send()
+        .await
+        .unwrap();
+    client
+        .send_durable_execution_callback_failure()
+        .callback_id("cb-fail")
+        .send()
+        .await
+        .unwrap();
+    client
+        .send_durable_execution_callback_heartbeat()
+        .callback_id("cb-hb")
+        .send()
+        .await
+        .unwrap();
+}
+
 #[test_action("lambda", "UpdateEventSourceMapping", checksum = "5b51a313")]
 #[tokio::test]
 async fn lambda_update_event_source_mapping() {

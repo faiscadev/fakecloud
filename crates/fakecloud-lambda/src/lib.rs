@@ -5,6 +5,7 @@ pub mod resource_policy;
 pub mod runtime;
 pub(crate) mod service;
 pub(crate) mod state;
+pub(crate) mod workflows;
 
 pub use service::LambdaService;
 pub use state::{

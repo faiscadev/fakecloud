@@ -28,6 +28,27 @@ async fn kms_create_key() {
     assert!(meta.arn().unwrap().contains(":key/"));
 }
 
+#[test_action("kms", "GetKeyLastUsage", checksum = "d40a8c5a")]
+#[tokio::test]
+async fn kms_get_key_last_usage() {
+    let server = TestServer::start().await;
+    let client = server.kms_client().await;
+
+    let key = client.create_key().send().await.unwrap();
+    let key_id = key.key_metadata().unwrap().key_id().to_string();
+
+    let resp = client
+        .get_key_last_usage()
+        .key_id(&key_id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.key_id().unwrap(), key_id);
+    assert!(resp.key_creation_date().is_some());
+    assert!(resp.tracking_start_date().is_some());
+    assert!(resp.key_last_usage().is_none());
+}
+
 #[test_action("kms", "DescribeKey", checksum = "c64650b2")]
 #[tokio::test]
 async fn kms_describe_key() {

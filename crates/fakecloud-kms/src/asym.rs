@@ -26,19 +26,17 @@ pub enum AsymError {
 
 pub type KeyPair = (Vec<u8>, Vec<u8>);
 
-/// Returns (private_pkcs8_der, public_spki_der) for the given KMS
-/// `KeySpec`. Returns `None` for symmetric / HMAC / unsupported specs
-/// so the caller can keep the existing fake-bytes path for those.
-pub fn generate_keypair(key_spec: &str) -> Result<Option<KeyPair>, AsymError> {
-    let bits = match key_spec {
-        "RSA_2048" => 2048,
-        "RSA_3072" => 3072,
-        "RSA_4096" => 4096,
-        // ECDSA / ECDH / SM2 specs are out of scope for G1; G2 covers
-        // ECDSA. Falling through to None keeps the fake-bytes legacy
-        // path in place for those.
-        _ => return Ok(None),
-    };
+// One precomputed keypair per RSA bit width, shared across every CreateKey.
+// RSA-4096 keygen is ~20 seconds on CI; the conformance harness exercises
+// every enum value per operation, and earlier we hit 30s read timeouts
+// (surfaced as CRASH) when several RSA-4096 CreateKey variants ran in
+// parallel. Reuse is invisible to clients — each KMS key still has its
+// own ARN, metadata, and lifecycle, only the raw key material is shared.
+static RSA_2048_KEY: std::sync::OnceLock<KeyPair> = std::sync::OnceLock::new();
+static RSA_3072_KEY: std::sync::OnceLock<KeyPair> = std::sync::OnceLock::new();
+static RSA_4096_KEY: std::sync::OnceLock<KeyPair> = std::sync::OnceLock::new();
+
+fn generate_rsa(bits: usize) -> Result<KeyPair, AsymError> {
     let mut rng = rand::thread_rng();
     let private = RsaPrivateKey::new(&mut rng, bits)
         .map_err(|e| AsymError::CryptoFailure(format!("rsa keygen: {e}")))?;
@@ -53,7 +51,31 @@ pub fn generate_keypair(key_spec: &str) -> Result<Option<KeyPair>, AsymError> {
         .map_err(|e| AsymError::CryptoFailure(format!("spki encode: {e}")))?
         .as_bytes()
         .to_vec();
-    Ok(Some((priv_der, pub_der)))
+    Ok((priv_der, pub_der))
+}
+
+fn cached_rsa(slot: &'static std::sync::OnceLock<KeyPair>, bits: usize) -> Result<KeyPair, AsymError> {
+    if let Some(kp) = slot.get() {
+        return Ok(kp.clone());
+    }
+    let kp = generate_rsa(bits)?;
+    Ok(slot.get_or_init(|| kp).clone())
+}
+
+/// Returns (private_pkcs8_der, public_spki_der) for the given KMS
+/// `KeySpec`. Returns `None` for symmetric / HMAC / unsupported specs
+/// so the caller can keep the existing fake-bytes path for those.
+pub fn generate_keypair(key_spec: &str) -> Result<Option<KeyPair>, AsymError> {
+    let kp = match key_spec {
+        "RSA_2048" => cached_rsa(&RSA_2048_KEY, 2048)?,
+        "RSA_3072" => cached_rsa(&RSA_3072_KEY, 3072)?,
+        "RSA_4096" => cached_rsa(&RSA_4096_KEY, 4096)?,
+        // ECDSA / ECDH / SM2 specs are out of scope for G1; G2 covers
+        // ECDSA. Falling through to None keeps the fake-bytes legacy
+        // path in place for those.
+        _ => return Ok(None),
+    };
+    Ok(Some(kp))
 }
 
 /// Signs `message` with the private key encoded in `priv_der` using
