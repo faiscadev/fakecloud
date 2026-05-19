@@ -6,7 +6,7 @@ pub mod management;
 pub mod mock;
 pub mod router;
 pub(crate) mod service;
-pub mod state;
+pub(crate) mod state;
 pub mod websocket;
 pub mod websocket_dispatch;
 

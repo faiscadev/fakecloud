@@ -6,7 +6,6 @@
 //! legacy fake-bytes path. SM2 is not currently supported and is
 //! refused at CreateKey.
 
-use rsa::sha2::{Sha256, Sha384};
 use signature::{Signer, Verifier};
 
 #[derive(Debug, thiserror::Error)]
@@ -287,12 +286,6 @@ fn digest_to_array_48(d: &[u8]) -> Result<[u8; 48], EcdsaError> {
     d.try_into().map_err(|_| {
         EcdsaError::CryptoFailure("MessageType=DIGEST requires 48-byte digest for SHA-384".into())
     })
-}
-
-#[allow(dead_code)]
-fn _unused_imports_keepalive() {
-    let _ = Sha256::default();
-    let _ = Sha384::default();
 }
 
 #[cfg(test)]

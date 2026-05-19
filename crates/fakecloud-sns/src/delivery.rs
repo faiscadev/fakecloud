@@ -345,10 +345,6 @@ mod tests {
         struct Call {
             queue_arn: String,
             body: String,
-            #[allow(dead_code)]
-            group: Option<String>,
-            #[allow(dead_code)]
-            dedup: Option<String>,
         }
 
         #[derive(Default)]
@@ -366,8 +362,6 @@ mod tests {
                 self.calls.lock().unwrap().push(Call {
                     queue_arn: queue_arn.to_string(),
                     body: message_body.to_string(),
-                    group: None,
-                    dedup: None,
                 });
             }
 
@@ -376,14 +370,12 @@ mod tests {
                 queue_arn: &str,
                 message_body: &str,
                 _attrs: &HashMap<String, fakecloud_core::delivery::SqsMessageAttribute>,
-                group: Option<&str>,
-                dedup: Option<&str>,
+                _group: Option<&str>,
+                _dedup: Option<&str>,
             ) {
                 self.calls.lock().unwrap().push(Call {
                     queue_arn: queue_arn.to_string(),
                     body: message_body.to_string(),
-                    group: group.map(|s| s.to_string()),
-                    dedup: dedup.map(|s| s.to_string()),
                 });
             }
         }

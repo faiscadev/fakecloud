@@ -3095,6 +3095,7 @@ version = "0.15.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "fakecloud-aws",
  "fakecloud-core",
  "http 1.4.0",
  "parking_lot",

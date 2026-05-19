@@ -41,8 +41,7 @@ use fakecloud_cloudfront::{
         OriginRequestPolicyQueryStringsConfig, ResponseHeadersPolicyConfig, StoredCachePolicy,
         StoredOriginAccessControl, StoredOriginRequestPolicy, StoredResponseHeadersPolicy,
     },
-    state::StoredDistribution,
-    SharedCloudFrontState,
+    SharedCloudFrontState, StoredDistribution,
 };
 use fakecloud_cloudwatch::{AlarmState, Dashboard, MetricAlarm, SharedCloudWatchState};
 use fakecloud_cognito::{
@@ -73,7 +72,7 @@ use fakecloud_elbv2::{
 use fakecloud_eventbridge::{
     ApiDestination, Archive, Connection, Endpoint, EventBus, EventRule, SharedEventBridgeState,
 };
-use fakecloud_firehose::state::{DeliveryStream, S3Destination};
+use fakecloud_firehose::{DeliveryStream, S3Destination};
 use fakecloud_iam::{
     IamAccessKey, IamGroup, IamInstanceProfile, IamPolicy, IamRole, IamUser, OidcProvider,
     PolicyVersion, SamlProvider, SharedIamState, Tag, VirtualMfaDevice,
