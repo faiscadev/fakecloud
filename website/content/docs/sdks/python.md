@@ -329,13 +329,17 @@ Called as a method on the main client: `fc.organizations()`.
 Methods raise `FakeCloudError` on non-2xx responses:
 
 ```python
+import asyncio
 from fakecloud import FakeCloudError
 
-try:
-    await fc.cognito.confirm_user(req)
-except FakeCloudError as err:
-    print(err.status)  # 404
-    print(err.body)
+async def main():
+    try:
+        await fc.cognito.confirm_user(req)
+    except FakeCloudError as err:
+        print(err.status)  # 404
+        print(err.body)
+
+asyncio.run(main())
 ```
 
 ## Example: pytest fixture

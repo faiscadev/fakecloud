@@ -334,7 +334,7 @@ func TestAppPublishesToSQS(t *testing.T) {
 
     cfg, _ := config.LoadDefaultConfig(ctx,
         config.WithRegion("us-east-1"),
-        config.WithCredentialsProvider(aws.AnonymousCredentialsProvider{}),
+        config.WithCredentialsProvider(aws.AnonymousCredentials{}),
     )
     sqsClient := sqs.NewFromConfig(cfg, func(o *sqs.Options) {
         o.BaseEndpoint = aws.String("http://localhost:4566")
