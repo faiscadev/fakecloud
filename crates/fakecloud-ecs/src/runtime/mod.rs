@@ -1166,6 +1166,7 @@ pub(crate) fn build_run_argv(
     task_id: &str,
     host_ip: &str,
     run_image: &str,
+    awsvpc_network_ready: bool,
 ) -> Vec<String> {
     let mut argv: Vec<String> = Vec::new();
     argv.push("run".into());
@@ -1178,14 +1179,17 @@ pub(crate) fn build_run_argv(
     argv.push(format!("fakecloud-ecs-container={}", plan.container_name));
     argv.push("--add-host".into());
     argv.push(format!("host.docker.internal:{}", host_ip));
-    if plan.network_mode.as_deref() == Some("awsvpc") {
+    let use_awsvpc_network = plan.network_mode.as_deref() == Some("awsvpc") && awsvpc_network_ready;
+    if use_awsvpc_network {
         argv.push("--network".into());
         argv.push(format!("fakecloud-ecs-{}", task_id));
     }
     // `awsvpc` puts the container on a per-task ENI; emulating that on a
     // local docker host means *not* publishing to the host port table.
-    // Bridge / host / default network modes still get `--publish`.
-    let publish_ports = plan.network_mode.as_deref() != Some("awsvpc");
+    // Bridge / host / default network modes still get `--publish`. If
+    // the awsvpc per-task network creation failed and we fell back to
+    // bridge, we DO want to publish so the container is reachable.
+    let publish_ports = !use_awsvpc_network;
     if publish_ports {
         for pm in &plan.port_mappings {
             argv.push("--publish".into());
@@ -2159,7 +2163,7 @@ mod tests {
             interactive: false,
             readonly_rootfs: false,
         };
-        let argv = build_run_argv(&plan, &[], "task-1", "host-gateway", "alpine");
+        let argv = build_run_argv(&plan, &[], "task-1", "host-gateway", "alpine", true);
         let joined = argv.join(" ");
         assert!(joined.contains("--health-cmd true"), "argv: {joined}");
         assert!(joined.contains("--health-interval=5s"), "argv: {joined}");
@@ -2196,7 +2200,7 @@ mod tests {
             interactive: false,
             readonly_rootfs: false,
         };
-        let argv = build_run_argv(&plan, &[], "task-1", "host-gateway", "alpine");
+        let argv = build_run_argv(&plan, &[], "task-1", "host-gateway", "alpine", true);
         assert!(!argv.iter().any(|s| s.starts_with("--health")));
     }
 
@@ -2262,7 +2266,7 @@ mod tests {
             interactive: false,
             readonly_rootfs: false,
         };
-        let argv = build_run_argv(&plan, &[], "task-1", "host-gateway", "alpine");
+        let argv = build_run_argv(&plan, &[], "task-1", "host-gateway", "alpine", true);
         let pair = argv
             .windows(2)
             .find(|w| w[0] == "-v")
@@ -2533,7 +2537,7 @@ mod tests {
             interactive: false,
             readonly_rootfs: false,
         };
-        let argv = build_run_argv(&plan, &[], "t", "host", "img");
+        let argv = build_run_argv(&plan, &[], "t", "host", "img", true);
         assert!(argv.contains(&"--ulimit".to_string()));
         assert!(argv.contains(&"nofile=1024:2048".to_string()));
     }
@@ -2583,7 +2587,7 @@ mod tests {
             interactive: true,
             readonly_rootfs: true,
         };
-        let argv = build_run_argv(&plan, &[], "t", "host", "img");
+        let argv = build_run_argv(&plan, &[], "t", "host", "img", true);
         assert!(argv.contains(&"--cap-add".to_string()));
         assert!(argv.contains(&"NET_ADMIN".to_string()));
         assert!(argv.contains(&"--cap-drop".to_string()));

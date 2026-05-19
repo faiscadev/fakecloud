@@ -272,7 +272,14 @@ impl EcsRuntime {
                     return Err(err);
                 }
             }
-            let argv = build_run_argv(&rp.plan, &rp.env, task_id, &self.host_ip, run_image);
+            let argv = build_run_argv(
+                &rp.plan,
+                &rp.env,
+                task_id,
+                &self.host_ip,
+                run_image,
+                network_created,
+            );
             let mut cmd = Command::new(&self.cli);
             cmd.args(&argv);
             let run_out = cmd.output().await.map_err(|e| {
