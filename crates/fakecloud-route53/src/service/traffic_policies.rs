@@ -582,7 +582,7 @@ impl Route53Service {
         instances.sort_by(|a, b| a.id.cmp(&b.id));
         let slice: Vec<&StoredTrafficPolicyInstance> = instances.iter().take(max_items).collect();
         let next_marker = if slice.len() < instances.len() {
-            Some(instances[slice.len()].id.clone())
+            Some(instances[slice.len()].name.clone())
         } else {
             None
         };
