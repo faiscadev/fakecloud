@@ -15,24 +15,17 @@ use super::{
     s3_xml, validate_lifecycle_xml, validate_tags, xml_escape, S3Service,
 };
 
-/// Decoded `PublicAccessBlockConfiguration` flags. Each flag defaults
-/// to `false` when missing from the stored XML, matching AWS's
-/// `GetPublicAccessBlock` echo path.
-///
-/// `ignore_public_acls` and `restrict_public_buckets` gate
-/// **read-time** evaluation (effective ACL / effective policy lookup)
-/// — fakecloud doesn't yet evaluate effective access at GetObject
-/// time, so we parse and store them but they are not read from on
-/// the request path. Removing them would silently drop the values
-/// from `GetPublicAccessBlock` round-trips.
+/// Decoded `PublicAccessBlockConfiguration` flags read by the request
+/// path. `GetPublicAccessBlock` echoes the bucket's stored XML directly
+/// (see `get_public_access_block`), so flags absent here still
+/// round-trip — they just aren't enforced. `RestrictPublicBuckets`
+/// is intentionally omitted until the effective-policy evaluator
+/// lands; it's a feature gap, not a parse gap.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct PublicAccessBlockFlags {
     pub block_public_acls: bool,
-    #[allow(dead_code)]
     pub ignore_public_acls: bool,
     pub block_public_policy: bool,
-    #[allow(dead_code)]
-    pub restrict_public_buckets: bool,
 }
 
 impl PublicAccessBlockFlags {
@@ -55,7 +48,6 @@ impl PublicAccessBlockFlags {
             block_public_acls: flag(xml, "BlockPublicAcls"),
             ignore_public_acls: flag(xml, "IgnorePublicAcls"),
             block_public_policy: flag(xml, "BlockPublicPolicy"),
-            restrict_public_buckets: flag(xml, "RestrictPublicBuckets"),
         }
     }
 }
