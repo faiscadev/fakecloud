@@ -1,4 +1,5 @@
 use super::*;
+use fakecloud_aws::arn::Arn;
 
 /// Actions that mutate persisted state. Only these trigger a snapshot save.
 /// Pull-shaped reads (`BatchGetImage`, `GetDownloadUrlForLayer`) are listed
@@ -861,7 +862,7 @@ pub(crate) fn repository_policy_decision(
     use fakecloud_core::auth::{Principal, PrincipalType};
     use fakecloud_iam::evaluator::{evaluate, Decision, EvalRequest, PolicyDocument};
     let parsed = PolicyDocument::parse(doc);
-    let principal_arn = format!("arn:aws:iam::{caller_account}:root");
+    let principal_arn = Arn::global("iam", caller_account, "root").to_string();
     let principal = Principal {
         arn: principal_arn.clone(),
         user_id: principal_arn,

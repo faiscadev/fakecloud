@@ -49,6 +49,7 @@ fn validate_optional_string_length(
     super::validate_optional_string_length_with_code(field, value, min, max, "InvalidInput")
 }
 
+use fakecloud_aws::arn::Arn;
 use fakecloud_aws::xml::xml_escape;
 
 fn xml_response(action: &str, body: &str, request_id: &str) -> AwsResponse {
@@ -1038,7 +1039,7 @@ impl IamService {
 
         let principal_arn_str = caller_arn
             .clone()
-            .unwrap_or_else(|| format!("arn:aws:iam::{}:root", req.account_id));
+            .unwrap_or_else(|| Arn::global("iam", &req.account_id, "root").to_string());
         let principal = Principal {
             arn: principal_arn_str.clone(),
             user_id: principal_arn_str.clone(),

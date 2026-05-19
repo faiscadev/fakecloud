@@ -1291,7 +1291,7 @@ impl EventBridgeService {
                         req.principal
                             .clone()
                             .unwrap_or_else(|| fakecloud_core::auth::Principal {
-                                arn: format!("arn:aws:iam::{caller_account}:root"),
+                                arn: Arn::global("iam", caller_account, "root").to_string(),
                                 user_id: caller_account.to_string(),
                                 account_id: caller_account.to_string(),
                                 principal_type: fakecloud_core::auth::PrincipalType::Root,

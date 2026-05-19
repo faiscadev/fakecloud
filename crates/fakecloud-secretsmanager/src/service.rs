@@ -8,6 +8,7 @@ use serde_json::{json, Value};
 
 use tokio::sync::Mutex as AsyncMutex;
 
+use fakecloud_aws::arn::Arn;
 use fakecloud_core::delivery::DeliveryBus;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 use fakecloud_core::validation::*;
@@ -2116,7 +2117,7 @@ fn resource_policy_allows(policy_doc: &str, caller_account: &str, secret_arn: &s
     use fakecloud_core::auth::{Principal, PrincipalType};
     use fakecloud_iam::evaluator::{evaluate, EvalRequest, PolicyDocument};
     let doc = PolicyDocument::parse(policy_doc);
-    let principal_arn = format!("arn:aws:iam::{caller_account}:root");
+    let principal_arn = Arn::global("iam", caller_account, "root").to_string();
     let principal = Principal {
         arn: principal_arn.clone(),
         user_id: principal_arn.clone(),
