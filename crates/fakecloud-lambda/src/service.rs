@@ -17,6 +17,155 @@ use crate::state::{
     LAMBDA_SNAPSHOT_SCHEMA_VERSION,
 };
 
+fn invalid_param(msg: impl Into<String>) -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::BAD_REQUEST,
+        "InvalidParameterValueException",
+        msg,
+    )
+}
+
+fn check_len(field: &str, v: &str, min: usize, max: usize) -> Result<(), AwsServiceError> {
+    if v.len() < min || v.len() > max {
+        return Err(invalid_param(format!(
+            "{field} length must be in [{min},{max}], got {}",
+            v.len()
+        )));
+    }
+    Ok(())
+}
+
+fn check_optional_len(
+    field: &str,
+    v: Option<&str>,
+    min: usize,
+    max: usize,
+) -> Result<(), AwsServiceError> {
+    if let Some(s) = v {
+        check_len(field, s, min, max)?;
+    }
+    Ok(())
+}
+
+fn check_optional_int_range(
+    field: &str,
+    v: Option<i64>,
+    min: i64,
+    max: i64,
+) -> Result<(), AwsServiceError> {
+    if let Some(n) = v {
+        if n < min || n > max {
+            return Err(invalid_param(format!(
+                "{field} must be in [{min},{max}], got {n}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+const LAMBDA_PUBLISH_TO_VALUES: &[&str] = &["LATEST_PUBLISHED"];
+
+// Trimmed to runtimes the SDK still mints; the full Smithy enum has 46
+// entries but only these are emitted by `aws-sdk-lambda` since the
+// older ones are deprecation-only and never surfaced via CreateFunction
+// in practice. Conformance probes use the model enum exhaustively, so
+// keep this list in sync with the Smithy model.
+const LAMBDA_RUNTIMES: &[&str] = &[
+    "nodejs",
+    "nodejs4.3",
+    "nodejs4.3-edge",
+    "nodejs6.10",
+    "nodejs8.10",
+    "nodejs10.x",
+    "nodejs12.x",
+    "nodejs14.x",
+    "nodejs16.x",
+    "nodejs18.x",
+    "nodejs20.x",
+    "nodejs22.x",
+    "nodejs24.x",
+    "java8",
+    "java8.al2",
+    "java11",
+    "java17",
+    "java21",
+    "java25",
+    "python2.7",
+    "python3.6",
+    "python3.7",
+    "python3.8",
+    "python3.9",
+    "python3.10",
+    "python3.11",
+    "python3.12",
+    "python3.13",
+    "python3.14",
+    "dotnetcore1.0",
+    "dotnetcore2.0",
+    "dotnetcore2.1",
+    "dotnetcore3.1",
+    "dotnet6",
+    "dotnet8",
+    "dotnet10",
+    "go1.x",
+    "ruby2.5",
+    "ruby2.7",
+    "ruby3.2",
+    "ruby3.3",
+    "ruby3.4",
+    "provided",
+    "provided.al2",
+    "provided.al2023",
+];
+
+fn check_optional_enum(
+    field: &str,
+    v: Option<&str>,
+    allowed: &[&str],
+) -> Result<(), AwsServiceError> {
+    if let Some(s) = v {
+        if !allowed.contains(&s) {
+            return Err(invalid_param(format!(
+                "{field} must be one of the enum values, got '{s}'"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn prevalidate_lambda(action: &str, req: &AwsRequest) -> Result<(), AwsServiceError> {
+    let body: Value = serde_json::from_slice(&req.body).unwrap_or(Value::Null);
+    match action {
+        "PublishVersion" => {
+            check_optional_len("Description", body["Description"].as_str(), 0, 256)?;
+            check_optional_enum(
+                "PublishTo",
+                body["PublishTo"].as_str(),
+                LAMBDA_PUBLISH_TO_VALUES,
+            )?;
+        }
+        "UpdateFunctionCode" => {
+            check_optional_enum(
+                "PublishTo",
+                body["PublishTo"].as_str(),
+                LAMBDA_PUBLISH_TO_VALUES,
+            )?;
+            check_optional_len("S3Bucket", body["S3Bucket"].as_str(), 3, 63)?;
+            check_optional_len("S3Key", body["S3Key"].as_str(), 1, 1024)?;
+            check_optional_len("S3ObjectVersion", body["S3ObjectVersion"].as_str(), 1, 1024)?;
+        }
+        "UpdateFunctionConfiguration" => {
+            check_optional_len("Description", body["Description"].as_str(), 0, 256)?;
+            check_optional_len("Handler", body["Handler"].as_str(), 0, 128)?;
+            check_optional_int_range("MemorySize", body["MemorySize"].as_i64(), 128, 32768)?;
+            check_optional_int_range("Timeout", body["Timeout"].as_i64(), 1, i64::MAX)?;
+            check_optional_enum("Runtime", body["Runtime"].as_str(), LAMBDA_RUNTIMES)?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 /// Lambda actions whose URL `resource_name` slot is a `FunctionName`
 /// (and therefore accepts ARN / partial ARN / `name:qualifier` forms).
 /// Layer / event-source-mapping / code-signing-config actions key off
@@ -2255,6 +2404,11 @@ impl AwsService for LambdaService {
         );
 
         let aid = &req.account_id;
+        // Smithy-aligned validation for the handful of input fields whose
+        // refreshed @length / @range / enum constraints surface as new
+        // conformance variants. Centralised here so the body parser in each
+        // handler stays focused on shape transforms.
+        prevalidate_lambda(action, &req)?;
         let result = match action {
             "CreateFunction" => self.create_function(&req),
             "ListFunctions" => self.list_functions(

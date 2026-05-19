@@ -127,6 +127,16 @@ pub struct KmsService {
 
 impl KmsService {
     pub fn new(state: SharedKmsState) -> Self {
+        // Warm the RSA keypair cache in the background. Generation is
+        // CPU-bound (~20s for RSA-4096) and reused across every CreateKey
+        // with that bit width; doing it here off a blocking thread keeps
+        // the first concurrent CreateKey from racing N tokio workers into
+        // a 30s read-timeout cliff (see `asym::generate_keypair`).
+        tokio::task::spawn_blocking(|| {
+            let _ = self::asym::generate_keypair("RSA_2048");
+            let _ = self::asym::generate_keypair("RSA_3072");
+            let _ = self::asym::generate_keypair("RSA_4096");
+        });
         Self {
             state,
             snapshot_store: None,

@@ -789,6 +789,84 @@ fn rest_request_config(
                 format!("/2025-11-30/functions/{}/function-scaling-config", FUNC),
                 None,
             ),
+            // Lambda Workflows: capacity providers (2025-11-30 API).
+            "CreateCapacityProvider" => (
+                reqwest::Method::POST,
+                "/2025-11-30/capacity-providers".to_string(),
+                None,
+            ),
+            "ListCapacityProviders" => (
+                reqwest::Method::GET,
+                "/2025-11-30/capacity-providers".to_string(),
+                None,
+            ),
+            "GetCapacityProvider" => (
+                reqwest::Method::GET,
+                "/2025-11-30/capacity-providers/test-capacity-provider".to_string(),
+                None,
+            ),
+            "UpdateCapacityProvider" => (
+                reqwest::Method::PUT,
+                "/2025-11-30/capacity-providers/test-capacity-provider".to_string(),
+                None,
+            ),
+            "DeleteCapacityProvider" => (
+                reqwest::Method::DELETE,
+                "/2025-11-30/capacity-providers/test-capacity-provider".to_string(),
+                None,
+            ),
+            "ListFunctionVersionsByCapacityProvider" => (
+                reqwest::Method::GET,
+                "/2025-11-30/capacity-providers/test-capacity-provider/function-versions"
+                    .to_string(),
+                None,
+            ),
+            // Lambda Workflows: durable executions (2025-12-01 API).
+            "GetDurableExecution" => (
+                reqwest::Method::GET,
+                "/2025-12-01/durable-executions/test-durable-execution".to_string(),
+                None,
+            ),
+            "GetDurableExecutionHistory" => (
+                reqwest::Method::GET,
+                "/2025-12-01/durable-executions/test-durable-execution/history".to_string(),
+                None,
+            ),
+            "GetDurableExecutionState" => (
+                reqwest::Method::GET,
+                "/2025-12-01/durable-executions/test-durable-execution/state".to_string(),
+                None,
+            ),
+            "CheckpointDurableExecution" => (
+                reqwest::Method::POST,
+                "/2025-12-01/durable-executions/test-durable-execution/checkpoint".to_string(),
+                None,
+            ),
+            "StopDurableExecution" => (
+                reqwest::Method::POST,
+                "/2025-12-01/durable-executions/test-durable-execution/stop".to_string(),
+                None,
+            ),
+            "ListDurableExecutionsByFunction" => (
+                reqwest::Method::GET,
+                format!("/2025-12-01/functions/{}/durable-executions", FUNC),
+                None,
+            ),
+            "SendDurableExecutionCallbackSuccess" => (
+                reqwest::Method::POST,
+                "/2025-12-01/durable-execution-callbacks/test-callback/succeed".to_string(),
+                None,
+            ),
+            "SendDurableExecutionCallbackFailure" => (
+                reqwest::Method::POST,
+                "/2025-12-01/durable-execution-callbacks/test-callback/fail".to_string(),
+                None,
+            ),
+            "SendDurableExecutionCallbackHeartbeat" => (
+                reqwest::Method::POST,
+                "/2025-12-01/durable-execution-callbacks/test-callback/heartbeat".to_string(),
+                None,
+            ),
             // Default: POST to functions path
             _ => (
                 reqwest::Method::POST,
@@ -1216,6 +1294,10 @@ fn legacy_substitute_identifiers(
             // Alias ops use `LATEST` as the path placeholder. Drive
             // negative variants through the same slot.
             ("LATEST", "Name"),
+            // Lambda Workflows path labels (2025-11-30 + 2025-12-01).
+            ("test-capacity-provider", "CapacityProviderName"),
+            ("test-durable-execution", "DurableExecutionArn"),
+            ("test-callback", "CallbackId"),
         ],
         "s3" => &[("test-conformance-bucket", "Bucket"), ("test-key", "Key")],
         _ => &[],
