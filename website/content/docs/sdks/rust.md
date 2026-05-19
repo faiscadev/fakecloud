@@ -10,57 +10,306 @@ weight = 4
 cargo add fakecloud-sdk
 ```
 
-Rust 1.75+.
+Rust 1.75+. Async-only, built on `reqwest` + `tokio`.
 
 ## Initialize
 
 ```rust
-use fakecloud_sdk::FakeCloudClient;
+use fakecloud_sdk::FakeCloud;
 
-let fc = FakeCloudClient::new("http://localhost:4566");
-// or default:
-let fc = FakeCloudClient::default();
+let fc = FakeCloud::new("http://localhost:4566");
 ```
+
+Every sub-client is constructed lazily via an accessor (`fc.lambda()`, `fc.sqs()`, ...). All endpoint methods are `async` and return `Result<T, fakecloud_sdk::Error>`.
 
 ## Top-level
 
-| Method                                | Description             |
-| ------------------------------------- | ----------------------- |
-| `health().await`                      | Server health check     |
-| `reset().await`                       | Reset all service state |
-| `reset_service(service).await`        | Reset a single service  |
+| Method                                            | Description                              |
+| ------------------------------------------------- | ---------------------------------------- |
+| `health().await`                                  | Server health check                      |
+| `reset().await`                                   | Reset all service state                  |
+| `reset_service(service).await`                    | Reset a single service                   |
+| `reset_service_for_account(service, account).await` | Reset one service in one account       |
+| `create_admin(req).await`                         | Create an admin user in another account  |
+
+## `fc.acm()`
+
+| Method                                              | Description                                                  |
+| --------------------------------------------------- | ------------------------------------------------------------ |
+| `set_certificate_status(arn_or_id, req).await`      | Flip a stored certificate's status (and optional failure reason) |
+| `get_certificate_chain_info(arn_or_id).await`       | Inspect PEM block counts and byte sizes of a stored chain    |
+| `approve_certificate(arn_or_id).await`              | Approve a `PENDING_VALIDATION` certificate                   |
+
+## `fc.apigatewayv2()`
+
+| Method                                | Description                                          |
+| ------------------------------------- | ---------------------------------------------------- |
+| `get_requests().await`                | List recorded HTTP API requests                      |
+| `connections().await`                 | List WebSocket connections                           |
+| `mtls_info(name).await`               | Inspect mTLS trust-store status for a domain name    |
+| `ws_url(api_id, stage)`               | Build a `ws://` URL for a WebSocket API (sync)       |
+
+## `fc.application_autoscaling()`
+
+| Method                       | Description                                                   |
+| ---------------------------- | ------------------------------------------------------------- |
+| `tick().await`               | Re-evaluate target-tracking policies and emit scaling actions |
+| `scheduled_tick().await`     | Fire any scheduled actions whose time has arrived             |
+
+## `fc.athena()`
+
+| Method                      | Description                          |
+| --------------------------- | ------------------------------------ |
+| `get_named_queries().await` | List recorded Athena named queries   |
 
 ## `fc.bedrock()`
 
-| Method                                              | Description                                       |
-| --------------------------------------------------- | ------------------------------------------------- |
-| `get_invocations().await`                           | List runtime invocations                          |
-| `set_model_response(model_id, text).await`          | Single canned response                            |
-| `set_response_rules(model_id, rules).await`         | Prompt-conditional rules                          |
-| `clear_response_rules(model_id).await`              | Clear rules for a model                           |
-| `queue_fault(rule).await`                           | Queue a fault rule                                |
-| `get_faults().await`                                | List queued fault rules                           |
-| `clear_faults().await`                              | Clear all queued fault rules                      |
+| Method                                       | Description                                                  |
+| -------------------------------------------- | ------------------------------------------------------------ |
+| `get_invocations().await`                    | List recorded Bedrock runtime invocations                    |
+| `set_model_response(model_id, text).await`   | Configure a single canned response for a model               |
+| `set_response_rules(model_id, rules).await`  | Replace prompt-conditional response rules for a model        |
+| `clear_response_rules(model_id).await`       | Clear all prompt-conditional response rules for a model      |
+| `queue_fault(rule).await`                    | Queue a fault rule (e.g. `ThrottlingException`) for the next N calls |
+| `get_faults().await`                         | List currently queued fault rules                            |
+| `clear_faults().await`                       | Clear all queued fault rules                                 |
 
-## `fc.lambda()`, `fc.ses()`, `fc.sns()`, `fc.sqs()`, `fc.events()`, `fc.s3()`, `fc.dynamodb()`, `fc.secretsmanager()`, `fc.cognito()`, `fc.stepfunctions()`, `fc.rds()`, `fc.apigatewayv2()`
+## `fc.bedrock_agent()`
 
-Each service accessor mirrors the TypeScript SDK's surface with Rust method naming (`get_messages`, `tick_ttl`, `fire_rule`, etc.). See the [TypeScript reference](/docs/sdks/typescript/) for the full method list.
+| Method                | Description                                |
+| --------------------- | ------------------------------------------ |
+| `get_agents().await`  | List configured Bedrock agents             |
 
-The authoritative per-method list for Rust lives in the [`fakecloud-sdk` crate source](https://github.com/faiscadev/fakecloud/tree/main/crates/fakecloud-sdk).
+## `fc.bedrock_agent_runtime()`
+
+| Method                       | Description                                |
+| ---------------------------- | ------------------------------------------ |
+| `get_invocations().await`    | List recorded Bedrock Agent runtime invocations |
+
+## `fc.cloudfront()`
+
+| Method                                                  | Description                                              |
+| ------------------------------------------------------- | -------------------------------------------------------- |
+| `set_distribution_status(id, req).await`                | Override a CloudFront distribution's deployment status   |
+
+## `fc.cognito()`
+
+| Method                                              | Description                                                |
+| --------------------------------------------------- | ---------------------------------------------------------- |
+| `get_user_codes(pool_id, username).await`           | Pending confirmation codes for a specific user             |
+| `get_confirmation_codes().await`                    | List all pending confirmation codes                        |
+| `confirm_user(pool_id, username).await`             | Force-confirm a user                                       |
+| `get_tokens().await`                                | List currently active tokens                               |
+| `expire_tokens(req).await`                          | Expire tokens for a pool/user                              |
+| `get_auth_events().await`                           | List recorded auth events                                  |
+| `get_pre_token_gen_invocations().await`             | List Pre-Token-Generation Lambda invocations               |
+| `mint_authorization_code(req).await`                | Mint an OAuth2 authorization code without a real browser   |
+| `set_compromised_passwords(req).await`              | Seed the compromised-credentials list                      |
+| `get_webauthn_credentials().await`                  | List registered WebAuthn credentials                       |
+
+## `fc.dynamodb()`
+
+| Method             | Description                                |
+| ------------------ | ------------------------------------------ |
+| `tick_ttl().await` | Tick the DynamoDB TTL processor            |
+
+## `fc.ecr()`
+
+| Method                              | Description                                |
+| ----------------------------------- | ------------------------------------------ |
+| `get_images().await`                | List stored ECR images                     |
+| `get_repositories().await`          | List ECR repositories                      |
+| `get_pull_through_rules().await`    | List pull-through cache rules              |
+
+## `fc.ecs()`
+
+| Method                                  | Description                                                  |
+| --------------------------------------- | ------------------------------------------------------------ |
+| `get_clusters().await`                  | List ECS clusters with task counts                           |
+| `get_tasks(filter).await`               | List tasks, optionally filtered by cluster / family / status |
+| `get_task_logs(task_id).await`          | Fetch captured stdout/stderr for a task                      |
+| `force_stop_task(task_id).await`        | Force a task into `STOPPED`                                  |
+| `mark_task_failed(task_id, req).await`  | Mark a task failed with a custom reason / exit code          |
+| `get_events().await`                    | List ECS service / task lifecycle events                     |
+| `get_metadata_by_arn(task_arn).await`   | Fetch task metadata by full ARN                              |
+| `task_credentials(task_id).await`       | Fetch IAM credentials served to the task                     |
+| `task_metadata_v3(task_id).await`       | Task Metadata Endpoint v3 payload                            |
+| `task_metadata_v4(task_id).await`       | Task Metadata Endpoint v4 payload                            |
+
+## `fc.elasticache()`
+
+| Method                                  | Description                                |
+| --------------------------------------- | ------------------------------------------ |
+| `get_clusters().await`                  | List ElastiCache clusters                  |
+| `get_replication_groups().await`        | List replication groups                    |
+| `get_serverless_caches().await`         | List serverless caches                     |
+| `get_acls().await`                      | List RBAC ACLs                             |
+
+## `fc.elbv2()`
+
+| Method                               | Description                                |
+| ------------------------------------ | ------------------------------------------ |
+| `get_load_balancers().await`         | List ALB / NLB / GWLB load balancers       |
+| `get_listeners().await`              | List listeners across load balancers       |
+| `get_rules().await`                  | List listener rules                        |
+| `get_target_groups().await`          | List target groups                         |
+| `flush_access_logs().await`          | Flush buffered access-log entries          |
+| `waf_counts().await`                 | Inspect WAF allow/block counters           |
+
+## `fc.events()`
+
+| Method                  | Description                                |
+| ----------------------- | ------------------------------------------ |
+| `get_history().await`   | Get event history and delivery records     |
+| `fire_rule(req).await`  | Fire an EventBridge rule manually          |
+
+## `fc.glue()`
+
+| Method                              | Description                                |
+| ----------------------------------- | ------------------------------------------ |
+| `get_jobs().await`                  | List configured Glue jobs                  |
+| `get_job_runs(job_name).await`      | List job runs, optionally for one job      |
+
+## `fc.kms()`
+
+| Method            | Description                                       |
+| ----------------- | ------------------------------------------------- |
+| `usage().await`   | KMS key usage counters (encrypt/decrypt/sign/etc) |
+
+## `fc.lambda()`
+
+| Method                                          | Description                                |
+| ----------------------------------------------- | ------------------------------------------ |
+| `get_invocations().await`                       | List recorded Lambda invocations           |
+| `get_warm_containers().await`                   | List warm (cached) Lambda containers       |
+| `evict_container(function_name).await`          | Evict a warm container                     |
+| `download_function_code(function_name).await`   | Download the uploaded function zip         |
+| `download_layer_content(layer_name, ver).await` | Download a layer version's content         |
+
+## `fc.logs()`
+
+| Method                              | Description                                       |
+| ----------------------------------- | ------------------------------------------------- |
+| `inject_anomaly(req).await`         | Inject a synthetic CloudWatch Logs anomaly        |
+| `get_delivery_config().await`       | Inspect log-delivery configuration                |
+| `get_field_indexes(group).await`    | Inspect field indexes for a log group             |
+
+## `fc.organizations()`
+
+| Method                  | Description                                |
+| ----------------------- | ------------------------------------------ |
+| `get_accounts().await`  | List Organizations member accounts         |
+
+## `fc.rds()`
+
+| Method                              | Description                                                 |
+| ----------------------------------- | ----------------------------------------------------------- |
+| `get_instances().await`             | List managed RDS instances with runtime metadata            |
+| `lambda_invoke(req).await`          | Invoke a Lambda via the `aws_lambda` PG extension bridge    |
+| `s3_import(req).await`              | Simulate the `aws_s3.table_import_from_s3` extension call   |
+| `s3_export(req).await`              | Simulate the `aws_s3.query_export_to_s3` extension call     |
+
+## `fc.route53()`
+
+| Method                                       | Description                                       |
+| -------------------------------------------- | ------------------------------------------------- |
+| `dnssec_material(hosted_zone_id).await`      | Inspect DNSSEC key-signing material               |
+| `dnssec_sign(hosted_zone_id, req).await`     | Sign a payload with the zone's KSK                |
+| `set_health_check_status(id, req).await`     | Override a health check's status                  |
+
+## `fc.s3()`
+
+| Method                                  | Description                                |
+| --------------------------------------- | ------------------------------------------ |
+| `get_notifications().await`             | List S3 notification events                |
+| `tick_lifecycle().await`                | Tick the lifecycle processor               |
+| `get_access_points().await`             | List S3 access points                      |
+| `get_object_lambda_responses().await`   | List Object Lambda transformed responses   |
+
+## `fc.scheduler()`
+
+| Method                              | Description                                |
+| ----------------------------------- | ------------------------------------------ |
+| `get_schedules().await`             | List EventBridge Scheduler schedules       |
+| `fire_schedule(name, group).await`  | Fire a schedule immediately                |
+
+## `fc.secretsmanager()`
+
+| Method                  | Description                                |
+| ----------------------- | ------------------------------------------ |
+| `tick_rotation().await` | Tick the rotation scheduler                |
+
+## `fc.ses()`
+
+| Method                                              | Description                                         |
+| --------------------------------------------------- | --------------------------------------------------- |
+| `get_emails().await`                                | List all sent emails                                |
+| `simulate_inbound(req).await`                       | Simulate an inbound email (receipt rules)           |
+| `get_metrics().await`                               | Aggregate send / bounce / complaint counters        |
+| `get_bounces().await`                               | List recorded bounces                               |
+| `set_sandbox(enabled).await`                        | Toggle SES sandbox mode                             |
+| `get_event_destination_deliveries().await`          | List event-destination delivery records             |
+| `get_dkim_public_key(domain).await`                 | Fetch the public DKIM key for a domain              |
+| `set_mail_from_status(req).await`                   | Override a domain's MAIL-FROM verification status   |
+| `get_message_insights(message_id).await`            | Fetch message-insights breakdown for a message      |
+| `get_smtp_submissions().await`                      | List inbound SMTP submission records                |
+
+## `fc.sns()`
+
+| Method                              | Description                                       |
+| ----------------------------------- | ------------------------------------------------- |
+| `get_messages().await`              | List all published messages                       |
+| `get_pending_confirmations().await` | List subscriptions pending confirmation           |
+| `confirm_subscription(req).await`   | Confirm a pending subscription                    |
+| `cert_pem().await`                  | Fetch the PEM used to sign SNS HTTP/S deliveries  |
+| `sms().await`                       | List recorded SMS deliveries                      |
+
+## `fc.sqs()`
+
+| Method                          | Description                                |
+| ------------------------------- | ------------------------------------------ |
+| `get_messages().await`          | List all messages across all queues        |
+| `tick_expiration().await`       | Tick the message expiration processor      |
+| `force_dlq(queue_name).await`   | Force all messages to the queue's DLQ      |
+
+## `fc.ssm()`
+
+| Method                                          | Description                                            |
+| ----------------------------------------------- | ------------------------------------------------------ |
+| `set_command_status(command_id, req).await`     | Override an SSM Run Command's status                   |
+| `fail_command(command_id, req).await`           | Mark an SSM Run Command failed with a reason           |
+| `parameter_policy_events().await`               | List parameter-policy expiration / notification events |
+| `inject_session(req).await`                     | Inject a synthetic SSM Session                         |
+
+## `fc.stepfunctions()`
+
+| Method                                  | Description                                       |
+| --------------------------------------- | ------------------------------------------------- |
+| `get_executions().await`                | List standard executions                          |
+| `get_sync_executions().await`           | List Express sync executions                      |
+| `enqueue_activity_task(req).await`      | Enqueue a task for an activity worker             |
+| `get_execution_tree(execution_arn).await` | Fetch a nested execution tree                   |
+
+## `fc.wafv2()`
+
+| Method                       | Description                                                  |
+| ---------------------------- | ------------------------------------------------------------ |
+| `evaluate(body).await`       | Evaluate a request against configured WAFv2 rules            |
 
 ## Error handling
 
-All methods return `Result<T, FakeCloudError>`:
+All methods return `Result<T, fakecloud_sdk::Error>`. `Error` has two variants:
 
 ```rust
-use fakecloud_sdk::FakeCloudError;
+use fakecloud_sdk::{FakeCloud, Error};
 
+let fc = FakeCloud::new("http://localhost:4566");
 match fc.cognito().confirm_user("pool-1", "nobody").await {
     Ok(_) => {}
-    Err(FakeCloudError::Http { status, body }) => {
-        println!("status {}, body {}", status, body);
+    Err(Error::Api { status, body }) => {
+        println!("status {status}, body {body}");
     }
-    Err(e) => eprintln!("{}", e),
+    Err(Error::Http(e)) => eprintln!("transport: {e}"),
 }
 ```
 
@@ -69,11 +318,11 @@ match fc.cognito().confirm_user("pool-1", "nobody").await {
 ```rust
 use aws_sdk_sqs::Client;
 use aws_config::BehaviorVersion;
-use fakecloud_sdk::FakeCloudClient;
+use fakecloud_sdk::FakeCloud;
 
 #[tokio::test]
 async fn app_publishes_to_sqs() {
-    let fc = FakeCloudClient::default();
+    let fc = FakeCloud::new("http://localhost:4566");
     fc.reset().await.unwrap();
 
     let config = aws_config::defaults(BehaviorVersion::latest())
@@ -90,9 +339,9 @@ async fn app_publishes_to_sqs() {
         .await
         .unwrap();
 
-    let messages = fc.sqs().get_messages().await.unwrap();
-    assert_eq!(messages.len(), 1);
-    assert_eq!(messages[0].body, "hello");
+    let resp = fc.sqs().get_messages().await.unwrap();
+    assert_eq!(resp.messages.len(), 1);
+    assert_eq!(resp.messages[0].body, "hello");
 }
 ```
 
