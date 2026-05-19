@@ -132,11 +132,13 @@ impl KmsService {
         // with that bit width; doing it here off a blocking thread keeps
         // the first concurrent CreateKey from racing N tokio workers into
         // a 30s read-timeout cliff (see `asym::generate_keypair`).
-        tokio::task::spawn_blocking(|| {
-            let _ = self::asym::generate_keypair("RSA_2048");
-            let _ = self::asym::generate_keypair("RSA_3072");
-            let _ = self::asym::generate_keypair("RSA_4096");
-        });
+        if tokio::runtime::Handle::try_current().is_ok() {
+            tokio::task::spawn_blocking(|| {
+                let _ = self::asym::generate_keypair("RSA_2048");
+                let _ = self::asym::generate_keypair("RSA_3072");
+                let _ = self::asym::generate_keypair("RSA_4096");
+            });
+        }
         Self {
             state,
             snapshot_store: None,
