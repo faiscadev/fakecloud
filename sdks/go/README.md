@@ -65,6 +65,7 @@ func main() {
 | `Health(ctx)` | Check server health |
 | `Reset(ctx)` | Reset all service state |
 | `ResetService(ctx, service)` | Reset a single service |
+| `CreateAdmin(ctx, accountID, userName)` | Bootstrap an admin user in a secondary account |
 
 ### SES - `fc.SES()`
 
@@ -72,6 +73,14 @@ func main() {
 |--------|-------------|
 | `GetEmails(ctx)` | List all sent emails |
 | `SimulateInbound(ctx, req)` | Simulate an inbound email |
+| `GetMetrics(ctx)` | Aggregate send/delivery metrics |
+| `SetMailFromStatus(ctx, req)` | Drive custom MAIL FROM verification state |
+| `GetDkimPublicKey(ctx, identity)` | Fetch the synthetic DKIM public key for an identity |
+| `GetBounces(ctx)` | List simulated bounce/complaint events |
+| `GetMessageInsights(ctx)` | Per-message insights (placements, engagement) |
+| `GetSmtpSubmissions(ctx)` | List submissions made through the SMTP endpoint |
+| `GetEventDestinationDeliveries(ctx)` | List event-destination delivery attempts |
+| `SetSandbox(ctx, req)` | Toggle SES sandbox mode |
 
 ### SNS - `fc.SNS()`
 
@@ -80,6 +89,8 @@ func main() {
 | `GetMessages(ctx)` | List published messages |
 | `GetPendingConfirmations(ctx)` | List pending subscription confirmations |
 | `ConfirmSubscription(ctx, req)` | Confirm a subscription |
+| `GetCertPEM(ctx)` | Fetch the PEM used to sign SNS HTTP/S notifications |
+| `GetSMSMessages(ctx)` | List SMS messages delivered to phone numbers |
 
 ### SQS - `fc.SQS()`
 
@@ -96,12 +107,28 @@ func main() {
 | `GetHistory(ctx)` | Get event history and deliveries |
 | `FireRule(ctx, req)` | Manually fire a rule |
 
+### Scheduler - `fc.Scheduler()`
+
+| Method | Description |
+|--------|-------------|
+| `GetSchedules(ctx)` | List EventBridge Scheduler schedules with next-fire metadata |
+| `FireSchedule(ctx, req)` | Manually fire a schedule once |
+
+### Glue - `fc.Glue()`
+
+| Method | Description |
+|--------|-------------|
+| `GetJobs(ctx)` | List Glue job definitions |
+| `GetJobRuns(ctx)` | List Glue job runs with status |
+
 ### S3 - `fc.S3()`
 
 | Method | Description |
 |--------|-------------|
 | `GetNotifications(ctx)` | List notification events |
 | `TickLifecycle(ctx)` | Tick the lifecycle processor |
+| `GetAccessPoints(ctx)` | List S3 access points |
+| `GetObjectLambdaResponses(ctx)` | List Object Lambda transformed responses |
 
 ### Lambda - `fc.Lambda()`
 
@@ -109,7 +136,41 @@ func main() {
 |--------|-------------|
 | `GetInvocations(ctx)` | List recorded invocations |
 | `GetWarmContainers(ctx)` | List warm containers |
+| `DownloadFunctionCode(ctx, functionName)` | Download a function's deployment package |
+| `DownloadLayerContent(ctx, layerName, versionNumber)` | Download a layer version's zip content |
 | `EvictContainer(ctx, functionName)` | Evict a warm container |
+
+### RDS - `fc.RDS()`
+
+| Method | Description |
+|--------|-------------|
+| `GetInstances(ctx)` | List RDS instances with runtime metadata |
+| `LambdaInvoke(ctx, req)` | Drive the `aws_lambda` Postgres extension bridge |
+| `S3Import(ctx, req)` | Drive the `aws_s3.table_import_from_s3` bridge |
+| `S3Export(ctx, req)` | Drive the `aws_s3.query_export_to_s3` bridge |
+
+### ElastiCache - `fc.ElastiCache()`
+
+| Method | Description |
+|--------|-------------|
+| `GetClusters(ctx)` | List cache clusters |
+| `GetReplicationGroups(ctx)` | List replication groups |
+| `GetServerlessCaches(ctx)` | List serverless caches |
+| `GetElastiCacheAcls(ctx)` | List RBAC users and ACLs |
+
+### Athena - `fc.Athena()`
+
+| Method | Description |
+|--------|-------------|
+| `GetNamedQueries(ctx)` | List saved named queries |
+
+### ECR - `fc.ECR()`
+
+| Method | Description |
+|--------|-------------|
+| `GetRepositories(ctx)` | List ECR repositories |
+| `GetImages(ctx)` | List images across repositories |
+| `GetPullThroughRules(ctx)` | List pull-through cache rules |
 
 ### DynamoDB - `fc.DynamoDB()`
 
@@ -134,32 +195,27 @@ func main() {
 | `ExpireTokens(ctx, req)` | Expire tokens |
 | `GetAuthEvents(ctx)` | List auth events |
 | `MintAuthorizationCode(ctx, req)` | Mint a single-use OAuth2 authorization code (programmatic alternative to driving /oauth2/authorize) |
-
-### RDS - `fc.RDS()`
-
-| Method | Description |
-|--------|-------------|
-| `GetInstances(ctx)` | List RDS instances with runtime metadata |
-
-### ElastiCache - `fc.ElastiCache()`
-
-| Method | Description |
-|--------|-------------|
-| `GetClusters(ctx)` | List cache clusters |
-| `GetReplicationGroups(ctx)` | List replication groups |
-| `GetServerlessCaches(ctx)` | List serverless caches |
-
-### Step Functions - `fc.StepFunctions()`
-
-| Method | Description |
-|--------|-------------|
-| `GetExecutions(ctx)` | List all state machine execution history |
+| `SetCompromisedPasswords(ctx, req)` | Mark a set of passwords as compromised to drive advanced security |
+| `GetPreTokenGenInvocations(ctx)` | List pre-token-generation Lambda invocations |
+| `GetWebAuthnCredentials(ctx)` | List registered WebAuthn credentials |
 
 ### API Gateway v2 - `fc.ApiGatewayV2()`
 
 | Method | Description |
 |--------|-------------|
 | `GetRequests(ctx)` | List all HTTP API requests received |
+| `GetConnections(ctx)` | List active WebSocket connections |
+| `GetDomainNameMtlsInfo(ctx, domainName)` | Inspect mTLS trust-store config for a custom domain |
+| `WsURL(stage, apiID)` | Build a `ws://` URL for a WebSocket stage |
+
+### Step Functions - `fc.StepFunctions()`
+
+| Method | Description |
+|--------|-------------|
+| `GetExecutions(ctx)` | List all state machine execution history |
+| `GetSyncExecutions(ctx)` | List `StartSyncExecution` results (Express workflows) |
+| `GetExecutionTree(ctx, executionArn)` | Get the parent/child execution tree |
+| `EnqueueActivityTask(ctx, req)` | Enqueue an activity-task heartbeat/result for a worker |
 
 ### Bedrock - `fc.Bedrock()`
 
@@ -173,11 +229,103 @@ func main() {
 | `GetFaults(ctx)` | List currently queued fault rules |
 | `ClearFaults(ctx)` | Clear all queued fault rules |
 
+### Bedrock Agent - `fc.BedrockAgent()` / `fc.BedrockAgentRuntime()`
+
+| Method | Description |
+|--------|-------------|
+| `BedrockAgent().GetAgents(ctx)` | List configured Bedrock agents |
+| `BedrockAgentRuntime().GetInvocations(ctx)` | List recorded agent runtime invocations |
+
+### ECS - `fc.ECS()`
+
+| Method | Description |
+|--------|-------------|
+| `GetClusters(ctx)` | List ECS clusters |
+| `GetTasks(ctx)` | List tasks |
+| `GetTask(ctx, taskArn)` | Get a single task |
+| `GetTaskLogs(ctx, taskArn)` | Get logs for a task |
+| `ForceStopTask(ctx, taskArn)` | Forcibly stop a task |
+| `MarkTaskFailed(ctx, taskArn, req)` | Inject a failure into a task |
+| `GetEvents(ctx)` | List ECS lifecycle events |
+| `GetTaskMetadata(ctx, taskArn)` | Container-agent task metadata |
+| `GetTaskCredentials(ctx, credentialID)` | Task-role credentials served to containers |
+| `GetTaskMetadataV3(ctx, taskArn)` | Task metadata endpoint v3 |
+| `GetTaskMetadataV4(ctx, taskArn)` | Task metadata endpoint v4 |
+
+### ELBv2 - `fc.ELBv2()`
+
+| Method | Description |
+|--------|-------------|
+| `GetLoadBalancers(ctx)` | List load balancers (ALB/NLB/GWLB) |
+| `GetTargetGroups(ctx)` | List target groups |
+| `GetListeners(ctx)` | List listeners |
+| `GetRules(ctx)` | List listener rules |
+| `GetWafCounts(ctx)` | WAF allow/block counters per listener |
+| `FlushAccessLogs(ctx)` | Flush buffered access logs to S3 |
+
 ### Route 53 - `fc.Route53()`
 
 | Method | Description |
 |--------|-------------|
 | `SetHealthCheckStatus(ctx, id, req)` | Flip a health check between `Success` / `Failure` / `Timeout` / `DnsError` / `InsufficientDataPoints` / `Unknown` to drive failover routing in tests; reason is appended to the `<Status>` element for failure-flavoured statuses |
+| `GetDnssecMaterial(ctx, hostedZoneID)` | Fetch DNSSEC KSK/ZSK material for a hosted zone |
+| `SignRRset(ctx, req)` | Produce an RRSIG over an RRset for offline verification |
+
+### ACM - `fc.ACM()`
+
+| Method | Description |
+|--------|-------------|
+| `SetCertificateStatus(ctx, arn, req)` | Force a certificate into `ISSUED`/`FAILED`/etc. |
+| `ApproveCertificate(ctx, arn)` | Approve a pending certificate |
+| `GetCertificateChainInfo(ctx, arn)` | Inspect issuer and chain metadata |
+
+### Logs - `fc.Logs()`
+
+| Method | Description |
+|--------|-------------|
+| `InjectAnomaly(ctx, req)` | Inject a Log Anomaly Detection finding |
+| `GetDeliveryConfig(ctx)` | Inspect log-delivery configurations |
+| `GetFieldIndexes(ctx)` | List configured field indexes |
+
+### Application Auto Scaling - `fc.ApplicationAutoScaling()`
+
+| Method | Description |
+|--------|-------------|
+| `Tick(ctx)` | Run scaling evaluation once |
+| `ScheduledTick(ctx)` | Run scheduled-action evaluation once |
+
+### Organizations - `fc.Organizations()`
+
+| Method | Description |
+|--------|-------------|
+| `GetAccounts(ctx)` | List accounts in the organization |
+
+### SSM - `fc.SSM()`
+
+| Method | Description |
+|--------|-------------|
+| `SetCommandStatus(ctx, commandID, req)` | Drive a Run Command to `Success`/`Failed`/etc. |
+| `FailCommand(ctx, commandID, req)` | Convenience helper to fail a command with a reason |
+| `GetParameterPolicyEvents(ctx)` | List parameter-policy expiration/notification events |
+| `InjectSession(ctx, req)` | Inject a Session Manager session record |
+
+### KMS - `fc.KMS()`
+
+| Method | Description |
+|--------|-------------|
+| `GetUsage(ctx)` | Per-key usage counters (encrypt/decrypt/sign/verify) |
+
+### WAFv2 - `fc.WAFv2()`
+
+| Method | Description |
+|--------|-------------|
+| `Evaluate(ctx, req)` | Evaluate a request against a Web ACL and return the verdict |
+
+### CloudFront - `fc.CloudFront()`
+
+| Method | Description |
+|--------|-------------|
+| `SetDistributionStatus(ctx, id, req)` | Force a distribution into `Deployed`/`InProgress` |
 
 #### Testing Bedrock-calling code end-to-end
 
