@@ -100,11 +100,6 @@ impl fakecloud_core::delivery::KmsHook for KmsHookAdapter {
     }
 }
 
-/// Parse a `Authorization: Basic <b64(client_id:client_secret)>` header
-/// into `(client_id, client_secret)`. Returns `None` when the header is
-/// absent, malformed, or the credential pair doesn't contain a colon.
-/// Tolerates URL-encoded credentials per RFC 6749 §2.3.1 by treating
-
 pub(crate) struct SesEmailDispatcher {
     pub(crate) state: fakecloud_ses::SharedSesState,
 }
