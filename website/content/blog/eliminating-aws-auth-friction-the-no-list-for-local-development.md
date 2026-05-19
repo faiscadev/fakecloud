@@ -40,19 +40,19 @@ You do not need to sign up for a fakecloud account. There is no "Hobby" tier to 
 In March 2026, the industry's incumbent local AWS emulator transitioned its community edition to a proprietary image requiring an authentication token. This change broke thousands of air-gapped CI pipelines and forced developers to manage yet another secret. fakecloud requires zero tokens. It is a standalone utility, not a SaaS-tethered agent.
 
 ### 3. No Internet Connection Required
-True local development should work on a plane, in a secure bunker, or during a regional ISP outage. fakecloud does not "phone home" to verify a license or pull service definitions. The entire API surface—all 2,422 operations—is contained within the local binary.
+True local development should work on a plane, in a secure bunker, or during a regional ISP outage. fakecloud does not "phone home" to verify a license or pull service definitions. The entire API surface—all 2,591 operations—is contained within the local binary.
 
 ## How It Works: High-Fidelity Emulation via Smithy
 
 Engineering managers often worry that "fake" services lead to "fake" passes in CI. A mock that returns a hardcoded JSON string is not an infrastructure emulator. fakecloud achieves 100% API conformance across its 33 supported services by using AWS's own Smithy models.
 
-Every commit to the [fakecloud repository](https://github.com/faiscadev/fakecloud) is validated against 59,000+ generated test variants. This ensures that when your application calls `DynamoDB.PutItem` or `Lambda.Invoke`, the response format, headers, and error codes exactly match the behavior of the real AWS production environment.
+Every commit to the [fakecloud repository](https://github.com/faiscadev/fakecloud) is validated against 86,327 generated test variants. This ensures that when your application calls `DynamoDB.PutItem` or `Lambda.Invoke`, the response format, headers, and error codes exactly match the behavior of the real AWS production environment.
 
 ### Performance Metrics (Verified 2026-05-13)
 - **Binary Size:** ~19MB (Rust-based, statically linked)
 - **Startup Time:** ~500ms
 - **Idle Memory Usage:** ~10MiB
-- **API Conformance:** 100% across 2,422 operations
+- **API Conformance:** 100% across 2,591 operations
 
 Because fakecloud is a single binary, it eliminates the overhead of managing multiple Docker containers for basic services like SQS or S3. While it can spin up Docker containers for complex runtimes (like the 23 supported Lambda runtimes), the core engine remains lightweight and fast.
 

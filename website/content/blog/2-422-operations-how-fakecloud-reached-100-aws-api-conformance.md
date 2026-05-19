@@ -1,7 +1,7 @@
 +++
-title = "2,422 Operations: How fakecloud Reached 100% AWS API Conformance"
+title = "2,591 Operations: How fakecloud Reached 100% AWS API Conformance"
 date = 2026-05-19
-description = "How fakecloud uses the Smithy protocol and 59,000+ test variants to achieve 100% API conformance across 2,422 AWS operations in a zero-friction local environment."
+description = "How fakecloud uses the Smithy protocol and 86,000+ test variants to achieve 100% API conformance across 2,591 AWS operations in a zero-friction local environment."
 
 [extra]
 author = "Lucas Vieira"
@@ -9,7 +9,7 @@ author = "Lucas Vieira"
 
 For senior developers and tooling engineers, the "local cloud" has historically been a minefield of broken promises. Traditional mocks are brittle, often failing to capture the nuanced error codes or side effects of real AWS infrastructure. Heavyweight emulators, meanwhile, have evolved into complex platforms that require accounts, auth tokens, and significant memory overhead just to run a simple integration test.
 
-As of May 2026, the landscape of local AWS development has shifted. While incumbent tools have moved toward account-gated models and mandatory internet connectivity for license verification, [fakecloud](https://github.com/faiscadev/fakecloud) provides a high-fidelity, zero-friction alternative. By focusing on 100% API conformance across 2,422 operations, fakecloud ensures that your local environment behaves like infrastructure, not a simulation.
+As of May 2026, the landscape of local AWS development has shifted. While incumbent tools have moved toward account-gated models and mandatory internet connectivity for license verification, [fakecloud](https://github.com/faiscadev/fakecloud) provides a high-fidelity, zero-friction alternative. By focusing on 100% API conformance across 2,591 operations, fakecloud ensures that your local environment behaves like infrastructure, not a simulation.
 
 ## The Credibility Hurdle: Why Developers Distrust Mocks
 
@@ -27,28 +27,28 @@ Engineering pragmatism dictates that a tool should not be harder to manage than 
 *   **No auth tokens:** There are no `LOCALSTACK_AUTH_TOKEN` environment variables to manage or rotate.
 *   **No internet connection:** The binary is fully self-contained. You can develop on a plane, in a secure air-gapped environment, or during a network outage.
 *   **No paid subscriptions:** The local development environment is open-source under the AGPL-3.0 license.
-*   **No 1GB+ Docker images:** The entire fakecloud environment is delivered as a ~19MB standalone binary with a [500ms startup time](/blog/benchmarking-local-aws-500ms-startup-vs-cloud-dependent-mocks/).
+*   **No 1GB+ Docker images:** The entire fakecloud environment is delivered as a ~32 MB compressed download (~85 MB unpacked binary) with a [sub-second startup time](/blog/benchmarking-local-aws-500ms-startup-vs-cloud-dependent-mocks/).
 
-## 100% Conformance Across 2,422 Operations
+## 100% Conformance Across 2,591 Operations
 
-Reliability in an emulator is measured by its API surface area and its conformance to the expected behavior of that surface. fakecloud currently supports 33 core AWS services, covering the most critical components of modern cloud-native architectures.
+Reliability in an emulator is measured by its API surface area and its conformance to the expected behavior of that surface. fakecloud currently supports 39 AWS services, covering the most critical components of modern cloud-native architectures.
 
 | Service | Operations Supported | Key Features |
 | :--- | :--- | :--- |
-| **S3** | 100+ | Multipart uploads, bucket policies, object tagging |
-| **Lambda** | 50+ | Cross-service triggers, environment variables, layers |
-| **DynamoDB** | 80+ | TTL, Global Secondary Indexes (GSI), Transactions |
-| **SQS/SNS** | 60+ | Dead-letter queues, SNS-to-SQS fanout, filtering |
-| **Bedrock** | 111 | Foundation model invocation, listing models, tags |
-| **IAM** | 40+ | Policy evaluation, role assumption, credential validation |
+| **S3** | 107 | Multipart uploads, bucket policies, object tagging |
+| **Lambda** | 85 | Cross-service triggers, environment variables, layers |
+| **DynamoDB** | 57 | TTL, Global Secondary Indexes (GSI), Transactions |
+| **SQS/SNS** | 65 | Dead-letter queues, SNS-to-SQS fanout, filtering |
+| **Bedrock** | 106 | Foundation model invocation, listing models, tags |
+| **IAM** | 176 | Policy evaluation, role assumption, credential validation |
 
-Reaching 100% conformance across 2,422 operations is not a manual task. It is the result of a rigorous, model-driven engineering process.
+Reaching 100% conformance across 2,591 operations is not a manual task. It is the result of a rigorous, model-driven engineering process.
 
-## The Smithy Protocol: 59,000+ Test Variants
+## The Smithy Protocol: 86,000+ Test Variants
 
-To ensure that fakecloud behaves exactly like the real AWS, we leverage **Smithy**, the interface definition language (IDL) used by AWS to build their own SDKs and services. 
+To ensure that fakecloud behaves exactly like the real AWS, we leverage **Smithy**, the interface definition language (IDL) used by AWS to build their own SDKs and services.
 
-As of May 2026, the Smithy ecosystem has matured significantly, with the general availability of Smithy-Java and Smithy-Go client frameworks. fakecloud uses these Smithy models to generate a massive suite of test variants—over 59,000 in total. 
+fakecloud uses official AWS Smithy models to generate a massive suite of test variants—86,327 in total, with 100% currently passing against the local binary.
 
 ### How the Test Suite Works
 
@@ -59,17 +59,17 @@ As of May 2026, the Smithy ecosystem has matured significantly, with the general
 
 This protocol ensures that when you use the official AWS SDK in your application, it cannot distinguish between fakecloud and the real cloud.
 
-## Performance by the Numbers: ~19MB and ~500ms
+## Performance by the Numbers: ~32 MB and ~300ms
 
 For a senior developer, the "inner loop" of development—code, test, repeat—must be as fast as possible. Waiting for a heavy Docker container to pull or a complex emulator to initialize is a productivity killer.
 
-*   **Binary Size:** ~19MB. This is small enough to be committed to a repository or distributed via a simple `curl` command.
-*   **Startup Time:** ~500ms. fakecloud is ready to accept requests before you can switch from your terminal to your IDE.
-*   **Memory Footprint:** Minimal. Unlike Java-based or Python-based emulators that can consume gigabytes of RAM, fakecloud's Go-based architecture is optimized for low-resource environments.
+*   **Download Size:** ~32 MB compressed (~85 MB unpacked). Small enough for any CI cache and faster to pull than a multi-gigabyte Docker image.
+*   **Startup Time:** ~300ms cold-start on a modern laptop. fakecloud is ready to accept requests before you can switch from your terminal to your IDE.
+*   **Memory Footprint:** Minimal. Unlike Java-based or Python-based emulators that can consume gigabytes of RAM, fakecloud's Rust-based architecture is optimized for low-resource environments.
 
 ```sh
 # Start fakecloud in the background
-./fakecloud start &
+./fakecloud &
 
 # Point your AWS CLI to the local endpoint
 aws s3 mb s3://my-local-bucket --endpoint-url http://localhost:4566
@@ -79,7 +79,7 @@ aws s3 mb s3://my-local-bucket --endpoint-url http://localhost:4566
 
 In 2026, AI integration is no longer optional. Developing applications that use Amazon Bedrock typically requires a paid AWS account and incurs per-token costs even during the prototyping phase. 
 
-fakecloud provides support for 111 Bedrock operations. This allows you to build and test your AI orchestration logic—such as prompt chaining, model selection, and [guardrail integration](/blog/bedrock-guardrails-local/)—locally and for free. While fakecloud does not ship with the multi-gigabyte weights of frontier models, it provides the API structure necessary to test your application's interaction with the Bedrock service. You can learn more in our guide to [local Bedrock testing](/blog/bedrock-local-testing/).
+fakecloud provides support for 106 Bedrock operations (plus the Bedrock Agent, Agent Runtime, and Runtime APIs). This allows you to build and test your AI orchestration logic—such as prompt chaining, model selection, and [guardrail integration](/blog/bedrock-guardrails-local/)—locally and for free. While fakecloud does not ship with the multi-gigabyte weights of frontier models, it provides the API structure necessary to test your application's interaction with the Bedrock service. You can learn more in our guide to [local Bedrock testing](/blog/bedrock-local-testing/).
 
 ## SDK-Client Separation: Testing with Confidence
 
@@ -102,7 +102,7 @@ assertions.AssertBucketCount(t, "my-local-bucket", 1)
 Because fakecloud is a standalone binary with no external dependencies, integrating it into a CI/CD pipeline is trivial. There are no Docker-in-Docker complexities or auth secrets to configure.
 
 1.  **Download the binary:** Use a simple `curl` or `wget` in your CI script.
-2.  **Start the service:** Run `./fakecloud start`.
+2.  **Start the service:** Run `./fakecloud`.
 3.  **Run your tests:** Point your test suite to `http://localhost:4566`.
 
 This approach ensures that your CI environment is an exact replica of your local development environment, further reducing the risk of deployment-time surprises.
@@ -111,11 +111,11 @@ This approach ensures that your CI environment is an exact replica of your local
 
 The trend toward "cloud-only" development is a response to the difficulty of building high-fidelity emulators. fakecloud proves that with a model-driven approach and a commitment to API conformance, the local environment can remain the most productive place for a developer to work.
 
-By eliminating the friction of accounts, tokens, and costs, fakecloud returns control to the engineer. You can focus on building features and refining architecture, confident that your local tests are backed by 59,000+ test variants and 100% conformance to the AWS API.
+By eliminating the friction of accounts, tokens, and costs, fakecloud returns control to the engineer. You can focus on building features and refining architecture, confident that your local tests are backed by 86,000+ Smithy-generated test variants and 100% conformance to the AWS API.
 
 To get started, download the latest binary for your architecture and run the start command to begin developing against a local AWS environment that actually works.
 
 ```sh
-curl -L https://fakecloud.dev/install.sh | sh
-fakecloud start
+curl -fsSL https://fakecloud.dev/install.sh | bash
+fakecloud
 ```

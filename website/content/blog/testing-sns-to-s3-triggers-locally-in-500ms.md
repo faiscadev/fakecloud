@@ -9,7 +9,7 @@ author = "Lucas Vieira"
 
 Mocking individual AWS services is a common strategy that leads to production failures. When you mock a call to `sns.Publish` or `s3.PutObject`, you are testing your ability to write a mock, not the infrastructure's ability to handle the event. In a real-world event-driven system, the failure points live in the gaps between services: the IAM policy that doesn't quite allow the SNS fanout, the S3 bucket notification configuration that points to a non-existent ARN, or the Lambda trigger that fails because of a malformed event payload.
 
-As of 2026-05-13, the landscape for local AWS development has shifted. With major incumbents moving to proprietary models and requiring mandatory auth tokens even for local runs, developers need a high-fidelity, zero-friction alternative. [fakecloud](https://github.com/faiscadev/fakecloud) provides a standalone ~19MB binary that starts in ~500ms, offering 100% API conformance across 2,422 operations without requiring an account, internet connection, or subscription.
+As of 2026-05-13, the landscape for local AWS development has shifted. With major incumbents moving to proprietary models and requiring mandatory auth tokens even for local runs, developers need a high-fidelity, zero-friction alternative. [fakecloud](https://github.com/faiscadev/fakecloud) provides a standalone ~19MB binary that starts in ~500ms, offering 100% API conformance across 2,591 operations without requiring an account, internet connection, or subscription.
 
 ## The Integration Gap: Why Mocks Fail
 
@@ -69,11 +69,11 @@ aws sns subscribe \
     --notification-endpoint arn:aws:lambda:us-east-1:000000000000:function:s3-uploader
 ```
 
-At this point, your local environment is fully wired. The fakecloud binary is managing the state of 33 core AWS services in-memory, backed by 59,000+ Smithy-model-generated test variants to ensure the API responses match AWS exactly.
+At this point, your local environment is fully wired. The fakecloud binary is managing the state of 39 AWS services in-memory, backed by 86,327 Smithy-model-generated test variants to ensure the API responses match AWS exactly.
 
-## 100% Conformance Across 2,422 Operations
+## 100% Conformance Across 2,591 Operations
 
-fakecloud is not a collection of simple mocks. It is a high-fidelity emulator built on the Smithy models used by AWS to define their own APIs. As of May 2026, fakecloud supports 2,422 operations with 100% behavioral conformance. This includes complex behaviors like:
+fakecloud is not a collection of simple mocks. It is a high-fidelity emulator built on the Smithy models used by AWS to define their own APIs. As of May 2026, fakecloud supports 2,591 operations with 100% behavioral conformance. This includes complex behaviors like:
 
 | Service | Supported Operations | Key Integration Features |
 | :--- | :--- | :--- |
