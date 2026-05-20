@@ -1,6 +1,6 @@
 +++
 title = "Lambda"
-description = "Real code execution in Docker containers across 27 runtimes. Event source mappings, warm container reuse."
+description = "Real code execution in Docker containers across 23 runtimes. Event source mappings, warm container reuse."
 weight = 5
 +++
 
@@ -10,7 +10,7 @@ fakecloud implements **70 of 70** Lambda operations at 100% Smithy conformance. 
 
 - **Function CRUD** — create, update, delete, list, get
 - **Real code execution** — functions run in Docker containers with the official AWS Lambda runtime images
-- **27 runtimes** — Node.js (16/18/20/22/24), Python (3.8/3.9/3.10/3.11/3.12/3.13/3.14), Java (11/17/21/25), Go (1.x), Ruby (3.2/3.3/3.4), .NET (6/8/10), `provided.al2`, `provided.al2023`
+- **23 runtimes** — Node.js (16/18/20/22/24), Python (3.8/3.9/3.10/3.11/3.12/3.13/3.14), Java (11/17/21/25), Go (1.x), Ruby (3.3/3.4), .NET (8/10), `provided.al2`, `provided.al2023`
 - **Event source mappings** — SQS, Kinesis, DynamoDB Streams polling loops with **`FilterCriteria`** (EventBridge-style JSON pattern, exists/prefix/suffix/equals-ignore-case/anything-but/numeric operators, SQS body decode), **`StartingPosition`** (`TRIM_HORIZON` / `LATEST` / `AT_TIMESTAMP` for Kinesis, `TRIM_HORIZON` / `LATEST` for DDB Streams), **`MaximumBatchingWindowInSeconds`** (SQS), and **`FunctionResponseTypes=[ReportBatchItemFailures]`** for SQS partial-batch failure semantics
 - **Layers** — create, publish, attach to functions; layer ZIP content is extracted into `/opt` of the runtime container at invoke time, so Python `import`, Node `require`, and `LD_LIBRARY_PATH` lookups resolve against attached layers exactly as on real AWS
 - **Environment variables** — passed to the container

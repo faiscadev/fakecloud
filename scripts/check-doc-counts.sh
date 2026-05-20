@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 # Verify every evergreen doc/marketing headline that quotes a service count,
-# operation count, or Smithy variant count agrees with the canonical sources:
+# operation count, Smithy variant count, per-service operation count, Bedrock
+# surface count, or performance metric (startup time / idle memory / binary
+# size) agrees with the canonical sources:
 #
-#   - website/content/docs/parity.md   (sum of Ops column + row count)
+#   - website/content/docs/parity.md   (per-service Ops column + row count + Bedrock 4-part surface)
 #   - conformance-baseline.json        (variants_passed + total_variants)
+#   - constants in this script         (startup time / idle memory / binary size — no in-repo source of truth)
 #
 # Run locally with `bash scripts/check-doc-counts.sh` or via the
 # `doc-counts` CI job. Blog posts and dated marketing drafts are skipped per
@@ -26,6 +29,25 @@ if [ ! -f "$BASELINE" ]; then
     exit 2
 fi
 
+# --- Performance metrics ---
+# These have no in-repo source of truth. When re-measurement establishes a new
+# number, update these constants and audit every page in FILES in the same PR.
+STARTUP_MS=300
+IDLE_MEM_MIB=10
+BINARY_MB=19
+
+# --- Lambda runtime count ---
+# Canonical source: `runtime_to_image()` in crates/fakecloud-lambda/src/runtime.rs.
+# That match expression is the actual list of supported runtimes — anything not
+# in it returns None and `CreateFunction` rejects it. Count it with:
+#
+#   grep -cE '^\s*"[^"]+"\s*=>\s*\(' crates/fakecloud-lambda/src/runtime.rs
+#
+# (= 23 as of 2026-05-20). When fakecloud-lambda gains/drops a runtime, update
+# this constant, the runtime list in docs/services/lambda.md, and audit every
+# page in FILES in the same PR.
+LAMBDA_RUNTIMES=23
+
 # Canonical service count = row count in parity.md table.
 parity_services=$(awk '/^\| \[/ {n++} END{print n+0}' "$PARITY")
 
@@ -40,6 +62,33 @@ parity_ops=$(awk '
     }
     END { print sum + 0 }
 ' "$PARITY")
+
+# Per-service ops map: "<Service>\t<ops>" lines, one per service in parity.md.
+# Used to validate per-service claims in evergreen surfaces.
+service_ops_map=$(awk '
+    /^\| \[/ {
+        # Service name is the bracketed link text in the first cell.
+        match($0, /\[[^]]+\]/)
+        svc = substr($0, RSTART+1, RLENGTH-2)
+        # Ops is the second pipe-delimited field after the leading `| `.
+        split($0, parts, "|")
+        ops = parts[3]
+        gsub(/^ +| +$/, "", ops)
+        if (ops ~ /^[0-9]+$/) print svc "\t" ops
+    }
+' "$PARITY")
+
+# Bedrock 4-part surface: pull each row from the map.
+lookup_ops() {
+    local svc="$1"
+    echo "$service_ops_map" | awk -F'\t' -v svc="$svc" '$1 == svc { print $2; exit }'
+}
+
+bedrock_ctrl=$(lookup_ops "Bedrock")
+bedrock_runtime=$(lookup_ops "Bedrock Runtime")
+bedrock_agent=$(lookup_ops "Bedrock Agent")
+bedrock_agent_rt=$(lookup_ops "Bedrock Agent Runtime")
+bedrock_family=$(( ${bedrock_ctrl:-0} + ${bedrock_runtime:-0} + ${bedrock_agent:-0} + ${bedrock_agent_rt:-0} ))
 
 # Variant counts straight out of the baseline JSON.
 variants_pass=$(jq -r .variants_passed "$BASELINE")
@@ -70,6 +119,11 @@ echo "  services           = $parity_services (parity.md row count)"
 echo "  operations         = $parity_ops ($ops_fmt) (sum of parity.md Ops column)"
 echo "  variants_passed    = $variants_pass ($vp_fmt)"
 echo "  total_variants     = $variants_total ($vt_fmt)"
+echo "  startup_ms         = $STARTUP_MS (script constant)"
+echo "  idle_mem_mib       = $IDLE_MEM_MIB (script constant)"
+echo "  binary_mb          = $BINARY_MB (script constant)"
+echo "  bedrock surface    = $bedrock_ctrl + $bedrock_runtime + $bedrock_agent + $bedrock_agent_rt = $bedrock_family (parity.md rows)"
+echo "  lambda_runtimes    = $LAMBDA_RUNTIMES (script constant; canonical: docs/services/lambda.md)"
 echo
 
 # Files to check. Evergreen-only. Blog posts and dated marketing drafts excluded
@@ -77,21 +131,31 @@ echo
 FILES=(
     README.md
     AGENTS.md
+    website/content/_index.md
+    website/content/docs/_index.md
     website/content/docs/parity.md
     website/content/docs/services/_index.md
     website/content/docs/about/conformance.md
     website/content/docs/about/what-it-is.md
+    website/content/docs/migration-from-localstack.md
+    website/content/docs/getting-started/install.md
     website/content/faq.md
+    website/content/glossary.md
     website/content/localstack-alternative.md
+    website/content/supported-services.md
     website/content/fake-aws-server.md
     website/content/fake-bedrock.md
     website/content/dynamodb-emulator.md
+    website/content/vs/dynamodb-local.md
+    website/content/vs/elasticmq.md
     website/content/vs/floci.md
+    website/content/vs/localstack.md
+    website/content/vs/minio.md
     website/content/vs/ministack.md
     website/content/vs/moto.md
-    website/content/vs/elasticmq.md
+    website/content/vs/s3mock.md
     website/content/vs/sam-local.md
-    website/content/vs/localstack.md
+    website/content/vs/testcontainers.md
     website/static/llms.txt
     website/static/llms-full.txt
     website/templates/index.html
@@ -168,6 +232,147 @@ for f in "${FILES[@]}"; do
             fail=1
         fi
     done < <(grep -oE "\b[0-9]+,[0-9]{3}\+? (Smithy[-a-z]* )?(generated )?(test )?variants\b" "$f" | grep -oE "^[0-9]+,[0-9]{3}" | sort -u)
+
+    # --- Lambda runtime-count claims ---
+    # Catches "23 runtimes", "27 runtimes", "X Lambda runtimes" — anywhere on
+    # a page that quotes how many runtimes fakecloud supports. Avoids matching
+    # "27 runtimes are supported by real AWS" by looking for the literal
+    # token "runtimes" right after the number.
+    while read -r hit; do
+        [ -z "$hit" ] && continue
+        if [ "$hit" != "$LAMBDA_RUNTIMES" ] && ! is_exception "$f" lambda_runtimes "$hit"; then
+            problems+=("$f: claims '$hit runtimes', expected $LAMBDA_RUNTIMES")
+            fail=1
+        fi
+    done < <(grep -oE '\b[0-9]+\s+runtimes\b' "$f" | grep -oE '^[0-9]+' | sort -u)
+
+    # --- Startup time claims ---
+    # Pulls every "~?Nms" / "~?N ms" / "<Nms" that appears on a line mentioning
+    # "startup" or "starts in". Excludes context lines about other emulators'
+    # startup numbers ("LocalStack ~3s") by requiring the number to be on the
+    # same line as our own positioning words.
+    while read -r hit; do
+        [ -z "$hit" ] && continue
+        if [ "$hit" != "$STARTUP_MS" ] && ! is_exception "$f" startup_ms "$hit"; then
+            problems+=("$f: claims '${hit}ms startup', expected ${STARTUP_MS}ms")
+            fail=1
+        fi
+    done < <(
+        grep -E -i 'startup|starts in|start time' "$f" \
+            | grep -oE '[<~]?[0-9]+\s*ms\b' \
+            | grep -oE '[0-9]+' \
+            | sort -u
+    )
+
+    # --- Idle memory claims ---
+    # "~10 MiB", "10 MiB idle", "10 MiB idle memory". Avoids false positives by
+    # only firing on lines that mention "idle" or "memory" alongside the number.
+    while read -r hit; do
+        [ -z "$hit" ] && continue
+        if [ "$hit" != "$IDLE_MEM_MIB" ] && ! is_exception "$f" idle_mem_mib "$hit"; then
+            problems+=("$f: claims '${hit} MiB idle memory', expected ${IDLE_MEM_MIB} MiB")
+            fail=1
+        fi
+    done < <(
+        grep -E 'idle (memory|RSS)|idle$|MiB idle' "$f" \
+            | grep -oE '~?[0-9]+\s*MiB' \
+            | grep -oE '[0-9]+' \
+            | sort -u
+    )
+
+    # --- Binary size claims ---
+    # "~19 MB binary", "19MB binary", "19 MB static binary", "binary (~19 MB)".
+    # Restricted to lines mentioning "binary" to avoid catching unrelated MB
+    # mentions (e.g. install size for competitors).
+    while read -r hit; do
+        [ -z "$hit" ] && continue
+        if [ "$hit" != "$BINARY_MB" ] && ! is_exception "$f" binary_mb "$hit"; then
+            problems+=("$f: claims '${hit} MB binary', expected ${BINARY_MB} MB")
+            fail=1
+        fi
+    done < <(
+        grep -E -i 'binary' "$f" \
+            | grep -oE '~?[0-9]+\s*MB' \
+            | grep -oE '[0-9]+' \
+            | sort -u
+    )
+
+    # --- Bedrock 4-part surface claims ---
+    # Catches "111 Bedrock operations" / "214 Bedrock-family operations" mismatches
+    # against the parity.md sum, and per-API counts that drift.
+    # The pattern fires on any "<N> Bedrock(...) operations" phrase, with
+    # optional qualifier words (Runtime, Agent, family). We accept N if it
+    # matches the relevant sub-surface or the full family sum.
+    while read -r line; do
+        [ -z "$line" ] && continue
+        n=$(echo "$line" | grep -oE '^[0-9]+')
+        qual=$(echo "$line" | sed -E 's/^[0-9]+ //; s/operations?.*$//; s/ +$//')
+        expected=""
+        case "$qual" in
+            "Bedrock"|"Bedrock-family"|"Bedrock family")
+                expected="$bedrock_family"
+                ;;
+            "Bedrock Runtime")
+                expected="$bedrock_runtime"
+                ;;
+            "Bedrock Agent")
+                expected="$bedrock_agent"
+                ;;
+            "Bedrock Agent Runtime")
+                expected="$bedrock_agent_rt"
+                ;;
+        esac
+        # Tolerate the bare "Bedrock" form referring to either ctrl-only or family
+        # (the site uses both framings; both are accepted as long as N matches one of them).
+        if [ "$qual" = "Bedrock" ]; then
+            if [ "$n" != "$bedrock_ctrl" ] && [ "$n" != "$bedrock_family" ]; then
+                problems+=("$f: claims '$n Bedrock operations', expected $bedrock_ctrl (ctrl) or $bedrock_family (family)")
+                fail=1
+            fi
+        elif [ -n "$expected" ] && [ "$n" != "$expected" ]; then
+            problems+=("$f: claims '$n $qual operations', expected $expected")
+            fail=1
+        fi
+    done < <(
+        grep -oE '\b[0-9]+ Bedrock(-family| Runtime| Agent Runtime| Agent| family)? operations?\b' "$f" \
+            | sort -u
+    )
+
+    # --- Per-service op count claims ---
+    # Catches "**S3**: 154 operations", "Lambda (82 operations)", etc. Walks the
+    # per-service map and looks for any service-name followed by a number+ops
+    # phrase. Skips parity.md (it's the source) and the per-service service docs
+    # under docs/services/ (those are the source for their own service).
+    if [[ "$f" == "$PARITY" || "$f" == website/content/docs/services/*.md ]]; then
+        continue_per_service=1
+    else
+        continue_per_service=0
+    fi
+    if [ "$continue_per_service" -eq 0 ]; then
+        while IFS=$'\t' read -r svc canonical_ops; do
+            [ -z "$svc" ] && continue
+            # Bedrock family is handled by the dedicated Bedrock-surface check
+            # above, which accepts both the per-API count and the family sum.
+            # Skipping here avoids double-firing on the same phrase.
+            case "$svc" in
+                "Bedrock"|"Bedrock Runtime"|"Bedrock Agent"|"Bedrock Agent Runtime") continue ;;
+            esac
+            # Escape regex specials in service name for grep (parentheses, etc.)
+            svc_re=$(printf '%s\n' "$svc" | sed 's/[][\.*^$()+?{}|]/\\&/g')
+            while read -r hit; do
+                [ -z "$hit" ] && continue
+                if [ "$hit" != "$canonical_ops" ] && ! is_exception "$f" "ops_${svc}" "$hit"; then
+                    problems+=("$f: claims '$svc: $hit ops', expected $canonical_ops")
+                    fail=1
+                fi
+            done < <(
+                grep -oE "(\*\*)?${svc_re}(\*\*)?[: ]\(?[ ]*[0-9]+ (operations?|ops)\b" "$f" \
+                    | grep -oE '[0-9]+ (operations?|ops)' \
+                    | grep -oE '^[0-9]+' \
+                    | sort -u
+            )
+        done <<< "$service_ops_map"
+    fi
 done
 
 if [ "$fail" -eq 0 ]; then
@@ -181,5 +386,5 @@ for p in "${problems[@]}"; do
 done
 echo >&2
 echo "Reconcile the drifted file(s) against the canonical sources at the top of this output," >&2
-echo "or update parity.md / conformance-baseline.json if the implementation actually changed." >&2
+echo "or update parity.md / conformance-baseline.json / the script constants if the implementation actually changed." >&2
 exit 1

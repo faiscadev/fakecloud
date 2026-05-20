@@ -1,6 +1,6 @@
 +++
 title = "Test Lambda locally"
-description = "Run AWS Lambda locally with real runtimes and real event triggers. 27 Lambda runtimes, real S3/SQS/SNS/EventBridge triggers, no account required."
+description = "Run AWS Lambda locally with real runtimes and real event triggers. 23 Lambda runtimes, real S3/SQS/SNS/EventBridge triggers, no account required."
 template = "page.html"
 +++
 
@@ -13,7 +13,7 @@ fakecloud
 
 ## What you get
 
-- **All 27 AWS Lambda runtimes** — Node 16/18/20/22/24, Python 3.8/3.9/3.10/3.11/3.12/3.13/3.14, Java 11/17/21/25, .NET 6/8/10, Ruby 3.2/3.3/3.4, Go 1.x, custom (`provided.al2`, `provided.al2023`).
+- **All 23 AWS Lambda runtimes** — Node 16/18/20/22/24, Python 3.8/3.9/3.10/3.11/3.12/3.13/3.14, Java 11/17/21/25, .NET 8/10, Ruby 3.3/3.4, Go 1.x, custom (`provided.al2`, `provided.al2023`).
 - **Real code execution.** fakecloud pulls the AWS Lambda runtime container and runs your handler. Not a stub, not a simulated response.
 - **Real event triggers.** S3 -> Lambda, SQS -> Lambda, SNS -> Lambda, EventBridge -> Lambda, DynamoDB Streams -> Lambda, API Gateway v2 -> Lambda. All wired end-to-end.
 - **Real event source mappings.** fakecloud polls SQS/Kinesis, batches events, invokes your Lambda, handles success/failure/DLQ the way AWS does.
@@ -54,7 +54,7 @@ cat out.json
 
 | Tool | Runs function code | Multi-runtime | Cross-service triggers | Language | Free |
 |---|---|---|---|---|---|
-| fakecloud | Yes (Docker) | 27 runtimes | Yes (S3, SQS, SNS, EventBridge, DynamoDB Streams, API GW v2) | Any | Yes |
+| fakecloud | Yes (Docker) | 23 runtimes | Yes (S3, SQS, SNS, EventBridge, DynamoDB Streams, API GW v2) | Any | Yes |
 | SAM Local | Yes (Docker) | All AWS runtimes | Partial (synthetic events only) | Any | Yes |
 | LocalStack Community (post-Mar 2026) | Yes (Docker, auth required) | All | Yes | Any | No (auth token required) |
 | serverless-offline | Yes (in-process) | Node only | API Gateway only | Node | Yes |
