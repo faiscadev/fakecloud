@@ -3015,7 +3015,7 @@ fn admin_initiate_auth_unsupported_flow() {
 
 #[test]
 fn sign_up_and_confirm() {
-    let (svc, _) = make_svc();
+    let (svc, state) = make_svc();
     let pool_id = create_pool(&svc);
     let client_id = create_client(&svc, &pool_id);
 
@@ -3031,11 +3031,35 @@ fn sign_up_and_confirm() {
     assert!(!b["UserConfirmed"].as_bool().unwrap());
     assert!(b["UserSub"].as_str().is_some());
 
-    // Confirm via ConfirmSignUp (accepts any code in current impl)
+    // Confirm with wrong code first — should be rejected with CodeMismatchException.
     let body = json!({
         "ClientId": client_id,
         "Username": "selfuser",
-        "ConfirmationCode": "123456",
+        "ConfirmationCode": "wrong",
+    });
+    let req = make_req("ConfirmSignUp", &body.to_string());
+    let err = expect_err(block_on(svc.confirm_sign_up(&req)));
+    assert_eq!(err.code(), "CodeMismatchException");
+
+    // Read stored code via state to drive a successful confirmation.
+    let code = {
+        let accounts = state.read();
+        accounts
+            .get("123456789012")
+            .unwrap()
+            .users
+            .get(&pool_id)
+            .unwrap()
+            .get("selfuser")
+            .unwrap()
+            .confirmation_code
+            .clone()
+            .expect("SignUp should have stored a confirmation code")
+    };
+    let body = json!({
+        "ClientId": client_id,
+        "Username": "selfuser",
+        "ConfirmationCode": code,
     });
     let req = make_req("ConfirmSignUp", &body.to_string());
     block_on(svc.confirm_sign_up(&req)).unwrap();

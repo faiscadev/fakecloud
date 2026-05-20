@@ -225,6 +225,23 @@ impl CognitoService {
                 )
             })?;
 
+        // Validate confirmation code against the stored value before
+        // promoting the user to CONFIRMED. Without this check anyone
+        // calling ConfirmSignUp with the user's name + a non-empty
+        // string could activate the account. Stored code is set by
+        // SignUp (auth/signup.rs:153) and ResendConfirmationCode.
+        match user.confirmation_code.as_deref() {
+            Some(stored) if stored == code => {}
+            _ => {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "CodeMismatchException",
+                    "Invalid verification code provided, please try again.",
+                ));
+            }
+        }
+        user.confirmation_code = None;
+
         user.user_status = user_status::CONFIRMED.to_string();
         user.user_last_modified_date = Utc::now();
 
