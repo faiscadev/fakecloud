@@ -45,7 +45,7 @@ impl Wafv2Service {
         validate_opt_next_marker(&body)?;
         let limit = body.get("Limit").and_then(Value::as_u64).unwrap_or(100) as usize;
         let next_marker = body.get("NextMarker").and_then(Value::as_str).unwrap_or("");
-        let all = vec![
+        let all = [
             json!({"ReleaseVersion": "1.0.0", "Timestamp": Utc::now().timestamp() as f64}),
             json!({"ReleaseVersion": "1.1.0", "Timestamp": Utc::now().timestamp() as f64}),
         ];
