@@ -77,6 +77,40 @@ pub(super) fn parse_options_to_include(req: &AwsRequest) -> Vec<Value> {
         if let Some(v) = version {
             entry.insert("OptionVersion".to_string(), json!(v));
         }
+        // Capture nested security-group memberships — the doc-comment
+        // promised them but the loop above never read them, so
+        // ModifyOptionGroup was dropping that part of the request.
+        let mut dbsg = Vec::new();
+        for j in 1.. {
+            let id = get_param(
+                req,
+                &format!("OptionsToInclude.member.{i}.DBSecurityGroupMemberships.member.{j}"),
+            );
+            match id {
+                Some(v) => dbsg.push(json!(v)),
+                None => break,
+            }
+        }
+        if !dbsg.is_empty() {
+            entry.insert("DBSecurityGroupMemberships".to_string(), Value::Array(dbsg));
+        }
+        let mut vpcsg = Vec::new();
+        for j in 1.. {
+            let id = get_param(
+                req,
+                &format!("OptionsToInclude.member.{i}.VpcSecurityGroupMemberships.member.{j}"),
+            );
+            match id {
+                Some(v) => vpcsg.push(json!(v)),
+                None => break,
+            }
+        }
+        if !vpcsg.is_empty() {
+            entry.insert(
+                "VpcSecurityGroupMemberships".to_string(),
+                Value::Array(vpcsg),
+            );
+        }
         out.push(Value::Object(entry));
     }
     out

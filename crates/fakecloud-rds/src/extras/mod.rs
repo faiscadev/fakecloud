@@ -297,11 +297,23 @@ impl RdsService {
             "DeleteDBClusterSnapshot" => {
                 let id = get_param(req, "DBClusterSnapshotIdentifier").ok_or_else(|| missing("DBClusterSnapshotIdentifier"))?;
                 let arn = Arn::new("rds", region, &aid, &format!("cluster-snapshot:{id}")).to_string();
-                {
+                // Recover the source cluster id from stored state before
+                // remove — emitting a hardcoded "default" would corrupt
+                // downstream consumers that key off DBClusterIdentifier.
+                let cluster = {
                     let mut accounts = write_state!();
                     let state = accounts.get_or_create(&aid);
+                    let prior = state
+                        .extras
+                        .get("cluster_snapshots")
+                        .and_then(|m| m.get(&id))
+                        .and_then(|v| v.get("DBClusterIdentifier"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string();
                     if let Some(m) = state.extras.get_mut("cluster_snapshots") { m.remove(&id); }
-                }
+                    prior
+                };
                 self.emit_event(
                     RdsSourceType::DbClusterSnapshot,
                     &id,
@@ -310,7 +322,7 @@ impl RdsService {
                     &["deletion"],
                     "DB cluster snapshot deleted",
                 );
-                Ok(xml_response("DeleteDBClusterSnapshot", cluster_snapshot_xml(&id, &arn, "default"), &rid))
+                Ok(xml_response("DeleteDBClusterSnapshot", cluster_snapshot_xml(&id, &arn, &cluster), &rid))
             }
             "DescribeDBClusterSnapshots" => list_extras_xml(self, &aid, "cluster_snapshots", "DBClusterSnapshots", "DescribeDBClusterSnapshots", cluster_snapshot_member_xml, &rid),
             "DescribeDBClusterSnapshotAttributes" | "ModifyDBClusterSnapshotAttribute" => {
@@ -485,6 +497,7 @@ impl RdsService {
             "ModifyDBProxy" => {
                 let name = get_param(req, "DBProxyName").ok_or_else(|| missing("DBProxyName"))?;
                 let auth = parse_proxy_auth(req);
+                let new_name = get_param(req, "NewDBProxyName");
                 let mut accounts = write_state!();
                 let state = accounts.get_or_create(&aid);
                 let entry = state
@@ -511,11 +524,24 @@ impl RdsService {
                     if let Some(v) = get_param(req, "DebugLogging") {
                         obj.insert("DebugLogging".to_string(), json!(v.eq_ignore_ascii_case("true")));
                     }
-                    if let Some(v) = get_param(req, "NewDBProxyName") {
+                    if let Some(v) = new_name.as_ref() {
                         obj.insert("DBProxyName".to_string(), json!(v));
                     }
                 }
                 let updated = entry.clone();
+                // Rekey the map so subsequent Describe/Delete/Modify
+                // against NewDBProxyName actually find the entry —
+                // otherwise the rename only mutates the payload field
+                // and Describe still keys by the old name.
+                if let Some(new) = new_name {
+                    if new != name {
+                        if let Some(m) = state.extras.get_mut("proxies") {
+                            if let Some(val) = m.remove(&name) {
+                                m.insert(new, val);
+                            }
+                        }
+                    }
+                }
                 Ok(xml_response("ModifyDBProxy", format!("    <DBProxy>\n{}\n    </DBProxy>", proxy_xml(&updated)), &rid))
             }
             "DeleteDBProxy" => {
@@ -537,6 +563,7 @@ impl RdsService {
             "ModifyDBProxyEndpoint" => {
                 let name = get_param(req, "DBProxyEndpointName").ok_or_else(|| missing("DBProxyEndpointName"))?;
                 let vpc_sgs = parse_member_list(req, "VpcSecurityGroupIds");
+                let new_name = get_param(req, "NewDBProxyEndpointName");
                 let mut accounts = write_state!();
                 let state = accounts.get_or_create(&aid);
                 let entry = state
@@ -554,11 +581,23 @@ impl RdsService {
                     if !vpc_sgs.is_empty() {
                         obj.insert("VpcSecurityGroupIds".to_string(), json!(vpc_sgs));
                     }
-                    if let Some(v) = get_param(req, "NewDBProxyEndpointName") {
+                    if let Some(v) = new_name.as_ref() {
                         obj.insert("DBProxyEndpointName".to_string(), json!(v));
                     }
                 }
-                Ok(xml_response("ModifyDBProxyEndpoint", format!("    <DBProxyEndpoint>\n      <DBProxyEndpointName>{}</DBProxyEndpointName>\n    </DBProxyEndpoint>", xml_escape(&name)), &rid))
+                let final_name = new_name.clone().unwrap_or_else(|| name.clone());
+                // Rekey so the rename is visible to subsequent lookups,
+                // not just to the payload field.
+                if let Some(new) = new_name {
+                    if new != name {
+                        if let Some(m) = state.extras.get_mut("proxy_endpoints") {
+                            if let Some(val) = m.remove(&name) {
+                                m.insert(new, val);
+                            }
+                        }
+                    }
+                }
+                Ok(xml_response("ModifyDBProxyEndpoint", format!("    <DBProxyEndpoint>\n      <DBProxyEndpointName>{}</DBProxyEndpointName>\n    </DBProxyEndpoint>", xml_escape(&final_name)), &rid))
             }
             "DeleteDBProxyEndpoint" => {
                 let name = get_param(req, "DBProxyEndpointName").ok_or_else(|| missing("DBProxyEndpointName"))?;
@@ -567,8 +606,60 @@ impl RdsService {
                 if let Some(m) = state.extras.get_mut("proxy_endpoints") { m.remove(&name); }
                 Ok(xml_response("DeleteDBProxyEndpoint", "    <DBProxyEndpoint/>".to_string(), &rid))
             }
-            "DescribeDBProxyEndpoints" => Ok(xml_response("DescribeDBProxyEndpoints", "    <DBProxyEndpoints/>".to_string(), &rid)),
-            "DescribeDBProxyTargetGroups" => Ok(xml_response("DescribeDBProxyTargetGroups", "    <TargetGroups/>".to_string(), &rid)),
+            "DescribeDBProxyEndpoints" => {
+                let accounts = self.state.read();
+                let state_opt = accounts.get(&aid);
+                let mut members = String::new();
+                if let Some(state) = state_opt {
+                    if let Some(m) = state.extras.get("proxy_endpoints") {
+                        for v in m.values() {
+                            // Render with the same field shape as
+                            // CreateDBProxyEndpoint above so consumers
+                            // see the persisted endpoint name and any
+                            // VpcSecurityGroupIds we recorded.
+                            let n = v
+                                .get("DBProxyEndpointName")
+                                .and_then(|x| x.as_str())
+                                .unwrap_or_default();
+                            members.push_str(&format!(
+                                "      <member>\n        <DBProxyEndpointName>{}</DBProxyEndpointName>\n      </member>\n",
+                                xml_escape(n)
+                            ));
+                        }
+                    }
+                }
+                Ok(xml_response("DescribeDBProxyEndpoints", format!("    <DBProxyEndpoints>\n{members}    </DBProxyEndpoints>"), &rid))
+            }
+            "DescribeDBProxyTargetGroups" => {
+                let accounts = self.state.read();
+                let state_opt = accounts.get(&aid);
+                let filter_proxy = get_param(req, "DBProxyName");
+                let mut members = String::new();
+                if let Some(state) = state_opt {
+                    if let Some(m) = state.extras.get("proxy_target_groups") {
+                        for v in m.values() {
+                            let proxy = v
+                                .get("DBProxyName")
+                                .and_then(|x| x.as_str())
+                                .unwrap_or_default();
+                            if let Some(want) = filter_proxy.as_deref() {
+                                if proxy != want {
+                                    continue;
+                                }
+                            }
+                            let tgn = v
+                                .get("TargetGroupName")
+                                .and_then(|x| x.as_str())
+                                .unwrap_or_default();
+                            members.push_str(&format!(
+                                "      <member>\n        <DBProxyName>{}</DBProxyName>\n        <TargetGroupName>{}</TargetGroupName>\n      </member>\n",
+                                xml_escape(proxy), xml_escape(tgn)
+                            ));
+                        }
+                    }
+                }
+                Ok(xml_response("DescribeDBProxyTargetGroups", format!("    <TargetGroups>\n{members}    </TargetGroups>"), &rid))
+            }
             "DescribeDBProxyTargets" => Ok(xml_response("DescribeDBProxyTargets", "    <Targets/>".to_string(), &rid)),
             "ModifyDBProxyTargetGroup" => {
                 let proxy = get_param(req, "DBProxyName").ok_or_else(|| missing("DBProxyName"))?;

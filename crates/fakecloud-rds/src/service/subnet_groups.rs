@@ -32,11 +32,19 @@ impl RdsService {
         }
 
         let vpc_id = format!("vpc-{}", uuid::Uuid::new_v4().simple());
-        let subnet_availability_zones: Vec<String> = (0..subnet_ids.len())
-            .map(|i| format!("{}{}", &state.region, char::from(b'a' + (i % 6) as u8)))
+        // We don't track real VPC subnet -> AZ mappings, so synthesize
+        // one AZ per subnet by hashing the subnet id. Two distinct
+        // subnet ids land in the same AZ only on hash collision, which
+        // makes the uniqueness check meaningful (the previous version
+        // derived AZ from index and was always unique by construction).
+        let subnet_availability_zones: Vec<String> = subnet_ids
+            .iter()
+            .map(|sid| {
+                let bucket = sid.bytes().fold(0u32, |a, b| a.wrapping_add(b as u32)) % 6;
+                format!("{}{}", &state.region, char::from(b'a' + bucket as u8))
+            })
             .collect();
 
-        // Validate that subnets span at least 2 unique Availability Zones
         let unique_azs: std::collections::HashSet<_> = subnet_availability_zones.iter().collect();
         if unique_azs.len() < 2 {
             return Err(AwsServiceError::aws_error(
@@ -200,11 +208,14 @@ impl RdsService {
                 )
             })?;
 
-        let subnet_availability_zones: Vec<String> = (0..subnet_ids.len())
-            .map(|i| format!("{}{}", &region, char::from(b'a' + (i % 6) as u8)))
+        let subnet_availability_zones: Vec<String> = subnet_ids
+            .iter()
+            .map(|sid| {
+                let bucket = sid.bytes().fold(0u32, |a, b| a.wrapping_add(b as u32)) % 6;
+                format!("{}{}", &region, char::from(b'a' + bucket as u8))
+            })
             .collect();
 
-        // Validate that subnets span at least 2 unique Availability Zones
         let unique_azs: std::collections::HashSet<_> = subnet_availability_zones.iter().collect();
         if unique_azs.len() < 2 {
             return Err(AwsServiceError::aws_error(
