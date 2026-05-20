@@ -6,7 +6,7 @@ impl CognitoService {
     /// Mint and persist tokens for a CUSTOM_AUTH flow that DefineAuthChallenge
     /// resolved with `issueTokens: true` on the very first call (no challenge
     /// round-trip needed).
-    pub(crate) fn custom_auth_issue_tokens(
+    pub(super) fn custom_auth_issue_tokens(
         &self,
         pool_id: &str,
         client_id: &str,
@@ -94,7 +94,7 @@ impl CognitoService {
             .await
     }
 
-    pub(crate) async fn handle_auth_challenge_response(
+    pub(super) async fn handle_auth_challenge_response(
         &self,
         client_id: &str,
         challenge_name: &str,
@@ -118,7 +118,7 @@ impl CognitoService {
         }
     }
 
-    pub(crate) fn respond_new_password_required(
+    pub(super) fn respond_new_password_required(
         &self,
         client_id: &str,
         session: &str,
@@ -245,7 +245,7 @@ impl CognitoService {
         })))
     }
 
-    pub(crate) async fn respond_custom_challenge(
+    pub(super) async fn respond_custom_challenge(
         &self,
         client_id: &str,
         session: &str,
@@ -519,7 +519,7 @@ impl CognitoService {
     /// Mint and persist tokens for a CUSTOM_CHALLENGE round whose final
     /// DefineAuthChallenge response set `issueTokens: true`. Mirrors the
     /// success-path bookkeeping that USER_PASSWORD_AUTH does.
-    pub(crate) fn custom_challenge_issue_tokens(
+    pub(super) fn custom_challenge_issue_tokens(
         &self,
         pool_id: &str,
         client_id: &str,

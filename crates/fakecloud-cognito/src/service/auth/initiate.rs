@@ -136,7 +136,7 @@ impl CognitoService {
         }
     }
 
-    pub(crate) async fn initiate_user_password_auth(
+    pub(super) async fn initiate_user_password_auth(
         &self,
         body: &Value,
         client_id: &str,
@@ -452,7 +452,7 @@ impl CognitoService {
         })))
     }
 
-    pub(crate) async fn initiate_custom_auth(
+    pub(super) async fn initiate_custom_auth(
         &self,
         body: &Value,
         client_id: &str,
@@ -662,7 +662,7 @@ impl CognitoService {
         Ok(AwsResponse::ok_json(response))
     }
 
-    pub(crate) fn initiate_refresh_token_auth(
+    pub(super) fn initiate_refresh_token_auth(
         &self,
         body: &Value,
         client_id: &str,

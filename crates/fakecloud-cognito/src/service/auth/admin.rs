@@ -3,7 +3,7 @@
 use super::*;
 
 impl CognitoService {
-    pub(crate) fn admin_auth_lookup(
+    pub(super) fn admin_auth_lookup(
         &self,
         input: &AdminAuthInput,
         req: &AwsRequest,
@@ -78,7 +78,7 @@ impl CognitoService {
         })
     }
 
-    pub(crate) fn admin_auth_verify(
+    pub(super) fn admin_auth_verify(
         &self,
         input: &AdminAuthInput,
         region: &str,
