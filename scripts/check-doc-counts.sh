@@ -37,10 +37,16 @@ IDLE_MEM_MIB=10
 BINARY_MB=19
 
 # --- Lambda runtime count ---
-# Canonical source: website/content/docs/services/lambda.md ("27 runtimes").
-# When fakecloud-lambda gains/drops a runtime, update this constant and the
-# lambda.md page in the same PR.
-LAMBDA_RUNTIMES=27
+# Canonical source: `runtime_to_image()` in crates/fakecloud-lambda/src/runtime.rs.
+# That match expression is the actual list of supported runtimes — anything not
+# in it returns None and `CreateFunction` rejects it. Count it with:
+#
+#   grep -cE '^\s*"[a-z]+[0-9.]+[a-z]*"\s*=>' crates/fakecloud-lambda/src/runtime.rs
+#
+# (= 23 as of 2026-05-20). When fakecloud-lambda gains/drops a runtime, update
+# this constant, the runtime list in docs/services/lambda.md, and audit every
+# page in FILES in the same PR.
+LAMBDA_RUNTIMES=23
 
 # Canonical service count = row count in parity.md table.
 parity_services=$(awk '/^\| \[/ {n++} END{print n+0}' "$PARITY")

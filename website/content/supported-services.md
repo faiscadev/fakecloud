@@ -15,7 +15,7 @@ fakecloud provides 100% API conformance across 2,592 operations. Unlike mocks, f
 ## Supported Services
 
 ### Compute & Containers
-- **Lambda**: 70 operations. Full execution environment in real Docker containers across 27 runtimes, cross-service triggers (S3, SNS, SQS, EventBridge).
+- **Lambda**: 70 operations. Full execution environment in real Docker containers across 23 runtimes, cross-service triggers (S3, SNS, SQS, EventBridge).
 - **ECR**: 58 operations. Full OCI v2 Distribution protocol support for `docker push` and `docker pull`.
 - **ECS**: 76 operations. Real Fargate-style task execution via Docker, services with rolling deployments, ECS Exec.
 

@@ -1,6 +1,6 @@
 +++
 title = "Test Lambda locally"
-description = "Run AWS Lambda locally with real runtimes and real event triggers. 27 Lambda runtimes, real S3/SQS/SNS/EventBridge triggers, no account required."
+description = "Run AWS Lambda locally with real runtimes and real event triggers. 23 Lambda runtimes, real S3/SQS/SNS/EventBridge triggers, no account required."
 template = "page.html"
 +++
 
@@ -54,7 +54,7 @@ cat out.json
 
 | Tool | Runs function code | Multi-runtime | Cross-service triggers | Language | Free |
 |---|---|---|---|---|---|
-| fakecloud | Yes (Docker) | 27 runtimes | Yes (S3, SQS, SNS, EventBridge, DynamoDB Streams, API GW v2) | Any | Yes |
+| fakecloud | Yes (Docker) | 23 runtimes | Yes (S3, SQS, SNS, EventBridge, DynamoDB Streams, API GW v2) | Any | Yes |
 | SAM Local | Yes (Docker) | All AWS runtimes | Partial (synthetic events only) | Any | Yes |
 | LocalStack Community (post-Mar 2026) | Yes (Docker, auth required) | All | Yes | Any | No (auth token required) |
 | serverless-offline | Yes (in-process) | Node only | API Gateway only | Node | Yes |

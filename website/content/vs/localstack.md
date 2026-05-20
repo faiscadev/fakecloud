@@ -37,7 +37,7 @@ Since LocalStack replaced its open-source Community Edition with a proprietary i
 | ECR | 58 ops + real `docker push`/`pull` via OCI v2 | [Paid only](https://docs.localstack.cloud/references/licensing/) (and push is [flaky](https://github.com/localstack/localstack/issues/8128) when paid) | Yes |
 | Bedrock | 214 ops across Bedrock + Bedrock Runtime + Bedrock Agent + Bedrock Agent Runtime | Not available | Not available |
 | SCPs / multi-account | Yes (Organizations control plane + ceiling enforcement) | No | Partial |
-| Lambda real code execution | Yes (27 runtimes) | Paywall required | Yes |
+| Lambda real code execution | Yes (23 runtimes) | Paywall required | Yes |
 
 ## Approach difference
 

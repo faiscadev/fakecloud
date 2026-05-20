@@ -22,7 +22,7 @@ fakecloud is a different tool for a different problem.
 | Works with Terraform | Yes | **No** (Moto is in-process, Terraform runs as a separate binary) |
 | Works with CDK | Yes | **No** (same reason) |
 | Works with AWS CLI | Yes | **No** |
-| Real Lambda execution | Yes (27 runtimes, real containers) | **No** (stubbed responses) |
+| Real Lambda execution | Yes (23 runtimes, real containers) | **No** (stubbed responses) |
 | Real RDS databases | Yes (PostgreSQL/MySQL/MariaDB via Docker) | **No** (in-memory stubs) |
 | Real ElastiCache | Yes (Redis/Valkey/Memcached via Docker) | **No** |
 | Real `docker push`/`pull` to ECR | Yes (OCI v2 Distribution) | **No** (Moto ships the JSON control plane only) |
