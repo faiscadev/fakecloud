@@ -180,14 +180,20 @@ pub(super) fn parse_policy_effect(response: &serde_json::Value, method_arn: &str
     for stmt in stmts {
         let effect = stmt.get("Effect").and_then(|v| v.as_str()).unwrap_or("");
         // Resource matching: explicit ARN match, wildcard `*`, or
-        // missing Resource (treat as `*`).
+        // missing Resource (treat as `*`). Invalid Resource types
+        // (number, bool, null) are NOT treated as wildcard — that would
+        // let a malformed policy authorize requests instead of failing
+        // safe.
         let matches = match stmt.get("Resource") {
             Some(serde_json::Value::String(s)) => arn_matches(s, method_arn),
             Some(serde_json::Value::Array(arr)) => arr
                 .iter()
                 .filter_map(|v| v.as_str())
                 .any(|s| arn_matches(s, method_arn)),
-            _ => true,
+            // Missing Resource is interpreted as `*` (AWS default).
+            None => true,
+            // Wrong type — refuse to match. Caller sees Deny.
+            _ => false,
         };
         if !matches {
             continue;

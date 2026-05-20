@@ -365,19 +365,29 @@ fn extract_lambda_arn(uri: &str) -> Option<String> {
 
 /// Build the method ARN used in Lambda-authorizer policy documents.
 /// AWS format: `arn:aws:execute-api:<region>:<account-id>:<api-id>/<stage>/<method>/<path>`.
-fn build_method_arn(req: &AwsRequest, api_id: &str) -> String {
-    let stage = req
-        .path_segments
-        .first()
-        .map(|s| s.as_str())
-        .unwrap_or("$default");
-    let path = req
-        .path_segments
-        .iter()
-        .skip(1)
-        .map(|s| s.as_str())
-        .collect::<Vec<_>>()
-        .join("/");
+/// `stage` is passed in explicitly because the execute-api path
+/// (`/{stage}/{path}`) and the custom-domain path
+/// (`/{base-path}/{path}` -> resolved stage) need different sources of
+/// truth — falling back to `req.path_segments[0]` for custom domains
+/// would surface the route's first path segment as the stage.
+fn build_method_arn(req: &AwsRequest, api_id: &str, stage: &str) -> String {
+    let segments = if req.path_segments.first().map(|s| s.as_str()) == Some(stage) {
+        // execute-api: stage IS path_segments[0], so the remaining
+        // segments are the resource path.
+        req.path_segments
+            .iter()
+            .skip(1)
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+    } else {
+        // custom-domain: path_segments already contains only the
+        // resource path; stage was stripped before this fn ran.
+        req.path_segments
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+    };
+    let path = segments.join("/");
     format!(
         "arn:aws:execute-api:{}:{}:{}/{}/{}/{}",
         req.region,

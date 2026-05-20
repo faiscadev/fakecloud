@@ -1981,7 +1981,7 @@ async fn execute_api_lambda_authorizer_malformed_policy_no_resource() {
 #[test]
 fn build_method_arn_includes_method_and_no_double_slash() {
     let req = make_request(Method::GET, "/prod/pets", "");
-    let arn = build_method_arn(&req, "abc123");
+    let arn = build_method_arn(&req, "abc123", "prod");
     assert_eq!(
         arn,
         "arn:aws:execute-api:us-east-1:123456789012:abc123/prod/GET/pets"
@@ -1989,7 +1989,7 @@ fn build_method_arn_includes_method_and_no_double_slash() {
 
     // Empty path after stage should not produce trailing slash.
     let req2 = make_request(Method::GET, "/prod", "");
-    let arn2 = build_method_arn(&req2, "abc123");
+    let arn2 = build_method_arn(&req2, "abc123", "prod");
     assert_eq!(
         arn2,
         "arn:aws:execute-api:us-east-1:123456789012:abc123/prod/GET/"

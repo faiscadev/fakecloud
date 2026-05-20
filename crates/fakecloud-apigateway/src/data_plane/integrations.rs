@@ -296,7 +296,11 @@ pub(super) async fn aws_direct_integration(
         bad_gateway("AWS direct integration not available: service registry not yet populated")
     })?;
 
-    let parts: Vec<&str> = uri.split(':').collect();
+    // Split only the first 6 segments — the trailing one is `action/...`
+    // or `path/...` and can carry embedded `:` (e.g. Lambda ARNs). Naive
+    // `split(':').collect()` truncated those at the first colon and
+    // mis-routed the integration.
+    let parts: Vec<&str> = uri.splitn(6, ':').collect();
     if parts.len() < 6 || parts[0] != "arn" || parts[1] != "aws" || parts[2] != "apigateway" {
         return Err(bad_gateway(format!(
             "AWS integration uri not in expected ARN format: {uri}"

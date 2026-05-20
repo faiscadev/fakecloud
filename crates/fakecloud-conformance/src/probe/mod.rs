@@ -864,8 +864,9 @@ mod tests {
     }
 
     #[test]
-    fn classify_4xx_empty_error_shapes_lenient() {
-        // Op declares no errors (rare). Treat any AWS-shaped error as Pass.
+    fn classify_4xx_empty_error_shapes_strict() {
+        // Op declares NO errors. Any 4xx is undeclared, so surface it
+        // rather than silently passing.
         let body = r#"{"__type":"SomeException"}"#;
         let declared: Vec<String> = Vec::new();
         let result = classify_response(
@@ -877,7 +878,11 @@ mod tests {
             Some(&declared),
             "",
         );
-        assert_eq!(result.status, ProbeStatus::Pass);
+        assert!(
+            matches!(result.status, ProbeStatus::UnexpectedResult(_)),
+            "expected UnexpectedResult, got {:?}",
+            result.status
+        );
     }
 
     #[test]

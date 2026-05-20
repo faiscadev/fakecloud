@@ -70,7 +70,10 @@ pub(super) fn classify_success_expectation(
     // Op model unavailable (no model for this service or unknown op) -> any
     // AWS-shaped error counts as a handler response.
     if let Some(declared) = op_error_shapes {
-        if declared.is_empty() || matches_declared_error(&code, declared) {
+        // Empty declared list means the op declares *no* errors in its
+        // Smithy contract — anything 4xx/5xx is undeclared, so don't
+        // silently mark these as Pass.
+        if !declared.is_empty() && matches_declared_error(&code, declared) {
             ProbeStatus::Pass
         } else {
             ProbeStatus::UnexpectedResult(format!(
@@ -251,7 +254,10 @@ pub(super) fn classify_response(
             }
         }
         Expectation::Error(expected_code) => {
-            if body.contains(expected_code) {
+            // Don't accept a 2xx body that happens to contain the expected
+            // error string — the response is only valid as Error if the
+            // status code is actually an error status.
+            if http_status >= 400 && body.contains(expected_code) {
                 ProbeStatus::Pass
             } else if http_status >= 400 {
                 ProbeStatus::UnexpectedResult(format!(

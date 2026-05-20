@@ -378,7 +378,7 @@ impl ApiGatewayV2Service {
 
             // Authorizer enforcement
             let authorizer_info = self
-                .enforce_authorizer(&req, &api_id, &route_match.route)
+                .enforce_authorizer(&req, &api_id, &stage_name, &route_match.route)
                 .await?;
 
             // Get the integration for this route
