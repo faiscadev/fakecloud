@@ -67,6 +67,43 @@ cargo fmt --check                        # format check
 - Wait for required CI and Cubic checks before merging.
 - When merging PRs, prefer a normal merge commit via `gh pr merge` with no special flags.
 
+## Website And Docs Conventions
+
+The fakecloud website lives in `website/` (Zola static site). Evergreen claims, URLs, and code samples ship to the public site, so they need to match the real implementation. The `doc-counts` CI job (`scripts/check-doc-counts.sh`) validates service/operation/variant counts and performance metrics; it does not validate URL conventions, package names, or CLI surface, so the rules below catch what the script can't.
+
+### URL Structure
+
+- Comparison pages live at `/vs/<competitor>/` (`website/content/vs/<competitor>.md`). Do not introduce `/compare/`, `/comparison/`, `/alternatives/`, or other parallel prefixes.
+- Service emulator and "local service" landing pages live at the root (`/<service>-emulator/`, `/local-<service>/`, `/test-<service>-locally/`, `/fake-<service>/`). Do not introduce `/features/` or similar nested prefixes for the same content.
+- Documentation pages live under `/docs/` and follow the existing section layout (`about/`, `getting-started/`, `guides/`, `reference/`, `services/`, `sdks/`).
+- Blog posts live under `/blog/` and are point-in-time — do not retroactively update them. Use new posts to reflect new state instead of editing old ones.
+- Before adding a new landing page, search `website/content/` for an existing canonical page on the same topic and extend it rather than adding a parallel page. SEO works against fragmented pages on the same intent.
+
+### Real SDK Package Names
+
+Match what's published. Do not invent scoped names or alternative spellings.
+
+- TypeScript: `fakecloud` (npm) — see `sdks/typescript/package.json`
+- Python: `fakecloud` (PyPI) — see `sdks/python/pyproject.toml`
+- Go: `github.com/faiscadev/fakecloud/sdks/go` (Go module path) — see `sdks/go/go.mod`
+- PHP: `fakecloud/fakecloud` (Composer) — see `sdks/php/composer.json`
+- Java: group `dev.fakecloud` — see `sdks/java/build.gradle.kts`
+- Rust: crate `fakecloud-sdk` — see `crates/fakecloud-sdk/Cargo.toml`
+
+### Real CLI Surface
+
+The `fakecloud` binary has no subcommands. It accepts only flags. Do not document `fakecloud start`, `fakecloud stop`, `fakecloud reset`, or any other invented subcommand.
+
+Real flags (source of truth: `crates/fakecloud-server/src/cli.rs`): `--addr`, `--region`, `--account-id`, `--log-level`, `--storage-mode`, `--data-path`, `--s3-cache-size`, `--verify-sigv4`, `--iam`. Each has a matching `FAKECLOUD_*` env var.
+
+### Content Completeness
+
+Do not merge website pages that contain `[Full list of X...]`, `[...continuing for all N services...]`, `TODO`, or any other placeholder marker. Either ship complete content or keep the PR in draft. Per-service operation lists should be machine-generated from `website/aws-models/*.json` rather than hand-rolled.
+
+### Performance Claims
+
+Startup time, idle memory, and binary size are tracked as constants in `scripts/check-doc-counts.sh` (no in-repo source of truth). When re-measurement establishes a new number, update the constants and audit every page in the script's `FILES` array in the same PR. Do not introduce new performance claims unless they've been measured.
+
 ## AWS Protocol Notes
 
 - Query protocol (SQS, SNS, IAM, STS, CloudFormation, SES v1): form-encoded body, `Action` param, XML responses
