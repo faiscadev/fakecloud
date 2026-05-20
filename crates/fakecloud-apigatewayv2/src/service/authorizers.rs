@@ -316,6 +316,7 @@ impl ApiGatewayV2Service {
         &self,
         req: &AwsRequest,
         api_id: &str,
+        stage: &str,
         route: &Route,
     ) -> Result<Option<AuthorizerInfo>, AwsServiceError> {
         let authorizer_id = match &route.authorizer_id {
@@ -345,7 +346,7 @@ impl ApiGatewayV2Service {
         match authorizer.authorizer_type.as_str() {
             "JWT" => self.enforce_jwt_authorizer(req, &authorizer).await,
             "REQUEST" => {
-                self.enforce_lambda_authorizer(req, api_id, &authorizer)
+                self.enforce_lambda_authorizer(req, api_id, stage, &authorizer)
                     .await
             }
             _ => Err(AwsServiceError::aws_error(
@@ -475,6 +476,7 @@ impl ApiGatewayV2Service {
         &self,
         req: &AwsRequest,
         api_id: &str,
+        stage: &str,
         authorizer: &Authorizer,
     ) -> Result<Option<AuthorizerInfo>, AwsServiceError> {
         // Identity sources are optional for REQUEST authorizers.
@@ -509,7 +511,7 @@ impl ApiGatewayV2Service {
             )
         })?;
 
-        let method_arn = build_method_arn(req, api_id);
+        let method_arn = build_method_arn(req, api_id, stage);
 
         let mut headers = serde_json::Map::new();
         for (k, v) in req.headers.iter() {

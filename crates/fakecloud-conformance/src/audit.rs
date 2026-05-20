@@ -97,7 +97,7 @@ fn service_source_files(project_root: &Path) -> Vec<AuditMapping> {
         (
             "states",
             "stepfunctions",
-            &["service.rs"],
+            &["service/mod.rs", "service.rs"],
             &["states", "sfn"],
         ),
         ("scheduler", "scheduler", &["service.rs"], &["scheduler"]),
