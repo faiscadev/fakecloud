@@ -449,7 +449,8 @@ pub(super) fn rest_request_config(
             "CreateBucket" => (reqwest::Method::PUT, format!("/{}", BUCKET), None),
             "DeleteBucket" => (reqwest::Method::DELETE, format!("/{}", BUCKET), None),
             "HeadBucket" => (reqwest::Method::HEAD, format!("/{}", BUCKET), None),
-            "ListObjects" | "ListObjectsV2" => (
+            "ListObjects" => (reqwest::Method::GET, format!("/{}", BUCKET), None),
+            "ListObjectsV2" => (
                 reqwest::Method::GET,
                 format!("/{}", BUCKET),
                 Some("list-type=2".to_string()),

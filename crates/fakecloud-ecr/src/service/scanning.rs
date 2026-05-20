@@ -204,7 +204,15 @@ impl EcrService {
                     "repositoryArn": repo.repository_arn,
                     "repositoryName": n,
                     "scanOnPush": repo.image_scanning_configuration.scan_on_push,
-                    "scanFrequency": "SCAN_ON_PUSH",
+                    // Real ECR derives scanFrequency from the
+                    // repository's scanOnPush flag: SCAN_ON_PUSH when
+                    // set, MANUAL otherwise. Hardcoding SCAN_ON_PUSH
+                    // surfaced inconsistent responses.
+                    "scanFrequency": if repo.image_scanning_configuration.scan_on_push {
+                        "SCAN_ON_PUSH"
+                    } else {
+                        "MANUAL"
+                    },
                     "appliedScanFilters": [],
                 })),
                 None => failures.push(json!({

@@ -41,7 +41,13 @@ impl S3Service {
                 }
                 remaining = &after[end + 16..];
             } else {
-                break;
+                // Opening tag without a matching closer is malformed
+                // XML; reject instead of saving a half-parsed config.
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "MalformedXML",
+                    "The XML you provided was not well-formed or did not validate against our published schema",
+                ));
             }
         }
 

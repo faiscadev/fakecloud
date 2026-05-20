@@ -94,7 +94,10 @@ pub(super) fn extract_lambda_arn(uri: &str) -> Option<String> {
         return None;
     }
     let prefix = uri.split("/functions/").nth(1)?;
-    let arn = prefix.trim_end_matches("/invocations");
+    // Require the `/invocations` suffix explicitly. Without this check,
+    // a malformed URI like `.../functions/<arn>` resolved to the bare
+    // ARN and AWS-shaped 4xx wasn't surfaced.
+    let arn = prefix.strip_suffix("/invocations")?;
     Some(arn.to_string())
 }
 

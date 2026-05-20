@@ -305,12 +305,22 @@ impl AthenaService {
             .get("NextToken")
             .and_then(Value::as_str)
             .map(str::to_owned);
+        let state_filter = body
+            .get("StateFilter")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
         let mut state = self.state.write();
         let account = account_mut(&mut state, &req.account_id);
         let mut all: Vec<Session> = account
             .sessions
             .values()
             .filter(|s| s.work_group == work_group)
+            .filter(|s| {
+                state_filter
+                    .as_deref()
+                    .map(|sf| s.state == sf)
+                    .unwrap_or(true)
+            })
             .cloned()
             .collect();
         all.sort_by(|a, b| a.session_id.cmp(&b.session_id));
@@ -503,12 +513,22 @@ impl AthenaService {
             .get("NextToken")
             .and_then(Value::as_str)
             .map(str::to_owned);
+        let state_filter = body
+            .get("StateFilter")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
         let mut state = self.state.write();
         let account = account_mut(&mut state, &req.account_id);
         let mut all: Vec<Calculation> = account
             .calculations
             .values()
             .filter(|c| c.session_id == session_id)
+            .filter(|c| {
+                state_filter
+                    .as_deref()
+                    .map(|sf| c.state == sf)
+                    .unwrap_or(true)
+            })
             .cloned()
             .collect();
         all.sort_by(|a, b| a.calculation_execution_id.cmp(&b.calculation_execution_id));

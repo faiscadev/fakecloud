@@ -31,15 +31,35 @@ impl S3Service {
             .buckets
             .get_mut(bucket)
             .ok_or_else(|| no_such_bucket(bucket))?;
-        // Normalize: add BucketKeyEnabled=false to each Rule if missing
-        let normalized = if body_str.contains("<Rule>") && !body_str.contains("<BucketKeyEnabled>")
-        {
-            body_str.replace(
-                "</Rule>",
-                "<BucketKeyEnabled>false</BucketKeyEnabled></Rule>",
-            )
-        } else {
-            body_str
+        // Normalize: add BucketKeyEnabled=false to each <Rule> that
+        // is missing one. The prior whole-body check skipped this when
+        // a different rule already had BucketKeyEnabled, so mixed
+        // configs would drop the default on rules that needed it.
+        let normalized = {
+            let mut out = String::with_capacity(body_str.len() + 64);
+            let mut cursor = 0usize;
+            while let Some(start) = body_str[cursor..].find("<Rule>") {
+                let abs_start = cursor + start;
+                out.push_str(&body_str[cursor..abs_start]);
+                let rule_open = abs_start;
+                let rest = &body_str[rule_open..];
+                if let Some(end_rel) = rest.find("</Rule>") {
+                    let rule_block = &rest[..end_rel];
+                    let mut rule_out = rule_block.to_string();
+                    if !rule_block.contains("<BucketKeyEnabled>") {
+                        rule_out.push_str("<BucketKeyEnabled>false</BucketKeyEnabled>");
+                    }
+                    rule_out.push_str("</Rule>");
+                    out.push_str(&rule_out);
+                    cursor = rule_open + end_rel + "</Rule>".len();
+                } else {
+                    out.push_str(rest);
+                    cursor = body_str.len();
+                    break;
+                }
+            }
+            out.push_str(&body_str[cursor..]);
+            out
         };
         b.encryption_config = Some(normalized.clone());
         self.store

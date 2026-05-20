@@ -578,6 +578,12 @@ pub(super) fn compute_cidr_subnets(
     count: u32,
     cidr_bits: u32,
 ) -> Option<Vec<String>> {
+    // CloudFormation Fn::Cidr documents `count` in 1..=256. Reject
+    // out-of-range values before allocating to avoid oversized Vec
+    // construction on bad input.
+    if !(1..=256).contains(&count) {
+        return None;
+    }
     let (ip_str, prefix_str) = ip_block.split_once('/')?;
     let prefix: u32 = prefix_str.parse().ok()?;
     let ip: std::net::Ipv4Addr = ip_str.parse().ok()?;

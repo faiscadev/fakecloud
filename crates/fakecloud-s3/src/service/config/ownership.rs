@@ -9,7 +9,17 @@ impl S3Service {
         req: &AwsRequest,
         bucket: &str,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let body_str = std::str::from_utf8(&req.body).unwrap_or("").to_string();
+        // Reject non-UTF-8 bodies instead of silently coercing to ""
+        // and erasing the stored ownership config.
+        let body_str = std::str::from_utf8(&req.body)
+            .map_err(|_| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "MalformedXML",
+                    "PutBucketOwnershipControls body is not valid UTF-8",
+                )
+            })?
+            .to_string();
         let mut accts = self.state.write();
         let state = accts.get_or_create(account_id);
         let b = state
