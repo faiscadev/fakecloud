@@ -6,6 +6,9 @@ aliases = [
     "/compare/localstack/",
     "/comparison/localstack/",
     "/alternatives/localstack/",
+    "/blog/benchmarking-local-aws-500ms-startup-vs-cloud-dependent-mocks/",
+    "/blog/benchmarking-local-aws-emulators-fakecloud-vs-localstack-and-moto/",
+    "/blog/benchmarking-local-aws-emulators-500ms-vs-15s-startup-latency/",
 ]
 +++
 

@@ -2,6 +2,9 @@
 title = "How to test Lambda locally: the full guide for 2026"
 date = 2026-04-22
 description = "Run Lambda locally against a real runtime in seconds. Covers all 13 AWS Lambda runtimes, event source mappings, and cross-service triggers (S3, SQS, SNS, EventBridge). No mocks, no SAM, no account required."
+aliases = [
+    "/blog/testing-s3-and-lambda-a-guide-to-zero-auth-local-integration/",
+]
 
 [extra]
 author = "Lucas Vieira"

@@ -2,6 +2,9 @@
 title = "Integration testing AWS in GitHub Actions without mocks"
 date = 2026-04-22
 description = "Run real AWS integration tests in GitHub Actions, GitLab CI, and CircleCI with fakecloud. Copy-paste workflows for SQS, SNS, DynamoDB, Lambda, S3. No account, no auth token, no paid tier."
+aliases = [
+    "/blog/ci-cd-without-credentials-using-fakecloud-in-github-actions/",
+]
 
 [extra]
 author = "Lucas Vieira"

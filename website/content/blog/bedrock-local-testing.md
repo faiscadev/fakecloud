@@ -2,6 +2,10 @@
 title = "How to test Bedrock code locally, for free, deterministically"
 date = 2026-04-13
 description = "Testing code that calls Bedrock is painful: every run burns tokens, hits rate limits, and returns different text. Here's how to test Bedrock-calling code locally against fakecloud — deterministic responses, configurable per prompt, with fault injection for retry logic."
+aliases = [
+    "/blog/local-aws-bedrock-prototyping-genai-without-cloud-costs/",
+    "/blog/local-generative-ai-implementing-bedrock-with-fakecloud/",
+]
 
 [extra]
 author = "Lucas Vieira"

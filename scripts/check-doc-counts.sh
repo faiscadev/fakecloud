@@ -171,6 +171,9 @@ EXCEPTIONS=(
     "website/content/docs/about/conformance.md:services:7"
     # rhetorical comparison: "depth-first vs N services at 50%"
     "website/content/docs/about/what-it-is.md:services:100"
+    # vs/localstack.md aliases redirect legacy blog slugs that have "500ms" in
+    # the URL itself. They're URLs we have to match verbatim, not performance claims.
+    "website/content/vs/localstack.md:startup_ms:500"
 )
 
 is_exception() {

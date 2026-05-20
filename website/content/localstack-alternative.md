@@ -6,6 +6,8 @@ aliases = [
     "/alternative/localstack/",
     "/free-localstack-alternative/",
     "/localstack-free-alternative/",
+    "/blog/eliminating-aws-auth-friction-the-no-list-for-local-development/",
+    "/blog/the-no-list-why-fakecloud-requires-no-account-or-internet/",
 ]
 +++
 
