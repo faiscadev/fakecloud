@@ -1,7 +1,7 @@
 +++
 title = "LocalStack vs. fakecloud: Comparing Local AWS Development in May 2026"
 date = 2026-05-20
-description = "A technical comparison of LocalStack and fakecloud in May 2026, exploring the move to account-gated models and why fakecloud's zero-auth, Rust-based architecture is the preferred choice for local development."
+description = "A technical comparison of LocalStack and fakecloud, detailing the 2026 shift toward account-mandatory local development and how fakecloud provides a zero-friction, high-fidelity alternative."
 
 [extra]
 author = "Lucas Vieira"
@@ -32,7 +32,7 @@ In local development, latency is the primary enemy. A slow-starting emulator add
 | **License** | AGPL-3.0 | Proprietary |
 | **API Conformance** | 100% (per service) | Variable (Tier-dependent) |
 
-These numbers reflect a fundamental difference in architecture. LocalStack is a Python-based framework that orchestrates multiple containers and services. fakecloud is a single Rust binary that implements the AWS wire protocol directly. By removing the overhead of the Python runtime and container orchestration for the control plane, fakecloud achieves [sub-second startup times](/blog/benchmarking-local-aws-500ms-startup-vs-cloud-dependent-mocks/).
+These numbers reflect a fundamental difference in architecture. LocalStack is a Python-based framework that orchestrates multiple containers and services. fakecloud is a single Rust binary that implements the AWS wire protocol directly. By removing the overhead of the Python runtime and container orchestration for the control plane, fakecloud achieves sub-second startup times.
 
 ## The Auth-Free Advantage: Removing Friction
 
@@ -44,7 +44,7 @@ When you run fakecloud, you are the owner of the infrastructure. There are no CI
 
 To start the environment, you do not need to specify which services you want to enable. Unlike older emulators that required `-s s3,lambda,dynamodb` flags to conserve memory, fakecloud activates its entire service surface by default. Because the idle memory footprint is only 10 MiB, there is no performance penalty for having all 33+ services ready to accept requests.
 
-```sh
+```bash
 # Start the entire AWS environment locally
 fakecloud start
 ```
@@ -57,14 +57,14 @@ As of May 2026, fakecloud supports 33 AWS services with 100% API conformance acr
 
 ### Bedrock and AI Development
 
-For teams building agentic AI applications, fakecloud provides the most comprehensive local Bedrock implementation available. While other emulators may only mock the `InvokeModel` operation, fakecloud supports the full Bedrock surface, including 111 operations across the runtime and control plane. This includes:
+For teams building agentic AI applications, fakecloud provides the most comprehensive [local Bedrock implementation](/blog/bedrock-local-testing/) available. While other emulators may only mock the `InvokeModel` operation, fakecloud supports the full Bedrock surface, including 111 operations across the runtime and control plane. This includes:
 
 *   **InvokeModel and Converse:** Full support for streaming responses.
-*   **Guardrails:** Real content evaluation and [PII detection logic](/blog/bedrock-guardrails-local/).
+*   **Guardrails:** Real content evaluation and PII detection logic.
 *   **Knowledge Bases:** Integration with local OpenSearch or Vector engines.
 *   **Provisioned Throughput:** Emulated scaling and throttling behavior.
 
-This allows AI engineers to test their orchestration logic, prompt templates, and guardrail configurations without incurring per-token costs or waiting for cloud deployment cycles. Learn more in our guide to [local Bedrock testing](/blog/bedrock-local-testing/).
+This allows AI engineers to test their orchestration logic, prompt templates, and [guardrail configurations](/blog/bedrock-guardrails-local/) without incurring per-token costs or waiting for cloud deployment cycles.
 
 ### Real Stateful Backends
 
@@ -91,7 +91,7 @@ Testing against a local cloud often involves a lot of "polling and praying." You
 
 These SDKs allow you to make assertions directly against the emulator's internal state. Instead of calling the standard AWS SQS API to see if a message exists, you can use the fakecloud SDK to inspect the internal message bus and verify that the message was sent with the expected attributes.
 
-```ts
+```typescript
 import { FakecloudClient } from '@fakecloud/sdk-typescript';
 
 const fc = new FakecloudClient('http://localhost:4566');
@@ -115,7 +115,7 @@ If you are currently using a container-heavy setup, migrating to fakecloud is a 
 
 You can install the binary directly using a shell script or via package managers like Cargo.
 
-```sh
+```bash
 # Install the binary
 curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash
 
@@ -127,7 +127,7 @@ fakecloud start
 
 To use the AWS CLI with fakecloud, simply provide the `--endpoint-url` flag. You can use any string for the access key and secret key.
 
-```sh
+```bash
 export AWS_ACCESS_KEY_ID=fake
 export AWS_SECRET_ACCESS_KEY=fake
 export AWS_DEFAULT_REGION=us-east-1
@@ -139,8 +139,8 @@ aws --endpoint-url http://localhost:4566 s3 mb s3://my-test-bucket
 aws --endpoint-url http://localhost:4566 s3 ls
 ```
 
-For more permanent configurations, you can use the `aws-local` wrapper or set the `AWS_ENDPOINT_URL" environment variable, which is supported by most modern AWS SDKs as of 2025.
+For more permanent configurations, you can use the `aws-local` wrapper or set the `AWS_ENDPOINT_URL` environment variable, which is supported by most modern AWS SDKs as of 2025.
 
 ## Conclusion
 
-The shift toward proprietary, account-gated local development tools has created a clear need for open-source, high-performance alternatives. [fakecloud](https://github.com/faiscadev/fakecloud) meets this need by providing a standalone, 19MB binary that delivers 100% API conformance for 33+ AWS services without the friction of accounts or internet requirements. By focusing on the inner loop and providing sub-second startup times, fakecloud allows developers to reclaim their productivity and maintain fully local, deterministic testing workflows. To begin your migration, visit the [official documentation](https://github.com/faiscadev/fakecloud) and run the quick-start command to see the performance difference in your own environment.
+The shift toward proprietary, account-gated local development tools has created a clear need for open-source, high-performance alternatives. fakecloud meets this need by providing a standalone, 19MB binary that delivers 100% API conformance for 33+ AWS services without the friction of accounts or internet requirements. By focusing on the inner loop and providing sub-second startup times, fakecloud allows developers to reclaim their productivity and maintain fully local, deterministic testing workflows. To begin your migration, visit the [official documentation](https://github.com/faiscadev/fakecloud) and run the quick-start command to see the performance difference in your own environment.
