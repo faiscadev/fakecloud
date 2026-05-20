@@ -36,7 +36,7 @@ These are philosophies, not rankings. Breadth-first and depth-first are differen
 | Startup | ~300ms |
 | Idle memory | ~10 MiB |
 | Services covered today | 39 (2,592 ops) at true 100% conformance (86,327/86,327 variants), incl. ECR + ECS + ELBv2 |
-| Lambda execution | Real, 23 runtimes in Docker |
+| Lambda execution | Real, 27 runtimes in Docker |
 | RDS | Real PostgreSQL/MySQL/MariaDB via Docker |
 | ElastiCache | Real Redis/Valkey/Memcached via Docker |
 | Conformance methodology | Smithy-validated, 86,327/86,327 test variants pass on every commit |

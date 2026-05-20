@@ -31,7 +31,7 @@ This is why fakecloud runs real Lambda code in real runtime containers, runs rea
 - **39 AWS services.** S3, SQS, SNS, EventBridge, EventBridge Scheduler, Lambda, DynamoDB, IAM, STS, SSM, Secrets Manager, CloudWatch Logs, CloudWatch (Metrics & Alarms), KMS, CloudFormation, SES (v2 + v1 inbound), Cognito User Pools, Cognito Identity, Kinesis, Firehose, RDS, ElastiCache, Step Functions, API Gateway v1 (REST), API Gateway v2 (HTTP), Bedrock, Bedrock Agent, Bedrock Agent Runtime, Bedrock Runtime, ECR, ECS, Elastic Load Balancing v2, CloudFront, Route 53, WAF v2, Application Auto Scaling, Athena, ACM, Glue.
 - **2,592 API operations. True 100% conformance** across every implemented service — 86,327/86,327 Smithy-model-generated test variants pass on every commit.
 - **Tested against upstream Terraform acceptance tests.** CI runs `hashicorp/terraform-provider-aws` `TestAcc*` suites against fakecloud, catching waiter and field-presence drift that pure SDK tests miss.
-- **Real Lambda execution.** 23 runtimes in Docker containers. Not a mock, not a stub. Node, Python, Java, Go, .NET, Ruby, custom runtimes.
+- **Real Lambda execution.** 27 runtimes in Docker containers. Not a mock, not a stub. Node, Python, Java, Go, .NET, Ruby, custom runtimes.
 - **Real stateful services.** RDS runs real PostgreSQL/MySQL/MariaDB/Oracle/SQL Server/Db2. ElastiCache runs real Redis/Valkey/Memcached. Your Lambda talking to RDS is talking to a real Postgres (or Oracle, or SQL Server).
 - **Real cross-service wiring.** EventBridge -> Step Functions, S3 -> Lambda, SES inbound -> S3/SNS/Lambda, 15+ more end-to-end integrations.
 - **Fast.** ~300ms startup. ~10 MiB idle memory. ~19 MB binary. No Docker required to run fakecloud itself.
@@ -105,7 +105,7 @@ Yes. AGPL-3.0. Using fakecloud as a dev/test dependency has zero AGPL implicatio
 
 **How is fakecloud different from Moto?**
 
-Moto is a Python library that patches boto3 inside a test process. fakecloud is a real HTTP server that listens on port 4566 and speaks the AWS wire protocol. That means fakecloud works with any language and any SDK (Go, Java, Node, Rust, PHP), and it exercises real cross-service wiring (EventBridge -> Lambda, S3 -> SNS, etc) because the services are running in the same process. Moto doesn't execute Lambda code; fakecloud runs Lambda in real Docker containers across 23 runtimes.
+Moto is a Python library that patches boto3 inside a test process. fakecloud is a real HTTP server that listens on port 4566 and speaks the AWS wire protocol. That means fakecloud works with any language and any SDK (Go, Java, Node, Rust, PHP), and it exercises real cross-service wiring (EventBridge -> Lambda, S3 -> SNS, etc) because the services are running in the same process. Moto doesn't execute Lambda code; fakecloud runs Lambda in real Docker containers across 27 runtimes.
 
 **How is fakecloud different from SAM Local / serverless-offline?**
 

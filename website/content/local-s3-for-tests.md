@@ -121,7 +121,7 @@ aws --endpoint-url http://localhost:4566 s3api put-bucket-notification-configura
   }'
 ```
 
-Now `PutObject` fires the Lambda for real — not a stub. fakecloud runs Lambda code in real runtime containers across 23 runtimes. `CompleteMultipartUpload` fires its own `s3:ObjectCreated:CompleteMultipartUpload` event with the full-object checksum attached.
+Now `PutObject` fires the Lambda for real — not a stub. fakecloud runs Lambda code in real runtime containers across 27 runtimes. `CompleteMultipartUpload` fires its own `s3:ObjectCreated:CompleteMultipartUpload` event with the full-object checksum attached.
 
 ## Access Points, S3 Select, Object Lambda
 

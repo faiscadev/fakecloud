@@ -36,6 +36,12 @@ STARTUP_MS=300
 IDLE_MEM_MIB=10
 BINARY_MB=19
 
+# --- Lambda runtime count ---
+# Canonical source: website/content/docs/services/lambda.md ("27 runtimes").
+# When fakecloud-lambda gains/drops a runtime, update this constant and the
+# lambda.md page in the same PR.
+LAMBDA_RUNTIMES=27
+
 # Canonical service count = row count in parity.md table.
 parity_services=$(awk '/^\| \[/ {n++} END{print n+0}' "$PARITY")
 
@@ -111,6 +117,7 @@ echo "  startup_ms         = $STARTUP_MS (script constant)"
 echo "  idle_mem_mib       = $IDLE_MEM_MIB (script constant)"
 echo "  binary_mb          = $BINARY_MB (script constant)"
 echo "  bedrock surface    = $bedrock_ctrl + $bedrock_runtime + $bedrock_agent + $bedrock_agent_rt = $bedrock_family (parity.md rows)"
+echo "  lambda_runtimes    = $LAMBDA_RUNTIMES (script constant; canonical: docs/services/lambda.md)"
 echo
 
 # Files to check. Evergreen-only. Blog posts and dated marketing drafts excluded
@@ -219,6 +226,19 @@ for f in "${FILES[@]}"; do
             fail=1
         fi
     done < <(grep -oE "\b[0-9]+,[0-9]{3}\+? (Smithy[-a-z]* )?(generated )?(test )?variants\b" "$f" | grep -oE "^[0-9]+,[0-9]{3}" | sort -u)
+
+    # --- Lambda runtime-count claims ---
+    # Catches "23 runtimes", "27 runtimes", "X Lambda runtimes" — anywhere on
+    # a page that quotes how many runtimes fakecloud supports. Avoids matching
+    # "27 runtimes are supported by real AWS" by looking for the literal
+    # token "runtimes" right after the number.
+    while read -r hit; do
+        [ -z "$hit" ] && continue
+        if [ "$hit" != "$LAMBDA_RUNTIMES" ] && ! is_exception "$f" lambda_runtimes "$hit"; then
+            problems+=("$f: claims '$hit runtimes', expected $LAMBDA_RUNTIMES")
+            fail=1
+        fi
+    done < <(grep -oE '\b[0-9]+\s+runtimes\b' "$f" | grep -oE '^[0-9]+' | sort -u)
 
     # --- Startup time claims ---
     # Pulls every "~?Nms" / "~?N ms" / "<Nms" that appears on a line mentioning

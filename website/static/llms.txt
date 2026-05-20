@@ -7,7 +7,7 @@
 - **39 AWS services shipped today, 2,592 operations, true 100% Smithy conformance — 86,327/86,327 generated test variants pass on every commit**, no flake margin and no skipped services. More services land as they hit the conformance bar; roadmap is driven by real-project demand.
 - Services: S3, SQS, SNS, EventBridge, EventBridge Scheduler, Lambda, DynamoDB, IAM, STS, SSM, Secrets Manager, CloudWatch Logs, CloudWatch (Metrics & Alarms), KMS, CloudFormation, SES (v2 + v1 inbound), Cognito User Pools, Cognito Identity, Kinesis, Firehose, RDS, ElastiCache, Step Functions, API Gateway v1 (REST), API Gateway v2 (HTTP), Bedrock, Bedrock Agent, Bedrock Agent Runtime, Bedrock Runtime, ECR, ECS, Elastic Load Balancing v2, CloudFront, Route 53, WAF v2, Application Auto Scaling, Athena, ACM, Glue
 - 30+ cross-service integrations: S3 notifications, SNS fan-out, EventBridge rules, DynamoDB Streams, CloudWatch Logs subscriptions, Cognito triggers, API Gateway -> Lambda, Step Functions task integrations, SES inbound -> S3/SNS/Lambda, and more
-- Real Lambda execution via Docker across 13 runtimes (Node.js 18/20/22, Python 3.9-3.12, Java 11/17/21, .NET 6/8, Ruby 3.2, Go, custom `provided.al2` / `provided.al2023`)
+- Real Lambda execution via Docker across 27 runtimes (Node.js 16/18/20/22/24, Python 3.8/3.9/3.10/3.11/3.12/3.13/3.14, Java 11/17/21/25, Go 1.x, Ruby 3.2/3.3/3.4, .NET 6/8/10, custom `provided.al2` / `provided.al2023`)
 - Real stateful services: RDS runs real PostgreSQL/MySQL/MariaDB/Oracle/SQL Server/Db2 via Docker; ElastiCache runs real Redis/Valkey/Memcached via Docker
 - First-party test-assertion SDKs for TypeScript, Python, Go, PHP, Java, and Rust — assert on emails sent, SNS messages published, Lambda invocations, Cognito confirmation codes, etc. without raw HTTP
 - Multi-account, SCPs, ABAC (tag-based conditions), permission boundaries, session policies, KMS key policies, bucket policies — full Allow/Deny/NotPrincipal semantics
@@ -37,7 +37,7 @@
 - **SNS** (42 ops): topics, subscriptions, publishing, filter policies, SQS/Lambda/HTTP fan-out
 - **EventBridge** (57 ops): event buses, rules, targets, archives, replays, connections, API destinations, pattern matching
 - **EventBridge Scheduler** (12 ops): at/rate/cron schedules, SQS targets, DLQ routing, one-shot self-delete
-- **Lambda** (70 ops): function CRUD, real code execution via Docker across 23 runtimes, event source mappings (SQS, Kinesis, DynamoDB Streams), layers, versions, aliases, URL endpoints
+- **Lambda** (70 ops): function CRUD, real code execution via Docker across 27 runtimes, event source mappings (SQS, Kinesis, DynamoDB Streams), layers, versions, aliases, URL endpoints
 - **DynamoDB** (57 ops): tables, items, transactions, PartiQL, backups, global tables, streams
 - **IAM** (176 ops): users, roles, groups, policies, instance profiles, OIDC/SAML providers, MFA, permission boundaries, session policies, ABAC tag conditions
 - **STS** (11 ops): AssumeRole, AssumeRoleWithWebIdentity, GetSessionToken, GetCallerIdentity, session tags, external IDs, federation
