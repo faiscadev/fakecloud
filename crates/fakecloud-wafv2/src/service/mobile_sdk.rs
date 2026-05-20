@@ -43,11 +43,33 @@ impl Wafv2Service {
         validate_enum(&platform, &["IOS", "ANDROID"], "Platform")?;
         validate_opt_limit(&body)?;
         validate_opt_next_marker(&body)?;
-        Ok(AwsResponse::ok_json(json!({
-            "ReleaseSummaries": [
-                {"ReleaseVersion": "1.0.0", "Timestamp": Utc::now().timestamp() as f64},
-                {"ReleaseVersion": "1.1.0", "Timestamp": Utc::now().timestamp() as f64},
-            ],
-        })))
+        let limit = body.get("Limit").and_then(Value::as_u64).unwrap_or(100) as usize;
+        let next_marker = body.get("NextMarker").and_then(Value::as_str).unwrap_or("");
+        let all = vec![
+            json!({"ReleaseVersion": "1.0.0", "Timestamp": Utc::now().timestamp() as f64}),
+            json!({"ReleaseVersion": "1.1.0", "Timestamp": Utc::now().timestamp() as f64}),
+        ];
+        let start = if next_marker.is_empty() {
+            0
+        } else {
+            all.iter()
+                .position(|r| r.get("ReleaseVersion").and_then(Value::as_str) == Some(next_marker))
+                .map(|p| p + 1)
+                .unwrap_or(0)
+        };
+        let page: Vec<Value> = all.iter().skip(start).take(limit).cloned().collect();
+        let next = if start + page.len() < all.len() {
+            page.last()
+                .and_then(|r| r.get("ReleaseVersion"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        } else {
+            None
+        };
+        let mut out = json!({ "ReleaseSummaries": page });
+        if let Some(n) = next {
+            out["NextMarker"] = json!(n);
+        }
+        Ok(AwsResponse::ok_json(out))
     }
 }

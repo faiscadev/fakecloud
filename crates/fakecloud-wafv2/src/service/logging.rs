@@ -79,8 +79,10 @@ impl Wafv2Service {
                 "LogScope",
             )?;
         }
+        let limit = body.get("Limit").and_then(Value::as_u64).unwrap_or(100) as usize;
+        let next_marker = body.get("NextMarker").and_then(Value::as_str).unwrap_or("");
         let state = self.state.read();
-        let configs: Vec<Value> = state
+        let mut all: Vec<Value> = state
             .accounts
             .get(&req.account_id)
             .map(|a| {
@@ -96,8 +98,32 @@ impl Wafv2Service {
                     .collect()
             })
             .unwrap_or_default();
-        Ok(AwsResponse::ok_json(json!({
-            "LoggingConfigurations": configs,
-        })))
+        all.sort_by(|a, b| {
+            let a_arn = a.get("ResourceArn").and_then(Value::as_str).unwrap_or("");
+            let b_arn = b.get("ResourceArn").and_then(Value::as_str).unwrap_or("");
+            a_arn.cmp(b_arn)
+        });
+        let start = if next_marker.is_empty() {
+            0
+        } else {
+            all.iter()
+                .position(|c| c.get("ResourceArn").and_then(Value::as_str) == Some(next_marker))
+                .map(|p| p + 1)
+                .unwrap_or(0)
+        };
+        let page: Vec<Value> = all.iter().skip(start).take(limit).cloned().collect();
+        let next = if start + page.len() < all.len() {
+            page.last()
+                .and_then(|c| c.get("ResourceArn"))
+                .and_then(Value::as_str)
+                .map(|s| s.to_string())
+        } else {
+            None
+        };
+        let mut out = json!({ "LoggingConfigurations": page });
+        if let Some(n) = next {
+            out["NextMarker"] = json!(n);
+        }
+        Ok(AwsResponse::ok_json(out))
     }
 }

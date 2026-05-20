@@ -41,11 +41,16 @@ impl Wafv2Service {
     pub(super) fn delete_api_key(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         let api_key = require_str(&body, "APIKey")?;
-        let _scope = require_scope(&body)?;
+        let scope = require_scope(&body)?;
         let mut state = self.state.write();
         let account = account_mut(&mut state, &req.account_id);
-        if account.api_keys.remove(&api_key).is_none() {
-            return Err(not_found("APIKey"));
+        // Check the stored key's scope matches BEFORE removal. A
+        // CLOUDFRONT-scoped request shouldn't delete a REGIONAL key.
+        match account.api_keys.get(&api_key) {
+            Some(k) if k.scope == scope => {
+                account.api_keys.remove(&api_key);
+            }
+            _ => return Err(not_found("APIKey")),
         }
         Ok(AwsResponse::ok_json(json!({})))
     }

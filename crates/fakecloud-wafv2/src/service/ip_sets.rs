@@ -47,7 +47,7 @@ impl Wafv2Service {
         let name = require_str_len(&body, "Name", 1, 128)?;
         let scope = require_scope(&body)?;
         // Id is required (Smithy @required) and must be a length(1, 36) string.
-        let _id = require_str_len(&body, "Id", 1, 36)?;
+        let id = require_str_len(&body, "Id", 1, 36)?;
         let state = self.state.read();
         let set = state
             .accounts
@@ -55,6 +55,9 @@ impl Wafv2Service {
             .and_then(|a| a.ip_sets.get(&(scope, name)))
             .ok_or_else(|| not_found("IPSet"))?
             .clone();
+        if set.id != id {
+            return Err(not_found("IPSet"));
+        }
         Ok(AwsResponse::ok_json(json!({
             "IPSet": ip_set_detail_json(&set),
             "LockToken": set.lock_token,

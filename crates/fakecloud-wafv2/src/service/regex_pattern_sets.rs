@@ -63,7 +63,7 @@ impl Wafv2Service {
         let body = req.json_body();
         let name = require_str_len(&body, "Name", 1, 128)?;
         let scope = require_scope(&body)?;
-        let _id = require_str_len(&body, "Id", 1, 36)?;
+        let id = require_str_len(&body, "Id", 1, 36)?;
         let state = self.state.read();
         let set = state
             .accounts
@@ -71,6 +71,9 @@ impl Wafv2Service {
             .and_then(|a| a.regex_pattern_sets.get(&(scope, name)))
             .ok_or_else(|| not_found("RegexPatternSet"))?
             .clone();
+        if set.id != id {
+            return Err(not_found("RegexPatternSet"));
+        }
         Ok(AwsResponse::ok_json(json!({
             "RegexPatternSet": regex_set_detail_json(&set),
             "LockToken": set.lock_token,
