@@ -9,6 +9,26 @@ use helpers::TestServer;
 
 use aws_sdk_cognitoidentityprovider::types::{PasswordPolicyType, UserPoolPolicyType};
 
+async fn fetch_confirmation_code(server: &TestServer, pool_id: &str, username: &str) -> String {
+    let url = format!(
+        "{}/_fakecloud/cognito/confirmation-codes/{}/{}",
+        server.endpoint(),
+        pool_id,
+        username,
+    );
+    reqwest::Client::new()
+        .get(&url)
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap()["confirmationCode"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no confirmationCode for {pool_id}/{username}"))
+        .to_string()
+}
+
 /// Percent-encode a URL component for inline query-string assembly.
 /// We don't pull in the `urlencoding` crate just for tests — RFC 3986
 /// unreserved set is enough for the values we care about (URLs, JWTs,
@@ -106,7 +126,7 @@ async fn cognito_oauth2_authorize_code_flow_round_trip() {
         .confirm_sign_up()
         .client_id(&client_id)
         .username("alice")
-        .confirmation_code("123456")
+        .confirmation_code(fetch_confirmation_code(&server, &pool_id, "alice").await)
         .send()
         .await
         .expect("confirm");
@@ -235,7 +255,7 @@ async fn cognito_oauth2_authorize_implicit_flow_returns_fragment_tokens() {
         .confirm_sign_up()
         .client_id(&client_id)
         .username("bob")
-        .confirmation_code("123456")
+        .confirmation_code(fetch_confirmation_code(&server, &pool_id, "bob").await)
         .send()
         .await
         .expect("confirm");
@@ -491,7 +511,7 @@ async fn cognito_oauth2_authorize_bad_password_redirects_access_denied() {
         .confirm_sign_up()
         .client_id(&client_id)
         .username("carol")
-        .confirmation_code("123456")
+        .confirmation_code(fetch_confirmation_code(&server, &pool_id, "carol").await)
         .send()
         .await
         .expect("confirm");
@@ -577,7 +597,7 @@ async fn cognito_oauth2_authorize_with_pkce_round_trips_to_token() {
         .confirm_sign_up()
         .client_id(&client_id)
         .username("dave")
-        .confirmation_code("123456")
+        .confirmation_code(fetch_confirmation_code(&server, &pool_id, "dave").await)
         .send()
         .await
         .expect("confirm");
