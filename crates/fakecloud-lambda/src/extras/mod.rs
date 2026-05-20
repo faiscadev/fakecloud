@@ -1035,6 +1035,12 @@ fn extract_csc_id(input: &str) -> String {
     decoded.rsplit(':').next().unwrap_or(&decoded).to_string()
 }
 
+/// Re-export of `percent_decode` for the service-mod length check.
+/// Wraps the private helper without changing its signature.
+pub(crate) fn percent_decode_for_length(input: &str) -> String {
+    percent_decode(input)
+}
+
 fn percent_decode(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     let bytes = input.as_bytes();

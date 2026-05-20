@@ -119,12 +119,23 @@ impl LambdaService {
                         }
                         Ok(None) => break,
                         Err(e) => {
+                            // Stream-invoke contract: errors are encoded
+                            // in-stream as a terminal InvokeComplete frame
+                            // with HTTP 200. Returning HTTP 500 here breaks
+                            // SDK parsers expecting that envelope.
                             tracing::error!(function = %function_name, error = %e, "Lambda streaming chunk read failed");
-                            return Err(AwsServiceError::aws_error(
-                                StatusCode::INTERNAL_SERVER_ERROR,
-                                "ServiceException",
-                                format!("Lambda streaming read failed: {e}"),
+                            let detail = format!("Lambda streaming read failed: {e}");
+                            frames.extend_from_slice(&crate::eventstream::invoke_complete_frame(
+                                Some("Runtime.StreamReadFailure"),
+                                Some(&detail),
+                                "",
                             ));
+                            return Ok(AwsResponse {
+                                status: StatusCode::OK,
+                                headers: http::HeaderMap::new(),
+                                body: bytes::Bytes::from(frames).into(),
+                                content_type: "application/vnd.amazon.eventstream".to_string(),
+                            });
                         }
                     }
                 }
