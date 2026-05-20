@@ -27,7 +27,7 @@ Engineering pragmatism dictates that a tool should not be harder to manage than 
 *   **No auth tokens:** There are no `LOCALSTACK_AUTH_TOKEN` environment variables to manage or rotate.
 *   **No internet connection:** The binary is fully self-contained. You can develop on a plane, in a secure air-gapped environment, or during a network outage.
 *   **No paid subscriptions:** The local development environment is open-source under the AGPL-3.0 license.
-*   **No 1GB+ Docker images:** The entire fakecloud environment is delivered as a ~32 MB compressed download (~85 MB unpacked binary) with a [sub-second startup time](/blog/benchmarking-local-aws-500ms-startup-vs-cloud-dependent-mocks/).
+*   **No 1GB+ Docker images:** The entire fakecloud environment is delivered as a ~32 MB compressed download (~85 MB unpacked binary) with a sub-second startup time.
 
 ## 100% Conformance Across 2,591 Operations
 
