@@ -1,0 +1,111 @@
+//! probe `service_detection` (audit-2026-05-19).
+
+use super::*;
+
+/// Map service names to their protocol.
+pub(super) fn service_protocol(service_name: &str) -> Protocol {
+    match service_name {
+        "sqs" => Protocol::Query,
+        "sns" => Protocol::Query,
+        "iam" => Protocol::Query,
+        "sts" => Protocol::Query,
+        "cloudformation" => Protocol::Query,
+        "ssm" => Protocol::Json {
+            target_prefix: "AmazonSSM",
+        },
+        "events" => Protocol::Json {
+            target_prefix: "AWSEvents",
+        },
+        "dynamodb" => Protocol::Json {
+            target_prefix: "DynamoDB_20120810",
+        },
+        "dynamodbstreams" => Protocol::Json {
+            target_prefix: "DynamoDBStreams_20120810",
+        },
+        "secretsmanager" => Protocol::Json {
+            target_prefix: "secretsmanager",
+        },
+        "logs" => Protocol::Json {
+            target_prefix: "Logs_20140328",
+        },
+        "kms" => Protocol::Json {
+            target_prefix: "TrentService",
+        },
+        "cognito-idp" => Protocol::Json {
+            target_prefix: "AWSCognitoIdentityProviderService",
+        },
+        "cognito-identity" => Protocol::Json {
+            target_prefix: "AWSCognitoIdentityService",
+        },
+        "kinesis" => Protocol::Json {
+            target_prefix: "Kinesis_20131202",
+        },
+        "ecr" => Protocol::Json {
+            target_prefix: "AmazonEC2ContainerRegistry_V20150921",
+        },
+        "ecs" => Protocol::Json {
+            target_prefix: "AmazonEC2ContainerServiceV20141113",
+        },
+        // Smithy service_name for Step Functions is `states`; SDK calls it SFN.
+        "states" => Protocol::Json {
+            target_prefix: "AWSStepFunctions",
+        },
+        "organizations" => Protocol::Json {
+            target_prefix: "AWSOrganizationsV20161128",
+        },
+        "acm" => Protocol::Json {
+            target_prefix: "CertificateManager",
+        },
+        "application-autoscaling" => Protocol::Json {
+            target_prefix: "AnyScaleFrontendService",
+        },
+        "wafv2" => Protocol::Json {
+            target_prefix: "AWSWAF_20190729",
+        },
+        "athena" => Protocol::Json {
+            target_prefix: "AmazonAthena",
+        },
+        "firehose" => Protocol::Json {
+            target_prefix: "Firehose_20150804",
+        },
+        "glue" => Protocol::Json {
+            target_prefix: "AWSGlue",
+        },
+        "s3" => Protocol::Rest,
+        "lambda" => Protocol::Rest,
+        // API Gateway v1 (REST APIs) and v2 (HTTP APIs) are separate
+        // Smithy models with distinct `service_name` entries in
+        // `service-map.json`. fakecloud's facade routes both behind the
+        // single SigV4 service identifier `apigateway`, but probing
+        // keeps them separate. restJson1 wire format for both.
+        "apigateway" | "apigatewayv1" | "apigatewayv2" => Protocol::Rest,
+        // restJson1 services — REST routing with @http traits + JSON bodies.
+        "ses" => Protocol::Rest,
+        "bedrock" => Protocol::Rest,
+        "bedrock-runtime" => Protocol::Rest,
+        "bedrock-agent" => Protocol::Rest,
+        "bedrock-agent-runtime" => Protocol::Rest,
+        "scheduler" => Protocol::Rest,
+        // REST-XML services — distinct wire format from restJson1 but the
+        // probe uses the same `@http` trait-driven URL builder for both
+        // and reads response bodies as opaque text.
+        "route53" => Protocol::Rest,
+        "cloudfront" => Protocol::Rest,
+        // awsQuery services — RDS, ElastiCache, ELBv2 — explicitly listed
+        // for clarity instead of relying on the default fall-through.
+        "rds" => Protocol::Query,
+        "elasticache" => Protocol::Query,
+        "elasticloadbalancing" => Protocol::Query,
+        _ => Protocol::Query,
+    }
+}
+
+/// Services whose wire format is awsJson1.x but which carry the
+/// `aws.protocols#awsQueryCompatible` trait, so their `__type` values
+/// follow the awsQuery `<Code>` convention (preserved for legacy
+/// SDK compatibility). The shape-level `awsQueryError` trait is the
+/// authoritative wire code for these services even though they speak
+/// JSON. Currently SQS is the only such service in the vendored models.
+pub(super) fn is_aws_query_compatible_service(service_name: &str) -> bool {
+    matches!(service_name, "sqs")
+}
