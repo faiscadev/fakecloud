@@ -49,15 +49,21 @@ impl Wafv2Service {
             json!({"ReleaseVersion": "1.0.0", "Timestamp": Utc::now().timestamp() as f64}),
             json!({"ReleaseVersion": "1.1.0", "Timestamp": Utc::now().timestamp() as f64}),
         ];
+        // Unknown NextMarker should yield an empty page, not silently
+        // restart from offset 0 — falling back duplicates results when
+        // the caller resumes from a stale token.
         let start = if next_marker.is_empty() {
-            0
+            Some(0usize)
         } else {
             all.iter()
                 .position(|r| r.get("ReleaseVersion").and_then(Value::as_str) == Some(next_marker))
                 .map(|p| p + 1)
-                .unwrap_or(0)
         };
-        let page: Vec<Value> = all.iter().skip(start).take(limit).cloned().collect();
+        let page: Vec<Value> = match start {
+            Some(s) => all.iter().skip(s).take(limit).cloned().collect(),
+            None => Vec::new(),
+        };
+        let start = start.unwrap_or(all.len());
         let next = if start + page.len() < all.len() {
             page.last()
                 .and_then(|r| r.get("ReleaseVersion"))

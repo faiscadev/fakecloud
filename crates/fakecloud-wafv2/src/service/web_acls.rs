@@ -358,10 +358,14 @@ impl Wafv2Service {
                         // returned ARNs to that family. Without this
                         // filter, listing ALB resources also returns
                         // associated APIGW/AppSync/Amplify ARNs.
-                        resource_type
+                        // AWS defaults ResourceType to
+                        // APPLICATION_LOAD_BALANCER when omitted —
+                        // returning every resource type would surface
+                        // ARNs callers didn't ask for.
+                        let rt = resource_type
                             .as_deref()
-                            .map(|rt| resource_arn_matches_type(k, rt))
-                            .unwrap_or(true)
+                            .unwrap_or("APPLICATION_LOAD_BALANCER");
+                        resource_arn_matches_type(k, rt)
                     })
                     .map(|(k, _)| k.clone())
                     .collect()
