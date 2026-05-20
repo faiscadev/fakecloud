@@ -658,7 +658,7 @@ impl SqsService {
 
         // Now swap response bodies in to plaintext.
         if !plaintext_bodies.is_empty() {
-            for (msg, plaintext) in received.iter_mut().zip(plaintext_bodies.into_iter()) {
+            for (msg, plaintext) in received.iter_mut().zip(plaintext_bodies) {
                 msg.body = plaintext;
             }
         }
