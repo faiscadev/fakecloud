@@ -473,7 +473,7 @@ impl Wafv2Service {
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         let acl_arn = require_str(&body, "WebACLArn")?;
-        let _lock_token = require_str(&body, "WebACLLockToken")?;
+        let lock_token = require_str(&body, "WebACLLockToken")?;
         let mut state = self.state.write();
         let account = account_mut(&mut state, &req.account_id);
         let acl = account
@@ -481,6 +481,13 @@ impl Wafv2Service {
             .values_mut()
             .find(|a| a.arn == acl_arn)
             .ok_or_else(|| not_found("WebACL"))?;
+        if acl.lock_token != lock_token {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "WAFOptimisticLockException",
+                "Lock token stale; refetch the WebACL and retry",
+            ));
+        }
         acl.pre_process_firewall_manager_rule_groups.clear();
         acl.post_process_firewall_manager_rule_groups.clear();
         acl.lock_token = synth_uuid();

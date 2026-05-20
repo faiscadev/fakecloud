@@ -43,11 +43,39 @@ impl Wafv2Service {
         validate_enum(&platform, &["IOS", "ANDROID"], "Platform")?;
         validate_opt_limit(&body)?;
         validate_opt_next_marker(&body)?;
-        Ok(AwsResponse::ok_json(json!({
-            "ReleaseSummaries": [
-                {"ReleaseVersion": "1.0.0", "Timestamp": Utc::now().timestamp() as f64},
-                {"ReleaseVersion": "1.1.0", "Timestamp": Utc::now().timestamp() as f64},
-            ],
-        })))
+        let limit = body.get("Limit").and_then(Value::as_u64).unwrap_or(100) as usize;
+        let next_marker = body.get("NextMarker").and_then(Value::as_str).unwrap_or("");
+        let all = [
+            json!({"ReleaseVersion": "1.0.0", "Timestamp": Utc::now().timestamp() as f64}),
+            json!({"ReleaseVersion": "1.1.0", "Timestamp": Utc::now().timestamp() as f64}),
+        ];
+        // Unknown NextMarker should yield an empty page, not silently
+        // restart from offset 0 — falling back duplicates results when
+        // the caller resumes from a stale token.
+        let start = if next_marker.is_empty() {
+            Some(0usize)
+        } else {
+            all.iter()
+                .position(|r| r.get("ReleaseVersion").and_then(Value::as_str) == Some(next_marker))
+                .map(|p| p + 1)
+        };
+        let page: Vec<Value> = match start {
+            Some(s) => all.iter().skip(s).take(limit).cloned().collect(),
+            None => Vec::new(),
+        };
+        let start = start.unwrap_or(all.len());
+        let next = if start + page.len() < all.len() {
+            page.last()
+                .and_then(|r| r.get("ReleaseVersion"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        } else {
+            None
+        };
+        let mut out = json!({ "ReleaseSummaries": page });
+        if let Some(n) = next {
+            out["NextMarker"] = json!(n);
+        }
+        Ok(AwsResponse::ok_json(out))
     }
 }
