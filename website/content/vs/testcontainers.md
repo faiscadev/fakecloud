@@ -44,7 +44,7 @@ container, _ := testcontainers.GenericContainer(ctx, testcontainers.GenericConta
 
 ## When to use fakecloud standalone (no Testcontainers)
 
-- Simple CI setup — install-and-run is ~500ms vs ~2-3s container boot.
+- Simple CI setup — install-and-run is ~300ms vs ~2-3s container boot.
 - Local dev where you don't need per-test container throwaway.
 - Single-service CI jobs.
 
