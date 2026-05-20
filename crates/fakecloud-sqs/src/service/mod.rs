@@ -356,7 +356,37 @@ async fn run_message_move_task(
     dlq_targets: Vec<String>,
     interval: std::time::Duration,
     cancel_flag: Arc<AtomicBool>,
+    snapshot_store: Option<Arc<dyn SnapshotStore>>,
+    snapshot_lock: Arc<AsyncMutex<()>>,
 ) {
+    // Persist current state through the same code path SqsService::save_snapshot
+    // uses. The background loop mutates queues outside any handler, so callers
+    // can't trigger a save on its behalf — failing to checkpoint here means
+    // moved messages and task progress are silently rolled back after restart.
+    async fn checkpoint(
+        state_handle: &SharedSqsState,
+        snapshot_store: &Option<Arc<dyn SnapshotStore>>,
+        snapshot_lock: &Arc<AsyncMutex<()>>,
+    ) {
+        let Some(store) = snapshot_store.clone() else {
+            return;
+        };
+        let _guard = snapshot_lock.lock().await;
+        let snapshot = SqsSnapshot {
+            schema_version: SQS_SNAPSHOT_SCHEMA_VERSION,
+            accounts: Some(state_handle.read().clone()),
+            state: None,
+        };
+        let join = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+            let bytes = serde_json::to_vec(&snapshot)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+            store.save(&bytes)
+        })
+        .await;
+        if let Ok(Err(err)) = join {
+            tracing::warn!(%err, "background message-move snapshot save failed");
+        }
+    }
     enum Step {
         Moved,
         SourceDrained,
@@ -459,6 +489,7 @@ async fn run_message_move_task(
 
         match step {
             Step::Moved => {
+                checkpoint(&state_handle, &snapshot_store, &snapshot_lock).await;
                 tokio::time::sleep(interval).await;
             }
             Step::SourceDrained => {
@@ -469,6 +500,7 @@ async fn run_message_move_task(
                     &task_handle,
                     MessageMoveTaskStatus::Completed,
                 );
+                checkpoint(&state_handle, &snapshot_store, &snapshot_lock).await;
                 return;
             }
             Step::Failed => {
@@ -479,6 +511,7 @@ async fn run_message_move_task(
                     &task_handle,
                     MessageMoveTaskStatus::Failed,
                 );
+                checkpoint(&state_handle, &snapshot_store, &snapshot_lock).await;
                 return;
             }
         }
