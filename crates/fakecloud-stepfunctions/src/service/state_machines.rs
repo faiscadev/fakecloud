@@ -386,6 +386,23 @@ impl StepFunctionsService {
             .rsplit_once(':')
             .map(|(parent, _)| parent.to_string())
             .unwrap_or_default();
+        // All routed versions must belong to the same state machine.
+        // Otherwise an alias could mix versions of two different
+        // workflows, which AWS rejects with InvalidArn.
+        for route in &routes[1..] {
+            let other_parent = route
+                .state_machine_version_arn
+                .rsplit_once(':')
+                .map(|(p, _)| p.to_string())
+                .unwrap_or_default();
+            if other_parent != parent_arn {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidArn",
+                    "routingConfiguration entries must all reference versions of the same state machine",
+                ));
+            }
+        }
         let alias_arn = format!("{parent_arn}:{name}");
         let now = chrono::Utc::now();
         let alias = crate::state::StateMachineAlias {

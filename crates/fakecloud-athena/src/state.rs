@@ -151,6 +151,10 @@ pub struct Notebook {
 pub struct Session {
     pub session_id: String,
     pub work_group: String,
+    /// Notebook that started this session, when StartSession was called
+    /// with a NotebookId. `None` for ad-hoc work-group sessions.
+    #[serde(default)]
+    pub notebook_id: Option<String>,
     pub description: Option<String>,
     pub engine_version: Option<String>,
     pub state: String,
