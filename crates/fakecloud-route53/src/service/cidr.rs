@@ -331,7 +331,7 @@ impl Route53Service {
         fn decode_token(t: &str) -> Option<(&str, &str)> {
             let (len_str, rest) = t.split_once(':')?;
             let loc_len: usize = len_str.parse().ok()?;
-            if rest.len() < loc_len + 1 {
+            if rest.len() < loc_len + 1 || !rest.is_char_boundary(loc_len) {
                 return None;
             }
             let (loc, after) = rest.split_at(loc_len);
