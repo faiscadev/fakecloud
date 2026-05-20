@@ -275,7 +275,19 @@ impl AwsService for DynamoDbService {
     }
 
     async fn handle(&self, req: AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        let mutates = is_mutating_request(req.action.as_str(), &req.json_body());
+        // Avoid parsing the body for ops where the action alone tells us
+        // they mutate (or don't). Only PartiQL ops need statement
+        // inspection.
+        let mutates = if is_mutating_action(req.action.as_str()) {
+            true
+        } else if matches!(
+            req.action.as_str(),
+            "ExecuteStatement" | "BatchExecuteStatement" | "ExecuteTransaction"
+        ) {
+            is_mutating_request(req.action.as_str(), &req.json_body())
+        } else {
+            false
+        };
         let result = match req.action.as_str() {
             "CreateTable" => self.create_table(&req),
             "DeleteTable" => self.delete_table(&req),
