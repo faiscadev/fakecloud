@@ -24,16 +24,26 @@ fn service_source_files(project_root: &Path) -> Vec<AuditMapping> {
     // For each service, try both `src/<name>.rs` and `src/<name>/mod.rs` to
     // handle services that have been split into sub-module directories.
     let mappings: &[(&str, &str, &[&str], &[&str])] = &[
-        ("sqs", "sqs", &["service.rs"], &["sqs"]),
-        ("sns", "sns", &["service.rs"], &["sns"]),
-        ("events", "eventbridge", &["service.rs"], &["events"]),
+        ("sqs", "sqs", &["service/mod.rs", "service.rs"], &["sqs"]),
+        ("sns", "sns", &["service/mod.rs", "service.rs"], &["sns"]),
+        (
+            "events",
+            "eventbridge",
+            &["service/mod.rs", "service.rs"],
+            &["events"],
+        ),
         (
             "iam",
             "iam",
             &["iam_service/mod.rs", "iam_service.rs"],
             &["iam"],
         ),
-        ("sts", "iam", &["sts_service.rs"], &["sts"]),
+        (
+            "sts",
+            "iam",
+            &["sts_service/mod.rs", "sts_service.rs"],
+            &["sts"],
+        ),
         ("ssm", "ssm", &["service/mod.rs", "service.rs"], &["ssm"]),
         ("s3", "s3", &["service/mod.rs", "service.rs"], &["s3"]),
         (
@@ -42,7 +52,12 @@ fn service_source_files(project_root: &Path) -> Vec<AuditMapping> {
             &["service/mod.rs", "service.rs"],
             &["dynamodb"],
         ),
-        ("lambda", "lambda", &["service.rs"], &["lambda"]),
+        (
+            "lambda",
+            "lambda",
+            &["service/mod.rs", "service.rs"],
+            &["lambda"],
+        ),
         (
             "secretsmanager",
             "secretsmanager",

@@ -26,6 +26,7 @@ use fakecloud_application_autoscaling::{
     SharedApplicationAutoScalingState as AppasState, SuspendedState as AppasSuspendedState,
 };
 use fakecloud_athena::{DataCatalog, NamedQuery, PreparedStatement, SharedAthenaState, WorkGroup};
+use fakecloud_aws::arn::Arn;
 use fakecloud_cloudfront::{
     functions::{
         CloudFrontOriginAccessIdentityConfig, FunctionConfig, KeyGroupConfig, KeyGroupItems,
@@ -4936,7 +4937,8 @@ impl ResourceProvisioner {
             "E{}",
             Uuid::new_v4().simple().to_string()[..7].to_uppercase()
         );
-        let function_arn = format!("arn:aws:cloudfront::{}:function/{}", self.account_id, name);
+        let function_arn =
+            Arn::global("cloudfront", &self.account_id, &format!("function/{name}")).to_string();
 
         let now = Utc::now();
         let func = StoredFunction {
