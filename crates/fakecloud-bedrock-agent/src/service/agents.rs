@@ -258,13 +258,14 @@ impl BedrockAgentService {
         let alias_id = req_str(&body, "agentAliasId")?;
         let mut accts = self.state.write();
         let state = accts.get_or_create(&req.account_id, &req.region);
-        let removed = state
-            .agent_aliases
-            .remove(&alias_id)
-            .filter(|a| a.agent_id == agent_id)
-            .is_some();
-        if !removed {
-            return Err(not_found(format!("Alias {alias_id} not found")));
+        // Verify ownership BEFORE removal. The prior order popped the
+        // alias and then filtered — a request with the wrong agent_id
+        // could still delete a real alias and then surface 404.
+        match state.agent_aliases.get(&alias_id) {
+            Some(a) if a.agent_id == agent_id => {
+                state.agent_aliases.remove(&alias_id);
+            }
+            _ => return Err(not_found(format!("Alias {alias_id} not found"))),
         }
         Ok(AwsResponse::ok_json(json!({})))
     }

@@ -45,7 +45,7 @@ impl BedrockAgentService {
 
     pub(super) fn get_prompt(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        let id = req_str(&body, "promptId")?;
+        let id = req_str(&body, "promptIdentifier")?;
         let accts = self.state.read();
         let state = accts
             .get(&req.account_id)
@@ -120,7 +120,7 @@ impl BedrockAgentService {
 
     pub(super) fn update_prompt(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        let id = req_str(&body, "promptId")?;
+        let id = req_str(&body, "promptIdentifier")?;
         let mut accts = self.state.write();
         let state = accts.get_or_create(&req.account_id, &req.region);
         let p = state
@@ -142,7 +142,7 @@ impl BedrockAgentService {
 
     pub(super) fn delete_prompt(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        let id = req_str(&body, "promptId")?;
+        let id = req_str(&body, "promptIdentifier")?;
         let mut accts = self.state.write();
         let state = accts.get_or_create(&req.account_id, &req.region);
         state
@@ -151,5 +151,69 @@ impl BedrockAgentService {
             .ok_or_else(|| not_found(format!("Prompt {id} not found")))?;
         state.prompt_versions.remove(&id);
         Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    pub(super) fn list_prompt_versions(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let id = req_str(&body, "promptIdentifier")?;
+        let accts = self.state.read();
+        let state = accts
+            .get(&req.account_id)
+            .ok_or_else(|| not_found(format!("Prompt {id} not found")))?;
+        let versions: Vec<Value> = state
+            .prompt_versions
+            .get(&id)
+            .map(|vs| {
+                vs.iter()
+                    .map(|v| {
+                        let mut o = json!({
+                            "id": v.prompt_id,
+                            "version": v.prompt_version,
+                            "arn": format!("{}:{}", prompt_arn(&v.prompt_id, &req.region, &req.account_id), v.prompt_version),
+                            "createdAt": v.created_at.to_rfc3339(),
+                            "updatedAt": v.updated_at.to_rfc3339(),
+                        });
+                        if let Some(ref d) = v.description {
+                            o["description"] = json!(d);
+                        }
+                        o
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(AwsResponse::ok_json(json!({ "promptSummaries": versions })))
+    }
+
+    pub(super) fn get_prompt_version(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let id = req_str(&body, "promptIdentifier")?;
+        let version = req_str(&body, "promptVersion")?;
+        let accts = self.state.read();
+        let state = accts
+            .get(&req.account_id)
+            .ok_or_else(|| not_found(format!("Prompt {id} not found")))?;
+        let v = state
+            .prompt_versions
+            .get(&id)
+            .and_then(|vs| vs.iter().find(|v| v.prompt_version == version))
+            .ok_or_else(|| not_found(format!("Prompt version {version} not found")))?;
+        let mut out = json!({
+            "id": v.prompt_id,
+            "version": v.prompt_version,
+            "arn": format!("{}:{}", prompt_arn(&v.prompt_id, &req.region, &req.account_id), v.prompt_version),
+            "createdAt": v.created_at.to_rfc3339(),
+            "updatedAt": v.updated_at.to_rfc3339(),
+            "variants": v.variants,
+        });
+        if let Some(ref d) = v.description {
+            out["description"] = json!(d);
+        }
+        Ok(AwsResponse::ok_json(out))
     }
 }
