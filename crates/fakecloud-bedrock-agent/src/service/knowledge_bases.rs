@@ -143,6 +143,20 @@ impl BedrockAgentService {
         if !state.knowledge_bases.contains_key(&kb_id) {
             return Err(not_found(format!("KnowledgeBase {kb_id} not found")));
         }
+        // Validate the data source exists and belongs to this KB —
+        // otherwise jobs land tagged with a foreign dataSourceId and
+        // downstream queries return empty results with no failure.
+        match state.data_sources.get(&ds_id) {
+            Some(ds) if ds.knowledge_base_id == kb_id => {}
+            Some(_) => {
+                return Err(not_found(format!(
+                    "DataSource {ds_id} does not belong to KnowledgeBase {kb_id}"
+                )));
+            }
+            None => {
+                return Err(not_found(format!("DataSource {ds_id} not found")));
+            }
+        }
         let job = IngestionJob {
             ingestion_job_id: job_id.clone(),
             knowledge_base_id: kb_id.clone(),
@@ -237,17 +251,44 @@ impl BedrockAgentService {
         ))
     }
 
+    /// Validate `knowledgeBaseId` exists and `dataSourceId` (when
+    /// supplied) belongs to it. Used by every documents endpoint so
+    /// the API doesn't silently accept foreign dataSourceIds.
+    fn validate_kb_ds(
+        &self,
+        state: &crate::state::BedrockAgentState,
+        kb_id: &str,
+        ds_id: Option<&str>,
+    ) -> Result<(), AwsServiceError> {
+        if !state.knowledge_bases.contains_key(kb_id) {
+            return Err(not_found(format!("KnowledgeBase {kb_id} not found")));
+        }
+        if let Some(ds) = ds_id {
+            match state.data_sources.get(ds) {
+                Some(d) if d.knowledge_base_id == kb_id => {}
+                Some(_) => {
+                    return Err(not_found(format!(
+                        "DataSource {ds} does not belong to KnowledgeBase {kb_id}"
+                    )));
+                }
+                None => {
+                    return Err(not_found(format!("DataSource {ds} not found")));
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn ingest_knowledge_base_documents(
         &self,
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         let kb_id = req_str(&body, "knowledgeBaseId")?;
+        let ds_id = req_str(&body, "dataSourceId")?;
         let mut accts = self.state.write();
         let state = accts.get_or_create(&req.account_id, &req.region);
-        if !state.knowledge_bases.contains_key(&kb_id) {
-            return Err(not_found(format!("KnowledgeBase {kb_id} not found")));
-        }
+        self.validate_kb_ds(state, &kb_id, Some(&ds_id))?;
         Ok(AwsResponse::ok_json(json!({})))
     }
 
@@ -257,11 +298,10 @@ impl BedrockAgentService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         let kb_id = req_str(&body, "knowledgeBaseId")?;
+        let ds_id = req_str(&body, "dataSourceId")?;
         let mut accts = self.state.write();
         let state = accts.get_or_create(&req.account_id, &req.region);
-        if !state.knowledge_bases.contains_key(&kb_id) {
-            return Err(not_found(format!("KnowledgeBase {kb_id} not found")));
-        }
+        self.validate_kb_ds(state, &kb_id, Some(&ds_id))?;
         Ok(AwsResponse::ok_json(json!({})))
     }
 
@@ -271,13 +311,12 @@ impl BedrockAgentService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         let kb_id = req_str(&body, "knowledgeBaseId")?;
+        let ds_id = req_str(&body, "dataSourceId")?;
         let accts = self.state.read();
         let state = accts
             .get(&req.account_id)
             .ok_or_else(|| not_found(format!("KnowledgeBase {kb_id} not found")))?;
-        if !state.knowledge_bases.contains_key(&kb_id) {
-            return Err(not_found(format!("KnowledgeBase {kb_id} not found")));
-        }
+        self.validate_kb_ds(state, &kb_id, Some(&ds_id))?;
         Ok(AwsResponse::ok_json(json!({
             "documentDetails": [],
         })))
@@ -289,13 +328,12 @@ impl BedrockAgentService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         let kb_id = req_str(&body, "knowledgeBaseId")?;
+        let ds_id = req_str(&body, "dataSourceId")?;
         let accts = self.state.read();
         let state = accts
             .get(&req.account_id)
             .ok_or_else(|| not_found(format!("KnowledgeBase {kb_id} not found")))?;
-        if !state.knowledge_bases.contains_key(&kb_id) {
-            return Err(not_found(format!("KnowledgeBase {kb_id} not found")));
-        }
+        self.validate_kb_ds(state, &kb_id, Some(&ds_id))?;
         Ok(AwsResponse::ok_json(json!({
             "documentDetails": [],
         })))

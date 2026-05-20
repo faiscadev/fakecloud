@@ -275,7 +275,7 @@ impl AwsService for DynamoDbService {
     }
 
     async fn handle(&self, req: AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        let mutates = is_mutating_action(req.action.as_str());
+        let mutates = is_mutating_request(req.action.as_str(), &req.json_body());
         let result = match req.action.as_str() {
             "CreateTable" => self.create_table(&req),
             "DeleteTable" => self.delete_table(&req),
