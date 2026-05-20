@@ -33,7 +33,12 @@ fn service_source_files(project_root: &Path) -> Vec<AuditMapping> {
             &["iam_service/mod.rs", "iam_service.rs"],
             &["iam"],
         ),
-        ("sts", "iam", &["sts_service.rs"], &["sts"]),
+        (
+            "sts",
+            "iam",
+            &["sts_service/mod.rs", "sts_service.rs"],
+            &["sts"],
+        ),
         ("ssm", "ssm", &["service/mod.rs", "service.rs"], &["ssm"]),
         ("s3", "s3", &["service/mod.rs", "service.rs"], &["s3"]),
         (
