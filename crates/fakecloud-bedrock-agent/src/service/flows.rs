@@ -353,13 +353,11 @@ impl BedrockAgentService {
         let alias_id = req_str(&body, "aliasId")?;
         let mut accts = self.state.write();
         let state = accts.get_or_create(&req.account_id, &req.region);
-        let removed = state
-            .flow_aliases
-            .remove(&alias_id)
-            .filter(|a| a.flow_id == flow_id)
-            .is_some();
-        if !removed {
-            return Err(not_found(format!("Flow alias {alias_id} not found")));
+        match state.flow_aliases.get(&alias_id) {
+            Some(a) if a.flow_id == flow_id => {
+                state.flow_aliases.remove(&alias_id);
+            }
+            _ => return Err(not_found(format!("Flow alias {alias_id} not found"))),
         }
         Ok(AwsResponse::ok_json(json!({})))
     }
