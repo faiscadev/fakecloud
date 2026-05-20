@@ -18,7 +18,12 @@ impl S3Service {
             .ok_or_else(|| no_such_bucket(bucket))?;
 
         let prefix = req.query_params.get("prefix").cloned().unwrap_or_default();
-        let delimiter = req.query_params.get("delimiter").cloned();
+        // Treat empty `delimiter` as absent.
+        let delimiter = req
+            .query_params
+            .get("delimiter")
+            .filter(|s| !s.is_empty())
+            .cloned();
         let max_keys: usize = req
             .query_params
             .get("max-keys")
@@ -389,7 +394,12 @@ impl S3Service {
             .ok_or_else(|| no_such_bucket(bucket))?;
 
         let prefix = req.query_params.get("prefix").cloned().unwrap_or_default();
-        let delimiter = req.query_params.get("delimiter").cloned();
+        // Treat empty `delimiter` as absent.
+        let delimiter = req
+            .query_params
+            .get("delimiter")
+            .filter(|s| !s.is_empty())
+            .cloned();
         let key_marker = req
             .query_params
             .get("key-marker")
@@ -488,13 +498,14 @@ impl S3Service {
             all_entries = filtered_entries;
         }
 
-        // Pagination: truncate at max_keys (count versions + delete markers + common prefixes)
+        // Pagination: truncate at max_keys (count versions + delete markers + common prefixes).
+        // Both `all_entries` and `common_prefixes` count against max_keys —
+        // truncate each so the combined emit length never exceeds the cap.
         let total_items = all_entries.len() + common_prefixes.len();
         let is_truncated = total_items > max_keys;
-
-        // We need to limit versions to max_keys minus common_prefixes already counted
-        let version_limit = max_keys.saturating_sub(common_prefixes.len());
-        let truncated_entries: Vec<_> = all_entries.iter().take(version_limit).collect();
+        let truncated_entries: Vec<_> = all_entries.iter().take(max_keys).collect();
+        let remaining_slots = max_keys.saturating_sub(truncated_entries.len());
+        common_prefixes.truncate(remaining_slots);
         let next_markers = if is_truncated && !truncated_entries.is_empty() {
             let last = truncated_entries.last().unwrap();
             Some((

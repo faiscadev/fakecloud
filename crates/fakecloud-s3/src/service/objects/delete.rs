@@ -136,7 +136,9 @@ impl S3Service {
                     b.objects.remove(key);
                 }
             }
-            resp_headers.insert("x-amz-version-id", vid.parse().unwrap());
+            if let Ok(hv) = vid.parse() {
+                resp_headers.insert("x-amz-version-id", hv);
+            }
             if is_dm {
                 resp_headers.insert("x-amz-delete-marker", "true".parse().unwrap());
             }
@@ -359,7 +361,11 @@ impl S3Service {
                     continue;
                 }
 
-                // Delete specific version
+                // Delete specific version. Look in object_versions first;
+                // if absent, treat b.objects as the implicit "null" version
+                // slot — otherwise unversioned-bucket batch deletes that
+                // target a vid match still report Deleted while leaving
+                // the object in place.
                 if let Some(versions) = b.object_versions.get_mut(key) {
                     versions.retain(|o| {
                         !(o.version_id.as_deref() == Some(vid)
@@ -377,6 +383,12 @@ impl S3Service {
                     if versions.is_empty() {
                         b.object_versions.remove(key);
                     }
+                } else if let Some(obj) = b.objects.get(key) {
+                    let matches = obj.version_id.as_deref() == Some(vid.as_str())
+                        || (vid == "null" && obj.version_id.is_none());
+                    if matches {
+                        b.objects.remove(key);
+                    }
                 }
                 self.store
                     .delete_object(bucket, key, Some(vid.as_str()))
@@ -389,6 +401,22 @@ impl S3Service {
                     ));
                 }
             } else if versioning_enabled {
+                // Preserve any pre-versioning object as a "null" version
+                // before stacking the delete marker on top, otherwise
+                // the existing data is shadowed by the marker and lost
+                // from the version history.
+                if !b.object_versions.contains_key(key.as_str()) {
+                    if let Some(existing) = b.objects.get(key.as_str()) {
+                        let mut preserved = existing.clone();
+                        if preserved.version_id.is_none() {
+                            preserved.version_id = Some("null".to_string());
+                        }
+                        b.object_versions
+                            .entry(key.to_string())
+                            .or_default()
+                            .push(preserved);
+                    }
+                }
                 let dm_id = Uuid::new_v4().to_string();
                 let marker = make_delete_marker(key, &dm_id);
                 b.object_versions
