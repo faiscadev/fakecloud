@@ -104,6 +104,20 @@ trap 'rm -f "$tmp"' EXIT
 
 mkdir -p "$(dirname "$OUT")"
 
+# Detect new aws-models/*.json files that aren't mapped in SERVICES above.
+# Without this guard, a new model would silently be omitted from the generated
+# index and CI would still pass — defeats the point of regenerating from
+# source. The `service-map.json` file is metadata, not a service model.
+mapped=$(printf '%s\n' "${SERVICES[@]}" | cut -d'|' -f1 | sort -u)
+present=$(find "$MODELS_DIR" -maxdepth 1 -name '*.json' -not -name 'service-map.json' -exec basename {} .json \; | sort -u)
+unmapped=$(comm -23 <(echo "$present") <(echo "$mapped"))
+if [ -n "$unmapped" ]; then
+    echo "ERROR: ${MODELS_DIR} contains models not mapped in SERVICES:" >&2
+    echo "$unmapped" | sed 's/^/  /' >&2
+    echo "Add each one to the SERVICES array with its display name and docs slug." >&2
+    exit 2
+fi
+
 cat >"$tmp" <<'HEADER'
 +++
 title = "AWS Operations Index"
