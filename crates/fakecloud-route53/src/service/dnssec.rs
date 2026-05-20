@@ -371,13 +371,15 @@ impl Route53Service {
             .get(&(zone_id.clone(), name.clone()))
             .ok_or_else(|| no_such_key_signing_key(&zone_id, &name))?;
         // Real Route 53 requires Status == INACTIVE before delete.
-        if ksk.status.eq_ignore_ascii_case("ACTIVE") {
+        // ACTION_NEEDED / DELETING / other transient states are also
+        // rejected — only INACTIVE is OK.
+        if !ksk.status.eq_ignore_ascii_case("INACTIVE") {
             return Err(aws_error(
                 StatusCode::BAD_REQUEST,
                 "InvalidKeySigningKeyStatus",
                 format!(
-                    "KeySigningKey {}/{} must be deactivated before deletion",
-                    zone_id, name
+                    "KeySigningKey {}/{} must be INACTIVE before deletion (status={})",
+                    zone_id, name, ksk.status
                 ),
             ));
         }

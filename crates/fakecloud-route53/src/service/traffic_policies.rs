@@ -580,9 +580,52 @@ impl Route53Service {
             .unwrap_or_default();
         drop(state);
         instances.sort_by(|a, b| a.id.cmp(&b.id));
-        let slice: Vec<&StoredTrafficPolicyInstance> = instances.iter().take(max_items).collect();
-        let next_marker = if slice.len() < instances.len() {
-            Some(instances[slice.len()].name.clone())
+        // Honor incoming pagination markers. Without consuming
+        // `hostedzoneidmarker` / `trafficpolicyinstancenamemarker` /
+        // `trafficpolicyinstancetypemarker`, follow-up pages
+        // repeatedly returned the first page.
+        let hz_marker = req
+            .query_params
+            .get("hostedzoneidmarker")
+            .cloned()
+            .unwrap_or_default();
+        let name_marker = req
+            .query_params
+            .get("trafficpolicyinstancenamemarker")
+            .cloned()
+            .unwrap_or_default();
+        let type_marker = req
+            .query_params
+            .get("trafficpolicyinstancetypemarker")
+            .cloned()
+            .unwrap_or_default();
+        let start = if hz_marker.is_empty() && name_marker.is_empty() && type_marker.is_empty() {
+            0
+        } else {
+            instances
+                .iter()
+                .position(|i| {
+                    i.hosted_zone_id == hz_marker
+                        && i.name == name_marker
+                        && i.traffic_policy_type == type_marker
+                })
+                .map(|p| p + 1)
+                .unwrap_or(0)
+        };
+        let slice: Vec<&StoredTrafficPolicyInstance> =
+            instances.iter().skip(start).take(max_items).collect();
+        // Emit all three markers consumed at start: subsequent pages
+        // must echo them so the position lookup matches the same
+        // (hosted-zone, name, type) tuple — otherwise emitting only
+        // the name marker drops the request back to page 1.
+        let next: Option<(String, String, String)> = if start + slice.len() < instances.len() {
+            slice.last().map(|i| {
+                (
+                    i.hosted_zone_id.clone(),
+                    i.name.clone(),
+                    i.traffic_policy_type.clone(),
+                )
+            })
         } else {
             None
         };
@@ -596,15 +639,20 @@ impl Route53Service {
             push_traffic_policy_instance(&mut body, i);
         }
         body.push_str("</TrafficPolicyInstances>");
-        body.push_str(&format!(
-            "<IsTruncated>{}</IsTruncated>",
-            next_marker.is_some()
-        ));
+        body.push_str(&format!("<IsTruncated>{}</IsTruncated>", next.is_some()));
         body.push_str(&format!("<MaxItems>{}</MaxItems>", max_items));
-        if let Some(nm) = &next_marker {
+        if let Some((hz, nm, ty)) = &next {
+            body.push_str(&format!(
+                "<HostedZoneIdMarker>{}</HostedZoneIdMarker>",
+                esc(hz)
+            ));
             body.push_str(&format!(
                 "<TrafficPolicyInstanceNameMarker>{}</TrafficPolicyInstanceNameMarker>",
                 esc(nm)
+            ));
+            body.push_str(&format!(
+                "<TrafficPolicyInstanceTypeMarker>{}</TrafficPolicyInstanceTypeMarker>",
+                esc(ty)
             ));
         }
         body.push_str("</ListTrafficPolicyInstancesResponse>");
