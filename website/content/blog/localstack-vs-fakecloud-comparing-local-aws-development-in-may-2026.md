@@ -1,7 +1,7 @@
 +++
 title = "LocalStack vs. fakecloud: Comparing Local AWS Development in May 2026"
 date = 2026-05-20
-description = "A technical comparison of LocalStack and fakecloud, detailing the 2026 shift toward account-mandatory local development and how fakecloud provides a zero-friction, high-fidelity alternative."
+description = "A technical comparison of LocalStack and fakecloud in May 2026, examining the impact of mandatory authentication on the developer inner loop and the performance benefits of Rust-based emulation."
 
 [extra]
 author = "Lucas Vieira"
@@ -44,7 +44,7 @@ When you run fakecloud, you are the owner of the infrastructure. There are no CI
 
 To start the environment, you do not need to specify which services you want to enable. Unlike older emulators that required `-s s3,lambda,dynamodb` flags to conserve memory, fakecloud activates its entire service surface by default. Because the idle memory footprint is only 10 MiB, there is no performance penalty for having all 33+ services ready to accept requests.
 
-```bash
+```sh
 # Start the entire AWS environment locally
 fakecloud start
 ```
@@ -60,11 +60,11 @@ As of May 2026, fakecloud supports 33 AWS services with 100% API conformance acr
 For teams building agentic AI applications, fakecloud provides the most comprehensive [local Bedrock implementation](/blog/bedrock-local-testing/) available. While other emulators may only mock the `InvokeModel` operation, fakecloud supports the full Bedrock surface, including 111 operations across the runtime and control plane. This includes:
 
 *   **InvokeModel and Converse:** Full support for streaming responses.
-*   **Guardrails:** Real content evaluation and PII detection logic.
+*   **Guardrails:** Real content evaluation and [PII detection logic](/blog/bedrock-guardrails-local/).
 *   **Knowledge Bases:** Integration with local OpenSearch or Vector engines.
 *   **Provisioned Throughput:** Emulated scaling and throttling behavior.
 
-This allows AI engineers to test their orchestration logic, prompt templates, and [guardrail configurations](/blog/bedrock-guardrails-local/) without incurring per-token costs or waiting for cloud deployment cycles.
+This allows AI engineers to test their orchestration logic, prompt templates, and guardrail configurations without incurring per-token costs or waiting for cloud deployment cycles.
 
 ### Real Stateful Backends
 
@@ -91,7 +91,7 @@ Testing against a local cloud often involves a lot of "polling and praying." You
 
 These SDKs allow you to make assertions directly against the emulator's internal state. Instead of calling the standard AWS SQS API to see if a message exists, you can use the fakecloud SDK to inspect the internal message bus and verify that the message was sent with the expected attributes.
 
-```typescript
+```ts
 import { FakecloudClient } from '@fakecloud/sdk-typescript';
 
 const fc = new FakecloudClient('http://localhost:4566');
@@ -115,7 +115,7 @@ If you are currently using a container-heavy setup, migrating to fakecloud is a 
 
 You can install the binary directly using a shell script or via package managers like Cargo.
 
-```bash
+```sh
 # Install the binary
 curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash
 
@@ -127,7 +127,7 @@ fakecloud start
 
 To use the AWS CLI with fakecloud, simply provide the `--endpoint-url` flag. You can use any string for the access key and secret key.
 
-```bash
+```sh
 export AWS_ACCESS_KEY_ID=fake
 export AWS_SECRET_ACCESS_KEY=fake
 export AWS_DEFAULT_REGION=us-east-1
