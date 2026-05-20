@@ -143,6 +143,18 @@ impl BedrockAgentService {
         if !state.knowledge_bases.contains_key(&kb_id) {
             return Err(not_found(format!("KnowledgeBase {kb_id} not found")));
         }
+        // Validate the data source exists AND belongs to this KB before
+        // starting the job. Without the ownership check, ingestion jobs
+        // could be started under one KB referencing another KB's data
+        // source.
+        match state.data_sources.get(&ds_id) {
+            Some(ds) if ds.knowledge_base_id == kb_id => {}
+            _ => {
+                return Err(not_found(format!(
+                    "DataSource {ds_id} not found in KnowledgeBase {kb_id}"
+                )));
+            }
+        }
         let job = IngestionJob {
             ingestion_job_id: job_id.clone(),
             knowledge_base_id: kb_id.clone(),

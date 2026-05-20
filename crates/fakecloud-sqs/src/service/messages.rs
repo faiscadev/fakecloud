@@ -721,6 +721,17 @@ impl SqsService {
             .ok_or_else(|| missing_param("ReceiptHandle"))?;
         let visibility_timeout = val_as_i64(&body["VisibilityTimeout"])
             .ok_or_else(|| missing_param("VisibilityTimeout"))?;
+        // AWS limits VisibilityTimeout to 0..=43200 seconds (12 h).
+        // Anything outside that range is InvalidParameterValue.
+        if !(0..=43200).contains(&visibility_timeout) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterValue",
+                format!(
+                    "VisibilityTimeout {visibility_timeout} is invalid. Reason: Must be between 0 and 43200 seconds."
+                ),
+            ));
+        }
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);

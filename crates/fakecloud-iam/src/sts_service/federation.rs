@@ -168,7 +168,11 @@ impl StsService {
             "kid": "fakecloud-sts-stub",
         });
         let mut payload = serde_json::json!({
-            "iss": format!("https://sts.{}.amazonaws.com", req.region),
+            // Partition-aware iss: AWS GovCloud and China regions use
+            // different STS hostnames; hardcoding `.amazonaws.com`
+            // produces issuer values that OIDC providers in those
+            // partitions won't trust.
+            "iss": sts_issuer_url(&req.region),
             "sub": principal_arn,
             "aud": audiences,
             "iat": issued_at.timestamp(),

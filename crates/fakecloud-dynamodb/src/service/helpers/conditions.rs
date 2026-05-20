@@ -173,8 +173,19 @@ pub(crate) fn evaluate_single_key_condition(
         return key_cond_begins_with(rest, item, expr_attr_names, expr_attr_values);
     }
 
-    if let Some(between_pos) = part.to_ascii_uppercase().find("BETWEEN") {
-        return key_cond_between(part, between_pos, item, expr_attr_names, expr_attr_values);
+    // Require BETWEEN to sit on a word boundary so identifiers like
+    // `my_between_attr` or placeholders containing `between` aren't
+    // misparsed as range conditions.
+    let upper = part.to_ascii_uppercase();
+    if let Some(between_pos) = upper.find(" BETWEEN ") {
+        // Adjust for the leading space so callers see the keyword start.
+        return key_cond_between(
+            part,
+            between_pos + 1,
+            item,
+            expr_attr_names,
+            expr_attr_values,
+        );
     }
 
     key_cond_simple_comparison(part, item, expr_attr_names, expr_attr_values)

@@ -591,9 +591,32 @@ impl EcsRuntime {
     pub(super) fn cleanup_partial_start(&self, started: &[RunningContainer]) {
         let cli = self.cli.clone();
         let ids: Vec<String> = started.iter().map(|c| c.container_id.clone()).collect();
+        // Also tear down any per-task awsvpc network we created; without
+        // this, failed launches leak `fakecloud-ecs-<task>` networks
+        // until process exit. We only know the task name through the
+        // running containers' names — they all share the same prefix.
+        let network = started
+            .first()
+            .and_then(|c| {
+                c.container_id
+                    .split('-')
+                    .next()
+                    .map(|s| format!("fakecloud-ecs-{s}"))
+            })
+            .or_else(|| {
+                started
+                    .first()
+                    .map(|c| format!("fakecloud-ecs-{}", c.container_id))
+            });
         tokio::spawn(async move {
             for id in ids {
                 let _ = Command::new(&cli).args(["rm", "-f", &id]).output().await;
+            }
+            if let Some(net) = network {
+                let _ = Command::new(&cli)
+                    .args(["network", "rm", &net])
+                    .output()
+                    .await;
             }
         });
     }

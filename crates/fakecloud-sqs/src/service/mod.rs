@@ -322,13 +322,35 @@ impl AwsService for SqsService {
             "CreateQueue" | "TagQueue" => {
                 let body = parse_body(request);
                 let mut tags = std::collections::HashMap::new();
-                // Both CreateQueue and TagQueue send tags as JSON objects
+                // JSON-protocol clients send tags as objects.
                 for field in &["tags", "Tags"] {
                     if let Some(obj) = body[field].as_object() {
                         for (k, v) in obj {
                             if let Some(val) = v.as_str() {
                                 tags.insert(k.clone(), val.to_string());
                             }
+                        }
+                    }
+                }
+                // Query-protocol clients flatten tags into `Tag.N.Key` /
+                // `Tag.N.Value` query params (CreateQueue) or
+                // `Tags.member.N.Key` / `.Value` (TagQueue). Without
+                // walking those, IAM tag conditions evaluate against
+                // an empty tag set.
+                for prefix in &["Tag.", "Tags.member.", "tags.member.", "tag."] {
+                    let mut idx = 1usize;
+                    loop {
+                        let key_param = format!("{prefix}{idx}.Key");
+                        let val_param = format!("{prefix}{idx}.Value");
+                        match (
+                            request.query_params.get(&key_param),
+                            request.query_params.get(&val_param),
+                        ) {
+                            (Some(k), Some(v)) => {
+                                tags.insert(k.clone(), v.clone());
+                                idx += 1;
+                            }
+                            _ => break,
                         }
                     }
                 }

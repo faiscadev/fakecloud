@@ -206,6 +206,19 @@ impl AwsService for StsService {
     }
 }
 
+/// Partition-aware STS issuer URL for JWT `iss` claims. Mirrors the
+/// `*.amazonaws.com.cn` quirk in China and the regional STS
+/// endpoints AWS publishes in the GovCloud and ISO partitions.
+pub(super) fn sts_issuer_url(region: &str) -> String {
+    let suffix = match partition_for_region(region) {
+        "aws-cn" => "amazonaws.com.cn",
+        // GovCloud + ISO partitions still use `.amazonaws.com` for
+        // their public STS endpoints today.
+        _ => "amazonaws.com",
+    };
+    format!("https://sts.{region}.{suffix}")
+}
+
 /// Get the AWS partition from a region string.
 fn partition_for_region(region: &str) -> &str {
     if region.starts_with("cn-") {
