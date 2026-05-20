@@ -8,13 +8,43 @@
   <div class="container">
     <h1 class="section-title">Blog</h1>
     <p class="section-sub">Essays and hot takes on testing, AWS, and AI-assisted development.</p>
+
+    <h2 style="font-family: var(--mono); font-size: 22px; font-weight: 700; margin: 48px auto 16px; max-width: 700px;">Technical Deep Dives</h2>
     <div class="blog-list">
       {% for page in section.pages %}
-      <a href="{{ page.permalink }}" class="post" data-publish-date="{{ page.date | date(format="%Y-%m-%d") }}">
-        <div class="date">{{ page.date | date(format="%B %d, %Y") }}</div>
-        <h3>{{ page.title }}</h3>
-        <p>{{ page.description }}</p>
-      </a>
+        {% if "ai" not in page.slug and "bedrock" not in page.slug and "llm" not in page.slug and "claude" not in page.slug and "guardrails" not in page.slug and "no-list" not in page.slug and "eliminating" not in page.slug and "why-fakecloud" not in page.slug %}
+          <a href="{{ page.permalink }}" class="post" data-publish-date="{{ page.date | date(format="%Y-%m-%d") }}">
+            <div class="date">{{ page.date | date(format="%B %d, %Y") }}</div>
+            <h3>{{ page.title }}</h3>
+            <p>{{ page.description }}</p>
+          </a>
+        {% endif %}
+      {% endfor %}
+    </div>
+
+    <h2 style="font-family: var(--mono); font-size: 22px; font-weight: 700; margin: 48px auto 16px; max-width: 700px;">Developer Experience & AI</h2>
+    <div class="blog-list">
+      {% for page in section.pages %}
+        {% if "ai" in page.slug or "bedrock" in page.slug or "llm" in page.slug or "claude" in page.slug or "guardrails" in page.slug %}
+          <a href="{{ page.permalink }}" class="post" data-publish-date="{{ page.date | date(format="%Y-%m-%d") }}">
+            <div class="date">{{ page.date | date(format="%B %d, %Y") }}</div>
+            <h3>{{ page.title }}</h3>
+            <p>{{ page.description }}</p>
+          </a>
+        {% endif %}
+      {% endfor %}
+    </div>
+
+    <h2 style="font-family: var(--mono); font-size: 22px; font-weight: 700; margin: 48px auto 16px; max-width: 700px;">The 'No' List Series</h2>
+    <div class="blog-list">
+      {% for page in section.pages %}
+        {% if "no-list" in page.slug or "eliminating" in page.slug or "why-fakecloud" in page.slug %}
+          <a href="{{ page.permalink }}" class="post" data-publish-date="{{ page.date | date(format="%Y-%m-%d") }}">
+            <div class="date">{{ page.date | date(format="%B %d, %Y") }}</div>
+            <h3>{{ page.title }}</h3>
+            <p>{{ page.description }}</p>
+          </a>
+        {% endif %}
       {% endfor %}
     </div>
   </div>
