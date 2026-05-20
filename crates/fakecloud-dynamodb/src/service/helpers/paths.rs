@@ -30,8 +30,8 @@ pub(crate) fn resolve_path(
     if !path.contains('.') && !path.contains('[') {
         return item.get(&resolve_attr_name(path, expr_attr_names)).cloned();
     }
-    let resolved = resolve_projection_path(path, expr_attr_names);
-    resolve_nested_path(item, &resolved)
+    let segs = resolve_projection_path_segments(path, expr_attr_names);
+    resolve_nested_path_segments(item, &segs)
 }
 
 pub(crate) fn project_item(
@@ -54,9 +54,9 @@ pub(crate) fn project_item(
                         result.insert(key, v.clone());
                     }
                 } else {
-                    let resolved = resolve_projection_path(raw, &expr_attr_names);
-                    if let Some(v) = resolve_nested_path(item, &resolved) {
-                        insert_nested_value(&mut result, &resolved, v);
+                    let segs = resolve_projection_path_segments(raw, &expr_attr_names);
+                    if let Some(v) = resolve_nested_path_segments(item, &segs) {
+                        insert_nested_value_segments(&mut result, &segs, v);
                     }
                 }
             }
@@ -66,63 +66,89 @@ pub(crate) fn project_item(
     }
 }
 
-/// Resolve expression attribute names within each segment of a projection path.
-/// For example, "people[0].#n" with {"#n": "name"} => "people[0].name".
-pub(crate) fn resolve_projection_path(
+/// Resolve a projection path to logical `PathSegment`s, substituting
+/// `#alias` references without re-splitting the resolved name. Use
+/// this when the result will feed back into
+/// [`resolve_nested_path_segments`] / [`insert_nested_value_segments`]
+/// — otherwise an alias whose value contains `.` (e.g. `#sw` ->
+/// `Safety.Warning`) produces extra spurious segments.
+pub(crate) fn resolve_projection_path_segments(
     path: &str,
     expr_attr_names: &HashMap<String, String>,
-) -> String {
-    // Split on dots, resolve each part, rejoin
-    let mut result = String::new();
-    for (i, segment) in path.split('.').enumerate() {
-        if i > 0 {
-            result.push('.');
-        }
-        // A segment might be like "#n" or "people[0]" or "#attr[0]"
-        if let Some(bracket_pos) = segment.find('[') {
-            let key_part = &segment[..bracket_pos];
-            let index_part = &segment[bracket_pos..];
-            result.push_str(&resolve_attr_name(key_part, expr_attr_names));
-            result.push_str(index_part);
-        } else {
-            result.push_str(&resolve_attr_name(segment, expr_attr_names));
-        }
-    }
-    result
+) -> Vec<PathSegment> {
+    let raw = parse_path_segments(path);
+    raw.into_iter()
+        .map(|seg| match seg {
+            PathSegment::Key(k) => PathSegment::Key(resolve_attr_name(&k, expr_attr_names)),
+            other => other,
+        })
+        .collect()
 }
 
-/// Resolve a potentially nested path like "a.b.c" or "a[0].b" from an item.
-pub(crate) fn resolve_nested_path(
+/// Like [`resolve_nested_path`] but operating on pre-resolved segments.
+pub(crate) fn resolve_nested_path_segments(
     item: &HashMap<String, AttributeValue>,
-    path: &str,
+    segments: &[PathSegment],
 ) -> Option<Value> {
-    let segments = parse_path_segments(path);
     if segments.is_empty() {
         return None;
     }
-
-    let first = &segments[0];
-    let top_key = match first {
+    let top_key = match &segments[0] {
         PathSegment::Key(k) => k.as_str(),
         _ => return None,
     };
-
     let mut current = item.get(top_key)?.clone();
-
     for segment in &segments[1..] {
         match segment {
             PathSegment::Key(k) => {
-                // Navigate into a Map: {"M": {"key": ...}}
                 current = current.get("M")?.get(k)?.clone();
             }
             PathSegment::Index(idx) => {
-                // Navigate into a List: {"L": [...]}
                 current = current.get("L")?.get(*idx)?.clone();
             }
         }
     }
-
     Some(current)
+}
+
+/// Insert a value into `result` at the given pre-resolved segment path.
+pub(crate) fn insert_nested_value_segments(
+    result: &mut HashMap<String, AttributeValue>,
+    segments: &[PathSegment],
+    value: Value,
+) {
+    if segments.is_empty() {
+        return;
+    }
+    let top_key = match &segments[0] {
+        PathSegment::Key(k) => k.clone(),
+        _ => return,
+    };
+    if segments.len() == 1 {
+        result.insert(top_key, value);
+        return;
+    }
+    let wrapped = wrap_value_in_path(&segments[1..], value);
+    let existing = result.remove(&top_key);
+    let merged = match existing {
+        Some(existing) => merge_attribute_values(existing, wrapped),
+        None => wrapped,
+    };
+    result.insert(top_key, merged);
+}
+
+/// Resolve a potentially nested path like "a.b.c" or "a[0].b" from an item.
+///
+/// Kept for tests that exercise raw path parsing; production callers
+/// should resolve aliases first via
+/// [`resolve_projection_path_segments`] and then call
+/// [`resolve_nested_path_segments`] directly.
+#[cfg(test)]
+pub(crate) fn resolve_nested_path(
+    item: &HashMap<String, AttributeValue>,
+    path: &str,
+) -> Option<Value> {
+    resolve_nested_path_segments(item, &parse_path_segments(path))
 }
 
 /// Parse a path like "a.b[0].c" into segments: [Key("a"), Key("b"), Index(0), Key("c")]
@@ -166,45 +192,6 @@ pub(crate) fn parse_path_segments(path: &str) -> Vec<PathSegment> {
         segments.push(PathSegment::Key(current));
     }
     segments
-}
-
-/// Insert a value at a nested path in the result HashMap.
-/// For a path like "a.b", we set result["a"] = {"M": {"b": value}}.
-pub(crate) fn insert_nested_value(
-    result: &mut HashMap<String, AttributeValue>,
-    path: &str,
-    value: Value,
-) {
-    // Simple case: no nesting
-    if !path.contains('.') && !path.contains('[') {
-        result.insert(path.to_string(), value);
-        return;
-    }
-
-    let segments = parse_path_segments(path);
-    if segments.is_empty() {
-        return;
-    }
-
-    let top_key = match &segments[0] {
-        PathSegment::Key(k) => k.clone(),
-        _ => return,
-    };
-
-    if segments.len() == 1 {
-        result.insert(top_key, value);
-        return;
-    }
-
-    // For nested paths, wrap the value back into the nested structure
-    let wrapped = wrap_value_in_path(&segments[1..], value);
-    // Merge into existing value if present
-    let existing = result.remove(&top_key);
-    let merged = match existing {
-        Some(existing) => merge_attribute_values(existing, wrapped),
-        None => wrapped,
-    };
-    result.insert(top_key, merged);
 }
 
 /// Wrap a value in the nested path structure.
