@@ -63,7 +63,7 @@ Yes. Use the plain `cdk` binary with `AWS_ENDPOINT_URL=http://localhost:4566`, o
 
 ### Can I use fakecloud in CI?
 
-Yes. Fits as a GitHub Actions service container, GitLab CI service, CircleCI service, or install-and-run background step. ~500ms startup means negligible CI overhead. See [Integration testing AWS in CI](/blog/integration-testing-aws-in-ci/).
+Yes. Fits as a GitHub Actions service container, GitLab CI service, CircleCI service, or install-and-run background step. ~300ms startup means negligible CI overhead. See [Integration testing AWS in CI](/blog/integration-testing-aws-in-ci/).
 
 ### Does fakecloud require Docker?
 
@@ -118,7 +118,7 @@ GitHub issues: [github.com/faiscadev/fakecloud/issues](https://github.com/faisca
     {"@type": "Question", "name": "How do I install fakecloud?", "acceptedAnswer": {"@type": "Answer", "text": "One-line install script: curl -fsSL https://fakecloud.dev/install.sh | bash. Or Docker: docker run --rm -p 4566:4566 ghcr.io/faiscadev/fakecloud. Or cargo install fakecloud."}},
     {"@type": "Question", "name": "Does fakecloud work with Terraform?", "acceptedAnswer": {"@type": "Answer", "text": "Yes. CI runs the upstream hashicorp/terraform-provider-aws TestAcc suites against fakecloud on every commit."}},
     {"@type": "Question", "name": "Does fakecloud work with CDK?", "acceptedAnswer": {"@type": "Answer", "text": "Yes. Use the plain cdk binary with AWS_ENDPOINT_URL=http://localhost:4566, or the cdklocal wrapper."}},
-    {"@type": "Question", "name": "Can I use fakecloud in CI?", "acceptedAnswer": {"@type": "Answer", "text": "Yes. Fits as a GitHub Actions service container, GitLab CI service, CircleCI service, or install-and-run background step. ~500ms startup means negligible CI overhead."}},
+    {"@type": "Question", "name": "Can I use fakecloud in CI?", "acceptedAnswer": {"@type": "Answer", "text": "Yes. Fits as a GitHub Actions service container, GitLab CI service, CircleCI service, or install-and-run background step. ~300ms startup means negligible CI overhead."}},
     {"@type": "Question", "name": "Does fakecloud require Docker?", "acceptedAnswer": {"@type": "Answer", "text": "To run fakecloud itself, no. Single binary, ~19 MB. Docker is required only for services that run real containers such as Lambda runtimes, RDS engines, and ElastiCache engines."}},
     {"@type": "Question", "name": "Is fakecloud written from scratch?", "acceptedAnswer": {"@type": "Answer", "text": "Yes. Written in Rust, no LocalStack code was used. LocalStack is written in Python; fakecloud is written in Rust and ships as a single static binary."}},
     {"@type": "Question", "name": "How does fakecloud validate correctness?", "acceptedAnswer": {"@type": "Answer", "text": "Every commit runs 54,000+ conformance test variants generated from AWS's own Smithy models, plus end-to-end tests using the official AWS SDKs, plus the upstream hashicorp/terraform-provider-aws TestAcc suites."}},

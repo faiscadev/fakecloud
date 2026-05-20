@@ -35,7 +35,7 @@ fakecloud's SQS is one of 39 services and ties into the rest (SNS fan-out, Lambd
 | IAM policy enforcement on SQS | Yes (opt-in `--iam strict`) | No |
 | Other AWS services | 22 more | None |
 | Runtime | Rust binary (~19 MB) | Scala/JVM |
-| Startup | ~500ms | ~2-3s (JVM) |
+| Startup | ~300ms | ~2-3s (JVM) |
 
 ## Same SQS call works against both
 

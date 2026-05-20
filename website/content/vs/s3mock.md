@@ -34,7 +34,7 @@ fakecloud does S3 (107 operations) plus 22 other AWS services end-to-end.
 | Bucket policy enforcement | Yes (opt-in `--iam strict`) | No |
 | Non-JVM SDKs | Any | Any (S3 SDK only) |
 | Other AWS services | 22 more | None |
-| Startup | ~500ms | ~2s (JVM) |
+| Startup | ~300ms | ~2s (JVM) |
 | Runtime | Rust binary (~19 MB) | JAR / Docker |
 
 ## Using both

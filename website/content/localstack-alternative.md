@@ -29,7 +29,7 @@ This is why fakecloud runs real Lambda code in real runtime containers, runs rea
 - **Real Lambda execution.** 23 runtimes in Docker containers. Not a mock, not a stub. Node, Python, Java, Go, .NET, Ruby, custom runtimes.
 - **Real stateful services.** RDS runs real PostgreSQL/MySQL/MariaDB/Oracle/SQL Server/Db2. ElastiCache runs real Redis/Valkey/Memcached. Your Lambda talking to RDS is talking to a real Postgres (or Oracle, or SQL Server).
 - **Real cross-service wiring.** EventBridge -> Step Functions, S3 -> Lambda, SES inbound -> S3/SNS/Lambda, 15+ more end-to-end integrations.
-- **Fast.** ~500ms startup. ~10 MiB idle memory. ~19 MB binary. No Docker required to run fakecloud itself.
+- **Fast.** ~300ms startup. ~10 MiB idle memory. ~19 MB binary. No Docker required to run fakecloud itself.
 - **Test-assertion SDKs** for TypeScript, Python, Go, PHP, Java, and Rust. Assert that an email was sent, an SNS message published, a Lambda invoked, without writing raw HTTP.
 - **Multi-account, SCPs, ABAC.** Cross-account delivery on SQS/SNS/Lambda/S3/EventBridge/Step Functions. STS trust policies with `sts:ExternalId`, session tags, permission boundaries, and session policies all enforced.
 - **IAM, KMS key policies, bucket policies, SCPs.** Opt-in strict enforcement with the full Allow/Deny/NotPrincipal semantics AWS uses.
@@ -42,7 +42,7 @@ This is why fakecloud runs real Lambda code in real runtime containers, runs rea
 | Account / auth token | Not required | Required |
 | Free for commercial use | Yes | No |
 | Docker required | No (single binary) | Yes |
-| Startup | ~500ms | ~3s |
+| Startup | ~300ms | ~3s |
 | Idle memory | ~10 MiB | ~150 MiB |
 | Install size | ~19 MB binary | ~1 GB image |
 | Conformance methodology | Smithy-model-validated, 86,327/86,327 variants pass | Not published |
@@ -108,7 +108,7 @@ SAM Local and serverless-offline only run Lambda (and a limited HTTP/API Gateway
 
 **Does fakecloud run on CI?**
 
-Yes. Single binary, ~19 MB, ~500ms startup. Common patterns: install-and-run as a background step in GitHub Actions / GitLab CI / CircleCI, or pull `ghcr.io/faiscadev/fakecloud:latest` as a service container. See [integration testing AWS in CI](/blog/integration-testing-aws-in-ci/) for copy-paste configs.
+Yes. Single binary, ~19 MB, ~300ms startup. Common patterns: install-and-run as a background step in GitHub Actions / GitLab CI / CircleCI, or pull `ghcr.io/faiscadev/fakecloud:latest` as a service container. See [integration testing AWS in CI](/blog/integration-testing-aws-in-ci/) for copy-paste configs.
 
 **What does "100% conformance" mean?**
 
