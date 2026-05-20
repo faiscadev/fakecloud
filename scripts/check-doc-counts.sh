@@ -41,7 +41,7 @@ BINARY_MB=19
 # That match expression is the actual list of supported runtimes — anything not
 # in it returns None and `CreateFunction` rejects it. Count it with:
 #
-#   grep -cE '^\s*"[a-z]+[0-9.]+[a-z]*"\s*=>' crates/fakecloud-lambda/src/runtime.rs
+#   grep -cE '^\s*"[^"]+"\s*=>\s*\(' crates/fakecloud-lambda/src/runtime.rs
 #
 # (= 23 as of 2026-05-20). When fakecloud-lambda gains/drops a runtime, update
 # this constant, the runtime list in docs/services/lambda.md, and audit every
