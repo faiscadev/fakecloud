@@ -106,5 +106,17 @@ pub(crate) fn validate_key_attributes_in_key(
             format!("Missing the key {hash_key} in the item"),
         ));
     }
+    // Composite-key tables require BOTH hash and range in the Key map;
+    // omitting the range key would otherwise let GetItem / DeleteItem
+    // succeed with an under-specified key.
+    if let Some(range_key) = table.range_key_name() {
+        if !key.contains_key(range_key) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ValidationException",
+                format!("Missing the key {range_key} in the item"),
+            ));
+        }
+    }
     Ok(())
 }

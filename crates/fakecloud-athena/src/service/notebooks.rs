@@ -198,6 +198,10 @@ impl AthenaService {
             .get("Description")
             .and_then(Value::as_str)
             .map(str::to_owned);
+        let notebook_id = body
+            .get("NotebookId")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
         let configuration = body.get("EngineConfiguration").cloned();
         let mut state = self.state.write();
         let account = account_mut(&mut state, &req.account_id);
@@ -210,6 +214,7 @@ impl AthenaService {
             Session {
                 session_id: id.clone(),
                 work_group,
+                notebook_id,
                 description,
                 engine_version: Some("PySpark engine version 3".to_string()),
                 state: "IDLE".to_string(),
@@ -335,6 +340,7 @@ impl AthenaService {
         let summaries: Vec<Value> = account
             .sessions
             .values()
+            .filter(|s| s.notebook_id.as_deref() == Some(notebook_id.as_str()))
             .map(session_summary_json)
             .collect();
         Ok(AwsResponse::ok_json(json!({
