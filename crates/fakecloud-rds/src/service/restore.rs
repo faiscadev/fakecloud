@@ -62,20 +62,28 @@ impl RdsService {
                 })
                 .or_else(|| {
                     // Real shape: `arn:aws:rds:<region>:<acct>:auto-backup:ab-<id>`.
-                    // The trailing segment is `ab-<id>`, not a DB instance
-                    // identifier — match by stored `auto_backup_id` (and
-                    // fall back to dbi_resource_id) rather than assuming
-                    // the segment is the user-supplied DBInstanceId.
+                    // Match permissively against several candidate ids
+                    // since we don't store a separate auto_backup_id:
+                    // dbi_resource_id, the bare `ab-<id>` form, the raw
+                    // last ARN segment, and (last resort) substring of
+                    // dbi_resource_id — covers the common AWS shapes
+                    // without forcing callers to know our internal id.
                     source_backup_arn.as_deref().and_then(|arn| {
                         let last = arn.rsplit(':').next().unwrap_or("");
-                        let ab = last.strip_prefix("ab-").unwrap_or(last);
-                        if ab.is_empty() {
+                        if last.is_empty() {
                             return None;
                         }
+                        let bare = last.strip_prefix("ab-").unwrap_or(last);
                         state
                             .instances
                             .iter()
-                            .find(|(_, inst)| inst.dbi_resource_id == ab)
+                            .find(|(_, inst)| {
+                                let rid = inst.dbi_resource_id.as_str();
+                                rid == last
+                                    || rid == bare
+                                    || rid.ends_with(bare)
+                                    || bare.contains(rid)
+                            })
                             .map(|(k, v)| (k.clone(), v.clone()))
                     })
                 });
