@@ -80,12 +80,17 @@ impl SqsService {
             }
         }
 
-        // Reject if there's already a RUNNING task for this source.
-        if state
-            .message_move_tasks
-            .iter()
-            .any(|t| t.source_arn == source_arn && t.status == MessageMoveTaskStatus::Running)
-        {
+        // Reject if there's already an active task for this source —
+        // RUNNING or CANCELLING. CANCELLING is still actively moving
+        // (or finishing the in-flight batch), so a second task starting
+        // alongside it would double-drain the source queue.
+        if state.message_move_tasks.iter().any(|t| {
+            t.source_arn == source_arn
+                && matches!(
+                    t.status,
+                    MessageMoveTaskStatus::Running | MessageMoveTaskStatus::Cancelling
+                )
+        }) {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "AWS.SimpleQueueService.UnsupportedOperation",
@@ -105,14 +110,13 @@ impl SqsService {
         // The async path below is only useful when the caller wants real
         // backpressure (rate limit) or the ability to observe / cancel mid-flight.
         if max_per_sec.is_none() {
+            // Drain visible messages only. Inflight messages are
+            // received-but-unacked — clearing them would silently lose
+            // data on every move task.
             let source_messages: Vec<SqsMessage> = state
                 .queues
                 .get_mut(&source_url)
-                .map(|q| {
-                    let drained: Vec<_> = q.messages.drain(..).collect();
-                    q.inflight.clear();
-                    drained
-                })
+                .map(|q| q.messages.drain(..).collect())
                 .unwrap_or_default();
             let mut moved: u64 = 0;
             if let Some(ref dest) = destination_arn {
@@ -188,6 +192,8 @@ impl SqsService {
         drop(accounts);
 
         let state_handle = self.state.clone();
+        let snapshot_store = self.snapshot_store.clone();
+        let snapshot_lock = self.snapshot_lock.clone();
         let account_id = req.account_id.clone();
         let region = req.region.clone();
         let handle_for_task = task_handle.clone();
@@ -206,6 +212,8 @@ impl SqsService {
                 dlq_targets,
                 interval,
                 cancel_flag,
+                snapshot_store,
+                snapshot_lock,
             )
             .await;
         });

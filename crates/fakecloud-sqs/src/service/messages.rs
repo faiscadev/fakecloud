@@ -211,9 +211,9 @@ impl SqsService {
                         }
                         return Ok(sqs_response("SendMessage", resp, &request_id, is_query));
                     }
-                    queue
-                        .dedup_cache
-                        .insert(dedup_id.clone(), now + chrono::Duration::minutes(5));
+                    // Cache insertion deferred until after the message is
+                    // actually committed (encryption can fail), so a
+                    // KMS-denied retry isn't silently de-duplicated.
                 }
             }
 
@@ -282,13 +282,24 @@ impl SqsService {
                 visible_at,
                 receive_count: 0,
                 message_group_id,
-                message_dedup_id: effective_dedup_id,
+                message_dedup_id: effective_dedup_id.clone(),
                 created_at: now,
                 sequence_number: sequence_number.clone(),
             };
 
             let message_id = msg.message_id.clone();
             queue.messages.push_back(msg);
+
+            // Commit the dedup cache entry only after the message is on
+            // the queue. Earlier failures (encryption, size limit) leave
+            // the dedup_id un-cached so the caller's retry can succeed.
+            if queue.is_fifo {
+                if let Some(ref dedup_id) = effective_dedup_id {
+                    queue
+                        .dedup_cache
+                        .insert(dedup_id.clone(), now + chrono::Duration::minutes(5));
+                }
+            }
 
             (message_id, sequence_number)
         };
@@ -607,6 +618,23 @@ impl SqsService {
             queue.messages = remaining;
         }
 
+        // Capture queue-level encryption settings BEFORE the DLQ path
+        // re-borrows `state.queues` mutably to push into the DLQ.
+        let queue_arn = queue.arn.clone();
+        let kms_key_id = Self::effective_kms_key_id(&queue.attributes);
+
+        // Decrypt BEFORE mutating inflight/DLQ. The previous order would
+        // bump `receive_count` and stash the message in `inflight`, then
+        // bail with the decrypt error — the visibility window was
+        // already consumed even though the caller saw an error.
+        let mut plaintext_bodies: Vec<String> = Vec::with_capacity(received.len());
+        if kms_key_id.is_some() && self.kms_hook.is_some() {
+            for msg in received.iter() {
+                let plaintext = self.decrypt_message_body(account_id, &queue_arn, &msg.body)?;
+                plaintext_bodies.push(plaintext);
+            }
+        }
+
         // Push the popped messages onto inflight with their original
         // at-rest bodies (ciphertext for SendMessage-encrypted msgs,
         // plaintext for cross-service deliveries). Inflight has to
@@ -616,11 +644,6 @@ impl SqsService {
         for msg in &received {
             queue.inflight.push(msg.clone());
         }
-
-        // Capture queue-level encryption settings BEFORE the DLQ path
-        // re-borrows `state.queues` mutably to push into the DLQ.
-        let queue_arn = queue.arn.clone();
-        let kms_key_id = Self::effective_kms_key_id(&queue.attributes);
 
         // Move messages to DLQ — also with at-rest bodies untouched,
         // since the DLQ may have its own SSE settings and a downstream
@@ -633,15 +656,10 @@ impl SqsService {
             }
         }
 
-        // At-rest decryption: rewrite each delivered message's body
-        // from ciphertext to plaintext for the response. Covers both
-        // SSE-KMS (`KmsMasterKeyId`) and SSE-SQS
-        // (`SqsManagedSseEnabled=true`). Bodies that don't look like a
-        // fakecloud envelope (cross-service deliveries) are passed
-        // through unchanged inside `decrypt_message_body`.
-        if kms_key_id.is_some() && self.kms_hook.is_some() {
-            for msg in received.iter_mut() {
-                msg.body = self.decrypt_message_body(account_id, &queue_arn, &msg.body)?;
+        // Now swap response bodies in to plaintext.
+        if !plaintext_bodies.is_empty() {
+            for (msg, plaintext) in received.iter_mut().zip(plaintext_bodies) {
+                msg.body = plaintext;
             }
         }
 
