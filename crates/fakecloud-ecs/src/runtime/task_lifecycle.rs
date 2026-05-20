@@ -268,7 +268,7 @@ impl EcsRuntime {
                     .wait_for_depends_on(upstream, dep.condition, upstream_has_health_check)
                     .await
                 {
-                    self.cleanup_partial_start(&started);
+                    self.cleanup_partial_start(&started, task_id);
                     return Err(err);
                 }
             }
@@ -284,12 +284,12 @@ impl EcsRuntime {
             cmd.args(&argv);
             let run_out = cmd.output().await.map_err(|e| {
                 // Cleanup already-started containers on launch failure.
-                self.cleanup_partial_start(&started);
+                self.cleanup_partial_start(&started, task_id);
                 RuntimeError::ContainerStart(e.to_string())
             })?;
             if !run_out.status.success() {
                 let err = String::from_utf8_lossy(&run_out.stderr).to_string();
-                self.cleanup_partial_start(&started);
+                self.cleanup_partial_start(&started, task_id);
                 return Err(RuntimeError::ContainerStart(err));
             }
             let container_id = String::from_utf8_lossy(&run_out.stdout).trim().to_string();
@@ -587,37 +587,22 @@ impl EcsRuntime {
 
     /// Best-effort cleanup of containers we already started when a later
     /// container in the task failed to launch. Without this, half-launched
-    /// tasks leak docker containers.
-    pub(super) fn cleanup_partial_start(&self, started: &[RunningContainer]) {
+    /// tasks leak docker containers. `task_id` mirrors the value used at
+    /// network creation so `network rm` targets the right name —
+    /// deriving it from a container_id prefix was wrong (container ids
+    /// are docker-assigned, not task-shaped).
+    pub(super) fn cleanup_partial_start(&self, started: &[RunningContainer], task_id: &str) {
         let cli = self.cli.clone();
         let ids: Vec<String> = started.iter().map(|c| c.container_id.clone()).collect();
-        // Also tear down any per-task awsvpc network we created; without
-        // this, failed launches leak `fakecloud-ecs-<task>` networks
-        // until process exit. We only know the task name through the
-        // running containers' names — they all share the same prefix.
-        let network = started
-            .first()
-            .and_then(|c| {
-                c.container_id
-                    .split('-')
-                    .next()
-                    .map(|s| format!("fakecloud-ecs-{s}"))
-            })
-            .or_else(|| {
-                started
-                    .first()
-                    .map(|c| format!("fakecloud-ecs-{}", c.container_id))
-            });
+        let network = format!("fakecloud-ecs-{task_id}");
         tokio::spawn(async move {
             for id in ids {
                 let _ = Command::new(&cli).args(["rm", "-f", &id]).output().await;
             }
-            if let Some(net) = network {
-                let _ = Command::new(&cli)
-                    .args(["network", "rm", &net])
-                    .output()
-                    .await;
-            }
+            let _ = Command::new(&cli)
+                .args(["network", "rm", &network])
+                .output()
+                .await;
         });
     }
 
