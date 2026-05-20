@@ -537,7 +537,29 @@ impl RdsService {
                     if new != name {
                         if let Some(m) = state.extras.get_mut("proxies") {
                             if let Some(val) = m.remove(&name) {
-                                m.insert(new, val);
+                                m.insert(new.clone(), val);
+                            }
+                        }
+                        // proxy_target_groups is keyed `<proxy>/<group>` —
+                        // rekey every entry that belongs to this proxy so
+                        // filtered describes by the new name keep matching.
+                        if let Some(m) = state.extras.get_mut("proxy_target_groups") {
+                            let old_prefix = format!("{name}/");
+                            let migrations: Vec<(String, String)> = m
+                                .keys()
+                                .filter(|k| k.starts_with(&old_prefix))
+                                .map(|k| {
+                                    let suffix = &k[old_prefix.len()..];
+                                    (k.clone(), format!("{new}/{suffix}"))
+                                })
+                                .collect();
+                            for (old_k, new_k) in migrations {
+                                if let Some(mut val) = m.remove(&old_k) {
+                                    if let Some(obj) = val.as_object_mut() {
+                                        obj.insert("DBProxyName".to_string(), json!(new));
+                                    }
+                                    m.insert(new_k, val);
+                                }
                             }
                         }
                     }

@@ -37,13 +37,21 @@ impl RdsService {
         // subnet ids land in the same AZ only on hash collision, which
         // makes the uniqueness check meaningful (the previous version
         // derived AZ from index and was always unique by construction).
-        let subnet_availability_zones: Vec<String> = subnet_ids
-            .iter()
-            .map(|sid| {
-                let bucket = sid.bytes().fold(0u32, |a, b| a.wrapping_add(b as u32)) % 6;
-                format!("{}{}", &state.region, char::from(b'a' + bucket as u8))
-            })
-            .collect();
+        // Distinct subnet ids land in distinct AZs (each one gets its
+        // own letter) so the uniqueness check rejects only the case
+        // where the caller actually repeated a subnet id. We don't
+        // simulate real VPC subnet -> AZ mappings, so the previous
+        // hash-to-6-buckets approach produced spurious collisions for
+        // unrelated subnets.
+        let mut subnet_availability_zones: Vec<String> = Vec::with_capacity(subnet_ids.len());
+        let mut seen: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        let region = &state.region;
+        for sid in &subnet_ids {
+            let next = seen.len();
+            let idx = *seen.entry(sid.as_str()).or_insert(next);
+            let bucket = (idx % 26) as u8;
+            subnet_availability_zones.push(format!("{}{}", region, char::from(b'a' + bucket)));
+        }
 
         let unique_azs: std::collections::HashSet<_> = subnet_availability_zones.iter().collect();
         if unique_azs.len() < 2 {
@@ -208,13 +216,14 @@ impl RdsService {
                 )
             })?;
 
-        let subnet_availability_zones: Vec<String> = subnet_ids
-            .iter()
-            .map(|sid| {
-                let bucket = sid.bytes().fold(0u32, |a, b| a.wrapping_add(b as u32)) % 6;
-                format!("{}{}", &region, char::from(b'a' + bucket as u8))
-            })
-            .collect();
+        let mut subnet_availability_zones: Vec<String> = Vec::with_capacity(subnet_ids.len());
+        let mut seen: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        for sid in &subnet_ids {
+            let next = seen.len();
+            let idx = *seen.entry(sid.as_str()).or_insert(next);
+            let bucket = (idx % 26) as u8;
+            subnet_availability_zones.push(format!("{}{}", region, char::from(b'a' + bucket)));
+        }
 
         let unique_azs: std::collections::HashSet<_> = subnet_availability_zones.iter().collect();
         if unique_azs.len() < 2 {

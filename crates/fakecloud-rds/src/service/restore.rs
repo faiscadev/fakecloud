@@ -61,17 +61,22 @@ impl RdsService {
                     })
                 })
                 .or_else(|| {
+                    // Real shape: `arn:aws:rds:<region>:<acct>:auto-backup:ab-<id>`.
+                    // The trailing segment is `ab-<id>`, not a DB instance
+                    // identifier — match by stored `auto_backup_id` (and
+                    // fall back to dbi_resource_id) rather than assuming
+                    // the segment is the user-supplied DBInstanceId.
                     source_backup_arn.as_deref().and_then(|arn| {
-                        let id = arn.rsplit(':').next().unwrap_or("");
-                        if id.is_empty() {
-                            None
-                        } else {
-                            state
-                                .instances
-                                .get(id)
-                                .cloned()
-                                .map(|i| (id.to_string(), i))
+                        let last = arn.rsplit(':').next().unwrap_or("");
+                        let ab = last.strip_prefix("ab-").unwrap_or(last);
+                        if ab.is_empty() {
+                            return None;
                         }
+                        state
+                            .instances
+                            .iter()
+                            .find(|(_, inst)| inst.dbi_resource_id == ab)
+                            .map(|(k, v)| (k.clone(), v.clone()))
                     })
                 });
 
