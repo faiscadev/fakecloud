@@ -13,14 +13,20 @@ impl RdsService {
         // Smithy model doesn't mark any of them required at the input
         // shape, so don't reject for omission — map the missing case
         // onto the declared `DBInstanceNotFoundFault` instead.
-        let source_id = optional_query_param(request, "SourceDBInstanceIdentifier")
-            .or_else(|| optional_query_param(request, "SourceDbiResourceId"))
-            .or_else(|| optional_query_param(request, "SourceDBInstanceAutomatedBackupsArn"))
-            .ok_or_else(|| db_instance_not_found("(none)"))?;
+        let source_identifier = optional_query_param(request, "SourceDBInstanceIdentifier");
+        let source_dbi_resource_id = optional_query_param(request, "SourceDbiResourceId");
+        let source_backup_arn =
+            optional_query_param(request, "SourceDBInstanceAutomatedBackupsArn");
+        if source_identifier.is_none()
+            && source_dbi_resource_id.is_none()
+            && source_backup_arn.is_none()
+        {
+            return Err(db_instance_not_found("(none)"));
+        }
         let vpc_security_group_ids = parse_vpc_security_group_ids(request);
         let tags = parse_tags(request)?;
 
-        let (source_instance, db_name) = {
+        let (source_id, source_instance, db_name) = {
             let mut accounts = self.state.write();
             let state = accounts.get_or_create(&request.account_id);
 
@@ -32,11 +38,66 @@ impl RdsService {
                 ));
             }
 
-            let source_instance = match state.instances.get(&source_id).cloned() {
-                Some(inst) => inst,
+            // Resolve any one of the three accepted source forms to the
+            // stored DBInstance. SourceDbiResourceId matches the
+            // per-instance immutable resource id; the backups ARN
+            // ends in `:db:<identifier>` per AWS shape.
+            let resolved: Option<(String, crate::state::DbInstance)> = source_identifier
+                .as_deref()
+                .and_then(|id| {
+                    state
+                        .instances
+                        .get(id)
+                        .cloned()
+                        .map(|i| (id.to_string(), i))
+                })
+                .or_else(|| {
+                    source_dbi_resource_id.as_deref().and_then(|rid| {
+                        state
+                            .instances
+                            .iter()
+                            .find(|(_, inst)| inst.dbi_resource_id == rid)
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                    })
+                })
+                .or_else(|| {
+                    // Real shape: `arn:aws:rds:<region>:<acct>:auto-backup:ab-<id>`.
+                    // Only resolve when the ARN names a recognized
+                    // resource type and the trailing id matches a stored
+                    // dbi_resource_id exactly — substring/suffix matches
+                    // would let partial ARNs restore from unrelated
+                    // instances.
+                    source_backup_arn.as_deref().and_then(|arn| {
+                        let parts: Vec<&str> = arn.split(':').collect();
+                        if parts.len() < 7
+                            || parts[0] != "arn"
+                            || parts[2] != "rds"
+                            || parts[5] != "auto-backup"
+                        {
+                            return None;
+                        }
+                        let last = parts[6];
+                        let bare = last.strip_prefix("ab-").unwrap_or(last);
+                        if bare.is_empty() {
+                            return None;
+                        }
+                        state
+                            .instances
+                            .iter()
+                            .find(|(_, inst)| inst.dbi_resource_id == bare)
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                    })
+                });
+
+            let (source_id, source_instance) = match resolved {
+                Some(pair) => pair,
                 None => {
                     state.cancel_instance_creation(&target_id);
-                    return Err(db_instance_not_found(&source_id));
+                    let probe = source_identifier
+                        .or(source_dbi_resource_id)
+                        .or(source_backup_arn)
+                        .unwrap_or_default();
+                    return Err(db_instance_not_found(&probe));
                 }
             };
 
@@ -47,7 +108,7 @@ impl RdsService {
                 .unwrap_or(default_db)
                 .to_string();
 
-            (source_instance, db_name)
+            (source_id, source_instance, db_name)
         };
 
         let runtime = match self.require_runtime() {

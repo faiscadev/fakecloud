@@ -569,26 +569,52 @@ impl RdsService {
         }
 
         let running = if let Some(runtime) = self.runtime.as_ref() {
-            Some(
-                runtime
-                    .ensure_postgres(
-                        &db_instance_identifier,
-                        &instance.engine,
-                        &instance.engine_version,
-                        &instance.master_username,
-                        &instance.master_user_password,
-                        instance
-                            .db_name
-                            .as_deref()
-                            .unwrap_or(default_db_name(&instance.engine)),
-                        &request.account_id,
-                        &request.region,
-                    )
-                    .await
-                    .map_err(runtime_error_to_service_error)?,
-            )
+            match runtime
+                .ensure_postgres(
+                    &db_instance_identifier,
+                    &instance.engine,
+                    &instance.engine_version,
+                    &instance.master_username,
+                    &instance.master_user_password,
+                    instance
+                        .db_name
+                        .as_deref()
+                        .unwrap_or(default_db_name(&instance.engine)),
+                    &request.account_id,
+                    &request.region,
+                )
+                .await
+            {
+                Ok(r) => Some(r),
+                Err(e) => {
+                    // Roll the row back to `stopped` so the next
+                    // Describe doesn't report a permanently-`starting`
+                    // instance with no container behind it.
+                    let mut accounts = self.state.write();
+                    let state = accounts.get_or_create(&request.account_id);
+                    if let Some(inst) = state.instances.get_mut(&db_instance_identifier) {
+                        inst.db_instance_status = "stopped".to_string();
+                    }
+                    return Err(runtime_error_to_service_error(e));
+                }
+            }
         } else {
-            None
+            // No container runtime configured: StartDBInstance should
+            // fail rather than report success against a backend that
+            // does not exist. Roll the row back so subsequent calls
+            // don't see a stuck `starting` state.
+            {
+                let mut accounts = self.state.write();
+                let state = accounts.get_or_create(&request.account_id);
+                if let Some(inst) = state.instances.get_mut(&db_instance_identifier) {
+                    inst.db_instance_status = "stopped".to_string();
+                }
+            }
+            return Err(AwsServiceError::aws_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "InternalFailure",
+                "Container runtime is not configured; cannot start DB instance",
+            ));
         };
 
         let instance = {

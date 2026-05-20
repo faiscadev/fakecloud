@@ -445,7 +445,13 @@ fn resolve_routing_policy(
             }
         }
         if let Some(s) = secondary {
-            return rr_values(s);
+            // Only fall through to secondary when it's actually healthy;
+            // returning an unhealthy secondary while the primary is also
+            // unhealthy hands clients a known-broken endpoint instead
+            // of the documented "return primary as last resort".
+            if is_healthy(s, health_checks) {
+                return rr_values(s);
+            }
         }
         return primary.map(|p| rr_values(p)).unwrap_or_default();
     }
@@ -467,9 +473,16 @@ fn resolve_routing_policy(
             .iter()
             .filter(|r| is_healthy(r, health_checks) && r.weight.is_some())
             .collect();
-        let total: i64 = healthy.iter().map(|r| r.weight.unwrap_or(0)).sum();
-        if total == 0 || healthy.is_empty() {
+        if healthy.is_empty() {
             return candidates.first().map(|r| rr_values(r)).unwrap_or_default();
+        }
+        let total: i64 = healthy.iter().map(|r| r.weight.unwrap_or(0)).sum();
+        if total == 0 {
+            // All healthy candidates have weight 0 — uniform random
+            // pick among them rather than always returning the first
+            // candidate (which may be unhealthy).
+            let idx = (subnet_hash(edns0_subnet) as usize) % healthy.len();
+            return rr_values(healthy[idx]);
         }
         let mut pick = (subnet_hash(edns0_subnet) % total as u64) as i64;
         for r in &healthy {
