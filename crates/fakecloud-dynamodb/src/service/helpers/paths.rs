@@ -226,6 +226,11 @@ pub(crate) fn wrap_value_in_path(segments: &[PathSegment], value: Value) -> Valu
 }
 
 /// Merge two attribute values (for overlapping projections).
+///
+/// Handles both `M` (map) and `L` (list) merging. Without the list
+/// branch, two list-indexed projections (`list[0]` and `list[1]`)
+/// would overwrite each other because the second projection's `L`
+/// value replaced the first wholesale.
 pub(crate) fn merge_attribute_values(a: Value, b: Value) -> Value {
     if let (Some(a_map), Some(b_map)) = (
         a.get("M").and_then(|v| v.as_object()),
@@ -242,8 +247,30 @@ pub(crate) fn merge_attribute_values(a: Value, b: Value) -> Value {
                 merged.insert(k.clone(), v.clone());
             }
         }
-        json!({"M": merged})
-    } else {
-        b
+        return json!({"M": merged});
     }
+    if let (Some(a_list), Some(b_list)) = (
+        a.get("L").and_then(|v| v.as_array()),
+        b.get("L").and_then(|v| v.as_array()),
+    ) {
+        let len = a_list.len().max(b_list.len());
+        let mut out = Vec::with_capacity(len);
+        for i in 0..len {
+            let lhs = a_list.get(i).cloned().unwrap_or(Value::Null);
+            let rhs = b_list.get(i).cloned().unwrap_or(Value::Null);
+            // Null is the wrap_value_in_path placeholder for "no
+            // projection touched this index" — prefer the non-null
+            // side, recurse when both contributed a real value.
+            let picked = if lhs.is_null() {
+                rhs
+            } else if rhs.is_null() {
+                lhs
+            } else {
+                merge_attribute_values(lhs, rhs)
+            };
+            out.push(picked);
+        }
+        return json!({"L": out});
+    }
+    b
 }

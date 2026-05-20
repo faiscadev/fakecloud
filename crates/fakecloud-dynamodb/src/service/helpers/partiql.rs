@@ -268,6 +268,17 @@ pub(crate) fn find_partiql_where_indices(
 
     let conditions = split_partiql_and_clauses(where_clause);
     let parsed_conditions = parse_partiql_conditions(&conditions, parameters);
+    // If any clause failed to parse, fall back to the structured parser
+    // instead of running a `.all([])` -> match-all evaluation. AWS
+    // rejects unparseable PartiQL with ValidationException; mirror that
+    // rather than silently UPDATE/DELETE every row in the table.
+    if parsed_conditions.len() != conditions.len() {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "ValidationException",
+            "Statement contains unsupported predicate(s); refusing match-all fallback",
+        ));
+    }
 
     let mut indices = Vec::new();
     for (i, item) in table.items.iter().enumerate() {
