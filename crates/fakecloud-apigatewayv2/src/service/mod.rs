@@ -554,6 +554,15 @@ fn resolve_custom_domain(
     }
 
     best.map(|(api_id, stage, segs, resource_path)| {
+        // Custom-domain strip can leave an empty resource_path when the
+        // request exactly matches the base path. Normalize to "/" so
+        // downstream route matching sees a valid path instead of an
+        // empty string.
+        let resource_path = if resource_path.is_empty() {
+            "/".to_string()
+        } else {
+            resource_path
+        };
         (api_id.to_string(), stage.to_string(), segs, resource_path)
     })
 }
