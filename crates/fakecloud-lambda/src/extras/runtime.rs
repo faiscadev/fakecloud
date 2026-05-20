@@ -35,15 +35,21 @@ impl LambdaService {
         // Reject non-string RuntimeVersionArn values instead of silently
         // coercing to "". The Smithy shape is @length(26, 2048) on a
         // string; passing a number / array / null is a 400 input error.
-        let runtime_version_arn = match &body["RuntimeVersionArn"] {
-            serde_json::Value::Null => String::new(),
-            serde_json::Value::String(s) => s.clone(),
-            _ => {
-                return Err(AwsServiceError::aws_error(
-                    StatusCode::BAD_REQUEST,
-                    "InvalidParameterValueException",
-                    "RuntimeVersionArn must be a string",
-                ));
+        // Absent key (no entry in the JSON body) is allowed and means
+        // "leave unset"; explicit `null` is not the same — AWS treats
+        // it as a malformed enum value.
+        let runtime_version_arn = if body.get("RuntimeVersionArn").is_none() {
+            String::new()
+        } else {
+            match &body["RuntimeVersionArn"] {
+                serde_json::Value::String(s) => s.clone(),
+                _ => {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "InvalidParameterValueException",
+                        "RuntimeVersionArn must be a string",
+                    ));
+                }
             }
         };
         // `RuntimeVersionArn` Smithy shape: length 26..2048. Empty
