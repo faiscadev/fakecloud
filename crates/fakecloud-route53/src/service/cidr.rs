@@ -322,20 +322,31 @@ impl Route53Service {
             .get("nexttoken")
             .cloned()
             .unwrap_or_default();
-        // Token encodes `<LocationName>|<CidrBlock>` so the same CIDR
-        // text in two locations resumes at the correct position. Bare
-        // CIDR-only tokens collide and could skip or duplicate entries.
+        // Token format: `<loc_len>:<location>:<cidr>`. Length-prefixing
+        // the location name keeps the boundary unambiguous when the
+        // location itself contains separators (`|`, `:`, etc).
+        fn encode_token(loc: &str, cidr: &str) -> String {
+            format!("{}:{loc}:{cidr}", loc.len())
+        }
+        fn decode_token(t: &str) -> Option<(&str, &str)> {
+            let (len_str, rest) = t.split_once(':')?;
+            let loc_len: usize = len_str.parse().ok()?;
+            if rest.len() < loc_len + 1 {
+                return None;
+            }
+            let (loc, after) = rest.split_at(loc_len);
+            let cidr = after.strip_prefix(':')?;
+            Some((loc, cidr))
+        }
         let start = if nexttoken.is_empty() {
             0
-        } else if let Some((loc, cidr)) = nexttoken.split_once('|') {
+        } else if let Some((loc, cidr)) = decode_token(&nexttoken) {
             blocks
                 .iter()
                 .position(|(n, b)| n == loc && b == cidr)
                 .map(|p| p + 1)
                 .unwrap_or(0)
         } else {
-            // Backward-compat: treat legacy CIDR-only tokens as a best-
-            // effort lookup (first match).
             blocks
                 .iter()
                 .position(|(_, b)| b == &nexttoken)
@@ -344,7 +355,7 @@ impl Route53Service {
         };
         let slice: Vec<&(String, String)> = blocks.iter().skip(start).take(max_items).collect();
         let next = if start + slice.len() < blocks.len() {
-            slice.last().map(|(loc, cidr)| format!("{loc}|{cidr}"))
+            slice.last().map(|(loc, cidr)| encode_token(loc, cidr))
         } else {
             None
         };
