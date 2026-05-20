@@ -32,7 +32,20 @@ impl LambdaService {
                 ),
             ));
         }
-        let runtime_version_arn = body["RuntimeVersionArn"].as_str().unwrap_or("").to_string();
+        // Reject non-string RuntimeVersionArn values instead of silently
+        // coercing to "". The Smithy shape is @length(26, 2048) on a
+        // string; passing a number / array / null is a 400 input error.
+        let runtime_version_arn = match &body["RuntimeVersionArn"] {
+            serde_json::Value::Null => String::new(),
+            serde_json::Value::String(s) => s.clone(),
+            _ => {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterValueException",
+                    "RuntimeVersionArn must be a string",
+                ));
+            }
+        };
         // `RuntimeVersionArn` Smithy shape: length 26..2048. Empty
         // means "unset" (valid); any non-empty value must satisfy the
         // minimum.

@@ -19,6 +19,16 @@ impl LambdaService {
             .as_str()
             .ok_or_else(|| missing("Name"))?
             .to_string();
+        // Smithy Alias.name @length(1, 128). Reject early so we don't
+        // mint aliases that GetAlias / UpdateAlias / DeleteAlias would
+        // refuse later.
+        if name.is_empty() || name.chars().count() > 128 {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterValueException",
+                "Alias name must be 1..128 chars",
+            ));
+        }
         let version = body["FunctionVersion"]
             .as_str()
             .unwrap_or("$LATEST")

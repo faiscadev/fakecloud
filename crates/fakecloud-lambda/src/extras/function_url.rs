@@ -126,12 +126,26 @@ impl LambdaService {
             .get_mut(function_name)
             .ok_or_else(|| not_found("FunctionUrlConfig", function_name))?;
         if let Some(a) = body["AuthType"].as_str() {
+            if a != "NONE" && a != "AWS_IAM" {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterValueException",
+                    format!("AuthType must be NONE or AWS_IAM, got '{a}'"),
+                ));
+            }
             cfg.auth_type = a.to_string();
         }
         if let Some(c) = body.get("Cors") {
             cfg.cors = Some(c.clone());
         }
         if let Some(m) = body["InvokeMode"].as_str() {
+            if m != "BUFFERED" && m != "RESPONSE_STREAM" {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterValueException",
+                    format!("InvokeMode must be BUFFERED or RESPONSE_STREAM, got '{m}'"),
+                ));
+            }
             cfg.invoke_mode = m.to_string();
         }
         cfg.last_modified_time = Utc::now();

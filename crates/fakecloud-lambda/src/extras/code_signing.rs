@@ -177,10 +177,13 @@ impl LambdaService {
         let id = extract_csc_id(csc_id);
         let region = self.region_for(account_id);
         self.with_state_read(account_id, &region, |state| {
+            // Exact id match — substring matching would surface
+            // functions bound to a different csc that happens to share
+            // a prefix/suffix.
             let funcs: Vec<&String> = state
                 .function_code_signing
                 .iter()
-                .filter(|(_, v)| v.contains(&id))
+                .filter(|(_, v)| extract_csc_id(v) == id)
                 .map(|(k, _)| k)
                 .collect();
             ok(json!({"FunctionArns": funcs}))
