@@ -893,7 +893,12 @@ impl AwsService for LambdaService {
             // could never have been created. The 170-char ceiling tracks
             // the documented ARN-form upper bound.
             if let Some(raw) = resource_name.as_ref() {
-                let len = raw.chars().count();
+                // Percent-decode the path label before length-checking;
+                // SDK clients escape `:` to `%3A` for ARN-form names, so
+                // the raw count overruns the 200-char ARN ceiling on
+                // valid inputs.
+                let decoded = crate::extras::percent_decode_for_length(raw);
+                let len = decoded.chars().count();
                 // Bare-name form caps at 140. ARN form
                 // (`arn:aws:lambda:<region>:<acct>:function:<name>`)
                 // adds ~60 chars of prefix → up to ~200 total. Reject
@@ -904,8 +909,12 @@ impl AwsService for LambdaService {
                 // too-long inputs through `ResourceNotFoundException`
                 // instead — which is declared, and also reflects
                 // the practical outcome of looking up a 141-char name.
-                let limit = if raw.starts_with("arn:") { 200 } else { 140 };
-                if raw.is_empty() || len > limit {
+                let limit = if decoded.starts_with("arn:") {
+                    200
+                } else {
+                    140
+                };
+                if decoded.is_empty() || len > limit {
                     let (code, msg) = if action == "InvokeAsync" {
                         (
                             "ResourceNotFoundException",
