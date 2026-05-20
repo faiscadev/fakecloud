@@ -11,6 +11,18 @@ impl RdsService {
         let db_parameter_group_family = required_query_param(request, "DBParameterGroupFamily")?;
         let description = required_query_param(request, "Description")?;
 
+        // `default.*` is the reserved prefix for AWS-managed engine
+        // default groups. DeleteDBParameterGroup unconditionally
+        // refuses that prefix, so accepting it on create would mint
+        // groups the caller can never delete.
+        if db_parameter_group_name.starts_with("default.") {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterValue",
+                "DBParameterGroupName cannot start with the reserved 'default.' prefix",
+            ));
+        }
+
         // Family is stored verbatim. Real AWS rejects unknown families
         // with `InvalidParameterValue`, but that code isn't declared on
         // `CreateDBParameterGroup` so the strict probe drops responses
