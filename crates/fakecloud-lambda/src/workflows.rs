@@ -9,6 +9,7 @@ use http::StatusCode;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
+use fakecloud_aws::arn::Arn;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use crate::state::{
@@ -38,7 +39,13 @@ fn check_len(field: &str, v: &str, min: usize, max: usize) -> Result<(), AwsServ
 }
 
 fn arn_for_capacity_provider(region: &str, account: &str, name: &str) -> String {
-    format!("arn:aws:lambda:{region}:{account}:capacity-provider/{name}")
+    Arn::new(
+        "lambda",
+        region,
+        account,
+        &format!("capacity-provider/{name}"),
+    )
+    .to_string()
 }
 
 fn capacity_provider_json(cp: &CapacityProvider) -> Value {
@@ -245,7 +252,13 @@ pub(crate) fn list_function_versions_by_capacity_provider(
 // ─── Durable executions ───────────────────────────────────────────────────
 
 fn execution_arn(region: &str, account: &str, id: &str) -> String {
-    format!("arn:aws:lambda:{region}:{account}:durable-execution/{id}")
+    Arn::new(
+        "lambda",
+        region,
+        account,
+        &format!("durable-execution/{id}"),
+    )
+    .to_string()
 }
 
 fn execution_json(e: &DurableExecution) -> Value {

@@ -1,4 +1,5 @@
 use chrono::Utc;
+use fakecloud_aws::arn::Arn;
 use http::StatusCode;
 use serde_json::{json, Value};
 use uuid::Uuid;
@@ -186,7 +187,13 @@ fn base_model_arn(base_model_identifier: &str, region: &str) -> String {
     if base_model_identifier.starts_with("arn:") {
         base_model_identifier.to_string()
     } else {
-        format!("arn:aws:bedrock:{region}::foundation-model/{base_model_identifier}")
+        Arn::new(
+            "bedrock",
+            region,
+            "",
+            &format!("foundation-model/{base_model_identifier}"),
+        )
+        .to_string()
     }
 }
 
