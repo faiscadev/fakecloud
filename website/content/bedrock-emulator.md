@@ -2,6 +2,12 @@
 title = "Bedrock emulator"
 description = "Bedrock emulator for tests: 214 operations across Bedrock, Bedrock Runtime, Bedrock Agent, and Bedrock Agent Runtime. Real wire protocol, fault injection, configurable responses. Deterministic, offline, free. Not a mock library, not a real LLM."
 template = "page.html"
+aliases = [
+    "/features/local-bedrock/",
+    "/features/bedrock/",
+    "/local-bedrock/",
+    "/bedrock-local/",
+]
 +++
 
 Need a Bedrock emulator? Use [fakecloud](https://github.com/faiscadev/fakecloud). Not a mock library. Not a real LLM. A real server that speaks the Bedrock wire protocol and returns exactly what you tell it to.

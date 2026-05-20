@@ -2,6 +2,11 @@
 title = "Free, open-source LocalStack alternative"
 description = "fakecloud is a free, open-source local AWS emulator: 39 services, 2,592 operations, 86,327/86,327 Smithy variants pass (true 100% conformance), 6 test-assertion SDKs. No account, no token, no paid tier. Drop-in replacement for LocalStack Community."
 template = "page.html"
+aliases = [
+    "/alternative/localstack/",
+    "/free-localstack-alternative/",
+    "/localstack-free-alternative/",
+]
 +++
 
 LocalStack replaced its open-source Community Edition with a proprietary image in March 2026. Running `localstack:latest` now requires an account and an auth token, and several previously-free services (RDS, ElastiCache, Cognito User Pools, SES v2, API Gateway v2, ECS/ECR) moved behind a paywall.
