@@ -360,14 +360,20 @@ pub(crate) fn parse_update_clauses(expr: &str) -> Vec<(UpdateAction, Vec<String>
     let upper = expr.to_ascii_uppercase();
     let mut positions: Vec<(usize, UpdateAction)> = Vec::new();
 
+    // Identifiers in DynamoDB expressions can contain underscores
+    // (`my_set_field`) and `#`/`:` placeholder prefixes; treating any
+    // non-alphanumeric as a keyword boundary mis-parses those as
+    // genuine SET/ADD/REMOVE/DELETE clauses. Require an ASCII whitespace
+    // boundary on each side so `set foo = ...` is a keyword, but
+    // `:set_arg`, `my_set_field`, `#set` are not.
+    let is_boundary = |b: u8| b == b' ' || b == b'\t' || b == b'\n' || b == b'\r';
     for &(kw, action) in UpdateAction::KEYWORDS {
         let mut search_from = 0;
         while let Some(pos) = upper[search_from..].find(kw) {
             let abs_pos = search_from + pos;
-            let before_ok = abs_pos == 0 || !expr.as_bytes()[abs_pos - 1].is_ascii_alphanumeric();
+            let before_ok = abs_pos == 0 || is_boundary(expr.as_bytes()[abs_pos - 1]);
             let after_pos = abs_pos + kw.len();
-            let after_ok =
-                after_pos >= expr.len() || !expr.as_bytes()[after_pos].is_ascii_alphanumeric();
+            let after_ok = after_pos >= expr.len() || is_boundary(expr.as_bytes()[after_pos]);
             if before_ok && after_ok {
                 positions.push((abs_pos, action));
             }

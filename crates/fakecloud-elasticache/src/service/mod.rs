@@ -470,7 +470,6 @@ fn is_mutating_action(action: &str) -> bool {
             | "DescribeServiceUpdates"
             | "DescribeUpdateActions"
             | "ListAllowedNodeTypeModifications"
-            | "TestMigration"
     )
 }
 
@@ -605,21 +604,27 @@ impl ElastiCacheService {
         let id = required_query_param(request, "ReplicationGroupId")?;
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&request.account_id);
-        let migration = state.migrations.get_mut(&id).ok_or_else(|| {
-            AwsServiceError::aws_error(
+        // Validate all prerequisites BEFORE mutating migration.status —
+        // the prior order flipped status to "complete" and only then
+        // surfaced ReplicationGroupNotFoundFault on the lookup, leaving
+        // a stale "complete" status on the migration.
+        if !state.migrations.contains_key(&id) {
+            return Err(AwsServiceError::aws_error(
                 StatusCode::NOT_FOUND,
                 "ReplicationGroupNotUnderMigrationFault",
                 format!("ReplicationGroup {id} is not currently being migrated."),
-            )
-        })?;
-        migration.status = "complete".to_string();
-        let group = state.replication_groups.get(&id).ok_or_else(|| {
-            AwsServiceError::aws_error(
+            ));
+        }
+        if !state.replication_groups.contains_key(&id) {
+            return Err(AwsServiceError::aws_error(
                 StatusCode::NOT_FOUND,
                 "ReplicationGroupNotFoundFault",
                 format!("ReplicationGroup {id} not found."),
-            )
-        })?;
+            ));
+        }
+        let migration = state.migrations.get_mut(&id).expect("checked above");
+        migration.status = "complete".to_string();
+        let group = state.replication_groups.get(&id).expect("checked above");
         let region = state.region.clone();
         let xml = replication_group_xml(group, &region);
         Ok(AwsResponse::xml(

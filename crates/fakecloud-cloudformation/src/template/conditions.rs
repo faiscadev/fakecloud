@@ -75,8 +75,8 @@ pub(super) fn eval_condition_expr(
         return Ok(a == b);
     }
     if let Some(args) = map.get("Fn::And").and_then(|v| v.as_array()) {
-        if !(1..=10).contains(&args.len()) {
-            return Err("Fn::And requires between 1 and 10 conditions".to_string());
+        if !(2..=10).contains(&args.len()) {
+            return Err("Fn::And requires between 2 and 10 conditions".to_string());
         }
         for a in args {
             if !eval_condition_expr(a, conds, parameters, memo, in_progress)? {
@@ -86,8 +86,8 @@ pub(super) fn eval_condition_expr(
         return Ok(true);
     }
     if let Some(args) = map.get("Fn::Or").and_then(|v| v.as_array()) {
-        if !(1..=10).contains(&args.len()) {
-            return Err("Fn::Or requires between 1 and 10 conditions".to_string());
+        if !(2..=10).contains(&args.len()) {
+            return Err("Fn::Or requires between 2 and 10 conditions".to_string());
         }
         for a in args {
             if eval_condition_expr(a, conds, parameters, memo, in_progress)? {

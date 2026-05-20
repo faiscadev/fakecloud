@@ -173,7 +173,26 @@ pub(crate) fn evaluate_single_key_condition(
         return key_cond_begins_with(rest, item, expr_attr_names, expr_attr_values);
     }
 
-    if let Some(between_pos) = part.to_ascii_uppercase().find("BETWEEN") {
+    // Require BETWEEN to sit on a word boundary so identifiers like
+    // `my_between_attr` or placeholders containing `between` aren't
+    // misparsed as range conditions.
+    // Match `BETWEEN` only when bracketed by ASCII whitespace on both
+    // sides so tabs / newlines / multiple spaces in user-supplied
+    // expressions are accepted, while identifiers like `my_between` are
+    // not. Literal-space matching here would falsely reject valid
+    // multi-line expressions.
+    let upper = part.to_ascii_uppercase();
+    let bytes = upper.as_bytes();
+    let between_pos = (0..bytes.len().saturating_sub(7)).find(|&i| {
+        bytes[i..].starts_with(b"BETWEEN")
+            && i > 0
+            && (bytes[i - 1] as char).is_ascii_whitespace()
+            && bytes
+                .get(i + 7)
+                .map(|c| (*c as char).is_ascii_whitespace())
+                .unwrap_or(false)
+    });
+    if let Some(between_pos) = between_pos {
         return key_cond_between(part, between_pos, item, expr_attr_names, expr_attr_values);
     }
 

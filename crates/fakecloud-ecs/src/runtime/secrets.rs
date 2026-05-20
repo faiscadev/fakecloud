@@ -13,9 +13,22 @@ impl EcsRuntime {
             let accounts = state.read();
             let sm = accounts.get(account_id)?;
             // ARN shape: arn:aws:secretsmanager:<region>:<acct>:secret:<name>-<6char>
+            // ECS also allows trailing `:json-key:version-stage:version-id`
+            // (https://docs.aws.amazon.com/secretsmanager/latest/userguide/retrieving-secrets_ecs.html).
+            // Strip those trailing segments before parsing the secret name.
+            let mut arn_tail = value_from.rsplit(":secret:").next()?;
+            // Drop any of the up-to-3 trailing colon-separated optional
+            // selectors (json-key, version-stage, version-id) that ECS
+            // tacks on after the secret name.
+            for _ in 0..3 {
+                if let Some((head, _)) = arn_tail.rsplit_once(':') {
+                    arn_tail = head;
+                } else {
+                    break;
+                }
+            }
             // Stored key is the secret name (no suffix). Strip the
             // AWS-generated 6-char suffix when comparing.
-            let arn_tail = value_from.rsplit(":secret:").next()?;
             let name = arn_tail
                 .rsplit_once('-')
                 .map(|(n, _)| n)

@@ -270,8 +270,12 @@ impl Wafv2Service {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        let acl_arn = require_str(&body, "WebACLArn")?;
-        let resource_arn = normalize_resource_arn(&require_str(&body, "ResourceArn")?);
+        // Enforce the documented ARN length bounds (20..2048) on both
+        // sides — otherwise bad/empty inputs land directly in the
+        // associations map and surface as stale entries.
+        let acl_arn = require_str_len(&body, "WebACLArn", 20, 2048)?;
+        let resource_arn =
+            normalize_resource_arn(&require_str_len(&body, "ResourceArn", 20, 2048)?);
         let mut state = self.state.write();
         let account = account_mut(&mut state, &req.account_id);
         if !account.web_acls.values().any(|a| a.arn == acl_arn) {
@@ -337,6 +341,10 @@ impl Wafv2Service {
                 "ResourceType",
             )?;
         }
+        let resource_type = body
+            .get("ResourceType")
+            .and_then(Value::as_str)
+            .map(str::to_string);
         let state = self.state.read();
         let resources: Vec<String> = state
             .accounts
@@ -345,6 +353,20 @@ impl Wafv2Service {
                 a.associations
                     .iter()
                     .filter(|(_, v)| **v == acl_arn)
+                    .filter(|(k, _)| {
+                        // When ResourceType is set, restrict the
+                        // returned ARNs to that family. Without this
+                        // filter, listing ALB resources also returns
+                        // associated APIGW/AppSync/Amplify ARNs.
+                        // AWS defaults ResourceType to
+                        // APPLICATION_LOAD_BALANCER when omitted —
+                        // returning every resource type would surface
+                        // ARNs callers didn't ask for.
+                        let rt = resource_type
+                            .as_deref()
+                            .unwrap_or("APPLICATION_LOAD_BALANCER");
+                        resource_arn_matches_type(k, rt)
+                    })
                     .map(|(k, _)| k.clone())
                     .collect()
             })
@@ -352,5 +374,25 @@ impl Wafv2Service {
         Ok(AwsResponse::ok_json(json!({
             "ResourceArns": resources,
         })))
+    }
+}
+
+/// Map a `ResourceType` filter to the ARN segment that identifies that
+/// resource family. Mirrors the documented mapping in the WAFv2
+/// API reference.
+fn resource_arn_matches_type(arn: &str, ty: &str) -> bool {
+    match ty {
+        "APPLICATION_LOAD_BALANCER" => {
+            arn.contains(":elasticloadbalancing:") && arn.contains(":loadbalancer/app/")
+        }
+        "API_GATEWAY" => arn.contains(":apigateway:") && arn.contains("/restapis/"),
+        "APPSYNC" => arn.contains(":appsync:"),
+        "COGNITO_USER_POOL" => arn.contains(":cognito-idp:") && arn.contains(":userpool/"),
+        "APP_RUNNER_SERVICE" => arn.contains(":apprunner:"),
+        "VERIFIED_ACCESS_INSTANCE" => {
+            arn.contains(":ec2:") && arn.contains(":verified-access-instance/")
+        }
+        "AMPLIFY" => arn.contains(":amplify:"),
+        _ => true,
     }
 }

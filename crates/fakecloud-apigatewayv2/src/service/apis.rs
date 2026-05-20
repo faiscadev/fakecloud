@@ -39,16 +39,20 @@ impl ApiGatewayV2Service {
         }
         let protocol_type = protocol_type.to_string();
 
-        // IpAddressType is an optional enum: ipv4 | dualstack.
-        if let Some(ip) = body.get("ipAddressType").and_then(|v| v.as_str()) {
-            if ip != "ipv4" && ip != "dualstack" {
+        // IpAddressType is an optional enum: ipv4 | dualstack. Capture
+        // it now so the persisted HttpApi reflects the request — the
+        // prior code validated and dropped it on the floor.
+        let requested_ip_type = match body.get("ipAddressType").and_then(|v| v.as_str()) {
+            Some(ip) if ip != "ipv4" && ip != "dualstack" => {
                 return Err(AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
                     "BadRequestException",
                     format!("Invalid ipAddressType: {}", ip),
                 ));
             }
-        }
+            Some(ip) => Some(ip.to_string()),
+            None => None,
+        };
 
         let description = body["description"].as_str().map(|s| s.to_string());
         let tags = body["tags"].as_object().map(|m| {
@@ -76,6 +80,9 @@ impl ApiGatewayV2Service {
         let mut api = HttpApi::new(api_id, name, description, tags, region);
         api.cors_configuration = cors_configuration;
         api.protocol_type = protocol_type.clone();
+        if let Some(ip) = requested_ip_type {
+            api.ip_address_type = ip;
+        }
         if protocol_type == "WEBSOCKET" {
             // WebSocket APIs use a body-based selection expression by default
             // and have no implicit api-key header selector.

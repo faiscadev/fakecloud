@@ -110,7 +110,20 @@ impl EcrService {
         let name = req_str(&body, "repositoryName")?.to_string();
         let account = target_account_id(request, &body);
         let policy = match opt_str(&body, "lifecyclePolicyText") {
-            Some(s) => s.to_string(),
+            Some(s) => {
+                // Validate the supplied policy is JSON before pretending the
+                // preview succeeded; otherwise malformed input lands on
+                // `lifecycle_policy_preview` and downstream GetLifecyclePolicyPreview
+                // returns a bogus "successful" result.
+                if serde_json::from_str::<serde_json::Value>(s).is_err() {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "InvalidParameterException",
+                        "lifecyclePolicyText is not valid JSON",
+                    ));
+                }
+                s.to_string()
+            }
             None => {
                 let accounts = self.state.read();
                 let state = accounts

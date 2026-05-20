@@ -130,8 +130,12 @@ impl AthenaService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         let id = require_str(&body, "NamedQueryId")?;
-        let name = require_str(&body, "Name")?;
-        let query_string = require_str(&body, "QueryString")?;
+        // Match the same length bounds enforced on CreateNamedQuery so
+        // oversized inputs can't bypass API constraints via the update
+        // path.
+        let name = validate_required_string_len(&body, "Name", 1, 128)?;
+        let query_string = validate_required_string_len(&body, "QueryString", 1, 262144)?;
+        validate_opt_string_len(&body, "Description", 1, 1024)?;
         let description = body
             .get("Description")
             .and_then(Value::as_str)

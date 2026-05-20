@@ -952,23 +952,31 @@ impl AwsService for LambdaService {
         // listings cap at 50). Pick the right ceiling for the routed
         // action so above-max variants trip the validation reliably.
         if let Some(raw) = req.query_params.get("MaxItems") {
-            if let Ok(n) = raw.parse::<i64>() {
-                let max = match action {
-                    "ListLayers"
-                    | "ListLayerVersions"
-                    | "ListFunctionUrlConfigs"
-                    | "ListProvisionedConcurrencyConfigs"
-                    | "ListFunctionEventInvokeConfigs"
-                    | "ListAliases" => 50,
-                    _ => 10000,
-                };
-                if !(1..=max).contains(&n) {
-                    return Err(AwsServiceError::aws_error(
-                        StatusCode::BAD_REQUEST,
-                        "InvalidParameterValueException",
-                        format!("MaxItems must be between 1 and {} (got {})", max, n),
-                    ));
-                }
+            // Non-numeric MaxItems is a malformed request, not "use the
+            // default". AWS responds 400 — reject before falling through
+            // to range-check on the parsed value.
+            let n = raw.parse::<i64>().map_err(|_| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterValueException",
+                    format!("MaxItems must be a number (got '{raw}')"),
+                )
+            })?;
+            let max = match action {
+                "ListLayers"
+                | "ListLayerVersions"
+                | "ListFunctionUrlConfigs"
+                | "ListProvisionedConcurrencyConfigs"
+                | "ListFunctionEventInvokeConfigs"
+                | "ListAliases" => 50,
+                _ => 10000,
+            };
+            if !(1..=max).contains(&n) {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterValueException",
+                    format!("MaxItems must be between 1 and {} (got {})", max, n),
+                ));
             }
         }
 
@@ -1370,10 +1378,16 @@ impl AwsService for LambdaService {
             | "AddPermission"
             | "RemovePermission"
             | "GetPolicy" => {
-                let name = resource_name.unwrap_or_default();
-                if name.is_empty() {
+                let raw = resource_name.unwrap_or_default();
+                if raw.is_empty() {
                     "*".to_string()
                 } else {
+                    // Normalize ARN / `function:Name` / partial-ARN
+                    // inputs to bare names — IAM resource derivation
+                    // must produce the same ARN regardless of how the
+                    // caller spelled FunctionName, or policy evaluation
+                    // mismatches the actual function.
+                    let name = normalize_function_name(&raw);
                     format!(
                         "arn:aws:lambda:{}:{}:function:{}",
                         state.region, state.account_id, name

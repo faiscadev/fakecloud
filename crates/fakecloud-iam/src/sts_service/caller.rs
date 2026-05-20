@@ -29,8 +29,11 @@ impl StsService {
         // (the `test` root bypass and similar smoke probes) by falling
         // back to root only when an Authorization header was present
         // but didn't resolve to a stored principal.
-        let has_auth_header = req.headers.contains_key("authorization")
-            || req.headers.contains_key("x-amz-security-token");
+        // Accepting `x-amz-security-token` alone lets an unauthenticated
+        // request pass this guard — that header is metadata that
+        // accompanies sigv4 auth, not a substitute for it. Require an
+        // actual Authorization header.
+        let has_auth_header = req.headers.contains_key("authorization");
         if !has_auth_header {
             return Err(AwsServiceError::aws_error(
                 StatusCode::FORBIDDEN,

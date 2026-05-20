@@ -515,14 +515,20 @@ impl ElastiCacheService {
                 )
             })?;
 
+        // Stop runtime containers for any primary we're about to drop —
+        // otherwise the Docker containers + their port bindings leak
+        // until process exit and a later CreateReplicationGroup hits
+        // port conflicts. Collect first because container teardown
+        // releases the state lock asynchronously.
+        let mut to_drop: Vec<String> = Vec::new();
         for member in &group.members {
             if !retain_primary && member.role == "primary" {
-                // Delete the primary replication group when RetainPrimaryReplicationGroup=false
                 if let Some(rg) = state
                     .replication_groups
                     .remove(&member.replication_group_id)
                 {
                     state.tags.remove(&rg.arn);
+                    to_drop.push(member.replication_group_id.clone());
                 }
             } else if let Some(replication_group) = state
                 .replication_groups
@@ -530,6 +536,16 @@ impl ElastiCacheService {
             {
                 replication_group.global_replication_group_id = None;
                 replication_group.global_replication_group_role = None;
+            }
+        }
+        if !to_drop.is_empty() {
+            if let Some(runtime) = self.runtime.clone() {
+                let to_drop = to_drop.clone();
+                tokio::spawn(async move {
+                    for id in to_drop {
+                        runtime.stop_container(&id).await;
+                    }
+                });
             }
         }
 
@@ -787,7 +803,15 @@ impl ElastiCacheService {
                 group.log_delivery_configurations = new_log_delivery_configurations;
             }
             if remove_user_groups == Some(true) {
-                group.user_group_ids.clear();
+                let cleared = std::mem::take(&mut group.user_group_ids);
+                // Drop the reverse pointer too — otherwise
+                // DescribeUserGroups keeps reporting this replication
+                // group as a member after it was detached.
+                for ug_id in &cleared {
+                    if let Some(ug) = state.user_groups.get_mut(ug_id) {
+                        ug.replication_groups.retain(|r| r != &replication_group_id);
+                    }
+                }
             }
             // Add / remove user-group ids on the replication group itself.
             // Skipped when RemoveUserGroups already cleared the list above only
