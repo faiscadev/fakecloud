@@ -2,6 +2,11 @@
 title = "fakecloud vs LocalStack"
 description = "How fakecloud compares to LocalStack Community (post-March 2026) and LocalStack Pro. Honest positioning, feature table, migration path."
 template = "page.html"
+aliases = [
+    "/compare/localstack/",
+    "/comparison/localstack/",
+    "/alternatives/localstack/",
+]
 +++
 
 Since LocalStack replaced its open-source Community Edition with a proprietary image in March 2026, `localstack:latest` now requires an account + auth token, and several previously-free services (Cognito, SES v2, RDS, ElastiCache, API Gateway v2, ECS/ECR) moved to the paid LocalStack Pro tier.

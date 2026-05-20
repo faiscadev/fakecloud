@@ -4,7 +4,7 @@ description = "Technical path for migrating from LocalStack to fakecloud, target
 weight = 2
 +++
 
-If your local development workflow is blocked by LocalStack's account requirements or proprietary tier shifts, fakecloud offers a drop-in replacement for core services with zero internet dependency.
+If your local development workflow is blocked by LocalStack's account requirements or proprietary tier shifts, fakecloud offers a drop-in replacement for core services with zero internet dependency. This page is the technical reference card; for the full step-by-step walkthrough with docker-compose, CI, Terraform, CDK, and Serverless snippets, see [Migrating from LocalStack to fakecloud in 10 minutes](@/blog/migrate-from-localstack.md).
 
 ## Key Differences
 - **No API Key**: fakecloud is fully functional offline. No `ACTIVATE_PRO` or account login required.
