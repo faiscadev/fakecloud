@@ -30,6 +30,14 @@ pub(super) fn cluster_not_found(id: &str) -> AwsServiceError {
     )
 }
 
+pub(super) fn cluster_already_exists(id: &str) -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::BAD_REQUEST,
+        "DBClusterAlreadyExistsFault",
+        format!("DBCluster {id} already exists."),
+    )
+}
+
 pub(super) fn invalid_cluster_state(msg: impl Into<String>) -> AwsServiceError {
     AwsServiceError::aws_error(
         StatusCode::BAD_REQUEST,
@@ -250,9 +258,15 @@ pub(super) fn modify_db_cluster_action(
         }
 
         // NewDBClusterIdentifier: rename the cluster key + ARN.
+        // Reject when the target identifier already names another cluster —
+        // otherwise the rename silently overwrites real data instead of
+        // surfacing DBClusterAlreadyExistsFault.
         if let Some(new_id) = new_id.as_ref() {
             if new_id != &id {
                 if let Some(map) = state.extras.get_mut("clusters") {
+                    if map.contains_key(new_id) {
+                        return Err(cluster_already_exists(new_id));
+                    }
                     if let Some(mut entry) = map.remove(&id) {
                         let new_arn =
                             Arn::new("rds", region, account_id, &format!("cluster:{new_id}"))
