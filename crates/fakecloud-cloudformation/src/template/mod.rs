@@ -2231,8 +2231,6 @@ use conditions::*;
 use for_each::*;
 use intrinsics::*;
 use mappings::*;
-use parser::*;
-use resolution::*;
 
 pub use parser::{
     collect_import_value_names, parse_outputs, parse_template, parse_template_with_physical_ids,
