@@ -38,6 +38,14 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - run: bash scripts/check-doc-counts.sh
+      - name: operations index is up to date
+        run: |
+          bash scripts/generate-operations-index.sh
+          if ! git diff --quiet website/content/docs/operations/_index.md; then
+            echo "::error::website/content/docs/operations/_index.md is stale — run \`bash scripts/generate-operations-index.sh\` and commit." >&2
+            git diff website/content/docs/operations/_index.md >&2
+            exit 1
+          fi
 
   clippy:
     runs-on: ubuntu-latest

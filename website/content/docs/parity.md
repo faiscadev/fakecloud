@@ -95,3 +95,5 @@ These are gaps that fakecloud *can* implement but represent significant engineer
 | **Bedrock Knowledge Base ingestion lifecycle** | Document chunking + retrieval pipeline. The embedding model itself is out of scope; the framework around it is on the roadmap. |
 
 If you want to take one of these on, please open an issue first so we can scope it together.
+
+For a flat listing of every AWS operation grouped by service (not implementation status — that's this page), see the [AWS operations index](@/docs/operations/_index.md).
