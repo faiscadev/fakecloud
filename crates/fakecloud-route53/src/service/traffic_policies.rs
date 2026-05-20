@@ -614,8 +614,18 @@ impl Route53Service {
         };
         let slice: Vec<&StoredTrafficPolicyInstance> =
             instances.iter().skip(start).take(max_items).collect();
-        let next_marker = if start + slice.len() < instances.len() {
-            slice.last().map(|i| i.name.clone())
+        // Emit all three markers consumed at start: subsequent pages
+        // must echo them so the position lookup matches the same
+        // (hosted-zone, name, type) tuple — otherwise emitting only
+        // the name marker drops the request back to page 1.
+        let next: Option<(String, String, String)> = if start + slice.len() < instances.len() {
+            slice.last().map(|i| {
+                (
+                    i.hosted_zone_id.clone(),
+                    i.name.clone(),
+                    i.traffic_policy_type.clone(),
+                )
+            })
         } else {
             None
         };
@@ -629,15 +639,20 @@ impl Route53Service {
             push_traffic_policy_instance(&mut body, i);
         }
         body.push_str("</TrafficPolicyInstances>");
-        body.push_str(&format!(
-            "<IsTruncated>{}</IsTruncated>",
-            next_marker.is_some()
-        ));
+        body.push_str(&format!("<IsTruncated>{}</IsTruncated>", next.is_some()));
         body.push_str(&format!("<MaxItems>{}</MaxItems>", max_items));
-        if let Some(nm) = &next_marker {
+        if let Some((hz, nm, ty)) = &next {
+            body.push_str(&format!(
+                "<HostedZoneIdMarker>{}</HostedZoneIdMarker>",
+                esc(hz)
+            ));
             body.push_str(&format!(
                 "<TrafficPolicyInstanceNameMarker>{}</TrafficPolicyInstanceNameMarker>",
                 esc(nm)
+            ));
+            body.push_str(&format!(
+                "<TrafficPolicyInstanceTypeMarker>{}</TrafficPolicyInstanceTypeMarker>",
+                esc(ty)
             ));
         }
         body.push_str("</ListTrafficPolicyInstancesResponse>");

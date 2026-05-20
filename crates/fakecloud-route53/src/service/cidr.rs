@@ -322,9 +322,20 @@ impl Route53Service {
             .get("nexttoken")
             .cloned()
             .unwrap_or_default();
+        // Token encodes `<LocationName>|<CidrBlock>` so the same CIDR
+        // text in two locations resumes at the correct position. Bare
+        // CIDR-only tokens collide and could skip or duplicate entries.
         let start = if nexttoken.is_empty() {
             0
+        } else if let Some((loc, cidr)) = nexttoken.split_once('|') {
+            blocks
+                .iter()
+                .position(|(n, b)| n == loc && b == cidr)
+                .map(|p| p + 1)
+                .unwrap_or(0)
         } else {
+            // Backward-compat: treat legacy CIDR-only tokens as a best-
+            // effort lookup (first match).
             blocks
                 .iter()
                 .position(|(_, b)| b == &nexttoken)
@@ -333,7 +344,7 @@ impl Route53Service {
         };
         let slice: Vec<&(String, String)> = blocks.iter().skip(start).take(max_items).collect();
         let next = if start + slice.len() < blocks.len() {
-            slice.last().map(|(_, b)| b.clone())
+            slice.last().map(|(loc, cidr)| format!("{loc}|{cidr}"))
         } else {
             None
         };
