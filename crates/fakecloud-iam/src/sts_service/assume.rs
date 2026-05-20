@@ -865,4 +865,82 @@ impl StsService {
         );
         Ok(AwsResponse::xml(StatusCode::OK, xml))
     }
+
+    pub(crate) fn get_delegated_access_token(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        // `TradeInToken` is @required. The op declares no input shape,
+        // but `ExpiredTradeInTokenException` covers "we couldn't honour
+        // this token" — including the degenerate "you didn't supply
+        // one". Conformance probes accept any declared 4xx for the
+        // omit-required negative variant.
+        let _trade_in_token = req
+            .query_params
+            .get("TradeInToken")
+            .cloned()
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ExpiredTradeInTokenException",
+                    "TradeInToken is required",
+                )
+            })?;
+
+        let account_id = req
+            .principal
+            .as_ref()
+            .map(|p| p.account_id.clone())
+            .unwrap_or_else(|| {
+                let accounts = self.state.read();
+                accounts.default_account_id().to_string()
+            });
+        let assumed_principal = req
+            .principal
+            .as_ref()
+            .map(|p| p.arn.clone())
+            .unwrap_or_else(|| {
+                let partition = partition_for_region(&req.region);
+                format!("arn:{partition}:iam::{account_id}:root")
+            });
+
+        let expiration_at = Utc::now() + chrono::Duration::seconds(3600);
+        let expiration = format_expiration(expiration_at);
+        let creds = StsCredentials::generate();
+
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&account_id);
+        state.credential_identities.insert(
+            creds.access_key_id.clone(),
+            CredentialIdentity {
+                arn: assumed_principal.clone(),
+                user_id: account_id.clone(),
+                account_id: account_id.clone(),
+            },
+        );
+        state.sts_temp_credentials.insert(
+            creds.access_key_id.clone(),
+            StsTempCredential {
+                access_key_id: creds.access_key_id.clone(),
+                secret_access_key: creds.secret_access_key.clone(),
+                session_token: creds.session_token.clone(),
+                principal_arn: assumed_principal.clone(),
+                user_id: account_id.clone(),
+                account_id: account_id.clone(),
+                expiration: expiration_at,
+                session_policies: Vec::new(),
+                mfa_present: false,
+                issued_at: Utc::now(),
+                federated_provider: None,
+            },
+        );
+
+        let xml = xml_responses::get_delegated_access_token_response(
+            &creds,
+            &expiration,
+            &assumed_principal,
+            &req.request_id,
+        );
+        Ok(AwsResponse::xml(StatusCode::OK, xml))
+    }
 }
