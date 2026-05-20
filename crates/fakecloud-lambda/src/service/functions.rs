@@ -254,6 +254,31 @@ impl LambdaService {
                     ),
                 ));
             }
+            // AWS rejects DeleteFunction on a version still referenced
+            // by an alias; otherwise the alias dangles. Mirror that
+            // before mutating any snapshot maps.
+            let alias_targets: Vec<String> = state
+                .aliases
+                .iter()
+                .filter_map(|(k, a)| {
+                    let prefix = format!("{function_name}:");
+                    if k.starts_with(&prefix) && a.function_version == *q {
+                        Some(a.name.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            if !alias_targets.is_empty() {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::CONFLICT,
+                    "ResourceConflictException",
+                    format!(
+                        "Cannot delete version {q} of function {function_name}: alias(es) reference it ({})",
+                        alias_targets.join(", ")
+                    ),
+                ));
+            }
             let snap_existed = state
                 .function_version_snapshots
                 .get_mut(function_name)
