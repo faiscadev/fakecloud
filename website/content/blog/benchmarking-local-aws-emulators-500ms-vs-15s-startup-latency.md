@@ -1,15 +1,15 @@
 +++
 title = "Benchmarking Local AWS Emulators: 500ms vs 15s Startup Latency"
 date = 2026-05-20
-description = "A benchmark analysis of the performance gap between fakecloud and LocalStack, focusing on startup latency and binary footprint."
+description = "A performance comparison between fakecloud and LocalStack, focusing on startup latency, memory footprint, and developer productivity."
 
 [extra]
 author = "Lucas Vieira"
 +++
 
-In modern software engineering, the inner loop -- the cycle of coding, building, and testing -- is the most critical factor in developer productivity. When your local environment relies on cloud-emulation tools that introduce multi-second latencies, that inner loop breaks. As of 2026-05-20, the landscape for local AWS development has shifted significantly. With major players moving toward mandatory accounts and auth tokens, the need for a high-fidelity, zero-friction binary has never been greater.
+In modern software engineering, the inner loop — the cycle of coding, building, and testing — is the most critical factor in developer productivity. When your local environment relies on cloud-emulation tools that introduce multi-second latencies, that inner loop breaks. As of 2026-05-20, the landscape for local AWS development has shifted significantly. With major players moving toward mandatory accounts and auth tokens, the need for a high-fidelity, zero-friction binary has never been greater.
 
-This benchmark analyzes the performance gap between [fakecloud](https://github.com/faiscadev/fakecloud) and the industry incumbent, LocalStack. We focus on two primary metrics: startup latency and binary footprint. These metrics are not just vanity numbers: they represent the difference between a fluid development experience and a fragmented one.
+This benchmark analyzes the performance gap between fakecloud and the industry incumbent, LocalStack. We focus on two primary metrics: startup latency and binary footprint. These metrics are not just vanity numbers: they represent the difference between a fluid development experience and a fragmented one.
 
 ## The Cost of Slow Feedback Loops
 
@@ -39,7 +39,7 @@ The following data was captured on 2026-05-20 using a standard engineering works
 
 The performance disparity is a result of fundamental architectural choices. LocalStack operates as a containerized environment, often wrapping various open-source tools (like Moto, LocalStack's own Python logic, and various sidecars) into a Docker image. Starting LocalStack requires the Docker daemon to pull or verify layers, initialize the container, start a Python runtime, and then boot the individual service mocks.
 
-fakecloud takes a different approach. It is a single, statically linked binary written in a high-performance systems language. When you run `fakecloud start`, there is no container overhead. The binary maps the 2,422 supported operations directly into memory. It does not wait for services to initialize because all 33+ services are active by default from the first millisecond.
+fakecloud takes a different approach. It is a single, statically linked binary written in a high-performance systems language. When you run `fakecloud start`, there is no container overhead. The binary maps the [2,422 operations](/blog/2-422-operations-how-fakecloud-reached-100-aws-api-conformance/) directly into memory. It does not wait for services to initialize because all 33+ services are active by default from the first millisecond.
 
 ### Memory Efficiency
 
@@ -47,9 +47,9 @@ In a CI/CD environment, memory is a finite resource. Running a 400 MiB container
 
 ## Service Conformance and Radical Accuracy
 
-Speed is irrelevant if the emulator does not behave like the real AWS. As of 2026-05-20, fakecloud achieves [100% API conformance across 2,422 operations](/blog/2-422-operations-how-fakecloud-reached-100-aws-api-conformance/). This is not achieved through manual mocking, which is error-prone and difficult to maintain. Instead, fakecloud uses Smithy models -- the same modeling language AWS uses to define its own APIs.
+Speed is irrelevant if the emulator does not behave like the real AWS. As of 2026-05-20, fakecloud achieves 100% API conformance across 2,422 operations. This is not achieved through manual mocking, which is error-prone and difficult to maintain. Instead, fakecloud uses Smithy models — the same modeling language AWS uses to define its own APIs.
 
-Every commit to the fakecloud repository is validated against 59,000+ generated test variants. This ensures that edge cases, such as specific error codes, header requirements, and XML/JSON serialization quirks, match the behavior of the real AWS production environment.
+Every commit to the [fakecloud repository](https://github.com/faiscadev/fakecloud) is validated against 59,000+ generated test variants. This ensures that edge cases, such as specific error codes, header requirements, and XML/JSON serialization quirks, match the behavior of the real AWS production environment.
 
 ### Supported Services (Partial List)
 
@@ -57,7 +57,7 @@ Every commit to the fakecloud repository is validated against 59,000+ generated 
 *   **Lambda**: Support for 23 runtimes with sub-second execution overhead.
 *   **DynamoDB**: 100% conformance on TTL, Global Secondary Indexes (GSI), and atomic increments.
 *   **SQS/SNS**: Real cross-service integration, including SNS fanout to multiple SQS queues.
-*   **Bedrock**: [111 operations supported](/blog/bedrock-local-testing/) for local AI development and agent orchestration.
+*   **Bedrock**: 111 operations supported for local AI development and agent orchestration.
 
 ## AI Development with Local Bedrock
 
@@ -113,7 +113,7 @@ steps:
 
 We do not use words like "seamless" or "effortless" because engineering is rarely either. Instead, we provide a binary that starts in 500ms and conforms to 2,422 operations. We provide a tool that respects your time by not requiring an account or an internet connection. We provide a high-fidelity environment that behaves like the real AWS so that your tests are meaningful.
 
-The goal of [fakecloud](https://github.com/faiscadev/fakecloud) is to shrink the gap between your local machine and the cloud. By eliminating the latency of containers and the friction of mandatory authentication, we return those lost minutes to your day. 
+The goal of fakecloud is to shrink the gap between your local machine and the cloud. By eliminating the latency of containers and the friction of mandatory authentication, we return those lost minutes to your day. 
 
 To begin using the fastest local AWS environment available as of 2026-05-20, run the installation command and start the binary. No configuration flags are required: every service is ready when you are.
 
