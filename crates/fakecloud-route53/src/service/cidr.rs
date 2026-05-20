@@ -193,9 +193,23 @@ impl Route53Service {
             .unwrap_or_default();
         drop(state);
         colls.sort_by(|a, b| a.id.cmp(&b.id));
-        let slice: Vec<&StoredCidrCollection> = colls.iter().take(max_items).collect();
-        let next = if slice.len() < colls.len() {
-            Some(colls[slice.len()].id.clone())
+        let nexttoken = req
+            .query_params
+            .get("nexttoken")
+            .cloned()
+            .unwrap_or_default();
+        let start = if nexttoken.is_empty() {
+            0
+        } else {
+            colls
+                .iter()
+                .position(|c| c.id == nexttoken)
+                .map(|p| p + 1)
+                .unwrap_or(0)
+        };
+        let slice: Vec<&StoredCidrCollection> = colls.iter().skip(start).take(max_items).collect();
+        let next = if start + slice.len() < colls.len() {
+            slice.last().map(|c| c.id.clone())
         } else {
             None
         };
@@ -241,9 +255,23 @@ impl Route53Service {
         drop(state);
         let mut names: Vec<String> = coll.locations.keys().cloned().collect();
         names.sort();
-        let slice: Vec<&String> = names.iter().take(max_items).collect();
-        let next = if slice.len() < names.len() {
-            Some(names[slice.len()].clone())
+        let nexttoken = req
+            .query_params
+            .get("nexttoken")
+            .cloned()
+            .unwrap_or_default();
+        let start = if nexttoken.is_empty() {
+            0
+        } else {
+            names
+                .iter()
+                .position(|n| n == &nexttoken)
+                .map(|p| p + 1)
+                .unwrap_or(0)
+        };
+        let slice: Vec<&String> = names.iter().skip(start).take(max_items).collect();
+        let next = if start + slice.len() < names.len() {
+            slice.last().map(|n| (*n).clone())
         } else {
             None
         };
@@ -289,9 +317,23 @@ impl Route53Service {
             .filter(|(n, _)| location_name.as_ref().is_none_or(|name| name == *n))
             .flat_map(|(n, blocks)| blocks.iter().map(move |b| (n.clone(), b.clone())))
             .collect();
-        let slice: Vec<&(String, String)> = blocks.iter().take(max_items).collect();
-        let next = if slice.len() < blocks.len() {
-            Some(blocks[slice.len()].1.clone())
+        let nexttoken = req
+            .query_params
+            .get("nexttoken")
+            .cloned()
+            .unwrap_or_default();
+        let start = if nexttoken.is_empty() {
+            0
+        } else {
+            blocks
+                .iter()
+                .position(|(_, b)| b == &nexttoken)
+                .map(|p| p + 1)
+                .unwrap_or(0)
+        };
+        let slice: Vec<&(String, String)> = blocks.iter().skip(start).take(max_items).collect();
+        let next = if start + slice.len() < blocks.len() {
+            slice.last().map(|(_, b)| b.clone())
         } else {
             None
         };

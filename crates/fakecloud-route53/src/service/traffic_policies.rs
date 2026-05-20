@@ -580,9 +580,42 @@ impl Route53Service {
             .unwrap_or_default();
         drop(state);
         instances.sort_by(|a, b| a.id.cmp(&b.id));
-        let slice: Vec<&StoredTrafficPolicyInstance> = instances.iter().take(max_items).collect();
-        let next_marker = if slice.len() < instances.len() {
-            Some(instances[slice.len()].name.clone())
+        // Honor incoming pagination markers. Without consuming
+        // `hostedzoneidmarker` / `trafficpolicyinstancenamemarker` /
+        // `trafficpolicyinstancetypemarker`, follow-up pages
+        // repeatedly returned the first page.
+        let hz_marker = req
+            .query_params
+            .get("hostedzoneidmarker")
+            .cloned()
+            .unwrap_or_default();
+        let name_marker = req
+            .query_params
+            .get("trafficpolicyinstancenamemarker")
+            .cloned()
+            .unwrap_or_default();
+        let type_marker = req
+            .query_params
+            .get("trafficpolicyinstancetypemarker")
+            .cloned()
+            .unwrap_or_default();
+        let start = if hz_marker.is_empty() && name_marker.is_empty() && type_marker.is_empty() {
+            0
+        } else {
+            instances
+                .iter()
+                .position(|i| {
+                    i.hosted_zone_id == hz_marker
+                        && i.name == name_marker
+                        && i.traffic_policy_type == type_marker
+                })
+                .map(|p| p + 1)
+                .unwrap_or(0)
+        };
+        let slice: Vec<&StoredTrafficPolicyInstance> =
+            instances.iter().skip(start).take(max_items).collect();
+        let next_marker = if start + slice.len() < instances.len() {
+            slice.last().map(|i| i.name.clone())
         } else {
             None
         };
