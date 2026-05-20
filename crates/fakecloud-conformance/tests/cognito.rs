@@ -977,11 +977,31 @@ async fn cognito_sign_up_and_confirm() {
     assert!(!signup.user_confirmed());
     assert!(!signup.user_sub().is_empty());
 
+    // Pull the freshly-minted confirmation code from the
+    // /_fakecloud/cognito introspection endpoint; ConfirmSignUp now
+    // validates the code so passing a literal won't work.
+    let code_url = format!(
+        "{}/_fakecloud/cognito/confirmation-codes/{}/signupuser",
+        server.endpoint(),
+        pool_id
+    );
+    let code = reqwest::Client::new()
+        .get(&code_url)
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap()["confirmationCode"]
+        .as_str()
+        .expect("introspection should expose the stored confirmation code")
+        .to_string();
+
     client
         .confirm_sign_up()
         .client_id(&client_id)
         .username("signupuser")
-        .confirmation_code("123456")
+        .confirmation_code(code)
         .send()
         .await
         .unwrap();

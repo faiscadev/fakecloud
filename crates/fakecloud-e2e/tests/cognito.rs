@@ -1,6 +1,26 @@
 mod helpers;
 use helpers::TestServer;
 
+async fn fetch_confirmation_code(server: &TestServer, pool_id: &str, username: &str) -> String {
+    let url = format!(
+        "{}/_fakecloud/cognito/confirmation-codes/{}/{}",
+        server.endpoint(),
+        pool_id,
+        username
+    );
+    reqwest::Client::new()
+        .get(&url)
+        .send()
+        .await
+        .expect("introspection fetch")
+        .json::<serde_json::Value>()
+        .await
+        .expect("introspection json")["confirmationCode"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no confirmationCode for {pool_id}/{username}"))
+        .to_string()
+}
+
 use aws_sdk_cognitoidentityprovider::types::{
     AccountRecoverySettingType, AttributeType, ChallengeNameType, DeliveryMediumType,
     DeviceRememberedStatusType, DomainStatusType, ExplicitAuthFlowsType, IdentityProviderTypeType,
@@ -1312,7 +1332,7 @@ async fn cognito_sign_up_and_confirm() {
         .confirm_sign_up()
         .client_id(&client_id)
         .username("signupuser")
-        .confirmation_code("123456")
+        .confirmation_code(fetch_confirmation_code(&server, &pool_id, "signupuser").await)
         .send()
         .await
         .expect("confirm sign up");
@@ -1467,7 +1487,7 @@ async fn cognito_refresh_token_flow() {
         .confirm_sign_up()
         .client_id(&client_id)
         .username("refreshuser")
-        .confirmation_code("123456")
+        .confirmation_code(fetch_confirmation_code(&server, &pool_id, "refreshuser").await)
         .send()
         .await
         .expect("confirm sign up");
@@ -2963,7 +2983,7 @@ async fn cognito_resend_confirmation_code() {
         .confirm_sign_up()
         .client_id(&client_id)
         .username("resenduser")
-        .confirmation_code("123456")
+        .confirmation_code(fetch_confirmation_code(&server, &pool_id, "resenduser").await)
         .send()
         .await
         .expect("confirm sign up");
@@ -5054,7 +5074,7 @@ async fn cognito_oauth2_token_refresh_grant() {
         .confirm_sign_up()
         .client_id(&client_id)
         .username("alice")
-        .confirmation_code("123456")
+        .confirmation_code(fetch_confirmation_code(&server, &pool_id, "alice").await)
         .send()
         .await
         .expect("confirm");
@@ -5287,7 +5307,7 @@ async fn cognito_oauth2_token_authorization_code_grant_issues_tokens() {
         .confirm_sign_up()
         .client_id(&client_id)
         .username("alice")
-        .confirmation_code("123456")
+        .confirmation_code(fetch_confirmation_code(&server, &pool_id, "alice").await)
         .send()
         .await
         .expect("confirm");
@@ -5419,7 +5439,7 @@ async fn cognito_oauth2_token_authorization_code_redirect_uri_mismatch() {
         .confirm_sign_up()
         .client_id(&client_id)
         .username("bob")
-        .confirmation_code("123456")
+        .confirmation_code(fetch_confirmation_code(&server, &pool_id, "bob").await)
         .send()
         .await
         .expect("confirm");
@@ -5524,7 +5544,7 @@ async fn cognito_oauth2_token_authorization_code_with_pkce_s256() {
         .confirm_sign_up()
         .client_id(&client_id)
         .username("carol")
-        .confirmation_code("123456")
+        .confirmation_code(fetch_confirmation_code(&server, &pool_id, "carol").await)
         .send()
         .await
         .expect("confirm");
@@ -5926,7 +5946,7 @@ async fn cognito_oauth2_userinfo_returns_user_attrs() {
         .confirm_sign_up()
         .client_id(&client_id)
         .username("bob")
-        .confirmation_code("123456")
+        .confirmation_code(fetch_confirmation_code(&server, &pool_id, "bob").await)
         .send()
         .await
         .expect("confirm");
@@ -6041,7 +6061,7 @@ async fn cognito_oauth2_revoke_refresh_token() {
         .confirm_sign_up()
         .client_id(&client_id)
         .username("carol")
-        .confirmation_code("123456")
+        .confirmation_code(fetch_confirmation_code(&server, &pool_id, "carol").await)
         .send()
         .await
         .expect("confirm");
@@ -6208,7 +6228,7 @@ async fn cognito_refresh_token_rotation_enabled_rotates() {
         .confirm_sign_up()
         .client_id(&client_id)
         .username("dave")
-        .confirmation_code("123456")
+        .confirmation_code(fetch_confirmation_code(&server, &pool_id, "dave").await)
         .send()
         .await
         .expect("confirm");
@@ -6303,7 +6323,7 @@ async fn cognito_refresh_token_rotation_disabled_no_new_token() {
         .confirm_sign_up()
         .client_id(&client_id)
         .username("eve")
-        .confirmation_code("123456")
+        .confirmation_code(fetch_confirmation_code(&server, &pool_id, "eve").await)
         .send()
         .await
         .expect("confirm");
@@ -6405,7 +6425,7 @@ async fn cognito_oauth2_token_rotates_refresh_when_enabled() {
         .confirm_sign_up()
         .client_id(&client_id)
         .username("frank")
-        .confirmation_code("123456")
+        .confirmation_code(fetch_confirmation_code(&server, &pool_id, "frank").await)
         .send()
         .await
         .expect("confirm");
