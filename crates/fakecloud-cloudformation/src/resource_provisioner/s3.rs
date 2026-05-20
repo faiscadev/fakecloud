@@ -46,7 +46,7 @@ impl ResourceProvisioner {
         let bucket = S3Bucket::new(bucket_name, &state.region, &state.account_id);
         state.buckets.insert(bucket_name.to_string(), bucket);
 
-        let arn = Arn::s3(&bucket_name).to_string();
+        let arn = Arn::s3(bucket_name).to_string();
         let domain_name = format!("{bucket_name}.s3.amazonaws.com");
         let regional_domain_name = format!("{bucket_name}.s3.{region}.amazonaws.com");
         let dual_stack_domain_name = format!("{bucket_name}.s3.dualstack.{region}.amazonaws.com");
