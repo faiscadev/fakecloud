@@ -27,7 +27,10 @@ impl LambdaService {
             let state = accounts.get(account_id).unwrap_or(&empty);
             resolve_qualifier_to_version(state, function_name, qualifier)
         };
-        let executed_version = resolved_version
+        // Tracks the version actually executed — diverges from the
+        // requested version when the version snapshot is missing and
+        // we fall back to $LATEST code below.
+        let mut executed_version = resolved_version
             .clone()
             .unwrap_or_else(|| "$LATEST".to_string());
         let (func, layer_zips) = {
@@ -40,12 +43,21 @@ impl LambdaService {
             // the snapshot is missing (legacy state) so we never 404 a
             // routable invoke.
             let func = match resolved_version.as_deref() {
-                Some(v) => state
-                    .function_version_snapshots
-                    .get(function_name)
-                    .and_then(|m| m.get(v))
-                    .cloned()
-                    .or_else(|| state.functions.get(function_name).cloned()),
+                Some(v) => {
+                    let snap = state
+                        .function_version_snapshots
+                        .get(function_name)
+                        .and_then(|m| m.get(v))
+                        .cloned();
+                    if snap.is_none() {
+                        // Snapshot missing: code is whatever is in
+                        // `functions` ($LATEST). Reflect that in the
+                        // response header so callers can't be misled
+                        // into thinking they ran v=`v`.
+                        executed_version = "$LATEST".to_string();
+                    }
+                    snap.or_else(|| state.functions.get(function_name).cloned())
+                }
                 None => state.functions.get(function_name).cloned(),
             }
             .ok_or_else(|| {
@@ -163,7 +175,8 @@ impl LambdaService {
                     let func_clone = func.clone();
                     let payload_vec = payload.to_vec();
                     let bus = self.delivery_bus.clone();
-                    let destination_config = self.lookup_destination_config(&func, account_id);
+                    let destination_config =
+                        self.lookup_destination_config(&func, account_id, qualifier);
                     let function_arn = func.function_arn.clone();
                     let layer_zips_async = layer_zips.clone();
                     let async_guard = _concurrency_guard;
@@ -314,14 +327,25 @@ impl LambdaService {
         &self,
         func: &crate::state::LambdaFunction,
         account_id: &str,
+        qualifier: Option<&str>,
     ) -> Option<serde_json::Value> {
         let accounts = self.state.read();
         let state = accounts.get(account_id)?;
-        let key = format!("{}:$LATEST", func.function_name);
-        state
-            .event_invoke_configs
-            .get(&key)
-            .and_then(|cfg| cfg.destination_config.clone())
-            .filter(|v| !v.is_null() && !v.as_object().map(|o| o.is_empty()).unwrap_or(false))
+        // EventInvokeConfig is keyed per-qualifier on AWS — alias/version
+        // can carry its own DestinationConfig. Walk qualifier-specific
+        // first, then fall back to $LATEST so unqualified invokes still
+        // see function-level config.
+        let candidates = [qualifier.unwrap_or("$LATEST"), "$LATEST"];
+        for q in candidates {
+            let key = format!("{}:{}", func.function_name, q);
+            if let Some(cfg) = state.event_invoke_configs.get(&key) {
+                if let Some(dc) = cfg.destination_config.clone() {
+                    if !dc.is_null() && !dc.as_object().map(|o| o.is_empty()).unwrap_or(false) {
+                        return Some(dc);
+                    }
+                }
+            }
+        }
+        None
     }
 }

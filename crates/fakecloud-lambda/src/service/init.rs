@@ -70,7 +70,12 @@ impl LambdaService {
             && segs.get(3).map(|s| s.as_str()) == Some("provisioned-concurrency")
         {
             let res = segs.get(2).map(|s| s.to_string());
-            if req.method == Method::GET && req.query_params.contains_key("List") {
+            // AWS keys this overload on `List=ALL` specifically — any
+            // other value (or a bare key) is a malformed request, not
+            // an alias for the list op.
+            if req.method == Method::GET
+                && req.query_params.get("List").map(|v| v.as_str()) == Some("ALL")
+            {
                 return Some(("ListProvisionedConcurrencyConfigs", res));
             }
             return match req.method {
@@ -197,7 +202,10 @@ impl LambdaService {
                 _ => None,
             };
         }
-        if segs.get(1).map(|s| s.as_str()) == Some("function-urls") && req.method == Method::GET {
+        if segs.get(1).map(|s| s.as_str()) == Some("function-urls")
+            && segs.len() == 2
+            && req.method == Method::GET
+        {
             return Some(("ListFunctionUrlConfigs", None));
         }
         if segs.get(1).map(|s| s.as_str()) == Some("functions")
