@@ -1140,7 +1140,8 @@ async fn main() {
     // EventBridge / Lambda by ARN scheme.
     let mut lambda_destinations_inner = DeliveryBus::new()
         .with_sqs(sqs_delivery.clone())
-        .with_sns(sns_delivery.clone());
+        .with_sns(sns_delivery.clone())
+        .with_cloudwatch_metrics(cloudwatch_delivery_for_logs.clone());
     if let Some(ref ld) = lambda_delivery {
         lambda_destinations_inner = lambda_destinations_inner.with_lambda(ld.clone());
     }
