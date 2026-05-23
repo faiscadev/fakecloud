@@ -5,6 +5,6 @@ pub(crate) mod state;
 pub use delivery::CloudwatchDeliveryImpl;
 pub use service::CloudWatchService;
 pub use state::{
-    AlarmState, CloudWatchAccounts, CloudWatchState, Dashboard, MetricAlarm, MetricDatum,
-    SharedCloudWatchState,
+    AlarmState, CloudWatchAccounts, CloudWatchSnapshot, CloudWatchState, Dashboard, MetricAlarm,
+    MetricDatum, SharedCloudWatchState, CLOUDWATCH_SNAPSHOT_SCHEMA_VERSION,
 };

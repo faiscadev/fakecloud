@@ -2144,7 +2144,57 @@ async fn main() {
     registry.register(Arc::new(firehose_service));
     let glue_service = fakecloud_glue::GlueService::new(glue_state.clone());
     registry.register(Arc::new(glue_service));
-    let cloudwatch_service = fakecloud_cloudwatch::CloudWatchService::new(cloudwatch_state.clone());
+    let cloudwatch_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("cloudwatch").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_persistence::SnapshotStore::load(&store) {
+                Ok(Some(bytes)) => {
+                    match serde_json::from_slice::<fakecloud_cloudwatch::CloudWatchSnapshot>(&bytes)
+                    {
+                        Ok(snapshot) => {
+                            if snapshot.schema_version
+                                > fakecloud_cloudwatch::CLOUDWATCH_SNAPSHOT_SCHEMA_VERSION
+                            {
+                                fatal_exit(format_args!(
+                                    "cloudwatch persistence schema too new: on-disk={}, max supported={}",
+                                    snapshot.schema_version,
+                                    fakecloud_cloudwatch::CLOUDWATCH_SNAPSHOT_SCHEMA_VERSION,
+                                ));
+                            }
+                            let account_count = snapshot.accounts.accounts.len();
+                            *cloudwatch_state.write() = snapshot.accounts;
+                            tracing::info!(
+                                accounts = account_count,
+                                "loaded cloudwatch persistence snapshot"
+                            );
+                        }
+                        Err(err) => fatal_exit(format_args!(
+                            "failed to parse cloudwatch persistence snapshot: {err}"
+                        )),
+                    }
+                }
+                Ok(None) => {
+                    tracing::info!("no cloudwatch persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!(
+                    "failed to read cloudwatch persistence snapshot: {err}"
+                )),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut cloudwatch_service =
+        fakecloud_cloudwatch::CloudWatchService::new(cloudwatch_state.clone());
+    if let Some(store) = cloudwatch_snapshot_store {
+        cloudwatch_service = cloudwatch_service.with_snapshot_store(store);
+    }
     registry.register(Arc::new(cloudwatch_service));
     let app_autoscaling_service =
         fakecloud_application_autoscaling::ApplicationAutoScalingService::new(

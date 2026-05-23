@@ -9,8 +9,14 @@ use fakecloud_core::query::{
 };
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 
+use std::sync::Arc;
+
+use fakecloud_persistence::SnapshotStore;
+use tokio::sync::Mutex;
+
 use crate::state::{
-    AlarmState, Dashboard, MetricAlarm, MetricDatum, SharedCloudWatchState, StatisticSet,
+    AlarmState, CloudWatchSnapshot, Dashboard, MetricAlarm, MetricDatum, SharedCloudWatchState,
+    StatisticSet, CLOUDWATCH_SNAPSHOT_SCHEMA_VERSION,
 };
 
 const NS: &str = "http://monitoring.amazonaws.com/doc/2010-08-01/";
@@ -32,11 +38,50 @@ const SUPPORTED_ACTIONS: &[&str] = &[
 
 pub struct CloudWatchService {
     state: SharedCloudWatchState,
+    snapshot_store: Option<Arc<dyn SnapshotStore>>,
+    snapshot_lock: Arc<Mutex<()>>,
 }
 
 impl CloudWatchService {
     pub fn new(state: SharedCloudWatchState) -> Self {
-        Self { state }
+        Self {
+            state,
+            snapshot_store: None,
+            snapshot_lock: Arc::new(Mutex::new(())),
+        }
+    }
+
+    /// Attach a `SnapshotStore` so alarms / dashboards / metrics survive
+    /// restarts. Without this, all CloudWatch state is in-memory only —
+    /// alarms wired to actions fire on a freshly-started process.
+    pub fn with_snapshot_store(mut self, store: Arc<dyn SnapshotStore>) -> Self {
+        self.snapshot_store = Some(store);
+        self
+    }
+
+    /// Persist current state as a snapshot. Cloned + serialized under
+    /// the snapshot lock so concurrent mutators can't race a stale-last
+    /// write.
+    pub(crate) async fn save_snapshot(&self) {
+        let Some(store) = self.snapshot_store.clone() else {
+            return;
+        };
+        let _guard = self.snapshot_lock.lock().await;
+        let snapshot = CloudWatchSnapshot {
+            schema_version: CLOUDWATCH_SNAPSHOT_SCHEMA_VERSION,
+            accounts: self.state.read().clone_for_snapshot(),
+        };
+        let join = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+            let bytes = serde_json::to_vec(&snapshot)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+            store.save(&bytes)
+        })
+        .await;
+        match join {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => tracing::error!(%err, "failed to write cloudwatch snapshot"),
+            Err(err) => tracing::error!(%err, "cloudwatch snapshot task panicked"),
+        }
     }
 }
 
@@ -51,7 +96,18 @@ impl AwsService for CloudWatchService {
     }
 
     async fn handle(&self, req: AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        match req.action.as_str() {
+        let mutates = matches!(
+            req.action.as_str(),
+            "PutMetricData"
+                | "PutMetricAlarm"
+                | "DeleteAlarms"
+                | "EnableAlarmActions"
+                | "DisableAlarmActions"
+                | "SetAlarmState"
+                | "PutDashboard"
+                | "DeleteDashboards"
+        );
+        let result = match req.action.as_str() {
             "PutMetricData" => self.put_metric_data(&req),
             "GetMetricStatistics" => self.get_metric_statistics(&req),
             "GetMetricData" => self.get_metric_data(&req),
@@ -72,7 +128,11 @@ impl AwsService for CloudWatchService {
                 "monitoring",
                 &req.action,
             )),
+        };
+        if mutates && result.is_ok() {
+            self.save_snapshot().await;
         }
+        result
     }
 }
 

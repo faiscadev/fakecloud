@@ -7,7 +7,16 @@ use serde::{Deserialize, Serialize};
 
 pub type SharedCloudWatchState = Arc<RwLock<CloudWatchAccounts>>;
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+/// On-disk snapshot envelope for CloudWatch state.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CloudWatchSnapshot {
+    pub schema_version: u32,
+    pub accounts: CloudWatchAccounts,
+}
+
+pub const CLOUDWATCH_SNAPSHOT_SCHEMA_VERSION: u32 = 1;
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct CloudWatchAccounts {
     pub accounts: BTreeMap<String, CloudWatchState>,
 }
@@ -15,6 +24,16 @@ pub struct CloudWatchAccounts {
 impl CloudWatchAccounts {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Deep-clone for snapshot serialization. `Clone` isn't derived
+    /// because the live state is held behind a `RwLock` and the rest of
+    /// the crate references it by reference — this helper makes the
+    /// intent explicit at the persistence boundary.
+    pub fn clone_for_snapshot(&self) -> CloudWatchAccounts {
+        CloudWatchAccounts {
+            accounts: self.accounts.clone(),
+        }
     }
 
     pub fn get_or_create(&mut self, account_id: &str) -> &mut CloudWatchState {
@@ -28,7 +47,7 @@ impl CloudWatchAccounts {
     }
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct CloudWatchState {
     pub account_id: String,
     /// region -> namespace -> Vec<MetricDatum>
