@@ -1,0 +1,54 @@
+name: Lambda K8s Backend
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/fakecloud-lambda/**'
+      - '.github/workflows/lambda-k8s.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'crates/fakecloud-lambda/**'
+      - '.github/workflows/lambda-k8s.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  k8s-integration:
+    name: K8s backend (kind)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      - name: Create kind cluster
+        uses: helm/kind-action@a1b0e391336a6ee6713a0583f8c6240d70863de3 # v1
+        with:
+          cluster_name: fakecloud-k8s-test
+          # Single node is enough — these tests only exercise the
+          # control-plane interactions (create/list/delete pods,
+          # reap orphans by label). Multi-node would just slow boot.
+          wait: 120s
+
+      - name: Pre-pull pause image into the cluster
+        run: |
+          docker pull registry.k8s.io/pause:3.10
+          kind load docker-image registry.k8s.io/pause:3.10 --name fakecloud-k8s-test
+
+      - name: Run K8s integration tests
+        env:
+          FAKECLOUD_K8S_TEST: '1'
+        run: |
+          cargo test -p fakecloud-lambda \
+            --features k8s-integration \
+            --test k8s_integration \
+            -- --test-threads=1

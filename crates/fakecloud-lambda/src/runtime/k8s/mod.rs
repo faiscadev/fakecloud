@@ -67,6 +67,7 @@ impl K8sBackend {
         default_ecr_port: u16,
         internal_token: String,
     ) -> Result<Self, K8sBackendError> {
+        ensure_crypto_provider();
         let self_url =
             std::env::var("FAKECLOUD_K8S_SELF_URL").map_err(|_| K8sBackendError::MissingSelfUrl)?;
         let parsed = reqwest::Url::parse(&self_url)
@@ -182,6 +183,21 @@ impl K8sBackend {
             "RIE on {pod_ip}:8080 did not accept connections within 10s"
         )))
     }
+}
+
+/// Install rustls' `ring` CryptoProvider once per process. Rustls
+/// 0.23 dropped the implicit default and every TLS connection now
+/// panics until something installs one. Kube's `rustls-tls` feature
+/// doesn't pull in a provider on our behalf, so we do it here. Safe
+/// to call concurrently; the `.ok()` swallows the "already installed"
+/// error in case another component (a different test, a future
+/// service) beat us to it.
+fn ensure_crypto_provider() {
+    use std::sync::Once;
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
 }
 
 /// Extract the account ID from a function ARN
