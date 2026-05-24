@@ -152,6 +152,20 @@ spec:
 - **`fakecloud-lambda` Pods are leaking after fakecloud crashes** — confirm fakecloud has `delete` permission on `pods` in the configured namespace. The startup reaper deletes any Pod labeled `fakecloud-managed-by=fakecloud` whose `fakecloud-instance` differs from the current process.
 - **`kubectl get pods -l fakecloud-managed-by=fakecloud`** — quick health check showing every Lambda Pod fakecloud has spawned.
 
+## Running the test suite
+
+The K8s backend has unit tests (Pod-spec generation, helpers) that run on every workspace `cargo test`. Real-cluster integration tests are opt-in and gated behind the `k8s-integration` feature so a casual `cargo test` doesn't try to talk to a cluster that isn't there.
+
+To run them:
+
+```sh
+kind create cluster --name fakecloud-k8s-test
+FAKECLOUD_K8S_TEST=1 cargo test -p fakecloud-lambda \
+    --features k8s-integration --test k8s_integration -- --test-threads=1
+```
+
+The first test hard-fails (not skips) when `FAKECLOUD_K8S_TEST` is unset, so you can't silently miss a regression. CI runs the same suite against a kind cluster on every push that touches `crates/fakecloud-lambda/**` via [`.github/workflows/lambda-k8s.yml`](https://github.com/faiscadev/fakecloud/blob/main/.github/workflows/lambda-k8s.yml).
+
 ## Status
 
 Shipped in fakecloud 0.14.x. Beta — please open an issue or comment on [#1234](https://github.com/faiscadev/fakecloud/issues/1234) if you hit edge cases.
