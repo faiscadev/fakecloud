@@ -44,7 +44,21 @@ fn require_test_env() {
     }
 }
 
+/// rustls 0.23 dropped the implicit default CryptoProvider, so every
+/// kube TLS connection panics until something installs one. Each test
+/// that builds a `Client` directly (without going through
+/// `K8sBackend::from_env`) needs to install the provider explicitly;
+/// the call is process-wide and idempotent.
+fn install_crypto_provider() {
+    use std::sync::Once;
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+}
+
 async fn client() -> Client {
+    install_crypto_provider();
     Client::try_default()
         .await
         .expect("kube::Client::try_default failed — set KUBECONFIG or run inside a cluster")

@@ -32,6 +32,12 @@ bytes = { workspace = true }
 kube = { workspace = true }
 k8s-openapi = { workspace = true }
 futures-util = "0.3"
+# rustls 0.23 dropped the implicit default CryptoProvider; kube's
+# rustls-tls feature builds a Client but every request panics unless
+# one is installed up front. We install `ring` once at K8sBackend
+# construction so neither the server's runtime path nor opt-in
+# integration tests have to wire this in themselves.
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 
 [dev-dependencies]
 bytes = { workspace = true }
