@@ -29,6 +29,14 @@ pub fn is_aws_ecr_uri(image: &str) -> bool {
 /// Docker's localhost-registry behaviour means the daemon on both Linux
 /// and macOS Docker Desktop accepts `127.0.0.1:<port>` over plain HTTP.
 pub fn translate_to_local(image: &str, server_port: u16) -> Option<String> {
+    translate_to_local_at(image, "127.0.0.1", server_port)
+}
+
+/// Like [`translate_to_local`] but lets the caller pick the host the
+/// rewritten URI should point at. Lambda's Kubernetes backend needs
+/// this — inside a cluster, the in-cluster fakecloud Service hostname
+/// (not `127.0.0.1`) is the only address Lambda Pods can reach.
+pub fn translate_to_local_at(image: &str, host: &str, server_port: u16) -> Option<String> {
     if !is_aws_ecr_uri(image) {
         return None;
     }
@@ -36,7 +44,7 @@ pub fn translate_to_local(image: &str, server_port: u16) -> Option<String> {
     if path.is_empty() {
         return None;
     }
-    Some(format!("127.0.0.1:{server_port}/{path}"))
+    Some(format!("{host}:{server_port}/{path}"))
 }
 
 /// Is `image` a digest-pinned reference (`repo@sha256:...`)? Docker's
@@ -113,5 +121,22 @@ mod tests {
             translate_to_local("123456789012.dkr.ecr.us-east-1.amazonaws.com/", 4566),
             None
         );
+    }
+
+    #[test]
+    fn translate_to_local_at_overrides_host() {
+        assert_eq!(
+            translate_to_local_at(
+                "123456789012.dkr.ecr.us-east-1.amazonaws.com/repo:tag",
+                "fakecloud.fakecloud.svc.cluster.local",
+                4566
+            ),
+            Some("fakecloud.fakecloud.svc.cluster.local:4566/repo:tag".to_string())
+        );
+    }
+
+    #[test]
+    fn translate_to_local_at_returns_none_for_non_ecr() {
+        assert_eq!(translate_to_local_at("alpine:3.20", "anything", 4566), None);
     }
 }

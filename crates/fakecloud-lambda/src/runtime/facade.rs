@@ -76,6 +76,26 @@ impl LambdaRuntime {
         Self::auto_detect_docker(server_port)
     }
 
+    /// Construct a runtime backed by the Kubernetes backend. Reads
+    /// configuration from env vars (`FAKECLOUD_K8S_SELF_URL`,
+    /// `FAKECLOUD_K8S_NAMESPACE`, etc.) and connects to the cluster
+    /// via in-cluster service account or kubeconfig. Hard-fails on
+    /// any configuration or connectivity issue — we don't silently
+    /// fall back to Docker because the operator explicitly opted in
+    /// to K8s.
+    ///
+    /// `internal_token` is the bearer token the artifact endpoints on
+    /// the fakecloud server expect from Pod init containers — caller
+    /// must register the same token on those endpoints.
+    pub async fn new_k8s(
+        server_port: u16,
+        internal_token: String,
+    ) -> Result<Self, super::k8s::K8sBackendError> {
+        let backend = super::k8s::K8sBackend::from_env(server_port, internal_token).await?;
+        backend.reap_stale().await;
+        Ok(Self::from_backend(Arc::new(backend)))
+    }
+
     pub fn cli_name(&self) -> &str {
         self.backend.name()
     }
@@ -255,15 +275,26 @@ impl LambdaRuntime {
                     .unwrap_or_default();
                 let last_used = entry.last_used.read();
                 let idle_secs = last_used.elapsed().as_secs();
-                let container_id = match &entry.instance.handle {
-                    BackendHandle::Container { id } => id.clone(),
-                };
-                serde_json::json!({
+                let mut row = serde_json::json!({
                     "functionName": name,
                     "runtime": runtime,
-                    "containerId": container_id,
+                    "backend": self.backend.name(),
                     "lastUsedSecsAgo": idle_secs,
-                })
+                });
+                let obj = row.as_object_mut().expect("json object");
+                match &entry.instance.handle {
+                    BackendHandle::Container { id } => {
+                        obj.insert("containerId".into(), serde_json::Value::String(id.clone()));
+                    }
+                    BackendHandle::Pod { namespace, name } => {
+                        obj.insert("podName".into(), serde_json::Value::String(name.clone()));
+                        obj.insert(
+                            "namespace".into(),
+                            serde_json::Value::String(namespace.clone()),
+                        );
+                    }
+                }
+                row
             })
             .collect()
     }

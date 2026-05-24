@@ -32,6 +32,7 @@ pub enum RuntimeError {
 #[derive(Debug, Clone)]
 pub enum BackendHandle {
     Container { id: String },
+    Pod { namespace: String, name: String },
 }
 
 /// What [`LambdaBackend::launch`] returns. `endpoint` is the `host:port`

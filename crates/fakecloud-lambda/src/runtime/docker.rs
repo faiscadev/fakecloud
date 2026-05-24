@@ -442,6 +442,9 @@ impl LambdaBackend for DockerBackend {
     async fn terminate(&self, handle: &BackendHandle) {
         match handle {
             BackendHandle::Container { id } => self.remove_container(id).await,
+            // Pod handles belong to the K8s backend — defensive no-op
+            // so a mis-wired multi-backend setup doesn't panic.
+            BackendHandle::Pod { .. } => {}
         }
     }
 }

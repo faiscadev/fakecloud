@@ -13,6 +13,7 @@ use fakecloud_core::dispatch::{self, DispatchConfig};
 use fakecloud_core::registry::ServiceRegistry;
 use fakecloud_sdk::types;
 
+mod admin_lambda_artifacts;
 mod appas_hooks;
 mod cli;
 mod dynamodb_streams_lambda_poller;
@@ -182,17 +183,37 @@ async fn main() {
     // Reap any backing containers left behind by a previous fakecloud process
     // that was killed before it could run its own cleanup (SIGKILL, crash, OOM).
     reaper::reap_stale_containers();
-    // Auto-detect Docker/Podman for Lambda execution
-    let container_runtime =
-        fakecloud_lambda::runtime::ContainerRuntime::new(bound_addr.port()).map(Arc::new);
+    // Lambda execution backend. FAKECLOUD_LAMBDA_BACKEND=k8s opts into
+    // the native Kubernetes Pod backend (issue #1234); anything else
+    // (or unset) auto-detects Docker/Podman.
+    let lambda_backend_choice = std::env::var("FAKECLOUD_LAMBDA_BACKEND")
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let k8s_internal_token: Arc<String> = Arc::new(generate_k8s_internal_token());
+    let container_runtime = if lambda_backend_choice == "k8s" {
+        match fakecloud_lambda::runtime::LambdaRuntime::new_k8s(
+            bound_addr.port(),
+            (*k8s_internal_token).clone(),
+        )
+        .await
+        {
+            Ok(rt) => Some(Arc::new(rt)),
+            Err(e) => {
+                eprintln!(
+                    "FAKECLOUD_LAMBDA_BACKEND=k8s but Kubernetes backend failed to initialize: {e}"
+                );
+                std::process::exit(1);
+            }
+        }
+    } else {
+        fakecloud_lambda::runtime::ContainerRuntime::new(bound_addr.port()).map(Arc::new)
+    };
     if let Some(ref rt) = container_runtime {
-        tracing::info!(
-            cli = rt.cli_name(),
-            "Lambda execution enabled via container runtime"
-        );
+        tracing::info!(backend = rt.cli_name(), "Lambda execution enabled");
     } else {
         tracing::info!("Docker/Podman not available — Lambda Invoke will return errors for functions with code");
     }
+    let lambda_backend_is_k8s = lambda_backend_choice == "k8s";
     let secretsmanager_state = Arc::new(parking_lot::RwLock::new(
         fakecloud_core::multi_account::MultiAccountState::new(
             &cli.account_id,
@@ -7035,6 +7056,23 @@ async fn main() {
                 }
             }),
         )
+        .merge({
+            // K8s Lambda backend needs in-cluster Pod init containers to
+            // pull function code + layers over HTTP. The routes are
+            // mounted unconditionally (gated by bearer-token check, never
+            // exposed without auth) so the K8s backend can boot at any
+            // time after server start.
+            if lambda_backend_is_k8s {
+                admin_lambda_artifacts::router(
+                    admin_lambda_artifacts::ArtifactRoutesContext {
+                        lambda_state: lambda_state.clone(),
+                        bearer_token: k8s_internal_token.clone(),
+                    },
+                )
+            } else {
+                axum::Router::new()
+            }
+        })
         .fallback(dispatch::dispatch)
         .layer({
             let registry_arc = Arc::new(registry);
@@ -7344,6 +7382,17 @@ async fn bind_listener(addr: &str) -> std::io::Result<(TcpListener, std::net::So
 /// writer keeps this testable without capturing process stdout.
 fn announce_bound_port<W: std::io::Write>(port: u16, writer: &mut W) -> std::io::Result<()> {
     writeln!(writer, "{PORT_HANDSHAKE_PREFIX}{port}")
+}
+/// Generate the per-process bearer token used by the K8s backend's
+/// internal artifact endpoints. 32 random bytes, hex-encoded, never
+/// persisted. Pod specs embed this value at launch; teardown
+/// invalidates it by virtue of the next fakecloud process minting a
+/// fresh one.
+fn generate_k8s_internal_token() -> String {
+    use rand::RngCore;
+    let mut bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 /// Build a public-facing endpoint URL from the address the server actually
 /// bound to. Wildcard hosts (``0.0.0.0`` / ``[::]``) are rewritten to

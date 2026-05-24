@@ -16,6 +16,11 @@ fakecloud is configured via CLI flags or environment variables. Flags take prece
 | `--data-path`        | `FAKECLOUD_DATA_PATH`       | —                  | Directory to persist state to. Required when `--storage-mode=persistent`.                |
 | `--s3-cache-size`    | `FAKECLOUD_S3_CACHE_SIZE`   | `268435456`        | In-memory LRU cache for S3 object bodies in persistent mode. Default 256 MiB.            |
 |                      | `FAKECLOUD_CONTAINER_CLI`   | auto-detect        | Container CLI to use (`docker` or `podman`)                                              |
+|                      | `FAKECLOUD_LAMBDA_BACKEND`  | unset (docker)     | `k8s` to run Lambda functions as native Kubernetes Pods instead of Docker containers. See [Kubernetes backend](/docs/guides/kubernetes-backend/). |
+|                      | `FAKECLOUD_K8S_NAMESPACE`   | `default`          | Namespace fakecloud creates Lambda Pods in. Only honored with `FAKECLOUD_LAMBDA_BACKEND=k8s`. |
+|                      | `FAKECLOUD_K8S_SELF_URL`    | —                  | In-cluster URL of the fakecloud Service (e.g. `http://fakecloud.fakecloud.svc.cluster.local:4566`). Required for the K8s backend so init containers can fetch function code + layers. |
+|                      | `FAKECLOUD_K8S_ECR_URL`     | host of `_SELF_URL`| Override the host:port the K8s backend rewrites AWS private-ECR URIs to. Defaults to the host of `FAKECLOUD_K8S_SELF_URL`. |
+|                      | `FAKECLOUD_K8S_PULL_SECRET` | unset              | Name of a `kubernetes.io/dockerconfigjson` Secret used as `imagePullSecrets` for image-package Lambda Pods. |
 |                      | `FAKECLOUD_MAX_REQUEST_BODY_BYTES` | `1073741824` | Max bytes a buffered request body can absorb before fakecloud returns 413. Default 1 GiB. Streaming routes (S3 `PutObject` / `UploadPart`, ECR OCI blob upload `PATCH` / `PUT`) bypass this cap entirely — they spool the raw HTTP body to disk instead of buffering it all in RAM. Raise this only when stress-testing buffered requests past 1 GiB. |
 
 ## Examples
