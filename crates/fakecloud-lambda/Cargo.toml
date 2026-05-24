@@ -29,6 +29,9 @@ tempfile = { workspace = true }
 percent-encoding = { workspace = true }
 crc32fast = { workspace = true }
 bytes = { workspace = true }
+kube = { workspace = true }
+k8s-openapi = { workspace = true }
+futures-util = "0.3"
 
 [dev-dependencies]
 bytes = { workspace = true }

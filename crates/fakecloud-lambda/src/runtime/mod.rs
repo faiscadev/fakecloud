@@ -10,10 +10,12 @@ pub(crate) mod backend;
 pub(crate) mod docker;
 pub(crate) mod env_rewrite;
 pub(crate) mod facade;
+pub mod k8s;
 
 pub use backend::{BackendHandle, LambdaBackend, RuntimeError, StreamingInvocation, WarmInstance};
 pub use docker::{extract_zip, runtime_to_image, DockerBackend};
 pub use facade::LambdaRuntime;
+pub use k8s::{K8sBackend, K8sBackendError};
 
 /// Backwards-compatible alias used by callers across the workspace
 /// (eventbridge bridge, scheduler, lambda_delivery, reset state, server
