@@ -1,53 +1,25 @@
-use std::collections::HashMap;
+//! Docker/Podman [`LambdaBackend`] implementation.
+//!
+//! Shells out to `docker` or `podman` CLI. Auto-detects which one is
+//! available; honors `FAKECLOUD_CONTAINER_CLI` as an override.
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+use async_trait::async_trait;
 use base64::Engine;
-use parking_lot::RwLock;
-use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
+use super::backend::{BackendHandle, LambdaBackend, RuntimeError, WarmInstance};
+use super::env_rewrite::rewrite_localhost_envs;
 use crate::state::LambdaFunction;
 
-/// A running container kept warm for reuse.
-struct WarmContainer {
-    container_id: String,
-    host_port: u16,
-    last_used: RwLock<Instant>,
-    /// Combined fingerprint of the function's code SHA-256 plus the
-    /// SHA-256 of every attached layer's ZIP bytes, joined in attach
-    /// order. Layers mutate `/opt`, so a layer change invalidates the
-    /// warm container even when the function code is unchanged.
-    deploy_id: String,
-}
-
-/// Compute the warm-container key for a function with its current layer
-/// set. Stable across calls — layer ARNs are immutable in AWS, so the
-/// hash of their bytes is the right cache key.
-fn deploy_id_for(func: &LambdaFunction, layers: &[Vec<u8>]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(func.code_sha256.as_bytes());
-    for bytes in layers {
-        let mut layer_hasher = Sha256::new();
-        layer_hasher.update(bytes);
-        hasher.update(b":");
-        hasher.update(layer_hasher.finalize());
-    }
-    base64::Engine::encode(
-        &base64::engine::general_purpose::STANDARD,
-        hasher.finalize(),
-    )
-}
-
-/// Docker/Podman-based Lambda execution engine.
-pub struct ContainerRuntime {
+/// Docker/Podman-based Lambda execution backend.
+pub struct DockerBackend {
     cli: String,
-    containers: RwLock<HashMap<String, WarmContainer>>,
-    /// Serializes container startup per function to prevent duplicate containers.
-    starting: RwLock<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     instance_id: String,
-    /// IP address that containers should use to reach the host
+    /// IP address that containers should use to reach the host.
     host_ip: String,
     /// Port the main fakecloud server bound to. Used to translate AWS
     /// private-ECR URIs in `PackageType=Image` functions to fakecloud's
@@ -59,50 +31,13 @@ pub struct ContainerRuntime {
     docker_config: Option<Arc<TempDir>>,
 }
 
-/// Wrapper around an in-flight streaming invocation. Yields raw body
-/// chunks via [`Self::next_chunk`] until the RIE closes the response,
-/// at which point the final `Ok(None)` signals the caller to emit the
-/// terminal `InvokeComplete` frame.
-pub struct StreamingInvocation {
-    resp: reqwest::Response,
-}
-
-impl StreamingInvocation {
-    /// Read the next chunk of the function's response body. Returns
-    /// `Ok(None)` once the RIE has finished streaming. Buffered
-    /// handlers tend to deliver a single chunk; streaming handlers
-    /// deliver one chunk per `responseStream.write(...)` call.
-    pub async fn next_chunk(&mut self) -> Result<Option<bytes::Bytes>, RuntimeError> {
-        match self.resp.chunk().await {
-            Ok(Some(b)) => Ok(Some(b)),
-            Ok(None) => Ok(None),
-            Err(e) => Err(RuntimeError::InvocationFailed(e.to_string())),
-        }
-    }
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum RuntimeError {
-    #[error("no code ZIP provided for function {0}")]
-    NoCodeZip(String),
-    #[error("unsupported runtime: {0}")]
-    UnsupportedRuntime(String),
-    #[error("container failed to start: {0}")]
-    ContainerStartFailed(String),
-    #[error("invocation failed: {0}")]
-    InvocationFailed(String),
-    #[error("ZIP extraction failed: {0}")]
-    ZipExtractionFailed(String),
-}
-
-impl ContainerRuntime {
+impl DockerBackend {
     /// Auto-detect Docker or Podman. Returns `None` if neither is available.
     /// Override with `FAKECLOUD_CONTAINER_CLI` env var.
     /// `server_port` is the port the main fakecloud server bound to; used
     /// to resolve `PackageType=Image` ECR URIs against fakecloud ECR.
-    pub fn new(server_port: u16) -> Option<Self> {
+    pub fn auto_detect(server_port: u16) -> Option<Self> {
         let cli = if let Ok(cli) = std::env::var("FAKECLOUD_CONTAINER_CLI") {
-            // Verify the configured CLI works
             if std::process::Command::new(&cli)
                 .arg("info")
                 .stdout(std::process::Stdio::null())
@@ -125,9 +60,8 @@ impl ContainerRuntime {
 
         let instance_id = format!("fakecloud-{}", std::process::id());
 
-        // Detect the appropriate host address for containers
-        // On Linux, use the bridge gateway IP directly (more reliable)
-        // On Mac/Windows, use host-gateway which Docker Desktop handles
+        // On Linux use the bridge gateway IP directly; on Mac/Windows use
+        // Docker Desktop's `host-gateway` magic alias.
         let host_ip = if cfg!(target_os = "linux") {
             detect_bridge_gateway(&cli).unwrap_or_else(|| "172.17.0.1".to_string())
         } else {
@@ -137,8 +71,6 @@ impl ContainerRuntime {
         let docker_config = build_local_registry_docker_config(server_port).map(Arc::new);
         Some(Self {
             cli,
-            containers: RwLock::new(HashMap::new()),
-            starting: RwLock::new(HashMap::new()),
             instance_id,
             host_ip,
             server_port,
@@ -150,173 +82,20 @@ impl ContainerRuntime {
         self.docker_config.as_ref().map(|d| d.path().to_path_buf())
     }
 
-    pub fn cli_name(&self) -> &str {
-        &self.cli
-    }
-
-    /// Invoke a Lambda function, starting a container if needed. Layer
-    /// ZIPs are extracted into `/opt` of the runtime sandbox; AWS base
-    /// images already include `/opt/python`, `/opt/nodejs/node_modules`,
-    /// `/opt/lib`, and `/opt/bin` on the right import paths.
-    pub async fn invoke(
-        &self,
-        func: &LambdaFunction,
-        payload: &[u8],
-        layers: &[Vec<u8>],
-    ) -> Result<Vec<u8>, RuntimeError> {
-        let port = self.ensure_warm_container(func, layers).await?;
-
-        // POST to the RIE endpoint
-        let url = format!(
-            "http://localhost:{}/2015-03-31/functions/function/invocations",
-            port
-        );
-        let client = reqwest::Client::new();
-        let resp = client
-            .post(&url)
-            .body(payload.to_vec())
-            .timeout(Duration::from_secs(func.timeout as u64 + 5))
-            .send()
-            .await
-            .map_err(|e| RuntimeError::InvocationFailed(e.to_string()))?;
-
-        let body = resp
-            .bytes()
-            .await
-            .map_err(|e| RuntimeError::InvocationFailed(e.to_string()))?;
-
-        Ok(body.to_vec())
-    }
-
-    /// Invoke a Lambda function and yield the raw HTTP body as a stream
-    /// of byte chunks. Each chunk corresponds to one HTTP frame the RIE
-    /// flushed to the wire — for streaming-aware handlers (Node.js
-    /// `awslambda.streamifyResponse`, Python streaming response, custom
-    /// runtimes that flush mid-handler) this preserves the chunk
-    /// boundaries the function emitted. Buffered handlers come back as
-    /// a single chunk, which is still a valid streamed response.
-    pub async fn invoke_streaming(
-        &self,
-        func: &LambdaFunction,
-        payload: &[u8],
-        layers: &[Vec<u8>],
-    ) -> Result<StreamingInvocation, RuntimeError> {
-        let port = self.ensure_warm_container(func, layers).await?;
-
-        let url = format!(
-            "http://localhost:{}/2015-03-31/functions/function/invocations",
-            port
-        );
-        let client = reqwest::Client::new();
-        let resp = client
-            .post(&url)
-            .body(payload.to_vec())
-            .timeout(Duration::from_secs(func.timeout as u64 + 5))
-            .send()
-            .await
-            .map_err(|e| RuntimeError::InvocationFailed(e.to_string()))?;
-
-        Ok(StreamingInvocation { resp })
-    }
-
-    /// Resolve a warm container for `func`, starting one if its
-    /// fingerprint doesn't match (or there isn't one yet). Returns the
-    /// host port the RIE is bound to. Shared by `invoke` and
-    /// `invoke_streaming` so both paths use the same warm-pool logic.
-    async fn ensure_warm_container(
-        &self,
-        func: &LambdaFunction,
-        layers: &[Vec<u8>],
-    ) -> Result<u16, RuntimeError> {
-        // Zip-based functions need code bytes; image-based functions have
-        // everything baked into the image. Defer the zip check until we
-        // know we need to start a fresh container.
-        let is_image = func.package_type == "Image";
-        if !is_image && func.code_zip.is_none() {
-            return Err(RuntimeError::NoCodeZip(func.function_name.clone()));
-        }
-
-        let deploy_id = deploy_id_for(func, layers);
-
-        // Check for warm container with matching deploy fingerprint
-        let port = {
-            let containers = self.containers.read();
-            if let Some(container) = containers.get(&func.function_name) {
-                if container.deploy_id == deploy_id {
-                    *container.last_used.write() = Instant::now();
-                    Some(container.host_port)
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        };
-
-        if let Some(p) = port {
-            return Ok(p);
-        }
-
-        // Serialize container startup per function to prevent duplicates
-        let startup_lock = {
-            let mut starting = self.starting.write();
-            starting
-                .entry(func.function_name.clone())
-                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-                .clone()
-        };
-        let _guard = startup_lock.lock().await;
-
-        // Re-check after acquiring lock — another task may have started it
-        let existing_port = {
-            let containers = self.containers.read();
-            containers
-                .get(&func.function_name)
-                .filter(|c| c.deploy_id == deploy_id)
-                .map(|c| {
-                    *c.last_used.write() = Instant::now();
-                    c.host_port
-                })
-        };
-        if let Some(p) = existing_port {
-            return Ok(p);
-        }
-
-        self.stop_container(&func.function_name).await;
-        let container = if is_image {
-            self.start_image_container(func, layers, &deploy_id).await?
-        } else {
-            let zip_bytes = func
-                .code_zip
-                .as_ref()
-                .ok_or_else(|| RuntimeError::NoCodeZip(func.function_name.clone()))?;
-            self.start_container(func, zip_bytes, layers, &deploy_id)
-                .await?
-        };
-        let p = container.host_port;
-        self.containers
-            .write()
-            .insert(func.function_name.clone(), container);
-        Ok(p)
-    }
-
     /// Start a container for a `PackageType=Image` function. The image is
     /// expected to already embed the Runtime Interface Emulator (RIE) or
-    /// an equivalent, exposing port 8080 — that's the AWS convention for
-    /// container-based Lambda. AWS private-ECR URIs get translated to
-    /// fakecloud's local OCI v2 registry and retagged so the container
-    /// reports its user-visible image name.
+    /// an equivalent, exposing port 8080. AWS private-ECR URIs get
+    /// translated to fakecloud's local OCI v2 registry and retagged so
+    /// the container reports its user-visible image name.
     async fn start_image_container(
         &self,
         func: &LambdaFunction,
         layers: &[Vec<u8>],
-        deploy_id: &str,
-    ) -> Result<WarmContainer, RuntimeError> {
+    ) -> Result<WarmInstance, RuntimeError> {
         let image = func.image_uri.as_deref().ok_or_else(|| {
             RuntimeError::ContainerStartFailed("PackageType=Image function has no ImageUri".into())
         })?;
 
-        // Translate AWS private-ECR URIs to fakecloud ECR's local endpoint.
         let local_pull_uri = fakecloud_core::ecr_uri::translate_to_local(image, self.server_port);
         let pull_uri = local_pull_uri.as_deref().unwrap_or(image);
 
@@ -364,22 +143,12 @@ impl ContainerRuntime {
             .arg("--add-host")
             .arg(format!("host.docker.internal:{}", self.host_ip));
 
-        for (key, value) in &func.environment {
-            let transformed_value = value
-                .replace("http://127.0.0.1:", "http://host.docker.internal:")
-                .replace("https://127.0.0.1:", "https://host.docker.internal:")
-                .replace("http://localhost:", "http://host.docker.internal:")
-                .replace("https://localhost:", "https://host.docker.internal:");
-            cmd.arg("-e").arg(format!("{}={}", key, transformed_value));
+        for (key, value) in rewrite_localhost_envs(&func.environment, "host.docker.internal") {
+            cmd.arg("-e").arg(format!("{key}={value}"));
         }
         cmd.arg("-e")
             .arg(format!("AWS_LAMBDA_FUNCTION_TIMEOUT={}", func.timeout));
 
-        // EphemeralStorage.Size (MiB) maps to a tmpfs at /tmp so
-        // function code that writes there hits the configured limit
-        // instead of the docker default. Default 512 MiB matches AWS.
-        // `exec` matches AWS Lambda's /tmp behavior (binaries unpacked
-        // there can be invoked); the default `noexec` would break that.
         let tmpfs_arg = ephemeral_storage_tmpfs_arg(func.ephemeral_storage_size);
         cmd.arg("--tmpfs").arg(tmpfs_arg);
 
@@ -397,7 +166,7 @@ impl ContainerRuntime {
         let container_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
 
         if let Err(e) = self.copy_layers_into(&container_id, layers).await {
-            let _ = self.remove_container(&container_id).await;
+            self.remove_container(&container_id).await;
             return Err(e);
         }
 
@@ -407,48 +176,15 @@ impl ContainerRuntime {
             .await
             .map_err(|e| RuntimeError::ContainerStartFailed(e.to_string()))?;
         if !start_result.status.success() {
-            let _ = self.remove_container(&container_id).await;
+            self.remove_container(&container_id).await;
             return Err(RuntimeError::ContainerStartFailed(format!(
                 "docker start failed: {}",
                 String::from_utf8_lossy(&start_result.stderr)
             )));
         }
 
-        let port_output = tokio::process::Command::new(&self.cli)
-            .args(["port", &container_id, "8080"])
-            .output()
-            .await
-            .map_err(|e| RuntimeError::ContainerStartFailed(e.to_string()))?;
-        let port_str = String::from_utf8_lossy(&port_output.stdout);
-        let port: u16 = port_str
-            .trim()
-            .rsplit(':')
-            .next()
-            .and_then(|p| p.parse().ok())
-            .ok_or_else(|| {
-                RuntimeError::ContainerStartFailed(format!(
-                    "could not determine port from: {}",
-                    port_str.trim()
-                ))
-            })?;
-
-        let mut ready = false;
-        for _ in 0..20 {
-            tokio::time::sleep(Duration::from_millis(500)).await;
-            if tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port))
-                .await
-                .is_ok()
-            {
-                ready = true;
-                break;
-            }
-        }
-        if !ready {
-            let _ = self.remove_container(&container_id).await;
-            return Err(RuntimeError::ContainerStartFailed(
-                "container did not become ready within 10 seconds".to_string(),
-            ));
-        }
+        let port = self.query_host_port(&container_id).await?;
+        self.wait_for_ready(&container_id, port).await?;
 
         tracing::info!(
             function = %func.function_name,
@@ -458,21 +194,18 @@ impl ContainerRuntime {
             "Lambda image container started"
         );
 
-        Ok(WarmContainer {
-            container_id,
-            host_port: port,
-            last_used: RwLock::new(Instant::now()),
-            deploy_id: deploy_id.to_string(),
+        Ok(WarmInstance {
+            endpoint: format!("127.0.0.1:{port}"),
+            handle: BackendHandle::Container { id: container_id },
         })
     }
 
-    async fn start_container(
+    async fn start_zip_container(
         &self,
         func: &LambdaFunction,
         zip_bytes: &[u8],
         layers: &[Vec<u8>],
-        deploy_id: &str,
-    ) -> Result<WarmContainer, RuntimeError> {
+    ) -> Result<WarmInstance, RuntimeError> {
         let image = runtime_to_image(&func.runtime)
             .ok_or_else(|| RuntimeError::UnsupportedRuntime(func.runtime.clone()))?;
 
@@ -495,28 +228,16 @@ impl ContainerRuntime {
             .arg(format!("fakecloud-lambda={}", func.function_name))
             .arg("--label")
             .arg(format!("fakecloud-instance={}", self.instance_id))
-            // Map host.docker.internal to the detected host IP (bridge gateway on Linux, or explicit IP)
             .arg("--add-host")
             .arg(format!("host.docker.internal:{}", self.host_ip));
 
-        for (key, value) in &func.environment {
-            // Transform localhost URLs to use host.docker.internal, which we've set up via --add-host
-            let transformed_value = value
-                .replace("http://127.0.0.1:", "http://host.docker.internal:")
-                .replace("https://127.0.0.1:", "https://host.docker.internal:")
-                .replace("http://localhost:", "http://host.docker.internal:")
-                .replace("https://localhost:", "https://host.docker.internal:");
-            cmd.arg("-e").arg(format!("{}={}", key, transformed_value));
+        for (key, value) in rewrite_localhost_envs(&func.environment, "host.docker.internal") {
+            cmd.arg("-e").arg(format!("{key}={value}"));
         }
 
         cmd.arg("-e")
             .arg(format!("AWS_LAMBDA_FUNCTION_TIMEOUT={}", func.timeout));
 
-        // EphemeralStorage.Size (MiB) maps to a tmpfs at /tmp so
-        // function code that writes there hits the configured limit
-        // instead of the docker default. Default 512 MiB matches AWS.
-        // `exec` matches AWS Lambda's /tmp behavior (binaries unpacked
-        // there can be invoked); the default `noexec` would break that.
         let tmpfs_arg = ephemeral_storage_tmpfs_arg(func.ephemeral_storage_size);
         cmd.arg("--tmpfs").arg(tmpfs_arg);
 
@@ -544,11 +265,10 @@ impl ContainerRuntime {
             .map_err(|e| RuntimeError::ContainerStartFailed(e.to_string()))?;
 
         if !cp_result.status.success() {
-            let _ = self.remove_container(&container_id).await;
+            self.remove_container(&container_id).await;
             let stderr = String::from_utf8_lossy(&cp_result.stderr);
             return Err(RuntimeError::ContainerStartFailed(format!(
-                "docker cp failed: {}",
-                stderr
+                "docker cp failed: {stderr}"
             )));
         }
 
@@ -563,23 +283,21 @@ impl ContainerRuntime {
                 .map_err(|e| RuntimeError::ContainerStartFailed(e.to_string()))?;
 
             if !cp_runtime.status.success() {
-                let _ = self.remove_container(&container_id).await;
+                self.remove_container(&container_id).await;
                 let stderr = String::from_utf8_lossy(&cp_runtime.stderr);
                 return Err(RuntimeError::ContainerStartFailed(format!(
-                    "docker cp to /var/runtime failed: {}",
-                    stderr
+                    "docker cp to /var/runtime failed: {stderr}"
                 )));
             }
         }
 
         if let Err(e) = self.copy_layers_into(&container_id, layers).await {
-            let _ = self.remove_container(&container_id).await;
+            self.remove_container(&container_id).await;
             return Err(e);
         }
 
         // TempDir is dropped here — code now lives inside the container
 
-        // Step 3: docker start
         let start_result = tokio::process::Command::new(&self.cli)
             .args(["start", &container_id])
             .output()
@@ -587,53 +305,15 @@ impl ContainerRuntime {
             .map_err(|e| RuntimeError::ContainerStartFailed(e.to_string()))?;
 
         if !start_result.status.success() {
-            let _ = self.remove_container(&container_id).await;
+            self.remove_container(&container_id).await;
             let stderr = String::from_utf8_lossy(&start_result.stderr);
             return Err(RuntimeError::ContainerStartFailed(format!(
-                "docker start failed: {}",
-                stderr
+                "docker start failed: {stderr}"
             )));
         }
 
-        // Query the actual assigned port
-        let port_output = tokio::process::Command::new(&self.cli)
-            .args(["port", &container_id, "8080"])
-            .output()
-            .await
-            .map_err(|e| RuntimeError::ContainerStartFailed(e.to_string()))?;
-
-        let port_str = String::from_utf8_lossy(&port_output.stdout);
-        let port: u16 = port_str
-            .trim()
-            .rsplit(':')
-            .next()
-            .and_then(|p| p.parse().ok())
-            .ok_or_else(|| {
-                RuntimeError::ContainerStartFailed(format!(
-                    "could not determine port from: {}",
-                    port_str.trim()
-                ))
-            })?;
-
-        // Wait for RIE to start accepting connections
-        let mut ready = false;
-        for _ in 0..20 {
-            tokio::time::sleep(Duration::from_millis(500)).await;
-            if tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port))
-                .await
-                .is_ok()
-            {
-                ready = true;
-                break;
-            }
-        }
-
-        if !ready {
-            let _ = self.remove_container(&container_id).await;
-            return Err(RuntimeError::ContainerStartFailed(
-                "container did not become ready within 10 seconds".to_string(),
-            ));
-        }
+        let port = self.query_host_port(&container_id).await?;
+        self.wait_for_ready(&container_id, port).await?;
 
         tracing::info!(
             function = %func.function_name,
@@ -643,12 +323,46 @@ impl ContainerRuntime {
             "Lambda container started"
         );
 
-        Ok(WarmContainer {
-            container_id,
-            host_port: port,
-            last_used: RwLock::new(Instant::now()),
-            deploy_id: deploy_id.to_string(),
+        Ok(WarmInstance {
+            endpoint: format!("127.0.0.1:{port}"),
+            handle: BackendHandle::Container { id: container_id },
         })
+    }
+
+    async fn query_host_port(&self, container_id: &str) -> Result<u16, RuntimeError> {
+        let port_output = tokio::process::Command::new(&self.cli)
+            .args(["port", container_id, "8080"])
+            .output()
+            .await
+            .map_err(|e| RuntimeError::ContainerStartFailed(e.to_string()))?;
+        let port_str = String::from_utf8_lossy(&port_output.stdout);
+        port_str
+            .trim()
+            .rsplit(':')
+            .next()
+            .and_then(|p| p.parse().ok())
+            .ok_or_else(|| {
+                RuntimeError::ContainerStartFailed(format!(
+                    "could not determine port from: {}",
+                    port_str.trim()
+                ))
+            })
+    }
+
+    async fn wait_for_ready(&self, container_id: &str, port: u16) -> Result<(), RuntimeError> {
+        for _ in 0..20 {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            if tokio::net::TcpStream::connect(format!("127.0.0.1:{port}"))
+                .await
+                .is_ok()
+            {
+                return Ok(());
+            }
+        }
+        self.remove_container(container_id).await;
+        Err(RuntimeError::ContainerStartFailed(
+            "container did not become ready within 10 seconds".to_string(),
+        ))
     }
 
     /// Extract each layer ZIP into a shared temp directory and `docker cp`
@@ -701,102 +415,33 @@ impl ContainerRuntime {
             .output()
             .await;
     }
+}
 
-    /// Stop and remove a container for a specific function.
-    pub async fn stop_container(&self, function_name: &str) {
-        let container = self.containers.write().remove(function_name);
-        if let Some(container) = container {
-            tracing::info!(
-                function = %function_name,
-                container_id = %container.container_id,
-                "stopping Lambda container"
-            );
-            self.remove_container(&container.container_id).await;
-        }
+#[async_trait]
+impl LambdaBackend for DockerBackend {
+    fn name(&self) -> &str {
+        &self.cli
     }
 
-    /// Stop and remove all containers (used on server shutdown or reset).
-    pub async fn stop_all(&self) {
-        let containers: Vec<(String, String)> = {
-            let mut map = self.containers.write();
-            map.drain()
-                .map(|(name, c)| (name, c.container_id))
-                .collect()
-        };
-        for (name, container_id) in containers {
-            tracing::info!(
-                function = %name,
-                container_id = %container_id,
-                "stopping Lambda container (cleanup)"
-            );
-            self.remove_container(&container_id).await;
-        }
-    }
-
-    /// List all warm containers and their metadata for introspection.
-    pub fn list_warm_containers(
+    async fn launch(
         &self,
-        lambda_state: &crate::state::SharedLambdaState,
-    ) -> Vec<serde_json::Value> {
-        let containers = self.containers.read();
-        let accounts = lambda_state.read();
-        containers
-            .iter()
-            .map(|(name, container)| {
-                let runtime = accounts
-                    .iter()
-                    .find_map(|(_, state)| state.functions.get(name).map(|f| f.runtime.clone()))
-                    .unwrap_or_default();
-                let last_used = container.last_used.read();
-                let idle_secs = last_used.elapsed().as_secs();
-                serde_json::json!({
-                    "functionName": name,
-                    "runtime": runtime,
-                    "containerId": container.container_id,
-                    "lastUsedSecsAgo": idle_secs,
-                })
-            })
-            .collect()
-    }
-
-    /// Evict (stop and remove) the warm container for a specific function.
-    /// Returns true if a container was found and evicted.
-    pub async fn evict_container(&self, function_name: &str) -> bool {
-        let container = self.containers.write().remove(function_name);
-        if let Some(container) = container {
-            tracing::info!(
-                function = %function_name,
-                container_id = %container.container_id,
-                "evicting Lambda container via simulation API"
-            );
-            self.remove_container(&container.container_id).await;
-            true
+        func: &LambdaFunction,
+        code_zip: Option<&[u8]>,
+        layers: &[Vec<u8>],
+        _deploy_id: &str,
+    ) -> Result<WarmInstance, RuntimeError> {
+        if func.package_type == "Image" {
+            self.start_image_container(func, layers).await
         } else {
-            false
+            let bytes =
+                code_zip.ok_or_else(|| RuntimeError::NoCodeZip(func.function_name.clone()))?;
+            self.start_zip_container(func, bytes, layers).await
         }
     }
 
-    /// Background loop that stops containers idle longer than `ttl`.
-    pub async fn run_cleanup_loop(self: Arc<Self>, ttl: Duration) {
-        let mut interval = tokio::time::interval(Duration::from_secs(30));
-        loop {
-            interval.tick().await;
-            self.cleanup_idle(ttl).await;
-        }
-    }
-
-    async fn cleanup_idle(&self, ttl: Duration) {
-        let expired: Vec<String> = {
-            let containers = self.containers.read();
-            containers
-                .iter()
-                .filter(|(_, c)| c.last_used.read().elapsed() > ttl)
-                .map(|(name, _)| name.clone())
-                .collect()
-        };
-        for name in expired {
-            tracing::info!(function = %name, "stopping idle Lambda container");
-            self.stop_container(&name).await;
+    async fn terminate(&self, handle: &BackendHandle) {
+        match handle {
+            BackendHandle::Container { id } => self.remove_container(id).await,
         }
     }
 }
@@ -829,7 +474,7 @@ pub fn runtime_to_image(runtime: &str) -> Option<String> {
         "provided.al2" => ("provided", "al2"),
         _ => return None,
     };
-    Some(format!("public.ecr.aws/lambda/{}:{}", base, tag))
+    Some(format!("public.ecr.aws/lambda/{base}:{tag}"))
 }
 
 /// Build the `--tmpfs` argument string used by `docker create` so that
@@ -876,7 +521,6 @@ pub fn extract_zip(zip_bytes: &[u8], dest: &Path) -> Result<(), RuntimeError> {
             std::io::copy(&mut file, &mut out_file)
                 .map_err(|e| RuntimeError::ZipExtractionFailed(e.to_string()))?;
 
-            // Preserve executable permissions
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
@@ -890,8 +534,7 @@ pub fn extract_zip(zip_bytes: &[u8], dest: &Path) -> Result<(), RuntimeError> {
     Ok(())
 }
 
-/// Detect the Docker bridge gateway IP on Linux.
-/// Returns None if detection fails.
+/// Detect the Docker bridge gateway IP on Linux. Returns None if detection fails.
 fn detect_bridge_gateway(cli: &str) -> Option<String> {
     let output = std::process::Command::new(cli)
         .args([
@@ -1016,7 +659,6 @@ mod tests {
 
     #[test]
     fn test_extract_zip() {
-        // Create a minimal ZIP in memory
         let buf = Vec::new();
         let cursor = std::io::Cursor::new(buf);
         let mut writer = zip::ZipWriter::new(cursor);
