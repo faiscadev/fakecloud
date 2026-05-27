@@ -36,6 +36,16 @@ pub struct DockerBackend {
     /// private-ECR URIs in `PackageType=Image` functions to fakecloud's
     /// local OCI v2 registry.
     server_port: u16,
+    /// Hostname fakecloud uses to reach sibling Lambda containers it
+    /// just spawned. `"127.0.0.1"` when fakecloud runs on the host (the
+    /// containers expose ports on the host loopback). When fakecloud is
+    /// itself running in a container with `/var/run/docker.sock`
+    /// bind-mounted, the spawned Lambda containers are *siblings* on
+    /// the host's daemon — their published ports are reachable from
+    /// inside fakecloud's container as `host.docker.internal:<port>`,
+    /// not `127.0.0.1:<port>`. Set via the `FAKECLOUD_IN_CONTAINER=1`
+    /// env var baked into the published image (issue #1539 Bug 4).
+    sibling_host: String,
     /// Isolated DOCKER_CONFIG dir with Basic auth for `127.0.0.1:<port>`.
     /// Lets `docker pull` talk to fakecloud ECR without mutating the user's
     /// `~/.docker/config.json`.
@@ -97,12 +107,14 @@ impl DockerBackend {
         };
 
         let docker_config = build_local_registry_docker_config(server_port).map(Arc::new);
+        let sibling_host = resolve_sibling_host(std::env::var("FAKECLOUD_IN_CONTAINER").ok());
         Some(Self {
             cli,
             instance_id,
             host_alias,
             add_host_arg,
             server_port,
+            sibling_host,
             docker_config,
         })
     }
@@ -232,7 +244,7 @@ impl DockerBackend {
         );
 
         Ok(WarmInstance {
-            endpoint: format!("127.0.0.1:{port}"),
+            endpoint: format!("{}:{port}", self.sibling_host),
             handle: BackendHandle::Container { id: container_id },
         })
     }
@@ -360,7 +372,7 @@ impl DockerBackend {
         );
 
         Ok(WarmInstance {
-            endpoint: format!("127.0.0.1:{port}"),
+            endpoint: format!("{}:{port}", self.sibling_host),
             handle: BackendHandle::Container { id: container_id },
         })
     }
@@ -388,7 +400,7 @@ impl DockerBackend {
     async fn wait_for_ready(&self, container_id: &str, port: u16) -> Result<(), RuntimeError> {
         for _ in 0..20 {
             tokio::time::sleep(Duration::from_millis(500)).await;
-            if tokio::net::TcpStream::connect(format!("127.0.0.1:{port}"))
+            if tokio::net::TcpStream::connect(format!("{}:{port}", self.sibling_host))
                 .await
                 .is_ok()
             {
@@ -624,6 +636,26 @@ fn detect_bridge_gateway(cli: &str) -> Option<String> {
     None
 }
 
+/// Decide what loopback address fakecloud uses to reach the *sibling*
+/// Lambda containers it just spawned. Pure helper so the env-var
+/// parsing can be tested without touching the process's real
+/// environment (which would race with parallel tests).
+///
+/// - `Some("1")` or `Some("true")` -> fakecloud is in a container,
+///   sibling published ports live on `host.docker.internal:<port>`.
+/// - Anything else, including `None` -> fakecloud runs on the host,
+///   sibling ports live on `127.0.0.1:<port>`.
+fn resolve_sibling_host(env_value: Option<String>) -> String {
+    let in_container = env_value
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if in_container {
+        "host.docker.internal".to_string()
+    } else {
+        "127.0.0.1".to_string()
+    }
+}
+
 fn is_cli_available(name: &str) -> bool {
     std::process::Command::new(name)
         .arg("info")
@@ -751,6 +783,30 @@ mod tests {
         assert!(!is_podman_binary("/usr/local/bin/docker"));
         // Docker Desktop's compatibility CLI is `docker`, not `podman`.
         assert!(!is_podman_binary("docker-credential-helper"));
+    }
+
+    #[test]
+    fn resolve_sibling_host_defaults_to_loopback() {
+        assert_eq!(resolve_sibling_host(None), "127.0.0.1");
+        assert_eq!(resolve_sibling_host(Some("".to_string())), "127.0.0.1");
+        assert_eq!(resolve_sibling_host(Some("0".to_string())), "127.0.0.1");
+        assert_eq!(resolve_sibling_host(Some("false".to_string())), "127.0.0.1");
+    }
+
+    #[test]
+    fn resolve_sibling_host_uses_docker_internal_when_in_container() {
+        assert_eq!(
+            resolve_sibling_host(Some("1".to_string())),
+            "host.docker.internal"
+        );
+        assert_eq!(
+            resolve_sibling_host(Some("true".to_string())),
+            "host.docker.internal"
+        );
+        assert_eq!(
+            resolve_sibling_host(Some("TRUE".to_string())),
+            "host.docker.internal"
+        );
     }
 
     #[test]

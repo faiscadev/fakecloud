@@ -36,11 +36,16 @@ cargo run --release --bin fakecloud
 docker run --rm -p 4566:4566 ghcr.io/faiscadev/fakecloud
 ```
 
-To enable Lambda function execution (real code in containers), mount the Docker socket:
+To enable Lambda / RDS / ElastiCache / ECS function execution (real code in containers), mount the Docker socket **and** add the host-gateway alias so fakecloud can reach the sibling containers it spawns on the host's daemon:
 
 ```sh
-docker run --rm -p 4566:4566 -v /var/run/docker.sock:/var/run/docker.sock ghcr.io/faiscadev/fakecloud
+docker run --rm -p 4566:4566 \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  --add-host host.docker.internal:host-gateway \
+  ghcr.io/faiscadev/fakecloud
 ```
+
+The image ships with the `docker` CLI installed and `FAKECLOUD_IN_CONTAINER=1` set, so fakecloud automatically reaches spawned Lambda containers via `host.docker.internal:<port>` instead of `127.0.0.1:<port>` (which would resolve to fakecloud's own loopback inside its container).
 
 ## Docker Compose
 
@@ -53,6 +58,8 @@ services:
       - "4566:4566"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock # required for Lambda Invoke
+    extra_hosts:
+      - "host.docker.internal:host-gateway" # required for Lambda Invoke
     environment:
       FAKECLOUD_LOG: info
 ```
