@@ -72,11 +72,7 @@ def handler(event, context):
         .runtime(Runtime::Python312)
         .role("arn:aws:iam::123456789012:role/test-role")
         .handler("index.handler")
-        .code(
-            FunctionCode::builder()
-                .zip_file(Blob::new(zip))
-                .build(),
-        )
+        .code(FunctionCode::builder().zip_file(Blob::new(zip)).build())
         .send()
         .await
         .expect("create_function should succeed under podman backend");
