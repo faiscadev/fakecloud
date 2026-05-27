@@ -19,8 +19,19 @@ use crate::state::LambdaFunction;
 pub struct DockerBackend {
     cli: String,
     instance_id: String,
-    /// IP address that containers should use to reach the host.
-    host_ip: String,
+    /// DNS name the container uses to reach fakecloud on the host. For
+    /// docker we use the cross-platform `host.docker.internal` alias (and
+    /// inject it via `--add-host host.docker.internal:host-gateway` on
+    /// Mac/Windows; bridge gateway IP on Linux). For podman we use its
+    /// built-in `host.containers.internal` alias, which podman injects
+    /// automatically without an `--add-host` flag — passing `host-gateway`
+    /// to podman on macOS fails with "host containers internal IP address
+    /// is empty" because podman's gvproxy network doesn't populate the
+    /// magic alias. See issue #1539.
+    host_alias: String,
+    /// `--add-host <alias>:<value>` argument injected into every container
+    /// `create`, or `None` when the runtime provides the alias natively.
+    add_host_arg: Option<String>,
     /// Port the main fakecloud server bound to. Used to translate AWS
     /// private-ECR URIs in `PackageType=Image` functions to fakecloud's
     /// local OCI v2 registry.
@@ -60,22 +71,49 @@ impl DockerBackend {
 
         let instance_id = format!("fakecloud-{}", std::process::id());
 
-        // On Linux use the bridge gateway IP directly; on Mac/Windows use
-        // Docker Desktop's `host-gateway` magic alias.
-        let host_ip = if cfg!(target_os = "linux") {
-            detect_bridge_gateway(&cli).unwrap_or_else(|| "172.17.0.1".to_string())
+        let (host_alias, add_host_arg) = if is_podman_binary(&cli) {
+            // Podman ships `host.containers.internal` as a built-in container
+            // DNS entry on every supported platform; injecting `host-gateway`
+            // on macOS fails because rootless podman's gvproxy doesn't
+            // expose the magic alias (issue #1539).
+            ("host.containers.internal".to_string(), None)
+        } else if cfg!(target_os = "linux") {
+            // Bare docker on Linux: resolve the bridge gateway IP and add
+            // an explicit alias. `host.docker.internal:host-gateway` only
+            // works on Docker Desktop; native Linux docker has no such
+            // magic.
+            let ip = detect_bridge_gateway(&cli).unwrap_or_else(|| "172.17.0.1".to_string());
+            (
+                "host.docker.internal".to_string(),
+                Some(format!("host.docker.internal:{ip}")),
+            )
         } else {
-            "host-gateway".to_string()
+            // Docker Desktop on Mac/Windows: `host-gateway` is a Docker
+            // Desktop-only alias that resolves to the host's IP.
+            (
+                "host.docker.internal".to_string(),
+                Some("host.docker.internal:host-gateway".to_string()),
+            )
         };
 
         let docker_config = build_local_registry_docker_config(server_port).map(Arc::new);
         Some(Self {
             cli,
             instance_id,
-            host_ip,
+            host_alias,
+            add_host_arg,
             server_port,
             docker_config,
         })
+    }
+
+    /// Append `--add-host` arguments to `cmd` when the runtime needs an
+    /// explicit host alias mapping (docker on Linux/Mac/Windows). No-op
+    /// for podman, which provides `host.containers.internal` natively.
+    fn apply_host_alias(&self, cmd: &mut tokio::process::Command) {
+        if let Some(arg) = &self.add_host_arg {
+            cmd.arg("--add-host").arg(arg);
+        }
     }
 
     fn docker_config_path(&self) -> Option<PathBuf> {
@@ -139,11 +177,10 @@ impl DockerBackend {
             .arg("--label")
             .arg(format!("fakecloud-lambda={}", func.function_name))
             .arg("--label")
-            .arg(format!("fakecloud-instance={}", self.instance_id))
-            .arg("--add-host")
-            .arg(format!("host.docker.internal:{}", self.host_ip));
+            .arg(format!("fakecloud-instance={}", self.instance_id));
+        self.apply_host_alias(&mut cmd);
 
-        for (key, value) in rewrite_localhost_envs(&func.environment, "host.docker.internal") {
+        for (key, value) in rewrite_localhost_envs(&func.environment, &self.host_alias) {
             cmd.arg("-e").arg(format!("{key}={value}"));
         }
         cmd.arg("-e")
@@ -227,11 +264,10 @@ impl DockerBackend {
             .arg("--label")
             .arg(format!("fakecloud-lambda={}", func.function_name))
             .arg("--label")
-            .arg(format!("fakecloud-instance={}", self.instance_id))
-            .arg("--add-host")
-            .arg(format!("host.docker.internal:{}", self.host_ip));
+            .arg(format!("fakecloud-instance={}", self.instance_id));
+        self.apply_host_alias(&mut cmd);
 
-        for (key, value) in rewrite_localhost_envs(&func.environment, "host.docker.internal") {
+        for (key, value) in rewrite_localhost_envs(&func.environment, &self.host_alias) {
             cmd.arg("-e").arg(format!("{key}={value}"));
         }
 
@@ -598,6 +634,18 @@ fn is_cli_available(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// True when `cli` is podman or a podman-compatible binary. Matches on the
+/// filename component so absolute paths (`/opt/homebrew/bin/podman`) and
+/// wrappers (`podman-remote`) both register as podman. Docker Desktop's
+/// compatibility CLI is named `docker`, so this check is safe.
+fn is_podman_binary(cli: &str) -> bool {
+    std::path::Path::new(cli)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(|n| n.contains("podman"))
+        .unwrap_or(false)
+}
+
 fn build_local_registry_docker_config(server_port: u16) -> Option<TempDir> {
     let dir = TempDir::new().ok()?;
     let auth = base64::engine::general_purpose::STANDARD.encode("AWS:fakecloud-lambda-runtime");
@@ -683,6 +731,26 @@ mod tests {
             Some("public.ecr.aws/lambda/dotnet:10".to_string())
         );
         assert_eq!(runtime_to_image("unknown"), None);
+    }
+
+    #[test]
+    fn is_podman_binary_matches_bare_name() {
+        assert!(is_podman_binary("podman"));
+        assert!(is_podman_binary("podman-remote"));
+    }
+
+    #[test]
+    fn is_podman_binary_matches_absolute_path() {
+        assert!(is_podman_binary("/opt/homebrew/bin/podman"));
+        assert!(is_podman_binary("/usr/local/bin/podman-remote"));
+    }
+
+    #[test]
+    fn is_podman_binary_rejects_docker() {
+        assert!(!is_podman_binary("docker"));
+        assert!(!is_podman_binary("/usr/local/bin/docker"));
+        // Docker Desktop's compatibility CLI is `docker`, not `podman`.
+        assert!(!is_podman_binary("docker-credential-helper"));
     }
 
     #[test]
