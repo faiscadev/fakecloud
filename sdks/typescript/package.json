@@ -1,7 +1,16 @@
 {
   "name": "fakecloud",
-  "version": "0.15.1",
+  "version": "0.15.2",
   "description": "Client SDK for fakecloud — local AWS cloud emulator",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/faiscadev/fakecloud.git",
+    "directory": "sdks/typescript"
+  },
+  "homepage": "https://fakecloud.dev",
+  "bugs": {
+    "url": "https://github.com/faiscadev/fakecloud/issues"
+  },
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {
