@@ -219,12 +219,24 @@ jobs:
     name: Publish npm
     needs: check
     runs-on: ubuntu-latest
+    # OIDC auth via npm Trusted Publishing (configured at
+    # https://www.npmjs.com/package/fakecloud/access). No NPM_TOKEN —
+    # the GitHub OIDC token is exchanged for a short-lived publish
+    # credential. id-token write is the only extra permission needed.
+    permissions:
+      id-token: write
+      contents: read
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
           registry-url: https://registry.npmjs.org
+
+      # setup-node@v4 with node 22 ships npm 10.x. Trusted Publishing
+      # OIDC support landed in npm 11.5.1; upgrade explicitly.
+      - name: Install npm 11.5+ (Trusted Publishing support)
+        run: npm install -g npm@latest
 
       - name: Verify tag matches package.json version
         working-directory: sdks/typescript
@@ -245,9 +257,10 @@ jobs:
 
       - name: Publish
         working-directory: sdks/typescript
-        run: npm publish --access public || { echo "Package may already be published"; npm view fakecloud@"$(node -p "require('./package.json').version")" version && echo "Already published, skipping" || exit 1; }
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        # --provenance ships the sigstore-signed link between this
+        # workflow run and the tarball, visible on npmjs as the
+        # "Provenance" badge. Free with OIDC, no extra setup.
+        run: npm publish --provenance --access public || { echo "Package may already be published"; npm view fakecloud@"$(node -p "require('./package.json').version")" version && echo "Already published, skipping" || exit 1; }
 
   publish-pypi:
     name: Publish PyPI
