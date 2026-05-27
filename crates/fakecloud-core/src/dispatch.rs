@@ -936,15 +936,53 @@ fn build_error_response_with_fields(
     // carrying a body — still surface the code. AWS SDKs read this header
     // when the body is empty. Emit it on every error response so HEAD,
     // OPTIONS, and any client that strips the body still see the code.
-    Response::builder()
+    // Backend errors regularly include newlines (multi-line stderr from
+    // docker/podman/etc.); HTTP header values reject control characters,
+    // so sanitize before insertion or the builder rejects the response
+    // and the connection drops.
+    let safe_code = sanitize_header_value(code);
+    let safe_message = sanitize_header_value(message);
+    let mut builder = Response::builder()
         .status(status)
         .header("content-type", content_type)
         .header("x-amzn-requestid", request_id)
-        .header("x-amz-request-id", request_id)
-        .header("x-amz-error-code", code)
-        .header("x-amz-error-message", message)
-        .body(Body::from(body))
-        .unwrap()
+        .header("x-amz-request-id", request_id);
+    if let Ok(v) = http::HeaderValue::from_str(&safe_code) {
+        builder = builder.header("x-amz-error-code", v);
+    }
+    if let Ok(v) = http::HeaderValue::from_str(&safe_message) {
+        builder = builder.header("x-amz-error-message", v);
+    }
+    builder.body(Body::from(body)).unwrap_or_else(|_| {
+        // Builder only fails if a header is invalid; we sanitized the two
+        // we control, so the remaining ones (content-type, request id) are
+        // ASCII and safe. This fallback exists purely so we never panic.
+        Response::new(Body::empty())
+    })
+}
+
+/// Strip characters that HTTP header values reject (control bytes, CR/LF/TAB)
+/// and truncate to a length that AWS SDKs handle cleanly. Backend tools
+/// (docker, podman, kubectl, …) emit multi-line stderr, and forwarding that
+/// raw into `x-amz-error-message` previously panicked the dispatcher.
+fn sanitize_header_value(s: &str) -> String {
+    const MAX_LEN: usize = 1024;
+    let mut out = String::with_capacity(s.len().min(MAX_LEN));
+    for ch in s.chars() {
+        if out.len() >= MAX_LEN {
+            break;
+        }
+        // Header values forbid CR, LF, and other control bytes (RFC 9110).
+        // Replace with a single space so multi-line messages stay readable.
+        if ch.is_control() {
+            if !out.ends_with(' ') {
+                out.push(' ');
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    out.trim().to_string()
 }
 
 /// Build the [`ConditionContext`] passed to the IAM evaluator for one
@@ -1339,6 +1377,73 @@ mod tests {
             .to_str()
             .unwrap();
         assert!(ct.contains("xml"));
+    }
+
+    /// Regression for issue #1539: multi-line backend errors (e.g. podman
+    /// stderr) used to panic the dispatcher when stuffed into the
+    /// `x-amz-error-message` HTTP header. The response must build cleanly
+    /// and the header value must not contain control characters.
+    #[test]
+    fn build_error_response_with_multiline_message_does_not_panic() {
+        let resp = build_error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "ServiceException",
+            "Lambda execution failed: container failed to start: docker start failed: \
+             Error: unable to start container \"abc\": \
+             failed to create new hosts file:\nhost-gateway is empty\n",
+            "req-multi",
+            AwsProtocol::Json,
+        );
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let msg = resp
+            .headers()
+            .get("x-amz-error-message")
+            .expect("x-amz-error-message must be set even when input contains newlines")
+            .to_str()
+            .unwrap();
+        assert!(!msg.contains('\n'));
+        assert!(!msg.contains('\r'));
+        assert!(msg.contains("Lambda execution failed"));
+        assert!(msg.contains("host-gateway is empty"));
+    }
+
+    #[test]
+    fn build_error_response_with_control_chars_strips_them() {
+        let resp = build_error_response(
+            StatusCode::BAD_REQUEST,
+            "Code\twith\ttabs",
+            "msg\x00with\x01nulls",
+            "req-ctrl",
+            AwsProtocol::Json,
+        );
+        let code = resp
+            .headers()
+            .get("x-amz-error-code")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        let msg = resp
+            .headers()
+            .get("x-amz-error-message")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(!code.contains('\t'));
+        assert!(!msg.contains('\x00'));
+        assert!(!msg.contains('\x01'));
+    }
+
+    #[test]
+    fn sanitize_header_value_truncates_long_input() {
+        let huge = "x".repeat(5_000);
+        let out = sanitize_header_value(&huge);
+        assert!(out.len() <= 1024);
+    }
+
+    #[test]
+    fn sanitize_header_value_collapses_consecutive_control_runs() {
+        let out = sanitize_header_value("a\n\n\n\rb");
+        assert_eq!(out, "a b");
     }
 
     #[test]
