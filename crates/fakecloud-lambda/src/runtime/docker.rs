@@ -447,6 +447,31 @@ impl LambdaBackend for DockerBackend {
             BackendHandle::Pod { .. } => {}
         }
     }
+
+    async fn prepull_image(&self, image: &str) -> Result<(), RuntimeError> {
+        // Translate AWS-flavored ECR URIs to fakecloud's local registry so
+        // private-ECR `Image` package functions can be warmed too. Falls
+        // back to the URI as-is for public-ECR / Docker Hub / Quay images.
+        let local_uri = fakecloud_core::ecr_uri::translate_to_local(image, self.server_port);
+        let pull_uri = local_uri.as_deref().unwrap_or(image);
+
+        let mut cmd = tokio::process::Command::new(&self.cli);
+        if let Some(p) = self.docker_config_path() {
+            cmd.env("DOCKER_CONFIG", p);
+        }
+        let out = cmd
+            .args(["pull", pull_uri])
+            .output()
+            .await
+            .map_err(|e| RuntimeError::ContainerStartFailed(format!("docker pull: {e}")))?;
+        if !out.status.success() {
+            return Err(RuntimeError::ContainerStartFailed(format!(
+                "docker pull failed for {pull_uri}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            )));
+        }
+        Ok(())
+    }
 }
 
 /// Map AWS runtime identifier to a Docker image tag.

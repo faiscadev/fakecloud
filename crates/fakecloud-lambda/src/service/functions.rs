@@ -116,6 +116,32 @@ impl LambdaService {
 
         let response = self.function_config_json(&func);
 
+        // Pre-pull the runtime image in the background so the first
+        // Invoke doesn't pay the cold-pull cost. Cold pulls of AWS base
+        // images (~700 MB) routinely exceed the AWS CLI default 60s read
+        // timeout, surfacing to users as `Connection was closed`
+        // (issue #1539). Invoke still re-pulls as a fallback if this
+        // task lost the race or failed, so a pre-pull error is not fatal.
+        if let Some(runtime) = self.runtime.clone() {
+            let func_for_prepull = func.clone();
+            let name = func.function_name.clone();
+            tokio::spawn(async move {
+                match runtime.prepull_for_function(&func_for_prepull).await {
+                    Some(Ok(())) => {
+                        tracing::info!(function = %name, "pre-pulled Lambda runtime image");
+                    }
+                    Some(Err(e)) => {
+                        tracing::warn!(
+                            function = %name,
+                            error = %e,
+                            "Lambda runtime image pre-pull failed; Invoke will retry on cold path"
+                        );
+                    }
+                    None => {} // no resolvable image (e.g. unsupported runtime)
+                }
+            });
+        }
+
         state.functions.insert(input.function_name, func);
 
         Ok(AwsResponse::json(StatusCode::CREATED, response.to_string()))

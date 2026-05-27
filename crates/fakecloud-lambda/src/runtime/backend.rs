@@ -93,4 +93,18 @@ pub trait LambdaBackend: Send + Sync + 'static {
     /// their function names don't leak across restarts. Default no-op;
     /// backends with out-of-process state should override.
     async fn reap_stale(&self) {}
+
+    /// Optional hook: pre-warm the runtime image so the first `launch()`
+    /// for a function doesn't pay the cold-pull cost. Called in the
+    /// background after `CreateFunction` persists; backends that don't
+    /// benefit from pre-pulling (e.g. Kubernetes, which pulls images on
+    /// the scheduling node anyway) leave this as a no-op.
+    ///
+    /// `image` is the registry URI fetched from `runtime_to_image` for
+    /// Zip-package functions, or the user-supplied `ImageUri` (already
+    /// translated to the local registry if applicable) for Image-package
+    /// functions.
+    async fn prepull_image(&self, _image: &str) -> Result<(), RuntimeError> {
+        Ok(())
+    }
 }

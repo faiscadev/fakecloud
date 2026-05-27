@@ -100,6 +100,31 @@ impl LambdaRuntime {
         self.backend.name()
     }
 
+    /// Background pre-warm hook: pull the image a Zip-package function
+    /// will need at invoke time, or the `ImageUri` of an Image-package
+    /// function. The first cold pull of an AWS base image (~700 MB)
+    /// frequently exceeds the AWS CLI default 60s read timeout, surfacing
+    /// to users as `Connection was closed` (issue #1539). Call after
+    /// `CreateFunction` persists so the warm path is ready before the
+    /// caller turns around and calls `Invoke`.
+    ///
+    /// Returns `None` if the function has no resolvable image (e.g. an
+    /// unsupported runtime string we can't map to a base image).
+    /// Otherwise returns the result of the backend's `prepull_image` —
+    /// callers log failures and move on, since invoke time still
+    /// re-attempts the pull as a fallback.
+    pub async fn prepull_for_function(
+        &self,
+        func: &LambdaFunction,
+    ) -> Option<Result<(), super::backend::RuntimeError>> {
+        let image = if func.package_type == "Image" {
+            func.image_uri.clone()?
+        } else {
+            super::docker::runtime_to_image(&func.runtime)?
+        };
+        Some(self.backend.prepull_image(&image).await)
+    }
+
     /// Invoke a Lambda function, starting an instance if needed. Layer
     /// ZIPs are extracted into `/opt` of the runtime sandbox; AWS base
     /// images already include `/opt/python`, `/opt/nodejs/node_modules`,

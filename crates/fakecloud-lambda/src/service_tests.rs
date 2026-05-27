@@ -2834,3 +2834,93 @@ async fn put_function_event_invoke_destination_config_echo_variants() {
         "missing OnSuccess half should be backfilled as empty object"
     );
 }
+
+/// In-memory `LambdaBackend` used by the pre-pull regression test below.
+/// Records every `prepull_image` call so the test can assert that
+/// CreateFunction kicked one off, without spinning up a real container.
+#[derive(Default, Clone)]
+struct PrepullSpy {
+    pulled: Arc<parking_lot::Mutex<Vec<String>>>,
+}
+
+#[async_trait::async_trait]
+impl crate::runtime::LambdaBackend for PrepullSpy {
+    fn name(&self) -> &str {
+        "prepull-spy"
+    }
+    async fn launch(
+        &self,
+        _func: &crate::state::LambdaFunction,
+        _code_zip: Option<&[u8]>,
+        _layers: &[Vec<u8>],
+        _deploy_id: &str,
+    ) -> Result<crate::runtime::WarmInstance, crate::runtime::RuntimeError> {
+        unreachable!("prepull regression test never invokes launch")
+    }
+    async fn terminate(&self, _handle: &crate::runtime::BackendHandle) {}
+    async fn prepull_image(&self, image: &str) -> Result<(), crate::runtime::RuntimeError> {
+        self.pulled.lock().push(image.to_string());
+        Ok(())
+    }
+}
+
+/// Regression for issue #1539 Bug 3: CreateFunction used to leave the
+/// runtime image cold, so the first Invoke paid a ~700 MB pull cost
+/// that routinely exceeded the AWS CLI default 60s read timeout. After
+/// the fix CreateFunction spawns a background pre-pull keyed off
+/// `runtime_to_image`.
+#[tokio::test]
+async fn create_function_kicks_off_background_prepull() {
+    let spy = PrepullSpy::default();
+    let pulled = spy.pulled.clone();
+    let backend: Arc<dyn crate::runtime::LambdaBackend> = Arc::new(spy);
+    let runtime = Arc::new(crate::runtime::LambdaRuntime::from_backend(backend));
+    let svc = LambdaService::new(make_state()).with_runtime(runtime);
+
+    let create_body = json!({
+        "FunctionName": "prepull-fn",
+        "Runtime": "python3.12",
+        "Role": "arn:aws:iam::123456789012:role/lambda-role",
+        "Handler": "index.handler",
+        "Code": {"ZipFile": ""},
+    })
+    .to_string();
+    let req = make_request(Method::POST, "/2015-03-31/functions", &create_body);
+    svc.handle(req).await.expect("create function");
+
+    // The pre-pull is `tokio::spawn`-ed; give it a brief chance to land
+    // on the runtime queue and run to completion. PrepullSpy returns
+    // immediately so this poll is bounded by scheduler latency, not I/O.
+    for _ in 0..50 {
+        if !pulled.lock().is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let calls = pulled.lock().clone();
+    assert_eq!(
+        calls,
+        vec!["public.ecr.aws/lambda/python:3.12".to_string()],
+        "CreateFunction must dispatch exactly one background pre-pull for the runtime image"
+    );
+}
+
+/// CreateFunction must not fail when no container runtime is wired up
+/// (e.g. fakecloud started without docker/podman available). The
+/// pre-pull is best-effort; absence of a runtime means there's nothing
+/// to pre-pull and the function still has to persist.
+#[tokio::test]
+async fn create_function_succeeds_without_runtime_prepull_hook() {
+    let svc = LambdaService::new(make_state()); // no `.with_runtime(...)`
+    let create_body = json!({
+        "FunctionName": "no-runtime-fn",
+        "Runtime": "python3.12",
+        "Role": "arn:aws:iam::123456789012:role/lambda-role",
+        "Handler": "index.handler",
+        "Code": {"ZipFile": ""},
+    })
+    .to_string();
+    let req = make_request(Method::POST, "/2015-03-31/functions", &create_body);
+    let resp = svc.handle(req).await.expect("create function");
+    assert_eq!(resp.status, StatusCode::CREATED);
+}
