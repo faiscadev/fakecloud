@@ -67,7 +67,7 @@ Step-by-step guide with S3, SQS, EventBridge triggers and test-assertion example
 ## Install
 
 - Binary: `curl -fsSL https://fakecloud.dev/install.sh | bash`
-- Docker: `docker run --rm -p 4566:4566 -v /var/run/docker.sock:/var/run/docker.sock ghcr.io/faiscadev/fakecloud`
+- Docker: `docker run --rm -p 4566:4566 -v /var/run/docker.sock:/var/run/docker.sock --add-host host.docker.internal:host-gateway ghcr.io/faiscadev/fakecloud`
 - Cargo: `cargo install fakecloud`
 
 ## Links
