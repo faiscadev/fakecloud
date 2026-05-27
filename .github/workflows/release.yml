@@ -3,6 +3,19 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  # Manual escape hatch — re-run an existing tag's publish flow. Used
+  # to backfill v0.15.1 to npm after the original push-triggered run
+  # failed at publish-npm (expired NPM_TOKEN; OIDC ships post-merge).
+  # On workflow_dispatch only the publish-npm job runs; binary build,
+  # GitHub Release, crates.io, PyPI, Maven, Packagist, Go are all
+  # push-only because they either can't be re-published (Maven Central)
+  # or the existing artifact is already there (everything else).
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to backfill to npm (e.g. v0.15.1).'
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -14,6 +27,7 @@ env:
 jobs:
   check:
     name: Check
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -27,6 +41,7 @@ jobs:
 
   build:
     name: Build ${{ matrix.name }}
+    if: github.event_name == 'push'
     needs: check
     runs-on: ${{ matrix.runner }}
     strategy:
@@ -76,6 +91,7 @@ jobs:
 
   release:
     name: Release
+    if: github.event_name == 'push'
     needs: build
     runs-on: ubuntu-latest
     steps:
@@ -93,6 +109,7 @@ jobs:
 
   publish-crates:
     name: Publish Crates
+    if: github.event_name == 'push'
     needs: check
     runs-on: ubuntu-latest
     steps:
@@ -218,6 +235,11 @@ jobs:
   publish-npm:
     name: Publish npm
     needs: check
+    # Runs on both push (release flow) and workflow_dispatch (manual
+    # backfill of an existing tag whose original publish-npm failed).
+    # When dispatched manually `needs: check` is skipped because the
+    # check job itself is gated on push; allow that via the if guard.
+    if: always() && (needs.check.result == 'success' || needs.check.result == 'skipped')
     runs-on: ubuntu-latest
     # OIDC auth via npm Trusted Publishing (configured at
     # https://www.npmjs.com/package/fakecloud/access). No NPM_TOKEN —
@@ -228,6 +250,11 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          # On push the default ref is the tag; on workflow_dispatch
+          # we check out whatever tag the operator supplied.
+          ref: ${{ inputs.tag || github.ref }}
+
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
@@ -241,7 +268,12 @@ jobs:
       - name: Verify tag matches package.json version
         working-directory: sdks/typescript
         run: |
-          TAG="${GITHUB_REF#refs/tags/v}"
+          if [ -n "${{ inputs.tag }}" ]; then
+            TAG="${{ inputs.tag }}"
+            TAG="${TAG#v}"
+          else
+            TAG="${GITHUB_REF#refs/tags/v}"
+          fi
           VERSION=$(node -p "require('./package.json').version")
           if [ "$TAG" != "$VERSION" ]; then
             echo "::error::Tag v${TAG} does not match package.json version ${VERSION}"
@@ -264,6 +296,7 @@ jobs:
 
   publish-pypi:
     name: Publish PyPI
+    if: github.event_name == 'push'
     needs: check
     runs-on: ubuntu-latest
     steps:
@@ -298,6 +331,7 @@ jobs:
 
   publish-maven:
     name: Publish Maven Central
+    if: github.event_name == 'push'
     needs: check
     runs-on: ubuntu-latest
     steps:
@@ -331,6 +365,7 @@ jobs:
 
   publish-packagist:
     name: Publish Packagist
+    if: github.event_name == 'push'
     needs: check
     runs-on: ubuntu-latest
     steps:
@@ -374,6 +409,7 @@ jobs:
 
   publish-go:
     name: Publish Go module
+    if: github.event_name == 'push'
     needs: check
     runs-on: ubuntu-latest
     steps:
