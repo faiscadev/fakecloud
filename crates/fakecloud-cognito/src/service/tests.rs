@@ -6,8 +6,20 @@ use crate::state::{
 use crate::triggers;
 
 /// Helper to run an async fn in sync test context.
+///
+/// Uses a current-thread runtime, not the default multi-threaded one.
+/// libtest runs these ~320 unit tests in parallel; a multi-threaded
+/// `Runtime::new()` per call spawns a worker-thread pool each time, and
+/// hundreds of those at once exhaust the runner's thread/fd limits,
+/// which intermittently hangs a random test until the 6h CI ceiling
+/// kills the job. A current-thread runtime drives the future on the
+/// calling thread with no extra workers.
 fn block_on<F: std::future::Future>(f: F) -> F::Output {
-    tokio::runtime::Runtime::new().unwrap().block_on(f)
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(f)
 }
 
 #[test]

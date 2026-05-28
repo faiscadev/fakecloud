@@ -1112,7 +1112,10 @@ fn delete_message_batch_removes_listed_messages() {
     send_msg_simple(&svc, &url, "a");
     send_msg_simple(&svc, &url, "b");
 
-    let rt = tokio::runtime::Runtime::new().unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
     let recv = rt
         .block_on(svc.receive_message(&make_request(
             "ReceiveMessage",
@@ -1152,7 +1155,10 @@ fn change_message_visibility_batch_updates_multiple() {
     send_msg_simple(&svc, &url, "a");
     send_msg_simple(&svc, &url, "b");
 
-    let rt = tokio::runtime::Runtime::new().unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
     let recv = rt
         .block_on(svc.receive_message(&make_request(
             "ReceiveMessage",
@@ -2200,7 +2206,10 @@ fn start_message_move_task_drains_to_explicit_destination() {
         .unwrap();
     assert!(body_json(resp)["TaskHandle"].as_str().is_some());
     // Verify destination queue received both messages.
-    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
     let recv = runtime
         .block_on(svc.receive_message(&make_request(
             "ReceiveMessage",
