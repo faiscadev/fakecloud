@@ -8,6 +8,25 @@ impl OrganizationsService {
         let name = required_str(&body, "Name")?;
         let policy_type = required_str(&body, "Type")?;
         let content = required_str(&body, "Content")?;
+        // An out-of-enum Type is a malformed request; a valid enum value that
+        // fakecloud doesn't manage isn't enabled for the org. Both are the
+        // AWS-documented responses (CreatePolicy declares neither
+        // PolicyTypeNotSupportedException — that isn't a real Organizations
+        // error code).
+        if !is_valid_policy_type(policy_type) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidInputException",
+                format!("You specified an invalid value for the Type parameter: {policy_type}"),
+            ));
+        }
+        if !is_known_policy_type(policy_type) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "PolicyTypeNotAvailableForOrganizationException",
+                format!("The {policy_type} policy type is not available for this organization."),
+            ));
+        }
         let description = body
             .get("Description")
             .and_then(|v| v.as_str())
@@ -70,10 +89,8 @@ impl OrganizationsService {
         // filter so the SDK wire format matches and callers learn about
         // their typo rather than getting an implicit SCP default.
         let filter = required_str(&body, "Filter")?;
-        if !is_known_policy_type(filter) {
-            return Err(org_error_to_aws(OrgError::PolicyTypeNotSupported(
-                filter.to_string(),
-            )));
+        if !is_valid_policy_type(filter) {
+            return Err(invalid_policy_filter(filter));
         }
         let guard = self.state.read();
         let org = self.require_member(&guard, &req.account_id)?;
@@ -118,10 +135,8 @@ impl OrganizationsService {
         let body = req.json_body();
         let target_id = required_str(&body, "TargetId")?;
         let filter = required_str(&body, "Filter")?;
-        if !is_known_policy_type(filter) {
-            return Err(org_error_to_aws(OrgError::PolicyTypeNotSupported(
-                filter.to_string(),
-            )));
+        if !is_valid_policy_type(filter) {
+            return Err(invalid_policy_filter(filter));
         }
         let guard = self.state.read();
         let org = self.require_member(&guard, &req.account_id)?;
@@ -325,6 +340,45 @@ impl OrganizationsService {
                 },
                 "Content": content,
             }
+        })))
+    }
+
+    /// `ListAccountsWithInvalidEffectivePolicy` reports member accounts
+    /// whose effective policy of `PolicyType` failed validation. fakecloud
+    /// stores well-formed policies only, so no account ever has an invalid
+    /// effective policy — the honest answer is an empty list. The
+    /// `PolicyType` is echoed back per the AWS response shape.
+    pub(super) fn list_accounts_with_invalid_effective_policy(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let policy_type = required_str(&body, "PolicyType")?.to_string();
+        let guard = self.state.read();
+        self.require_member(&guard, &req.account_id)?;
+        Ok(AwsResponse::ok_json(json!({
+            "Accounts": [],
+            "PolicyType": policy_type,
+        })))
+    }
+
+    /// `ListEffectivePolicyValidationErrors` reports the validation errors
+    /// for one account's effective policy of `PolicyType`. With only
+    /// well-formed policies stored, there are no errors — return the
+    /// account/type echo and an empty error list.
+    pub(super) fn list_effective_policy_validation_errors(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let account_id = required_str(&body, "AccountId")?.to_string();
+        let policy_type = required_str(&body, "PolicyType")?.to_string();
+        let guard = self.state.read();
+        self.require_member(&guard, &req.account_id)?;
+        Ok(AwsResponse::ok_json(json!({
+            "AccountId": account_id,
+            "PolicyType": policy_type,
+            "EffectivePolicyValidationErrors": [],
         })))
     }
 }

@@ -166,17 +166,34 @@ async fn delete_clears_state() {
 }
 
 #[tokio::test]
-async fn create_with_consolidated_billing_rejected() {
+async fn create_with_consolidated_billing_accepted() {
+    let (svc, _state) = OrganizationsService::shared();
+    let resp = svc
+        .handle(req_with(
+            "111111111111",
+            "CreateOrganization",
+            json!({"FeatureSet": "CONSOLIDATED_BILLING"}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        body_json(&resp)["Organization"]["FeatureSet"],
+        "CONSOLIDATED_BILLING"
+    );
+}
+
+#[tokio::test]
+async fn create_with_invalid_feature_set_rejected() {
     let (svc, _state) = OrganizationsService::shared();
     let err = expect_err(
         svc.handle(req_with(
             "111111111111",
             "CreateOrganization",
-            json!({"FeatureSet": "CONSOLIDATED_BILLING"}),
+            json!({"FeatureSet": "NONSENSE"}),
         ))
         .await,
     );
-    assert_eq!(err.code(), "UnsupportedAPIEndpointException");
+    assert_eq!(err.code(), "InvalidInputException");
 }
 
 /// Helper: create org with ACCOUNT_A as management, return shared
@@ -790,7 +807,7 @@ async fn create_policy_rejects_unrecognized_type() {
         ))
         .await,
     );
-    assert_eq!(err.code(), "PolicyTypeNotSupportedException");
+    assert_eq!(err.code(), "InvalidInputException");
 }
 
 #[tokio::test]
@@ -979,7 +996,7 @@ async fn list_policies_rejects_unrecognized_filter() {
         ))
         .await,
     );
-    assert_eq!(err.code(), "PolicyTypeNotSupportedException");
+    assert_eq!(err.code(), "InvalidInputException");
 }
 
 #[tokio::test]
@@ -1126,7 +1143,7 @@ async fn list_policies_for_target_rejects_bad_filter() {
         ))
         .await,
     );
-    assert_eq!(err.code(), "PolicyTypeNotSupportedException");
+    assert_eq!(err.code(), "InvalidInputException");
 }
 
 #[tokio::test]
@@ -1510,4 +1527,270 @@ async fn create_gov_cloud_account_returns_paired_id() {
         status["AccountId"].as_str().unwrap(),
         status["GovCloudAccountId"].as_str().unwrap()
     );
+}
+
+/// Create the org, then add one member account and return its id.
+async fn add_member_account(
+    svc: &std::sync::Arc<OrganizationsService>,
+    email: &str,
+    name: &str,
+) -> String {
+    let new_resp = svc
+        .handle(req_with(
+            "111111111111",
+            "CreateAccount",
+            json!({"Email": email, "AccountName": name}),
+        ))
+        .await
+        .unwrap();
+    let request_id = body_value(new_resp)["CreateAccountStatus"]["Id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let body = poll_until_terminal(svc, &request_id).await;
+    body["CreateAccountStatus"]["AccountId"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+#[tokio::test]
+async fn leave_organization_removes_calling_member() {
+    let (svc, _state) = OrganizationsService::shared();
+    create_org_with_root(&svc).await;
+    let member = add_member_account(&svc, "leaver@example.com", "Leaver").await;
+    svc.handle(req_with(&member, "LeaveOrganization", json!({})))
+        .await
+        .unwrap();
+    let err = expect_err(
+        svc.handle(req_with(
+            "111111111111",
+            "DescribeAccount",
+            json!({"AccountId": member}),
+        ))
+        .await,
+    );
+    assert_eq!(err.code(), "AccountNotFoundException");
+}
+
+#[tokio::test]
+async fn leave_organization_management_cannot_leave() {
+    let (svc, _state) = OrganizationsService::shared();
+    create_org_with_root(&svc).await;
+    let err = expect_err(
+        svc.handle(req_with("111111111111", "LeaveOrganization", json!({})))
+            .await,
+    );
+    assert_eq!(err.code(), "MasterCannotLeaveOrganizationException");
+}
+
+#[tokio::test]
+async fn leave_organization_non_member_errors() {
+    let (svc, _state) = OrganizationsService::shared();
+    create_org_with_root(&svc).await;
+    let err = expect_err(
+        svc.handle(req_with("999999999999", "LeaveOrganization", json!({})))
+            .await,
+    );
+    assert_eq!(err.code(), "AccountNotFoundException");
+}
+
+#[tokio::test]
+async fn list_accounts_with_invalid_effective_policy_is_empty() {
+    let (svc, _state) = OrganizationsService::shared();
+    create_org_with_root(&svc).await;
+    let resp = svc
+        .handle(req_with(
+            "111111111111",
+            "ListAccountsWithInvalidEffectivePolicy",
+            json!({"PolicyType": "TAG_POLICY"}),
+        ))
+        .await
+        .unwrap();
+    let v = body_value(resp);
+    assert_eq!(v["PolicyType"], "TAG_POLICY");
+    assert_eq!(v["Accounts"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn list_accounts_with_invalid_effective_policy_requires_type() {
+    let (svc, _state) = OrganizationsService::shared();
+    create_org_with_root(&svc).await;
+    let err = expect_err(
+        svc.handle(req_with(
+            "111111111111",
+            "ListAccountsWithInvalidEffectivePolicy",
+            json!({}),
+        ))
+        .await,
+    );
+    assert_eq!(err.code(), "InvalidInputException");
+}
+
+#[tokio::test]
+async fn list_effective_policy_validation_errors_is_empty() {
+    let (svc, _state) = OrganizationsService::shared();
+    create_org_with_root(&svc).await;
+    let resp = svc
+        .handle(req_with(
+            "111111111111",
+            "ListEffectivePolicyValidationErrors",
+            json!({"AccountId": "111111111111", "PolicyType": "BACKUP_POLICY"}),
+        ))
+        .await
+        .unwrap();
+    let v = body_value(resp);
+    assert_eq!(v["AccountId"], "111111111111");
+    assert_eq!(v["PolicyType"], "BACKUP_POLICY");
+    assert_eq!(
+        v["EffectivePolicyValidationErrors"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn responsibility_transfer_lifecycle() {
+    let (svc, _state) = OrganizationsService::shared();
+    create_org_with_root(&svc).await;
+    // Invite an outbound BILLING transfer.
+    let invite = svc
+        .handle(req_with(
+            "111111111111",
+            "InviteOrganizationToTransferResponsibility",
+            json!({
+                "Type": "BILLING",
+                "SourceName": "my-billing-transfer",
+                "StartTimestamp": 1893456000.0,
+                "Target": {"Id": "222222222222", "Type": "ACCOUNT"},
+            }),
+        ))
+        .await
+        .unwrap();
+    let invite_body = body_value(invite);
+    assert_eq!(
+        invite_body["Handshake"]["Action"],
+        "TRANSFER_RESPONSIBILITY"
+    );
+
+    // It must surface in the outbound list, not the inbound list.
+    let out = svc
+        .handle(req_with(
+            "111111111111",
+            "ListOutboundResponsibilityTransfers",
+            json!({"Type": "BILLING"}),
+        ))
+        .await
+        .unwrap();
+    let out_body = body_value(out);
+    let transfers = out_body["ResponsibilityTransfers"].as_array().unwrap();
+    assert_eq!(transfers.len(), 1);
+    let transfer_id = transfers[0]["Id"].as_str().unwrap().to_string();
+    assert_eq!(transfers[0]["Status"], "REQUESTED");
+    assert_eq!(transfers[0]["Type"], "BILLING");
+
+    let inbound = svc
+        .handle(req_with(
+            "111111111111",
+            "ListInboundResponsibilityTransfers",
+            json!({"Type": "BILLING"}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        body_value(inbound)["ResponsibilityTransfers"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
+
+    // Describe echoes the record.
+    let desc = svc
+        .handle(req_with(
+            "111111111111",
+            "DescribeResponsibilityTransfer",
+            json!({"Id": transfer_id}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        body_value(desc)["ResponsibilityTransfer"]["Name"],
+        "my-billing-transfer"
+    );
+
+    // Rename it.
+    let upd = svc
+        .handle(req_with(
+            "111111111111",
+            "UpdateResponsibilityTransfer",
+            json!({"Id": transfer_id, "Name": "renamed-transfer"}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        body_value(upd)["ResponsibilityTransfer"]["Name"],
+        "renamed-transfer"
+    );
+
+    // Terminate it: status flips to WITHDRAWN with an EndTimestamp.
+    let term = svc
+        .handle(req_with(
+            "111111111111",
+            "TerminateResponsibilityTransfer",
+            json!({"Id": transfer_id}),
+        ))
+        .await
+        .unwrap();
+    let term_body = body_value(term);
+    assert_eq!(term_body["ResponsibilityTransfer"]["Status"], "WITHDRAWN");
+    assert!(term_body["ResponsibilityTransfer"]["EndTimestamp"].is_number());
+
+    // Terminating again is rejected (already withdrawn).
+    let err = expect_err(
+        svc.handle(req_with(
+            "111111111111",
+            "TerminateResponsibilityTransfer",
+            json!({"Id": transfer_id}),
+        ))
+        .await,
+    );
+    assert_eq!(err.code(), "ResponsibilityTransferAlreadyInStatusException");
+}
+
+#[tokio::test]
+async fn describe_responsibility_transfer_unknown_id_errors() {
+    let (svc, _state) = OrganizationsService::shared();
+    create_org_with_root(&svc).await;
+    let err = expect_err(
+        svc.handle(req_with(
+            "111111111111",
+            "DescribeResponsibilityTransfer",
+            json!({"Id": "rt-doesnotexist"}),
+        ))
+        .await,
+    );
+    assert_eq!(err.code(), "ResponsibilityTransferNotFoundException");
+}
+
+#[tokio::test]
+async fn invite_responsibility_transfer_rejects_bad_type() {
+    let (svc, _state) = OrganizationsService::shared();
+    create_org_with_root(&svc).await;
+    let err = expect_err(
+        svc.handle(req_with(
+            "111111111111",
+            "InviteOrganizationToTransferResponsibility",
+            json!({
+                "Type": "NOPE",
+                "SourceName": "x",
+                "StartTimestamp": 1893456000.0,
+                "Target": {"Id": "222222222222", "Type": "ACCOUNT"},
+            }),
+        ))
+        .await,
+    );
+    assert_eq!(err.code(), "InvalidInputException");
 }

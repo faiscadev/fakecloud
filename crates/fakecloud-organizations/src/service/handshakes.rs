@@ -32,7 +32,12 @@ impl OrganizationsService {
         let body = req.json_body();
         let id = required_str(&body, "HandshakeId")?.to_string();
         let mut guard = self.state.write();
-        let org = guard.as_mut().ok_or_else(organizations_not_in_use)?;
+        // Handshake transitions are handshake-scoped, not org-scoped: with no
+        // org there are no handshakes, so the id can't be found. These ops
+        // don't declare AWSOrganizationsNotInUseException.
+        let org = guard.as_mut().ok_or_else(|| {
+            org_error_to_aws(crate::state::OrgError::HandshakeNotFound(id.clone()))
+        })?;
 
         // AcceptHandshake / DeclineHandshake belong to the *target*
         // account; CancelHandshake belongs to the *source* (management)
@@ -80,10 +85,14 @@ impl OrganizationsService {
         let body = req.json_body();
         let id = required_str(&body, "HandshakeId")?.to_string();
         let guard = self.state.read();
-        let org = guard.as_ref().ok_or_else(organizations_not_in_use)?;
-        let handshake = org.handshakes.get(&id).ok_or_else(|| {
-            org_error_to_aws(crate::state::OrgError::HandshakeNotFound(id.clone()))
-        })?;
+        // DescribeHandshake is handshake-scoped; with no org the id can't be
+        // found. It doesn't declare AWSOrganizationsNotInUseException.
+        let handshake = guard
+            .as_ref()
+            .and_then(|org| org.handshakes.get(&id))
+            .ok_or_else(|| {
+                org_error_to_aws(crate::state::OrgError::HandshakeNotFound(id.clone()))
+            })?;
         Ok(AwsResponse::ok_json(
             json!({ "Handshake": handshake_payload(handshake) }),
         ))

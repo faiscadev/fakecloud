@@ -1,6 +1,6 @@
 {
-  "variants_passed": 86327,
-  "total_variants": 86327,
+  "variants_passed": 88377,
+  "total_variants": 88377,
   "per_service": {
     "logs": {
       "passed": 3897,
@@ -145,6 +145,10 @@
     "lambda": {
       "passed": 3178,
       "total": 3178
+    },
+    "organizations": {
+      "passed": 2050,
+      "total": 2050
     }
   }
 }

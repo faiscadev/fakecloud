@@ -78,6 +78,11 @@ pub struct OrganizationState {
     /// `None` means unset (the default).
     #[serde(default)]
     pub resource_policy: Option<String>,
+    /// Billing-responsibility transfers keyed by id (`rt-...`), created
+    /// via `InviteOrganizationToTransferResponsibility` and queried via
+    /// the Describe / List{Inbound,Outbound} ops.
+    #[serde(default)]
+    pub responsibility_transfers: BTreeMap<String, ResponsibilityTransfer>,
 }
 
 fn default_enabled_policy_types() -> HashSet<String> {
@@ -168,6 +173,7 @@ impl OrganizationState {
             enabled_policy_types: default_enabled_policy_types(),
             resource_tags: BTreeMap::new(),
             resource_policy: None,
+            responsibility_transfers: BTreeMap::new(),
         }
     }
 
@@ -1178,6 +1184,31 @@ pub struct Policy {
     pub policy_type: String,
     pub aws_managed: bool,
     pub content: String,
+}
+
+/// A billing-responsibility transfer between organizations, created via
+/// `InviteOrganizationToTransferResponsibility`. Transfers ride on a
+/// handshake (the invited org accepts/declines it) and progress through
+/// the `ResponsibilityTransferStatus` lifecycle
+/// (`REQUESTED` -> `ACCEPTED` / `DECLINED` / `CANCELED` / `EXPIRED` /
+/// `WITHDRAWN`). `direction` records whether the transfer left this org
+/// (`OUTBOUND`) or arrived at it (`INBOUND`), which drives the
+/// `List{Inbound,Outbound}ResponsibilityTransfers` filters.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ResponsibilityTransfer {
+    pub id: String,
+    pub arn: String,
+    pub name: String,
+    pub transfer_type: String,
+    pub status: String,
+    pub direction: String,
+    pub source_management_account_id: String,
+    pub source_management_account_email: String,
+    pub target_management_account_id: String,
+    pub target_management_account_email: String,
+    pub start_timestamp: DateTime<Utc>,
+    pub end_timestamp: Option<DateTime<Utc>>,
+    pub active_handshake_id: Option<String>,
 }
 
 /// Resolve `parent_id` to the AWS-shape parent type:

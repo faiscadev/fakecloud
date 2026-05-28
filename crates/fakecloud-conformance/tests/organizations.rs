@@ -1,0 +1,722 @@
+//! Organizations conformance tests. Every operation in the Smithy model is
+//! exercised against a live fakecloud via the real `aws-sdk-organizations`
+//! client and tagged with `#[test_action(...)]` so the audit step counts it.
+
+mod helpers;
+
+use aws_sdk_organizations::types::{
+    EffectivePolicyType, HandshakeParty, HandshakePartyType, PolicyType,
+    ResponsibilityTransferType, Tag,
+};
+use fakecloud_conformance_macros::test_action;
+use helpers::TestServer;
+
+const SCP_ALLOW_ALL: &str =
+    r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"*","Resource":"*"}]}"#;
+
+/// Poll `DescribeCreateAccountStatus` until the request leaves IN_PROGRESS,
+/// returning the assigned account id. fakecloud flips the status to SUCCEEDED
+/// after a 1-2s synthetic delay.
+async fn await_account(client: &aws_sdk_organizations::Client, request_id: &str) -> String {
+    for _ in 0..50 {
+        let status = client
+            .describe_create_account_status()
+            .create_account_request_id(request_id)
+            .send()
+            .await
+            .unwrap();
+        let s = status.create_account_status().unwrap();
+        if s.state().map(|st| st.as_str()) != Some("IN_PROGRESS") {
+            return s.account_id().unwrap().to_string();
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    panic!("create account never left IN_PROGRESS");
+}
+
+async fn create_member(client: &aws_sdk_organizations::Client, email: &str, name: &str) -> String {
+    let resp = client
+        .create_account()
+        .email(email)
+        .account_name(name)
+        .send()
+        .await
+        .unwrap();
+    let request_id = resp
+        .create_account_status()
+        .unwrap()
+        .id()
+        .unwrap()
+        .to_string();
+    await_account(client, &request_id).await
+}
+
+#[test_action("organizations", "CreateOrganization", checksum = "ebba0331")]
+#[test_action("organizations", "DescribeOrganization", checksum = "95bbec3c")]
+#[test_action("organizations", "ListRoots", checksum = "aa404114")]
+#[test_action("organizations", "EnableAllFeatures", checksum = "837ce1cf")]
+#[test_action("organizations", "DeleteOrganization", checksum = "c1d79343")]
+#[tokio::test]
+async fn organizations_org_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.organizations_client().await;
+
+    let created = client.create_organization().send().await.unwrap();
+    assert!(created.organization().unwrap().id().is_some());
+
+    let described = client.describe_organization().send().await.unwrap();
+    let master = described
+        .organization()
+        .unwrap()
+        .master_account_id()
+        .unwrap()
+        .to_string();
+    assert!(!master.is_empty());
+
+    let roots = client.list_roots().send().await.unwrap();
+    assert_eq!(roots.roots().len(), 1);
+
+    // EnableAllFeatures starts a handshake-style process; it succeeds on a
+    // fresh org (already all-features) by returning the in-progress handshake.
+    let _ = client.enable_all_features().send().await;
+
+    client.delete_organization().send().await.unwrap();
+    assert!(client.describe_organization().send().await.is_err());
+}
+
+#[test_action("organizations", "CreateOrganizationalUnit", checksum = "262f64d6")]
+#[test_action("organizations", "UpdateOrganizationalUnit", checksum = "272479c1")]
+#[test_action("organizations", "DescribeOrganizationalUnit", checksum = "43d02ce7")]
+#[test_action(
+    "organizations",
+    "ListOrganizationalUnitsForParent",
+    checksum = "77b52c2f"
+)]
+#[test_action("organizations", "ListChildren", checksum = "518a30fc")]
+#[test_action("organizations", "ListParents", checksum = "b434813b")]
+#[test_action("organizations", "DeleteOrganizationalUnit", checksum = "4d497f0f")]
+#[tokio::test]
+async fn organizations_ou_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.organizations_client().await;
+    client.create_organization().send().await.unwrap();
+    let root = client.list_roots().send().await.unwrap().roots()[0]
+        .id()
+        .unwrap()
+        .to_string();
+
+    let ou = client
+        .create_organizational_unit()
+        .parent_id(&root)
+        .name("Engineering")
+        .send()
+        .await
+        .unwrap();
+    let ou_id = ou.organizational_unit().unwrap().id().unwrap().to_string();
+
+    client
+        .update_organizational_unit()
+        .organizational_unit_id(&ou_id)
+        .name("Eng")
+        .send()
+        .await
+        .unwrap();
+
+    let desc = client
+        .describe_organizational_unit()
+        .organizational_unit_id(&ou_id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(desc.organizational_unit().unwrap().name(), Some("Eng"));
+
+    let list = client
+        .list_organizational_units_for_parent()
+        .parent_id(&root)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(list.organizational_units().len(), 1);
+
+    let children = client
+        .list_children()
+        .parent_id(&root)
+        .child_type(aws_sdk_organizations::types::ChildType::OrganizationalUnit)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(children.children().len(), 1);
+
+    let parents = client.list_parents().child_id(&ou_id).send().await.unwrap();
+    assert_eq!(parents.parents().len(), 1);
+
+    client
+        .delete_organizational_unit()
+        .organizational_unit_id(&ou_id)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("organizations", "CreateAccount", checksum = "bc79609c")]
+#[test_action("organizations", "DescribeCreateAccountStatus", checksum = "07fa0ed7")]
+#[test_action("organizations", "ListCreateAccountStatus", checksum = "ae4b7c96")]
+#[test_action("organizations", "ListAccounts", checksum = "258d18f9")]
+#[test_action("organizations", "ListAccountsForParent", checksum = "48274d79")]
+#[test_action("organizations", "DescribeAccount", checksum = "af46dbef")]
+#[test_action("organizations", "MoveAccount", checksum = "e9ef2d01")]
+#[test_action("organizations", "CloseAccount", checksum = "471c34a7")]
+#[test_action(
+    "organizations",
+    "RemoveAccountFromOrganization",
+    checksum = "120f5d8a"
+)]
+#[test_action("organizations", "CreateGovCloudAccount", checksum = "da6ee7a1")]
+#[test_action("organizations", "LeaveOrganization", checksum = "c1ed84c3")]
+#[tokio::test]
+async fn organizations_account_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.organizations_client().await;
+    client.create_organization().send().await.unwrap();
+    let root = client.list_roots().send().await.unwrap().roots()[0]
+        .id()
+        .unwrap()
+        .to_string();
+
+    let member = create_member(&client, "alice@example.com", "Alice").await;
+
+    let statuses = client.list_create_account_status().send().await.unwrap();
+    assert!(!statuses.create_account_statuses().is_empty());
+
+    let accounts = client.list_accounts().send().await.unwrap();
+    assert!(accounts
+        .accounts()
+        .iter()
+        .any(|a| a.id() == Some(member.as_str())));
+
+    let for_parent = client
+        .list_accounts_for_parent()
+        .parent_id(&root)
+        .send()
+        .await
+        .unwrap();
+    assert!(!for_parent.accounts().is_empty());
+
+    let desc = client
+        .describe_account()
+        .account_id(&member)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(desc.account().unwrap().id(), Some(member.as_str()));
+
+    let ou = client
+        .create_organizational_unit()
+        .parent_id(&root)
+        .name("Dest")
+        .send()
+        .await
+        .unwrap();
+    let ou_id = ou.organizational_unit().unwrap().id().unwrap().to_string();
+    client
+        .move_account()
+        .account_id(&member)
+        .source_parent_id(&root)
+        .destination_parent_id(&ou_id)
+        .send()
+        .await
+        .unwrap();
+
+    // CreateGovCloudAccount returns a paired status.
+    let gov = client
+        .create_gov_cloud_account()
+        .email("gov@example.com")
+        .account_name("Gov")
+        .send()
+        .await
+        .unwrap();
+    assert!(gov.create_account_status().unwrap().id().is_some());
+
+    // LeaveOrganization is called by a member account; the management caller
+    // here cannot leave its own org — the documented error.
+    let leave_err = client.leave_organization().send().await;
+    assert!(leave_err.is_err());
+
+    // CloseAccount marks an account closed; then it can be removed.
+    let _ = client.close_account().account_id(&member).send().await;
+    let _ = client
+        .remove_account_from_organization()
+        .account_id(&member)
+        .send()
+        .await;
+}
+
+#[test_action("organizations", "CreatePolicy", checksum = "4e4dc139")]
+#[test_action("organizations", "UpdatePolicy", checksum = "76eee990")]
+#[test_action("organizations", "DescribePolicy", checksum = "2390d618")]
+#[test_action("organizations", "ListPolicies", checksum = "959cc293")]
+#[test_action("organizations", "AttachPolicy", checksum = "0def33ec")]
+#[test_action("organizations", "ListPoliciesForTarget", checksum = "6fc7b95e")]
+#[test_action("organizations", "ListTargetsForPolicy", checksum = "57555ab8")]
+#[test_action("organizations", "DetachPolicy", checksum = "176703c5")]
+#[test_action("organizations", "DeletePolicy", checksum = "70398202")]
+#[test_action("organizations", "DescribeEffectivePolicy", checksum = "511d3ac6")]
+#[test_action("organizations", "EnablePolicyType", checksum = "b998b346")]
+#[test_action("organizations", "DisablePolicyType", checksum = "21aaed05")]
+#[test_action(
+    "organizations",
+    "ListAccountsWithInvalidEffectivePolicy",
+    checksum = "e3c0880d"
+)]
+#[test_action(
+    "organizations",
+    "ListEffectivePolicyValidationErrors",
+    checksum = "81016441"
+)]
+#[tokio::test]
+async fn organizations_policy_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.organizations_client().await;
+    client.create_organization().send().await.unwrap();
+    let root = client.list_roots().send().await.unwrap().roots()[0]
+        .id()
+        .unwrap()
+        .to_string();
+    let master = client
+        .describe_organization()
+        .send()
+        .await
+        .unwrap()
+        .organization()
+        .unwrap()
+        .master_account_id()
+        .unwrap()
+        .to_string();
+
+    let policy = client
+        .create_policy()
+        .name("deny-nothing")
+        .description("test")
+        .content(SCP_ALLOW_ALL)
+        .r#type(PolicyType::ServiceControlPolicy)
+        .send()
+        .await
+        .unwrap();
+    let policy_id = policy
+        .policy()
+        .unwrap()
+        .policy_summary()
+        .unwrap()
+        .id()
+        .unwrap()
+        .to_string();
+
+    client
+        .update_policy()
+        .policy_id(&policy_id)
+        .description("updated")
+        .send()
+        .await
+        .unwrap();
+
+    let desc = client
+        .describe_policy()
+        .policy_id(&policy_id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        desc.policy().unwrap().policy_summary().unwrap().id(),
+        Some(policy_id.as_str())
+    );
+
+    let policies = client
+        .list_policies()
+        .filter(aws_sdk_organizations::types::PolicyType::ServiceControlPolicy)
+        .send()
+        .await
+        .unwrap();
+    assert!(!policies.policies().is_empty());
+
+    client
+        .attach_policy()
+        .policy_id(&policy_id)
+        .target_id(&root)
+        .send()
+        .await
+        .unwrap();
+
+    let for_target = client
+        .list_policies_for_target()
+        .target_id(&root)
+        .filter(PolicyType::ServiceControlPolicy)
+        .send()
+        .await
+        .unwrap();
+    assert!(!for_target.policies().is_empty());
+
+    let targets = client
+        .list_targets_for_policy()
+        .policy_id(&policy_id)
+        .send()
+        .await
+        .unwrap();
+    assert!(!targets.targets().is_empty());
+
+    let eff = client
+        .describe_effective_policy()
+        .policy_type(EffectivePolicyType::TagPolicy)
+        .target_id(&master)
+        .send()
+        .await;
+    assert!(eff.is_ok());
+
+    let invalid = client
+        .list_accounts_with_invalid_effective_policy()
+        .policy_type(EffectivePolicyType::TagPolicy)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(invalid.accounts().len(), 0);
+
+    let errs = client
+        .list_effective_policy_validation_errors()
+        .account_id(&master)
+        .policy_type(EffectivePolicyType::BackupPolicy)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(errs.effective_policy_validation_errors().len(), 0);
+
+    client
+        .detach_policy()
+        .policy_id(&policy_id)
+        .target_id(&root)
+        .send()
+        .await
+        .unwrap();
+    client
+        .delete_policy()
+        .policy_id(&policy_id)
+        .send()
+        .await
+        .unwrap();
+
+    // Enable then disable a non-SCP policy type on the root.
+    let _ = client
+        .enable_policy_type()
+        .root_id(&root)
+        .policy_type(PolicyType::TagPolicy)
+        .send()
+        .await;
+    let _ = client
+        .disable_policy_type()
+        .root_id(&root)
+        .policy_type(PolicyType::TagPolicy)
+        .send()
+        .await;
+}
+
+#[test_action("organizations", "InviteAccountToOrganization", checksum = "6fddc6a6")]
+#[test_action("organizations", "DescribeHandshake", checksum = "273efc7a")]
+#[test_action(
+    "organizations",
+    "ListHandshakesForOrganization",
+    checksum = "315b3790"
+)]
+#[test_action("organizations", "ListHandshakesForAccount", checksum = "3211ac8d")]
+#[test_action("organizations", "CancelHandshake", checksum = "3a60ce5c")]
+#[test_action("organizations", "AcceptHandshake", checksum = "186ca740")]
+#[test_action("organizations", "DeclineHandshake", checksum = "4c201613")]
+#[tokio::test]
+async fn organizations_handshake_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.organizations_client().await;
+    client.create_organization().send().await.unwrap();
+
+    let invite = client
+        .invite_account_to_organization()
+        .target(
+            HandshakeParty::builder()
+                .id("222222222222")
+                .r#type(HandshakePartyType::Account)
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let handshake_id = invite.handshake().unwrap().id().unwrap().to_string();
+
+    let desc = client
+        .describe_handshake()
+        .handshake_id(&handshake_id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(desc.handshake().unwrap().id(), Some(handshake_id.as_str()));
+
+    let for_org = client
+        .list_handshakes_for_organization()
+        .send()
+        .await
+        .unwrap();
+    assert!(!for_org.handshakes().is_empty());
+
+    let _ = client.list_handshakes_for_account().send().await.unwrap();
+
+    // Cancel from the source (management) account.
+    client
+        .cancel_handshake()
+        .handshake_id(&handshake_id)
+        .send()
+        .await
+        .unwrap();
+
+    // Accept / Decline on an already-resolved handshake error; the calls
+    // still route and return a declared exception.
+    let _ = client
+        .accept_handshake()
+        .handshake_id(&handshake_id)
+        .send()
+        .await;
+    let _ = client
+        .decline_handshake()
+        .handshake_id(&handshake_id)
+        .send()
+        .await;
+}
+
+#[test_action("organizations", "EnableAWSServiceAccess", checksum = "644de532")]
+#[test_action(
+    "organizations",
+    "ListAWSServiceAccessForOrganization",
+    checksum = "8a84df19"
+)]
+#[test_action("organizations", "DisableAWSServiceAccess", checksum = "938f0bf0")]
+#[test_action(
+    "organizations",
+    "RegisterDelegatedAdministrator",
+    checksum = "38f58ea0"
+)]
+#[test_action("organizations", "ListDelegatedAdministrators", checksum = "fe1fe568")]
+#[test_action(
+    "organizations",
+    "ListDelegatedServicesForAccount",
+    checksum = "50ec603a"
+)]
+#[test_action(
+    "organizations",
+    "DeregisterDelegatedAdministrator",
+    checksum = "c94a5348"
+)]
+#[tokio::test]
+async fn organizations_service_access_and_delegation() {
+    let server = TestServer::start().await;
+    let client = server.organizations_client().await;
+    client.create_organization().send().await.unwrap();
+    let member = create_member(&client, "admin@example.com", "Admin").await;
+
+    let principal = "config.amazonaws.com";
+    client
+        .enable_aws_service_access()
+        .service_principal(principal)
+        .send()
+        .await
+        .unwrap();
+
+    let access = client
+        .list_aws_service_access_for_organization()
+        .send()
+        .await
+        .unwrap();
+    assert!(!access.enabled_service_principals().is_empty());
+
+    client
+        .register_delegated_administrator()
+        .account_id(&member)
+        .service_principal(principal)
+        .send()
+        .await
+        .unwrap();
+
+    let admins = client.list_delegated_administrators().send().await.unwrap();
+    assert!(!admins.delegated_administrators().is_empty());
+
+    let services = client
+        .list_delegated_services_for_account()
+        .account_id(&member)
+        .send()
+        .await
+        .unwrap();
+    assert!(!services.delegated_services().is_empty());
+
+    client
+        .deregister_delegated_administrator()
+        .account_id(&member)
+        .service_principal(principal)
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .disable_aws_service_access()
+        .service_principal(principal)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("organizations", "TagResource", checksum = "3850eb16")]
+#[test_action("organizations", "ListTagsForResource", checksum = "f6ae02ad")]
+#[test_action("organizations", "UntagResource", checksum = "137868e5")]
+#[test_action("organizations", "PutResourcePolicy", checksum = "2c20c55c")]
+#[test_action("organizations", "DescribeResourcePolicy", checksum = "c7e31cdc")]
+#[test_action("organizations", "DeleteResourcePolicy", checksum = "46377c95")]
+#[tokio::test]
+async fn organizations_tags_and_resource_policy() {
+    let server = TestServer::start().await;
+    let client = server.organizations_client().await;
+    client.create_organization().send().await.unwrap();
+    let root = client.list_roots().send().await.unwrap().roots()[0]
+        .id()
+        .unwrap()
+        .to_string();
+
+    client
+        .tag_resource()
+        .resource_id(&root)
+        .tags(Tag::builder().key("team").value("infra").build().unwrap())
+        .send()
+        .await
+        .unwrap();
+
+    let tags = client
+        .list_tags_for_resource()
+        .resource_id(&root)
+        .send()
+        .await
+        .unwrap();
+    assert!(tags.tags().iter().any(|t| t.key() == "team"));
+
+    client
+        .untag_resource()
+        .resource_id(&root)
+        .tag_keys("team")
+        .send()
+        .await
+        .unwrap();
+
+    let rp = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"*"},"Action":"organizations:Describe*","Resource":"*"}]}"#;
+    client
+        .put_resource_policy()
+        .content(rp)
+        .send()
+        .await
+        .unwrap();
+
+    let desc = client.describe_resource_policy().send().await.unwrap();
+    assert!(desc.resource_policy().is_some());
+
+    client.delete_resource_policy().send().await.unwrap();
+}
+
+#[test_action(
+    "organizations",
+    "InviteOrganizationToTransferResponsibility",
+    checksum = "868bd7c1"
+)]
+#[test_action(
+    "organizations",
+    "ListOutboundResponsibilityTransfers",
+    checksum = "7abce332"
+)]
+#[test_action(
+    "organizations",
+    "ListInboundResponsibilityTransfers",
+    checksum = "b08a9db3"
+)]
+#[test_action(
+    "organizations",
+    "DescribeResponsibilityTransfer",
+    checksum = "50631866"
+)]
+#[test_action("organizations", "UpdateResponsibilityTransfer", checksum = "7f9d4be9")]
+#[test_action(
+    "organizations",
+    "TerminateResponsibilityTransfer",
+    checksum = "b849469d"
+)]
+#[tokio::test]
+async fn organizations_responsibility_transfer_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.organizations_client().await;
+    client.create_organization().send().await.unwrap();
+
+    client
+        .invite_organization_to_transfer_responsibility()
+        .r#type(ResponsibilityTransferType::Billing)
+        .source_name("billing-handoff")
+        .start_timestamp(aws_smithy_types::DateTime::from_secs(1893456000))
+        .target(
+            HandshakeParty::builder()
+                .id("222222222222")
+                .r#type(HandshakePartyType::Account)
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let outbound = client
+        .list_outbound_responsibility_transfers()
+        .r#type(ResponsibilityTransferType::Billing)
+        .send()
+        .await
+        .unwrap();
+    let transfers = outbound.responsibility_transfers();
+    assert_eq!(transfers.len(), 1);
+    let transfer_id = transfers[0].id().unwrap().to_string();
+
+    let inbound = client
+        .list_inbound_responsibility_transfers()
+        .r#type(ResponsibilityTransferType::Billing)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(inbound.responsibility_transfers().len(), 0);
+
+    let desc = client
+        .describe_responsibility_transfer()
+        .id(&transfer_id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        desc.responsibility_transfer().unwrap().id(),
+        Some(transfer_id.as_str())
+    );
+
+    client
+        .update_responsibility_transfer()
+        .id(&transfer_id)
+        .name("renamed")
+        .send()
+        .await
+        .unwrap();
+
+    let term = client
+        .terminate_responsibility_transfer()
+        .id(&transfer_id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        term.responsibility_transfer()
+            .unwrap()
+            .status()
+            .map(|s| s.as_str()),
+        Some("WITHDRAWN")
+    );
+}

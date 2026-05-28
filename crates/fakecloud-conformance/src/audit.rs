@@ -152,6 +152,12 @@ fn service_source_files(project_root: &Path) -> Vec<AuditMapping> {
         ),
         ("wafv2", "wafv2", &["service.rs"], &["wafv2"]),
         ("athena", "athena", &["service.rs"], &["athena"]),
+        (
+            "organizations",
+            "organizations",
+            &["service/mod.rs", "service.rs"],
+            &["organizations"],
+        ),
     ];
 
     mappings

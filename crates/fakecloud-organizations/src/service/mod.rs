@@ -12,7 +12,7 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceErr
 
 use crate::state::{
     MemberAccount, OrgError, OrganizationState, OrganizationalUnit, Policy,
-    SharedOrganizationsState, FEATURE_SET_ALL, POLICY_TYPE_SCP,
+    SharedOrganizationsState, FEATURE_SET_ALL, FEATURE_SET_CONSOLIDATED_BILLING, POLICY_TYPE_SCP,
 };
 
 /// Bounds for the synthetic delay before a `CreateAccount` request
@@ -79,6 +79,15 @@ pub static ORGANIZATIONS_ACTIONS: &[&str] = &[
     "PutResourcePolicy",
     "DeleteResourcePolicy",
     "DescribeResourcePolicy",
+    "LeaveOrganization",
+    "ListAccountsWithInvalidEffectivePolicy",
+    "ListEffectivePolicyValidationErrors",
+    "InviteOrganizationToTransferResponsibility",
+    "DescribeResponsibilityTransfer",
+    "UpdateResponsibilityTransfer",
+    "TerminateResponsibilityTransfer",
+    "ListInboundResponsibilityTransfers",
+    "ListOutboundResponsibilityTransfers",
 ];
 
 pub struct OrganizationsService {
@@ -92,6 +101,7 @@ mod org;
 mod ous;
 mod policies;
 mod policy_types;
+mod responsibility;
 mod roots;
 mod service_access;
 mod tags;
@@ -242,6 +252,25 @@ impl AwsService for OrganizationsService {
             "PutResourcePolicy" => self.put_resource_policy(&req),
             "DeleteResourcePolicy" => self.delete_resource_policy(&req),
             "DescribeResourcePolicy" => self.describe_resource_policy(&req),
+            "LeaveOrganization" => self.leave_organization(&req),
+            "ListAccountsWithInvalidEffectivePolicy" => {
+                self.list_accounts_with_invalid_effective_policy(&req)
+            }
+            "ListEffectivePolicyValidationErrors" => {
+                self.list_effective_policy_validation_errors(&req)
+            }
+            "InviteOrganizationToTransferResponsibility" => {
+                self.invite_organization_to_transfer_responsibility(&req)
+            }
+            "DescribeResponsibilityTransfer" => self.describe_responsibility_transfer(&req),
+            "UpdateResponsibilityTransfer" => self.update_responsibility_transfer(&req),
+            "TerminateResponsibilityTransfer" => self.terminate_responsibility_transfer(&req),
+            "ListInboundResponsibilityTransfers" => {
+                self.list_inbound_responsibility_transfers(&req)
+            }
+            "ListOutboundResponsibilityTransfers" => {
+                self.list_outbound_responsibility_transfers(&req)
+            }
             _ => Err(AwsServiceError::action_not_implemented(
                 "organizations",
                 &req.action,
@@ -335,6 +364,37 @@ fn is_known_policy_type(t: &str) -> bool {
             | "BACKUP_POLICY"
             | "AISERVICES_OPT_OUT_POLICY"
             | "RESOURCE_CONTROL_POLICY"
+    )
+}
+
+/// Every value of the Smithy `PolicyType` enum. The `List*` filter ops accept
+/// any of these — a type fakecloud doesn't manage simply yields an empty
+/// result set, mirroring AWS, which only rejects out-of-enum values with
+/// `InvalidInputException`.
+fn is_valid_policy_type(t: &str) -> bool {
+    matches!(
+        t,
+        "SERVICE_CONTROL_POLICY"
+            | "RESOURCE_CONTROL_POLICY"
+            | "TAG_POLICY"
+            | "BACKUP_POLICY"
+            | "AISERVICES_OPT_OUT_POLICY"
+            | "CHATBOT_POLICY"
+            | "DECLARATIVE_POLICY_EC2"
+            | "SECURITYHUB_POLICY"
+            | "INSPECTOR_POLICY"
+            | "UPGRADE_ROLLOUT_POLICY"
+            | "BEDROCK_POLICY"
+            | "S3_POLICY"
+            | "NETWORK_SECURITY_DIRECTOR_POLICY"
+    )
+}
+
+fn invalid_policy_filter(filter: &str) -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::BAD_REQUEST,
+        "InvalidInputException",
+        format!("You specified an invalid value for the Filter parameter: {filter}"),
     )
 }
 
