@@ -3320,6 +3320,8 @@ name = "fakecloud-cloudwatch"
 version = "0.15.4"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
+ "bytes",
  "chrono",
  "fakecloud-aws",
  "fakecloud-core",
@@ -3378,6 +3380,7 @@ dependencies = [
  "aws-sdk-bedrockruntime",
  "aws-sdk-cloudformation",
  "aws-sdk-cloudfront",
+ "aws-sdk-cloudwatch",
  "aws-sdk-cloudwatchlogs",
  "aws-sdk-cognitoidentity",
  "aws-sdk-cognitoidentityprovider",

@@ -88,6 +88,11 @@ fn service_source_files(project_root: &Path) -> Vec<AuditMapping> {
         ("rds", "rds", &["service.rs"], &["rds"]),
         ("kinesis", "kinesis", &["service.rs"], &["kinesis"]),
         ("firehose", "firehose", &["service.rs"], &["firehose"]),
+        // CloudWatch Metrics & Alarms speaks awsQuery under the SigV4
+        // service name `monitoring`. SUPPORTED_ACTIONS lives in service.rs;
+        // op handlers are split across submodules but the audit only scans
+        // the action list, so service.rs is sufficient.
+        ("monitoring", "cloudwatch", &["service.rs"], &["monitoring"]),
         (
             "elasticache",
             "elasticache",
