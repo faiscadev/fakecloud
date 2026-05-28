@@ -261,6 +261,39 @@ impl OrganizationsService {
         Ok(AwsResponse::ok_json(json!({})))
     }
 
+    /// `LeaveOrganization` removes the *calling* member account from its
+    /// organization. The management account cannot leave its own org
+    /// (it must `DeleteOrganization` instead), and a caller that isn't a
+    /// member of any org gets `AccountNotFoundException`.
+    pub(super) fn leave_organization(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let mut guard = self.state.write();
+        let org = guard.as_mut().ok_or_else(organizations_not_in_use)?;
+        if org.is_management(&req.account_id) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "MasterCannotLeaveOrganizationException",
+                "The management account in an organization cannot be removed; \
+                 delete the organization instead.",
+            ));
+        }
+        if !org.accounts.contains_key(&req.account_id) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "AccountNotFoundException",
+                format!(
+                    "The account {} is not a member of an organization.",
+                    req.account_id
+                ),
+            ));
+        }
+        org.remove_account(&req.account_id)
+            .map_err(org_error_to_aws)?;
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
     pub(super) fn invite_account_to_organization(
         &self,
         req: &AwsRequest,
@@ -318,13 +351,18 @@ impl OrganizationsService {
         let (max_results, next_token) = parse_list_pagination(&body)?;
 
         let guard = self.state.read();
-        let org = guard.as_ref().ok_or_else(organizations_not_in_use)?;
-        let filtered: Vec<Value> = org
-            .list_handshakes(Some(&req.account_id))
-            .into_iter()
-            .filter(|h| handshake_matches_filter(h, &filter))
-            .map(|h| handshake_payload(&h))
-            .collect();
+        // ListHandshakesForAccount is scoped to the calling account, not to
+        // an organization — a caller in no org simply has no handshakes.
+        // (The op doesn't even declare AWSOrganizationsNotInUseException.)
+        let filtered: Vec<Value> = match guard.as_ref() {
+            Some(org) => org
+                .list_handshakes(Some(&req.account_id))
+                .into_iter()
+                .filter(|h| handshake_matches_filter(h, &filter))
+                .map(|h| handshake_payload(&h))
+                .collect(),
+            None => Vec::new(),
+        };
         let (page, token) = paginate(&filtered, next_token.as_deref(), max_results);
         let mut body = json!({ "Handshakes": page });
         if let Some(t) = token {

@@ -12,15 +12,14 @@ impl OrganizationsService {
             .get("FeatureSet")
             .and_then(|v| v.as_str())
             .unwrap_or(FEATURE_SET_ALL);
-        if feature_set != FEATURE_SET_ALL {
-            // fakecloud ships SCP enforcement which requires the ALL
-            // feature set. CONSOLIDATED_BILLING disables SCPs in AWS,
-            // and we don't simulate that distinction — reject up front
-            // rather than silently lie about which feature set is on.
+        // FeatureSet is an enum: only ALL and CONSOLIDATED_BILLING are valid.
+        // Anything else is a malformed request (InvalidInputException), which
+        // is what AWS returns for an out-of-enum value.
+        if feature_set != FEATURE_SET_ALL && feature_set != FEATURE_SET_CONSOLIDATED_BILLING {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
-                "UnsupportedAPIEndpointException",
-                "fakecloud only supports the ALL feature set for organizations",
+                "InvalidInputException",
+                format!("FeatureSet must be one of [ALL, CONSOLIDATED_BILLING], got {feature_set}"),
             ));
         }
 
@@ -32,7 +31,13 @@ impl OrganizationsService {
                 "The AWS account is already a member of an organization.",
             ));
         }
-        let org = OrganizationState::bootstrap(&req.account_id);
+        let mut org = OrganizationState::bootstrap(&req.account_id);
+        // A CONSOLIDATED_BILLING org has no policy management; reflect the
+        // requested feature set and drop the auto-enabled SCP type.
+        if feature_set == FEATURE_SET_CONSOLIDATED_BILLING {
+            org.feature_set = FEATURE_SET_CONSOLIDATED_BILLING.to_string();
+            org.enabled_policy_types.clear();
+        }
         let resp_value = organization_payload(&org);
         *guard = Some(org);
         Ok(AwsResponse::ok_json(json!({ "Organization": resp_value })))
