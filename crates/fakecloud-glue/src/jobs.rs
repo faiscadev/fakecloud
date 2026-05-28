@@ -47,7 +47,7 @@ fn parse_string_map(val: &Value) -> BTreeMap<String, String> {
     m
 }
 
-fn job_to_json(j: &Job) -> Value {
+pub(crate) fn job_to_json(j: &Job) -> Value {
     json!({
         "Name": j.name,
         "Description": j.description,
@@ -193,9 +193,8 @@ impl GlueService {
         let name = body["JobName"].as_str().ok_or_else(|| missing("JobName"))?;
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id, &req.region);
-        if state.jobs.remove(name).is_none() {
-            return Err(entity_not_found(format!("Job {name} not found")));
-        }
+        // DeleteJob does not declare EntityNotFoundException; idempotent delete.
+        state.jobs.remove(name);
         Ok(AwsResponse::ok_json(json!({ "JobName": name })))
     }
 
