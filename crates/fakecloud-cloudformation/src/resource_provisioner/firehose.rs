@@ -64,6 +64,7 @@ impl ResourceProvisioner {
             version_id: "1".to_string(),
             destination,
             tags,
+            encryption: None,
         };
 
         let mut state = self.firehose_state.write();

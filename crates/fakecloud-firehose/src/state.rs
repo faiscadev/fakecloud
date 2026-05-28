@@ -67,6 +67,20 @@ pub struct DeliveryStream {
     pub version_id: String,
     pub destination: Option<S3Destination>,
     pub tags: BTreeMap<String, String>,
+    #[serde(default)]
+    pub encryption: Option<EncryptionConfig>,
+}
+
+/// Server-side encryption (SSE) configuration persisted on a delivery stream.
+///
+/// Mirrors Firehose's `DeliveryStreamEncryptionConfiguration`: `Status` is one
+/// of ENABLED/DISABLED, and when ENABLED with a customer-managed key the
+/// `KeyARN`/`KeyType` describe the KMS key in use.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EncryptionConfig {
+    pub status: String,
+    pub key_type: Option<String>,
+    pub key_arn: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
