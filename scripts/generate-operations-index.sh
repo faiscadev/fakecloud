@@ -70,16 +70,17 @@ SERVICES=(
     "application-autoscaling|Application Auto Scaling|application-autoscaling"
     "athena|Athena|athena"
     "acm|ACM|acm"
+    "cloudwatch|CloudWatch (Metrics & Alarms)|"
+    "firehose|Firehose|firehose"
+    "glue|Glue|glue"
+    "organizations|Organizations|organizations"
 )
 
 # Services parity.md tracks but aws-models does NOT include. Listed at the
 # bottom of the generated page so the page is honest about coverage without
-# hand-rolling operation lists from another source.
-SERVICES_WITHOUT_MODELS=(
-    "Firehose|firehose"
-    "Glue|glue"
-    "CloudWatch (Metrics & Alarms)|"
-)
+# hand-rolling operation lists from another source. Empty now that every
+# tracked service ships a first-party Smithy model.
+SERVICES_WITHOUT_MODELS=()
 
 # Extract operation names (sorted) from a Smithy model file.
 extract_ops() {
@@ -162,7 +163,9 @@ for entry in "${SERVICES[@]}"; do
     } >>"$tmp"
 done
 
-# Append the services without smithy models so the page is honest about coverage.
+# Append the services without smithy models so the page is honest about
+# coverage. Skipped entirely when every tracked service ships a model.
+if [ "${#SERVICES_WITHOUT_MODELS[@]}" -gt 0 ]; then
 {
     echo "## Services without an AWS Smithy model file"
     echo
@@ -178,6 +181,7 @@ done
     done
     echo
 } >>"$tmp"
+fi
 
 mv "$tmp" "$OUT"
 trap - EXIT

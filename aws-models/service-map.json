@@ -142,5 +142,21 @@
     "cognito-identity": {
         "repo_dir": "cognito-identity",
         "service_name": "cognito-identity"
+    },
+    "cloudwatch": {
+        "repo_dir": "cloudwatch",
+        "service_name": "monitoring"
+    },
+    "firehose": {
+        "repo_dir": "firehose",
+        "service_name": "firehose"
+    },
+    "glue": {
+        "repo_dir": "glue",
+        "service_name": "glue"
+    },
+    "organizations": {
+        "repo_dir": "organizations",
+        "service_name": "organizations"
     }
 }
