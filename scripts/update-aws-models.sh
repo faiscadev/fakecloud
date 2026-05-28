@@ -53,6 +53,10 @@ SERVICES=(
     "application-autoscaling:application-auto-scaling"
     "wafv2:wafv2"
     "athena:athena"
+    "cloudwatch:cloudwatch"
+    "firehose:firehose"
+    "glue:glue"
+    "organizations:organizations"
 )
 
 # Sparse checkout only the models we need
