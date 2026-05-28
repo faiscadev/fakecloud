@@ -1,6 +1,6 @@
 {
   "name": "fakecloud",
-  "version": "0.15.3",
+  "version": "0.15.4",
   "description": "Client SDK for fakecloud — local AWS cloud emulator",
   "repository": {
     "type": "git",
