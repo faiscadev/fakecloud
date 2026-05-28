@@ -20,7 +20,11 @@ RUN cargo build --release --bin fakecloud
 # platform in the build matrix (issue #1539 Bug 4).
 FROM debian:bookworm-slim AS docker-cli
 ARG TARGETARCH
-ARG DOCKER_CLI_VERSION=27.5.1
+# Pin a docker CLI built with a current Go toolchain — the static build
+# bakes the Go stdlib into the binary, so a stale toolchain trips the
+# image's Trivy CRITICAL/HIGH gate (27.5.1 shipped go1.22.11, flagged by
+# CVE-2025-68121). 29.5.2 ships go1.26.3, which clears the gate.
+ARG DOCKER_CLI_VERSION=29.5.2
 RUN apt-get update \
     && apt-get install -y --no-install-recommends curl ca-certificates \
     && case "$TARGETARCH" in \
