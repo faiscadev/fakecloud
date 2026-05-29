@@ -906,9 +906,9 @@ pub(crate) fn apply_add(
     attr_values: &serde_json::Map<String, Value>,
     attr_names: &serde_json::Map<String, Value>,
 ) {
-    // ADD #path :inc — numeric increment, with the value initialized to :inc when
-    // the attribute is absent. Set union (NS/SS/BS) is not implemented; ADD on a
-    // non-numeric attribute is a no-op.
+    // ADD #path :inc — numeric increment (value initialized to :inc when the
+    // attribute is absent) OR set union for the set types (NS/SS/BS).
+    // bug-audit 2026-05-28, 1.16: set union used to be unimplemented (no-op).
     for clause in split_top_commas(body) {
         let mut parts = clause.split_whitespace();
         let Some(path) = parts.next() else { continue };
@@ -922,10 +922,39 @@ pub(crate) fn apply_add(
         let current = item.get(&attr_name).cloned();
         let next = match (current.as_ref(), &delta) {
             (None, _) => delta.clone(),
-            (Some(cur), _) => arithmetic(Some(cur), '+', Some(&delta)).unwrap_or(delta.clone()),
+            (Some(cur), _) => {
+                if let Some(unioned) = add_to_set(cur, &delta) {
+                    unioned
+                } else {
+                    arithmetic(Some(cur), '+', Some(&delta)).unwrap_or(delta.clone())
+                }
+            }
         };
         item.insert(attr_name, next);
     }
+}
+
+/// DynamoDB `ADD` set-union semantics: when both the current attribute and the
+/// delta are the same set type (`SS`/`NS`/`BS`), return the order-preserving,
+/// deduplicated union. Returns `None` when either side isn't a matching set, so
+/// the caller can fall back to numeric arithmetic.
+fn add_to_set(current: &Value, delta: &Value) -> Option<Value> {
+    for set_type in ["SS", "NS", "BS"] {
+        let (Some(cur_arr), Some(add_arr)) = (
+            current.get(set_type).and_then(|v| v.as_array()),
+            delta.get(set_type).and_then(|v| v.as_array()),
+        ) else {
+            continue;
+        };
+        let mut elems = cur_arr.clone();
+        for e in add_arr {
+            if !elems.contains(e) {
+                elems.push(e.clone());
+            }
+        }
+        return Some(serde_json::json!({ set_type: elems }));
+    }
+    None
 }
 
 pub(crate) fn apply_delete(
@@ -1424,5 +1453,55 @@ mod tests {
         // contains '(' and starts with States. -> true, then evaluate
         // returns Err -> Null.
         assert_eq!(out["y"], Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod apply_add_set_tests {
+    use super::apply_add;
+    use serde_json::{json, Map, Value};
+    use std::collections::HashMap;
+
+    fn values(v: Value) -> Map<String, Value> {
+        v.as_object().unwrap().clone()
+    }
+
+    // bug-audit 2026-05-28, 1.16: ADD to a string set must union elements.
+    #[test]
+    fn add_to_string_set_unions_elements() {
+        let mut item: HashMap<String, Value> = HashMap::new();
+        item.insert("tags".to_string(), json!({ "SS": ["a", "b"] }));
+        apply_add(
+            &mut item,
+            "tags :v",
+            &values(json!({ ":v": { "SS": ["b", "c"] } })),
+            &Map::new(),
+        );
+        assert_eq!(item["tags"], json!({ "SS": ["a", "b", "c"] }));
+    }
+
+    #[test]
+    fn add_to_missing_set_creates_it() {
+        let mut item: HashMap<String, Value> = HashMap::new();
+        apply_add(
+            &mut item,
+            "nums :v",
+            &values(json!({ ":v": { "NS": ["1", "2"] } })),
+            &Map::new(),
+        );
+        assert_eq!(item["nums"], json!({ "NS": ["1", "2"] }));
+    }
+
+    #[test]
+    fn add_numeric_still_increments() {
+        let mut item: HashMap<String, Value> = HashMap::new();
+        item.insert("count".to_string(), json!({ "N": "5" }));
+        apply_add(
+            &mut item,
+            "count :v",
+            &values(json!({ ":v": { "N": "3" } })),
+            &Map::new(),
+        );
+        assert_eq!(item["count"], json!({ "N": "8" }));
     }
 }
