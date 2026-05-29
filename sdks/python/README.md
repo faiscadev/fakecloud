@@ -270,6 +270,14 @@ Called as a method on the main client: `fc.organizations()`.
 |---|---|
 | `get_jobs()` | List Glue jobs |
 | `get_job_runs(job_name=None)` | List job runs, optionally filtered by job |
+| `get_crawlers()` | List Glue crawlers with state and target summary |
+
+### `fc.cloudwatch`
+
+| Method | Description |
+|---|---|
+| `get_alarms()` | List metric and composite alarms across accounts/regions |
+| `get_metrics()` | List unique metric series with datapoint count and latest value |
 
 ### `fc.s3`
 

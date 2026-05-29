@@ -379,6 +379,132 @@ async fn jobs_and_job_runs_introspection() {
 }
 
 #[tokio::test]
+async fn cloudwatch_and_crawler_introspection() {
+    use aws_sdk_cloudwatch::types::{ComparisonOperator, Dimension, MetricDatum, Statistic};
+    use aws_sdk_glue::types::{CrawlerTargets, JdbcTarget, S3Target};
+    use serde_json::Value;
+
+    let server = TestServer::start().await;
+    let glue = server.glue_client().await;
+    let cw = server.cloudwatch_client().await;
+
+    // Metric alarm.
+    cw.put_metric_alarm()
+        .alarm_name("HighErrors")
+        .namespace("MyApp")
+        .metric_name("Errors")
+        .statistic(Statistic::Sum)
+        .period(60)
+        .evaluation_periods(1)
+        .threshold(10.0)
+        .comparison_operator(ComparisonOperator::GreaterThanThreshold)
+        .alarm_actions("arn:aws:sns:us-east-1:123456789012:ops")
+        .send()
+        .await
+        .expect("put alarm");
+
+    // Metric datapoint.
+    cw.put_metric_data()
+        .namespace("MyApp")
+        .metric_data(
+            MetricDatum::builder()
+                .metric_name("Requests")
+                .value(42.0)
+                .unit(aws_sdk_cloudwatch::types::StandardUnit::Count)
+                .dimensions(Dimension::builder().name("Service").value("api").build())
+                .build(),
+        )
+        .send()
+        .await
+        .expect("put metric data");
+
+    // Crawler.
+    glue.create_crawler()
+        .name("inventory")
+        .role("arn:aws:iam::123456789012:role/glue")
+        .database_name("analytics")
+        .targets(
+            CrawlerTargets::builder()
+                .s3_targets(S3Target::builder().path("s3://b/a").build())
+                .jdbc_targets(JdbcTarget::builder().connection_name("conn").build())
+                .build(),
+        )
+        .send()
+        .await
+        .expect("create crawler");
+
+    let client = reqwest::Client::new();
+
+    // Alarms endpoint.
+    let alarms: Value = client
+        .get(format!(
+            "{}/_fakecloud/cloudwatch/alarms",
+            server.endpoint()
+        ))
+        .send()
+        .await
+        .expect("alarms request")
+        .json()
+        .await
+        .expect("alarms json");
+    let alarms_arr = alarms["alarms"].as_array().expect("alarms array");
+    assert_eq!(alarms_arr.len(), 1);
+    let a = &alarms_arr[0];
+    assert_eq!(a["name"], "HighErrors");
+    assert_eq!(a["type"], "metric");
+    assert_eq!(a["namespace"], "MyApp");
+    assert_eq!(a["metricName"], "Errors");
+    assert_eq!(a["threshold"], 10.0);
+    assert_eq!(a["comparisonOperator"], "GreaterThanThreshold");
+    assert_eq!(a["state"], "INSUFFICIENT_DATA");
+    assert_eq!(
+        a["alarmActions"][0],
+        "arn:aws:sns:us-east-1:123456789012:ops"
+    );
+
+    // Metrics endpoint.
+    let metrics: Value = client
+        .get(format!(
+            "{}/_fakecloud/cloudwatch/metrics",
+            server.endpoint()
+        ))
+        .send()
+        .await
+        .expect("metrics request")
+        .json()
+        .await
+        .expect("metrics json");
+    let metrics_arr = metrics["metrics"].as_array().expect("metrics array");
+    assert_eq!(metrics_arr.len(), 1);
+    let m = &metrics_arr[0];
+    assert_eq!(m["namespace"], "MyApp");
+    assert_eq!(m["metricName"], "Requests");
+    assert_eq!(m["datapointCount"], 1);
+    assert_eq!(m["dimensions"][0]["name"], "Service");
+    assert_eq!(m["dimensions"][0]["value"], "api");
+    assert_eq!(m["latest"]["value"], 42.0);
+    assert_eq!(m["latest"]["unit"], "Count");
+
+    // Crawlers endpoint.
+    let crawlers: Value = client
+        .get(format!("{}/_fakecloud/glue/crawlers", server.endpoint()))
+        .send()
+        .await
+        .expect("crawlers request")
+        .json()
+        .await
+        .expect("crawlers json");
+    let crawlers_arr = crawlers["crawlers"].as_array().expect("crawlers array");
+    assert_eq!(crawlers_arr.len(), 1);
+    let c = &crawlers_arr[0];
+    assert_eq!(c["name"], "inventory");
+    assert_eq!(c["role"], "arn:aws:iam::123456789012:role/glue");
+    assert_eq!(c["databaseName"], "analytics");
+    assert_eq!(c["state"], "READY");
+    assert_eq!(c["targetSummary"], "1 S3, 1 JDBC");
+}
+
+#[tokio::test]
 async fn table_in_missing_database_returns_not_found() {
     let server = TestServer::start().await;
     let glue = server.glue_client().await;

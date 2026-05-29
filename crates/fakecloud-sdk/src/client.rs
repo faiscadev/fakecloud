@@ -185,6 +185,10 @@ impl FakeCloud {
         GlueClient { fc: self }
     }
 
+    pub fn cloudwatch(&self) -> CloudWatchClient<'_> {
+        CloudWatchClient { fc: self }
+    }
+
     pub fn logs(&self) -> LogsClient<'_> {
         LogsClient { fc: self }
     }
@@ -1985,6 +1989,52 @@ impl GlueClient<'_> {
             url.push_str(&encode(name));
         }
         let resp = self.fc.client.get(url).send().await?;
+        FakeCloud::parse(resp).await
+    }
+
+    /// List every configured Glue crawler across all accounts.
+    pub async fn get_crawlers(&self) -> Result<GlueCrawlersResponse, Error> {
+        let resp = self
+            .fc
+            .client
+            .get(format!("{}/_fakecloud/glue/crawlers", self.fc.base_url))
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
+}
+
+// ── CloudWatch ──────────────────────────────────────────────────────
+
+pub struct CloudWatchClient<'a> {
+    fc: &'a FakeCloud,
+}
+
+impl CloudWatchClient<'_> {
+    /// List every metric and composite alarm across all accounts and
+    /// regions, flattened with current state.
+    pub async fn get_alarms(&self) -> Result<CloudWatchAlarmsResponse, Error> {
+        let resp = self
+            .fc
+            .client
+            .get(format!("{}/_fakecloud/cloudwatch/alarms", self.fc.base_url))
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
+
+    /// List every unique metric series (account, region, namespace,
+    /// metric, dimensions) with its datapoint count and latest value.
+    pub async fn get_metrics(&self) -> Result<CloudWatchMetricsResponse, Error> {
+        let resp = self
+            .fc
+            .client
+            .get(format!(
+                "{}/_fakecloud/cloudwatch/metrics",
+                self.fc.base_url
+            ))
+            .send()
+            .await?;
         FakeCloud::parse(resp).await
     }
 }

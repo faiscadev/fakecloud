@@ -131,6 +131,7 @@ public final class FakeCloud {
     private final EventsClient events;
     private final SchedulerClient scheduler;
     private final GlueClient glue;
+    private final CloudWatchClient cloudwatch;
     private final S3Client s3;
     private final DynamoDbClient dynamodb;
     private final SecretsManagerClient secretsmanager;
@@ -169,6 +170,7 @@ public final class FakeCloud {
         this.events = new EventsClient(http);
         this.scheduler = new SchedulerClient(http);
         this.glue = new GlueClient(http);
+        this.cloudwatch = new CloudWatchClient(http);
         this.s3 = new S3Client(http);
         this.dynamodb = new DynamoDbClient(http);
         this.secretsmanager = new SecretsManagerClient(http);
@@ -239,6 +241,8 @@ public final class FakeCloud {
     public EventsClient events() { return events; }
     public SchedulerClient scheduler() { return scheduler; }
     public GlueClient glue() { return glue; }
+
+    public CloudWatchClient cloudwatch() { return cloudwatch; }
     public S3Client s3() { return s3; }
     public DynamoDbClient dynamodb() { return dynamodb; }
     public SecretsManagerClient secretsmanager() { return secretsmanager; }
@@ -624,6 +628,23 @@ public final class FakeCloud {
                 path += "?job_name=" + encodePath(jobName);
             }
             return http.get(path, Types.GlueJobRunsResponse.class);
+        }
+
+        public Types.GlueCrawlersResponse getCrawlers() {
+            return http.get("/_fakecloud/glue/crawlers", Types.GlueCrawlersResponse.class);
+        }
+    }
+
+    public static final class CloudWatchClient {
+        private final HttpTransport http;
+        CloudWatchClient(HttpTransport http) { this.http = http; }
+
+        public Types.CloudWatchAlarmsResponse getAlarms() {
+            return http.get("/_fakecloud/cloudwatch/alarms", Types.CloudWatchAlarmsResponse.class);
+        }
+
+        public Types.CloudWatchMetricsResponse getMetrics() {
+            return http.get("/_fakecloud/cloudwatch/metrics", Types.CloudWatchMetricsResponse.class);
         }
     }
 

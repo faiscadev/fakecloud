@@ -398,6 +398,63 @@ public final class Types {
     @JsonIgnoreProperties(ignoreUnknown = true)
     public record GlueJobRunsResponse(List<GlueJobRun> runs) {}
 
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record GlueCrawler(
+            String accountId,
+            String name,
+            String role,
+            String databaseName,
+            String state,
+            String targetSummary,
+            String schedule,
+            String creationTime,
+            String lastUpdated) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record GlueCrawlersResponse(List<GlueCrawler> crawlers) {}
+
+    // ── CloudWatch ─────────────────────────────────────────────────
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record CloudWatchDimension(String name, String value) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record CloudWatchAlarm(
+            String accountId,
+            String region,
+            String name,
+            String type,
+            String state,
+            String stateReason,
+            String stateUpdatedTimestamp,
+            boolean actionsEnabled,
+            List<String> alarmActions,
+            List<String> okActions,
+            List<String> insufficientDataActions,
+            String namespace,
+            String metricName,
+            Double threshold,
+            String comparisonOperator,
+            String alarmRule) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record CloudWatchAlarmsResponse(List<CloudWatchAlarm> alarms) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record CloudWatchLatestDatapoint(String timestamp, Double value, String unit) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record CloudWatchMetric(
+            String accountId,
+            String region,
+            String namespace,
+            String metricName,
+            List<CloudWatchDimension> dimensions,
+            int datapointCount,
+            CloudWatchLatestDatapoint latest) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record CloudWatchMetricsResponse(List<CloudWatchMetric> metrics) {}
+
     // ── Scheduler (EventBridge Scheduler) ──────────────────────────
     @JsonIgnoreProperties(ignoreUnknown = true)
     public record SchedulerSchedule(

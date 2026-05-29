@@ -2663,6 +2663,9 @@ async fn main() {
     let scheduler_state_for_fire = scheduler_state.clone();
     let glue_state_for_jobs = glue_state.clone();
     let glue_state_for_runs = glue_state.clone();
+    let glue_state_for_crawlers = glue_state.clone();
+    let cloudwatch_state_for_alarms = cloudwatch_state.clone();
+    let cloudwatch_state_for_metrics = cloudwatch_state.clone();
     let delivery_for_scheduler_fire = delivery_for_scheduler.clone();
     let default_account_for_scheduler_fire = cli.account_id.clone();
     let default_region_for_scheduler_fire = cli.region.clone();
@@ -4206,6 +4209,96 @@ async fn main() {
                             .collect();
                         axum::Json(types::GlueJobRunsResponse { runs })
                     }
+                }
+            }),
+        )
+        .route(
+            "/_fakecloud/glue/crawlers",
+            axum::routing::get({
+                let state = glue_state_for_crawlers;
+                move || async move {
+                    let rows = fakecloud_glue::introspection::list_all_crawlers(&state);
+                    let crawlers = rows
+                        .into_iter()
+                        .map(|r| types::GlueCrawler {
+                            account_id: r.account_id,
+                            name: r.name,
+                            role: r.role,
+                            database_name: r.database_name,
+                            state: r.state,
+                            target_summary: r.target_summary,
+                            schedule: r.schedule,
+                            creation_time: r.creation_time.to_rfc3339(),
+                            last_updated: r.last_updated.to_rfc3339(),
+                        })
+                        .collect();
+                    axum::Json(types::GlueCrawlersResponse { crawlers })
+                }
+            }),
+        )
+        .route(
+            "/_fakecloud/cloudwatch/alarms",
+            axum::routing::get({
+                let state = cloudwatch_state_for_alarms;
+                move || async move {
+                    let rows = fakecloud_cloudwatch::introspection::list_all_alarms(&state);
+                    let alarms = rows
+                        .into_iter()
+                        .map(|r| types::CloudWatchAlarm {
+                            account_id: r.account_id,
+                            region: r.region,
+                            name: r.name,
+                            alarm_type: r.kind.to_string(),
+                            state: r.state,
+                            state_reason: r.state_reason,
+                            state_updated_timestamp: r
+                                .state_updated_timestamp
+                                .map(|t| t.to_rfc3339()),
+                            actions_enabled: r.actions_enabled,
+                            alarm_actions: r.alarm_actions,
+                            ok_actions: r.ok_actions,
+                            insufficient_data_actions: r.insufficient_data_actions,
+                            namespace: r.namespace,
+                            metric_name: r.metric_name,
+                            threshold: r.threshold,
+                            comparison_operator: r.comparison_operator,
+                            alarm_rule: r.alarm_rule,
+                        })
+                        .collect();
+                    axum::Json(types::CloudWatchAlarmsResponse { alarms })
+                }
+            }),
+        )
+        .route(
+            "/_fakecloud/cloudwatch/metrics",
+            axum::routing::get({
+                let state = cloudwatch_state_for_metrics;
+                move || async move {
+                    let rows = fakecloud_cloudwatch::introspection::list_all_metrics(&state);
+                    let metrics = rows
+                        .into_iter()
+                        .map(|r| types::CloudWatchMetric {
+                            account_id: r.account_id,
+                            region: r.region,
+                            namespace: r.namespace,
+                            metric_name: r.metric_name,
+                            dimensions: r
+                                .dimensions
+                                .into_iter()
+                                .map(|d| types::CloudWatchDimension {
+                                    name: d.name,
+                                    value: d.value,
+                                })
+                                .collect(),
+                            datapoint_count: r.datapoint_count,
+                            latest: r.latest.map(|l| types::CloudWatchLatestDatapoint {
+                                timestamp: l.timestamp.to_rfc3339(),
+                                value: l.value,
+                                unit: l.unit,
+                            }),
+                        })
+                        .collect();
+                    axum::Json(types::CloudWatchMetricsResponse { metrics })
                 }
             }),
         )

@@ -1050,6 +1050,161 @@ class GlueJobRunsResponse:
         return cls(runs=[GlueJobRun.from_dict(r) for r in data.get("runs", [])])
 
 
+@dataclass
+class GlueCrawler:
+    account_id: str
+    name: str
+    role: str
+    state: str
+    target_summary: str
+    creation_time: str
+    last_updated: str
+    database_name: Optional[str] = None
+    schedule: Optional[str] = None
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> GlueCrawler:
+        return cls(
+            account_id=data.get("accountId", ""),
+            name=data.get("name", ""),
+            role=data.get("role", ""),
+            state=data.get("state", ""),
+            target_summary=data.get("targetSummary", ""),
+            creation_time=data.get("creationTime", ""),
+            last_updated=data.get("lastUpdated", ""),
+            database_name=data.get("databaseName"),
+            schedule=data.get("schedule"),
+        )
+
+
+@dataclass
+class GlueCrawlersResponse:
+    crawlers: List[GlueCrawler]
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> GlueCrawlersResponse:
+        return cls(
+            crawlers=[GlueCrawler.from_dict(c) for c in data.get("crawlers", [])]
+        )
+
+
+# ── CloudWatch ──────────────────────────────────────────────────────
+
+
+@dataclass
+class CloudWatchDimension:
+    name: str
+    value: str
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> CloudWatchDimension:
+        return cls(name=data.get("name", ""), value=data.get("value", ""))
+
+
+@dataclass
+class CloudWatchAlarm:
+    account_id: str
+    region: str
+    name: str
+    type: str
+    state: str
+    state_reason: str
+    actions_enabled: bool
+    alarm_actions: List[str]
+    ok_actions: List[str]
+    insufficient_data_actions: List[str]
+    state_updated_timestamp: Optional[str] = None
+    namespace: Optional[str] = None
+    metric_name: Optional[str] = None
+    threshold: Optional[float] = None
+    comparison_operator: Optional[str] = None
+    alarm_rule: Optional[str] = None
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> CloudWatchAlarm:
+        return cls(
+            account_id=data.get("accountId", ""),
+            region=data.get("region", ""),
+            name=data.get("name", ""),
+            type=data.get("type", ""),
+            state=data.get("state", ""),
+            state_reason=data.get("stateReason", ""),
+            actions_enabled=bool(data.get("actionsEnabled", False)),
+            alarm_actions=list(data.get("alarmActions") or []),
+            ok_actions=list(data.get("okActions") or []),
+            insufficient_data_actions=list(data.get("insufficientDataActions") or []),
+            state_updated_timestamp=data.get("stateUpdatedTimestamp"),
+            namespace=data.get("namespace"),
+            metric_name=data.get("metricName"),
+            threshold=data.get("threshold"),
+            comparison_operator=data.get("comparisonOperator"),
+            alarm_rule=data.get("alarmRule"),
+        )
+
+
+@dataclass
+class CloudWatchAlarmsResponse:
+    alarms: List[CloudWatchAlarm]
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> CloudWatchAlarmsResponse:
+        return cls(
+            alarms=[CloudWatchAlarm.from_dict(a) for a in data.get("alarms", [])]
+        )
+
+
+@dataclass
+class CloudWatchLatestDatapoint:
+    timestamp: str
+    value: Optional[float] = None
+    unit: Optional[str] = None
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> CloudWatchLatestDatapoint:
+        return cls(
+            timestamp=data.get("timestamp", ""),
+            value=data.get("value"),
+            unit=data.get("unit"),
+        )
+
+
+@dataclass
+class CloudWatchMetric:
+    account_id: str
+    region: str
+    namespace: str
+    metric_name: str
+    dimensions: List[CloudWatchDimension]
+    datapoint_count: int
+    latest: Optional[CloudWatchLatestDatapoint] = None
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> CloudWatchMetric:
+        latest = data.get("latest")
+        return cls(
+            account_id=data.get("accountId", ""),
+            region=data.get("region", ""),
+            namespace=data.get("namespace", ""),
+            metric_name=data.get("metricName", ""),
+            dimensions=[
+                CloudWatchDimension.from_dict(d) for d in data.get("dimensions", [])
+            ],
+            datapoint_count=int(data.get("datapointCount", 0)),
+            latest=CloudWatchLatestDatapoint.from_dict(latest) if latest else None,
+        )
+
+
+@dataclass
+class CloudWatchMetricsResponse:
+    metrics: List[CloudWatchMetric]
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> CloudWatchMetricsResponse:
+        return cls(
+            metrics=[CloudWatchMetric.from_dict(m) for m in data.get("metrics", [])]
+        )
+
+
 # ── Scheduler (EventBridge Scheduler) ───────────────────────────────
 
 

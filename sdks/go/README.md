@@ -120,6 +120,14 @@ func main() {
 |--------|-------------|
 | `GetJobs(ctx)` | List Glue job definitions |
 | `GetJobRuns(ctx)` | List Glue job runs with status |
+| `GetCrawlers(ctx)` | List Glue crawlers with state and target summary |
+
+### CloudWatch - `fc.CloudWatch()`
+
+| Method | Description |
+|--------|-------------|
+| `GetAlarms(ctx)` | List metric and composite alarms across accounts/regions |
+| `GetMetrics(ctx)` | List unique metric series with datapoint count and latest value |
 
 ### S3 - `fc.S3()`
 

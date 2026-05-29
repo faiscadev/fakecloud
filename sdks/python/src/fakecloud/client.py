@@ -24,6 +24,8 @@ from fakecloud.types import (
     BedrockResponseRule,
     BedrockStatusResponse,
     CloudFrontDistributionStatusRequest,
+    CloudWatchAlarmsResponse,
+    CloudWatchMetricsResponse,
     CompromisedPasswordsRequest,
     CompromisedPasswordsResponse,
     ConfirmationCodesResponse,
@@ -63,6 +65,7 @@ from fakecloud.types import (
     FireRuleResponse,
     FireScheduleResponse,
     ForceDlqResponse,
+    GlueCrawlersResponse,
     GlueJobRunsResponse,
     GlueJobsResponse,
     HealthResponse,
@@ -1312,6 +1315,29 @@ class GlueClient:
         _check(resp)
         return GlueJobRunsResponse.from_dict(resp.json())
 
+    async def get_crawlers(self) -> GlueCrawlersResponse:
+        resp = await self._client.get(f"{self._base}/_fakecloud/glue/crawlers")
+        _check(resp)
+        return GlueCrawlersResponse.from_dict(resp.json())
+
+
+class CloudWatchClient:
+    """Async CloudWatch metrics/alarms introspection client."""
+
+    def __init__(self, client: httpx.AsyncClient, base_url: str) -> None:
+        self._client = client
+        self._base = base_url
+
+    async def get_alarms(self) -> CloudWatchAlarmsResponse:
+        resp = await self._client.get(f"{self._base}/_fakecloud/cloudwatch/alarms")
+        _check(resp)
+        return CloudWatchAlarmsResponse.from_dict(resp.json())
+
+    async def get_metrics(self) -> CloudWatchMetricsResponse:
+        resp = await self._client.get(f"{self._base}/_fakecloud/cloudwatch/metrics")
+        _check(resp)
+        return CloudWatchMetricsResponse.from_dict(resp.json())
+
 
 class S3Client:
     """Async S3 introspection client."""
@@ -2018,6 +2044,27 @@ class _SyncGlueClient:
         _check(resp)
         return GlueJobRunsResponse.from_dict(resp.json())
 
+    def get_crawlers(self) -> GlueCrawlersResponse:
+        resp = self._client.get(f"{self._base}/_fakecloud/glue/crawlers")
+        _check(resp)
+        return GlueCrawlersResponse.from_dict(resp.json())
+
+
+class _SyncCloudWatchClient:
+    def __init__(self, client: httpx.Client, base_url: str) -> None:
+        self._client = client
+        self._base = base_url
+
+    def get_alarms(self) -> CloudWatchAlarmsResponse:
+        resp = self._client.get(f"{self._base}/_fakecloud/cloudwatch/alarms")
+        _check(resp)
+        return CloudWatchAlarmsResponse.from_dict(resp.json())
+
+    def get_metrics(self) -> CloudWatchMetricsResponse:
+        resp = self._client.get(f"{self._base}/_fakecloud/cloudwatch/metrics")
+        _check(resp)
+        return CloudWatchMetricsResponse.from_dict(resp.json())
+
 
 class _SyncS3Client:
     def __init__(self, client: httpx.Client, base_url: str) -> None:
@@ -2403,6 +2450,10 @@ class FakeCloud:
         return GlueClient(self._client, self._base)
 
     @property
+    def cloudwatch(self) -> CloudWatchClient:
+        return CloudWatchClient(self._client, self._base)
+
+    @property
     def s3(self) -> S3Client:
         return S3Client(self._client, self._base)
 
@@ -2574,6 +2625,10 @@ class FakeCloudSync:
     @property
     def glue(self) -> _SyncGlueClient:
         return _SyncGlueClient(self._client, self._base)
+
+    @property
+    def cloudwatch(self) -> _SyncCloudWatchClient:
+        return _SyncCloudWatchClient(self._client, self._base)
 
     @property
     def s3(self) -> _SyncS3Client:

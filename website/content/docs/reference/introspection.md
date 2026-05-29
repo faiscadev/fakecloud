@@ -91,6 +91,71 @@ curl http://localhost:4566/_fakecloud/health
 | -------- | ------ | ----------- |
 | `/_fakecloud/cloudfront/distributions/{id}/status` | POST | Change a distribution's status (deployed / in-progress / failed). |
 
+## CloudWatch
+
+| Endpoint | Method | Description |
+| -------- | ------ | ----------- |
+| `/_fakecloud/cloudwatch/alarms` | GET | **NEW** -- Every metric and composite alarm across all accounts and regions, with current state, actions, and (metric alarms) namespace/metric/threshold/comparison or (composite alarms) the alarm rule. Sorted by account, region, name. |
+| `/_fakecloud/cloudwatch/metrics` | GET | **NEW** -- Every unique metric series (account, region, namespace, metric, dimensions) with its datapoint count and latest datapoint. Sorted by account, region, namespace, metric. |
+
+`GET /_fakecloud/cloudwatch/alarms` response:
+
+```json
+{
+  "alarms": [
+    {
+      "accountId": "123456789012",
+      "region": "us-east-1",
+      "name": "HighErrors",
+      "type": "metric",
+      "state": "INSUFFICIENT_DATA",
+      "stateReason": "Unchecked: Initial alarm creation",
+      "stateUpdatedTimestamp": "2026-05-29T00:00:00+00:00",
+      "actionsEnabled": true,
+      "alarmActions": ["arn:aws:sns:us-east-1:123456789012:ops"],
+      "okActions": [],
+      "insufficientDataActions": [],
+      "namespace": "MyApp",
+      "metricName": "Errors",
+      "threshold": 10.0,
+      "comparisonOperator": "GreaterThanThreshold"
+    },
+    {
+      "accountId": "123456789012",
+      "region": "us-east-1",
+      "name": "comp",
+      "type": "composite",
+      "state": "INSUFFICIENT_DATA",
+      "stateReason": "",
+      "stateUpdatedTimestamp": "2026-05-29T00:00:00+00:00",
+      "actionsEnabled": true,
+      "alarmActions": [],
+      "okActions": [],
+      "insufficientDataActions": [],
+      "alarmRule": "ALARM(HighErrors)"
+    }
+  ]
+}
+```
+
+`GET /_fakecloud/cloudwatch/metrics` response:
+
+```json
+{
+  "metrics": [
+    {
+      "accountId": "123456789012",
+      "region": "us-east-1",
+      "namespace": "MyApp",
+      "metricName": "Requests",
+      "dimensions": [{ "name": "Service", "value": "api" }],
+      "datapointCount": 2,
+      "latest": { "timestamp": "2026-05-29T00:00:00+00:00", "value": 42.0, "unit": "Count" }
+    }
+  ]
+}
+```
+
 ## Cognito
 
 | Endpoint | Method | Description |
@@ -169,6 +234,7 @@ curl http://localhost:4566/_fakecloud/health
 | -------- | ------ | ----------- |
 | `/_fakecloud/glue/jobs` | GET | **NEW** -- All Glue Jobs (CreateJob ledger) across accounts. |
 | `/_fakecloud/glue/job-runs` | GET | **NEW** -- All JobRun state across accounts. Optional `?job_name=foo` filter. |
+| `/_fakecloud/glue/crawlers` | GET | **NEW** -- All Glue crawlers across accounts with role, database, state, a target summary, and timestamps. Sorted by account, name. |
 
 ## IAM
 
