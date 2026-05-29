@@ -553,8 +553,10 @@ fn diff_updated_attributes(
 mod tests {
     use super::*;
 
+    // AttributeValue is `serde_json::Value`; a DynamoDB number attribute
+    // is the JSON object `{"N": "<digits>"}`.
     fn n(v: &str) -> AttributeValue {
-        AttributeValue::N(v.to_string())
+        json!({ "N": v })
     }
 
     fn map(pairs: &[(&str, &str)]) -> HashMap<String, AttributeValue> {
