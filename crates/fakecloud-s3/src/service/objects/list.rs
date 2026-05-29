@@ -24,10 +24,14 @@ impl S3Service {
             .get("delimiter")
             .filter(|s| !s.is_empty())
             .cloned();
+        // AWS caps max-keys at 1000 regardless of the requested value, so
+        // clients that don't paginate still see truncation (bug-audit
+        // 2026-05-28, 1.4 — we used the requested value verbatim).
         let max_keys: usize = req
             .query_params
             .get("max-keys")
             .and_then(|v| v.parse().ok())
+            .map(|n: usize| n.min(1000))
             .unwrap_or(1000);
         let marker = req.query_params.get("marker").cloned().unwrap_or_default();
         let encoding_type = req.query_params.get("encoding-type").cloned();
@@ -185,10 +189,12 @@ impl S3Service {
             .get("delimiter")
             .cloned()
             .unwrap_or_default();
+        // AWS caps max-keys at 1000 (bug-audit 2026-05-28, 1.4).
         let max_keys: usize = req
             .query_params
             .get("max-keys")
             .and_then(|v| v.parse().ok())
+            .map(|n: usize| n.min(1000))
             .unwrap_or(1000);
         let start_after = req
             .query_params
@@ -406,10 +412,12 @@ impl S3Service {
             .cloned()
             .unwrap_or_default();
         let version_id_marker = req.query_params.get("version-id-marker").cloned();
+        // AWS caps max-keys at 1000 (bug-audit 2026-05-28, 1.4).
         let max_keys: usize = req
             .query_params
             .get("max-keys")
             .and_then(|s| s.parse().ok())
+            .map(|n: usize| n.min(1000))
             .unwrap_or(1000);
 
         let owner_id = &b.acl_owner_id;

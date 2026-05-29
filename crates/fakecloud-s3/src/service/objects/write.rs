@@ -180,6 +180,26 @@ impl S3Service {
         .await?;
         let data_size: u64 = spooled.size;
         let etag: String = spooled.md5_hex.clone();
+
+        // Content-MD5 integrity check: when the client sends the header,
+        // AWS verifies it against the body's MD5 and rejects a mismatch
+        // with `BadDigest` (bug-audit 2026-05-28, 1.9 — corrupt-digest
+        // writes used to be accepted silently). The header is the
+        // base64-encoded 128-bit MD5; the spool computed it as hex, so
+        // decode the hex to raw bytes and base64-encode to compare.
+        if let Some(content_md5) = req.headers.get("content-md5").and_then(|v| v.to_str().ok()) {
+            let supplied = content_md5.trim();
+            if !supplied.is_empty() {
+                let expected_b64 = hex_to_base64(&spooled.md5_hex);
+                if expected_b64.as_deref() != Some(supplied) {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "BadDigest",
+                        "The Content-MD5 you specified did not match what we received.",
+                    ));
+                }
+            }
+        }
         let content_type = req
             .headers
             .get("content-type")
@@ -747,6 +767,39 @@ impl S3Service {
                 ));
             }
         }
+        // Date-based copy-source preconditions (bug-audit 2026-05-28,
+        // 1.10 — these were ignored, so a copy always succeeded). A
+        // malformed date header is ignored, matching AWS.
+        if let Some(since) = req
+            .headers
+            .get("x-amz-copy-source-if-unmodified-since")
+            .and_then(|v| v.to_str().ok())
+            .and_then(crate::service::parse_http_date)
+        {
+            // Fail if the source WAS modified after the given instant.
+            if src_obj.last_modified > since {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::PRECONDITION_FAILED,
+                    "PreconditionFailed",
+                    "At least one of the pre-conditions you specified did not hold",
+                ));
+            }
+        }
+        if let Some(since) = req
+            .headers
+            .get("x-amz-copy-source-if-modified-since")
+            .and_then(|v| v.to_str().ok())
+            .and_then(crate::service::parse_http_date)
+        {
+            // Fail if the source was NOT modified after the given instant.
+            if src_obj.last_modified <= since {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::PRECONDITION_FAILED,
+                    "PreconditionFailed",
+                    "At least one of the pre-conditions you specified did not hold",
+                ));
+            }
+        }
 
         // Check copy-in-place validity
         let has_version_id = src_version_id.is_some();
@@ -1139,5 +1192,48 @@ impl S3Service {
             body: Bytes::new().into(),
             headers: HeaderMap::new(),
         })
+    }
+}
+
+/// Convert a lowercase hex MD5 digest to its base64 form, matching the
+/// `Content-MD5` header encoding AWS expects. Returns `None` if the input
+/// isn't valid hex of the right length.
+fn hex_to_base64(hex: &str) -> Option<String> {
+    use base64::Engine;
+    if !hex.len().is_multiple_of(2) {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(hex.len() / 2);
+    let h = hex.as_bytes();
+    let mut i = 0;
+    while i < h.len() {
+        let hi = (h[i] as char).to_digit(16)?;
+        let lo = (h[i + 1] as char).to_digit(16)?;
+        bytes.push((hi * 16 + lo) as u8);
+        i += 2;
+    }
+    Some(base64::engine::general_purpose::STANDARD.encode(bytes))
+}
+
+#[cfg(test)]
+mod content_md5_tests {
+    use super::hex_to_base64;
+
+    // bug-audit 2026-05-28, 1.9: the spool yields a hex MD5; the
+    // Content-MD5 header is base64 of the raw digest. Verify the
+    // conversion matches the canonical base64 form.
+    #[test]
+    fn hex_md5_converts_to_base64() {
+        // MD5("") = d41d8cd98f00b204e9800998ecf8427e
+        assert_eq!(
+            hex_to_base64("d41d8cd98f00b204e9800998ecf8427e").as_deref(),
+            Some("1B2M2Y8AsgTpgAmY7PhCfg==")
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_hex() {
+        assert_eq!(hex_to_base64("xyz"), None); // odd length
+        assert_eq!(hex_to_base64("zz"), None); // non-hex digits
     }
 }
