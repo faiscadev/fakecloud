@@ -403,22 +403,21 @@ impl DynamoDbService {
         // - UPDATED_NEW: only attributes that changed, with NEW values
         // - UPDATED_OLD: only attributes that changed, with OLD values
         // - NONE      : nothing
-        let response_attributes: Option<HashMap<String, AttributeValue>> =
-            match return_values {
-                "ALL_NEW" => Some(table.items[idx].clone()),
-                "ALL_OLD" => pre_update_item.clone(),
-                "UPDATED_NEW" => Some(diff_updated_attributes(
-                    pre_update_item.as_ref(),
-                    &table.items[idx],
-                    UpdatedSide::New,
-                )),
-                "UPDATED_OLD" => Some(diff_updated_attributes(
-                    pre_update_item.as_ref(),
-                    &table.items[idx],
-                    UpdatedSide::Old,
-                )),
-                _ => None,
-            };
+        let response_attributes: Option<HashMap<String, AttributeValue>> = match return_values {
+            "ALL_NEW" => Some(table.items[idx].clone()),
+            "ALL_OLD" => pre_update_item.clone(),
+            "UPDATED_NEW" => Some(diff_updated_attributes(
+                pre_update_item.as_ref(),
+                &table.items[idx],
+                UpdatedSide::New,
+            )),
+            "UPDATED_OLD" => Some(diff_updated_attributes(
+                pre_update_item.as_ref(),
+                &table.items[idx],
+                UpdatedSide::Old,
+            )),
+            _ => None,
+        };
 
         let event_name = if is_insert { "INSERT" } else { "MODIFY" };
         let new_item_for_stream = table.items[idx].clone();
