@@ -1,6 +1,6 @@
 {
-  "variants_passed": 90403,
-  "total_variants": 90403,
+  "variants_passed": 99678,
+  "total_variants": 99678,
   "per_service": {
     "logs": {
       "passed": 3897,
@@ -157,6 +157,10 @@
     "monitoring": {
       "passed": 1610,
       "total": 1610
+    },
+    "glue": {
+      "passed": 9275,
+      "total": 9275
     }
   }
 }
