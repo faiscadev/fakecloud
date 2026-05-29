@@ -21,6 +21,13 @@ pub struct ElastiCacheRuntime {
     cli: String,
     containers: Arc<RwLock<HashMap<String, RunningCacheContainer>>>,
     instance_id: String,
+    /// Container-to-host networking shared with the other runtimes via
+    /// [`fakecloud_core::container_net`]. ElastiCache only needs the
+    /// sibling-container address (redis/memcached don't call back into
+    /// fakecloud) — used so readiness probes reach the spawned container
+    /// instead of fakecloud's own loopback when containerized (issue
+    /// #1539, bug 0.4).
+    net: fakecloud_core::container_net::HostNetworking,
 }
 
 #[derive(Debug, thiserror::Error)]

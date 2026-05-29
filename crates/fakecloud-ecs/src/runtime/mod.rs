@@ -2342,13 +2342,15 @@ mod tests {
     /// share state.
     #[test]
     fn efs_without_root_directory_uses_filesystem_root() {
+        // No rootDirectory (or "/") -> a single shared named volume per
+        // filesystem id.
         assert_eq!(
-            stub_dir_for("efs", "fs-abc", "/"),
-            "/tmp/fakecloud/efs/fs-abc"
+            shared_volume_name("efs", "fs-abc", "/"),
+            "fakecloud-efs-fs-abc"
         );
         assert_eq!(
-            stub_dir_for("efs", "fs-abc", ""),
-            "/tmp/fakecloud/efs/fs-abc"
+            shared_volume_name("efs", "fs-abc", ""),
+            "fakecloud-efs-fs-abc"
         );
     }
 
