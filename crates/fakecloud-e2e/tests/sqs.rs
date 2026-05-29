@@ -1668,3 +1668,51 @@ async fn sqs_encryption_defaults_and_mode_switch() {
         "300"
     );
 }
+
+// bug-audit 2026-05-28, 1.13: a deduplicated FIFO send replays the ORIGINAL
+// MessageId + SequenceNumber instead of minting new ones / advancing the seq.
+#[tokio::test]
+async fn fifo_dedup_replays_original_id_and_sequence() {
+    let client = sqs_client().await;
+    let queue_url = create_fifo_queue(&client, "dedup-replay.fifo").await;
+
+    let first = client
+        .send_message()
+        .queue_url(&queue_url)
+        .message_body("hello")
+        .message_group_id("g1")
+        .message_deduplication_id("d1")
+        .send()
+        .await
+        .expect("first send");
+    let second = client
+        .send_message()
+        .queue_url(&queue_url)
+        .message_body("hello")
+        .message_group_id("g1")
+        .message_deduplication_id("d1")
+        .send()
+        .await
+        .expect("second send");
+
+    assert_eq!(
+        first.message_id(),
+        second.message_id(),
+        "dedup'd send must replay the original MessageId"
+    );
+    assert_eq!(
+        first.sequence_number(),
+        second.sequence_number(),
+        "dedup'd send must replay the original SequenceNumber"
+    );
+
+    // Only one message actually enqueued.
+    let recv = client
+        .receive_message()
+        .queue_url(&queue_url)
+        .max_number_of_messages(10)
+        .send()
+        .await
+        .expect("receive");
+    assert_eq!(recv.messages().len(), 1, "duplicate must not enqueue twice");
+}
