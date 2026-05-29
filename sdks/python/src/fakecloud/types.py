@@ -1205,6 +1205,65 @@ class CloudWatchMetricsResponse:
         )
 
 
+# ── Firehose ────────────────────────────────────────────────────────
+
+
+@dataclass
+class FirehoseEncryption:
+    status: str
+    key_type: Optional[str] = None
+    key_arn: Optional[str] = None
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> FirehoseEncryption:
+        return cls(
+            status=data.get("status", "DISABLED"),
+            key_type=data.get("keyType"),
+            key_arn=data.get("keyArn"),
+        )
+
+
+@dataclass
+class FirehoseDeliveryStream:
+    account_id: str
+    name: str
+    arn: str
+    stream_type: str
+    status: str
+    encryption: FirehoseEncryption
+    destination_count: int
+    create_timestamp: str
+    last_update_timestamp: Optional[str] = None
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> FirehoseDeliveryStream:
+        return cls(
+            account_id=data.get("accountId", ""),
+            name=data.get("name", ""),
+            arn=data.get("arn", ""),
+            stream_type=data.get("streamType", ""),
+            status=data.get("status", ""),
+            encryption=FirehoseEncryption.from_dict(data.get("encryption", {})),
+            destination_count=int(data.get("destinationCount", 0)),
+            create_timestamp=data.get("createTimestamp", ""),
+            last_update_timestamp=data.get("lastUpdateTimestamp"),
+        )
+
+
+@dataclass
+class FirehoseDeliveryStreamsResponse:
+    delivery_streams: List[FirehoseDeliveryStream]
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> FirehoseDeliveryStreamsResponse:
+        return cls(
+            delivery_streams=[
+                FirehoseDeliveryStream.from_dict(s)
+                for s in data.get("deliveryStreams", [])
+            ]
+        )
+
+
 # ── Scheduler (EventBridge Scheduler) ───────────────────────────────
 
 
@@ -2963,6 +3022,69 @@ class OrganizationsAccountsResponse:
             accounts=accounts,
             management_account_id=d.get("management_account_id"),
             master_account_id=d.get("master_account_id"),
+        )
+
+
+@dataclass
+class OrganizationsResponsibilityTransfer:
+    """One billing responsibility transfer in the org. ``direction`` is
+    INBOUND/OUTBOUND; ``active_handshake_id`` is the handshake the invited
+    org accepts/declines (``None`` when none)."""
+
+    id: str
+    arn: str
+    name: str
+    type: str
+    status: str
+    direction: str
+    source_management_account_id: str
+    source_management_account_email: str
+    target_management_account_id: str
+    target_management_account_email: str
+    start_timestamp: str
+    end_timestamp: Optional[str] = None
+    active_handshake_id: Optional[str] = None
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> OrganizationsResponsibilityTransfer:
+        d = _convert_keys(data)
+        return cls(
+            id=d.get("id", ""),
+            arn=d.get("arn", ""),
+            name=d.get("name", ""),
+            type=d.get("type", ""),
+            status=d.get("status", ""),
+            direction=d.get("direction", ""),
+            source_management_account_id=d.get("source_management_account_id", ""),
+            source_management_account_email=d.get(
+                "source_management_account_email", ""
+            ),
+            target_management_account_id=d.get("target_management_account_id", ""),
+            target_management_account_email=d.get(
+                "target_management_account_email", ""
+            ),
+            start_timestamp=d.get("start_timestamp", ""),
+            end_timestamp=d.get("end_timestamp"),
+            active_handshake_id=d.get("active_handshake_id"),
+        )
+
+
+@dataclass
+class OrganizationsResponsibilityTransfersResponse:
+    responsibility_transfers: List[OrganizationsResponsibilityTransfer] = field(
+        default_factory=list
+    )
+
+    @classmethod
+    def from_dict(
+        cls, data: Dict[str, Any]
+    ) -> OrganizationsResponsibilityTransfersResponse:
+        d = _convert_keys(data)
+        return cls(
+            responsibility_transfers=[
+                OrganizationsResponsibilityTransfer.from_dict(t)
+                for t in d.get("responsibility_transfers", [])
+            ],
         )
 
 

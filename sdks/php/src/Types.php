@@ -1379,6 +1379,72 @@ final class CloudWatchMetricsResponse
     }
 }
 
+// ── Firehose ────────────────────────────────────────────────────
+
+final class FirehoseEncryption
+{
+    public function __construct(
+        public readonly string $status,
+        public readonly ?string $keyType,
+        public readonly ?string $keyArn,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            $data['status'] ?? 'DISABLED',
+            $data['keyType'] ?? null,
+            $data['keyArn'] ?? null,
+        );
+    }
+}
+
+final class FirehoseDeliveryStream
+{
+    public function __construct(
+        public readonly string $accountId,
+        public readonly string $name,
+        public readonly string $arn,
+        public readonly string $streamType,
+        public readonly string $status,
+        public readonly FirehoseEncryption $encryption,
+        public readonly int $destinationCount,
+        public readonly string $createTimestamp,
+        public readonly ?string $lastUpdateTimestamp,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            $data['accountId'] ?? '',
+            $data['name'] ?? '',
+            $data['arn'] ?? '',
+            $data['streamType'] ?? '',
+            $data['status'] ?? '',
+            FirehoseEncryption::fromArray($data['encryption'] ?? []),
+            (int) ($data['destinationCount'] ?? 0),
+            $data['createTimestamp'] ?? '',
+            $data['lastUpdateTimestamp'] ?? null,
+        );
+    }
+}
+
+final class FirehoseDeliveryStreamsResponse
+{
+    public function __construct(
+        /** @var FirehoseDeliveryStream[] */
+        public readonly array $deliveryStreams,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(array_map(
+            FirehoseDeliveryStream::fromArray(...),
+            $data['deliveryStreams'] ?? [],
+        ));
+    }
+}
+
 // ── Scheduler (EventBridge Scheduler) ───────────────────────────
 
 final class SchedulerSchedule
@@ -3496,6 +3562,60 @@ final class OrganizationsAccountsResponse
             isset($data['managementAccountId']) ? (string) $data['managementAccountId'] : null,
             isset($data['masterAccountId']) ? (string) $data['masterAccountId'] : null,
         );
+    }
+}
+
+final class OrganizationsResponsibilityTransfer
+{
+    public function __construct(
+        public readonly string $id,
+        public readonly string $arn,
+        public readonly string $name,
+        public readonly string $type,
+        public readonly string $status,
+        public readonly string $direction,
+        public readonly string $sourceManagementAccountId,
+        public readonly string $sourceManagementAccountEmail,
+        public readonly string $targetManagementAccountId,
+        public readonly string $targetManagementAccountEmail,
+        public readonly string $startTimestamp,
+        public readonly ?string $endTimestamp = null,
+        public readonly ?string $activeHandshakeId = null,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            (string) ($data['id'] ?? ''),
+            (string) ($data['arn'] ?? ''),
+            (string) ($data['name'] ?? ''),
+            (string) ($data['type'] ?? ''),
+            (string) ($data['status'] ?? ''),
+            (string) ($data['direction'] ?? ''),
+            (string) ($data['sourceManagementAccountId'] ?? ''),
+            (string) ($data['sourceManagementAccountEmail'] ?? ''),
+            (string) ($data['targetManagementAccountId'] ?? ''),
+            (string) ($data['targetManagementAccountEmail'] ?? ''),
+            (string) ($data['startTimestamp'] ?? ''),
+            isset($data['endTimestamp']) ? (string) $data['endTimestamp'] : null,
+            isset($data['activeHandshakeId']) ? (string) $data['activeHandshakeId'] : null,
+        );
+    }
+}
+
+final class OrganizationsResponsibilityTransfersResponse
+{
+    public function __construct(
+        /** @var OrganizationsResponsibilityTransfer[] */
+        public readonly array $responsibilityTransfers,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(array_map(
+            OrganizationsResponsibilityTransfer::fromArray(...),
+            $data['responsibilityTransfers'] ?? [],
+        ));
     }
 }
 

@@ -228,6 +228,34 @@ curl http://localhost:4566/_fakecloud/health
 | `/_fakecloud/events/history` | GET | All events seen plus per-rule delivery results. |
 | `/_fakecloud/events/fire-rule` | POST | Manually fire a rule against the current bus state. |
 
+## Firehose
+
+| Endpoint | Method | Description |
+| -------- | ------ | ----------- |
+| `/_fakecloud/firehose/delivery-streams` | GET | **NEW** -- Every Firehose delivery stream across accounts and regions, with stream type, lifecycle status, encryption summary, destination count, and timestamps. Sorted by account, name. |
+
+`GET /_fakecloud/firehose/delivery-streams` response:
+
+```json
+{
+  "deliveryStreams": [
+    {
+      "accountId": "123456789012",
+      "name": "fh-intro",
+      "arn": "arn:aws:firehose:us-east-1:123456789012:deliverystream/fh-intro",
+      "streamType": "DirectPut",
+      "status": "ACTIVE",
+      "encryption": { "status": "ENABLED", "keyType": "AWS_OWNED_CMK" },
+      "destinationCount": 1,
+      "createTimestamp": "2026-05-29T00:00:00+00:00",
+      "lastUpdateTimestamp": "2026-05-29T00:00:00+00:00"
+    }
+  ]
+}
+```
+
+When a stream has no encryption configured, `encryption` is `{ "status": "DISABLED" }` (no `keyType`/`keyArn`).
+
 ## Glue
 
 | Endpoint | Method | Description |
@@ -270,6 +298,33 @@ curl http://localhost:4566/_fakecloud/health
 | Endpoint | Method | Description |
 | -------- | ------ | ----------- |
 | `/_fakecloud/organizations/accounts` | GET | **NEW** -- List every member account with lifecycle state, parent OU, tags, and directly-attached SCPs. |
+| `/_fakecloud/organizations/responsibility-transfers` | GET | **NEW** -- Every billing responsibility transfer in the org, with direction (INBOUND/OUTBOUND), lifecycle status, source/target management accounts, and the active handshake. Sorted by id. |
+
+`GET /_fakecloud/organizations/responsibility-transfers` response:
+
+```json
+{
+  "responsibilityTransfers": [
+    {
+      "id": "rt-0123456789abcdef0123456789abcdef",
+      "arn": "arn:aws:organizations::111111111111:responsibilitytransfer/o-abc123/rt-0123456789abcdef0123456789abcdef",
+      "name": "my-billing-transfer",
+      "type": "BILLING",
+      "status": "REQUESTED",
+      "direction": "OUTBOUND",
+      "sourceManagementAccountId": "111111111111",
+      "sourceManagementAccountEmail": "admin@example.com",
+      "targetManagementAccountId": "222222222222",
+      "targetManagementAccountEmail": "222222222222@example.com",
+      "startTimestamp": "2026-05-29T00:00:00+00:00",
+      "endTimestamp": null,
+      "activeHandshakeId": "h-0123456789abcdef0123456789abcdef"
+    }
+  ]
+}
+```
+
+`endTimestamp` and `activeHandshakeId` are `null` when not set. The list is empty when no organization exists.
 
 ## RDS
 

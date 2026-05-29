@@ -132,6 +132,7 @@ public final class FakeCloud {
     private final SchedulerClient scheduler;
     private final GlueClient glue;
     private final CloudWatchClient cloudwatch;
+    private final FirehoseClient firehose;
     private final S3Client s3;
     private final DynamoDbClient dynamodb;
     private final SecretsManagerClient secretsmanager;
@@ -171,6 +172,7 @@ public final class FakeCloud {
         this.scheduler = new SchedulerClient(http);
         this.glue = new GlueClient(http);
         this.cloudwatch = new CloudWatchClient(http);
+        this.firehose = new FirehoseClient(http);
         this.s3 = new S3Client(http);
         this.dynamodb = new DynamoDbClient(http);
         this.secretsmanager = new SecretsManagerClient(http);
@@ -243,6 +245,7 @@ public final class FakeCloud {
     public GlueClient glue() { return glue; }
 
     public CloudWatchClient cloudwatch() { return cloudwatch; }
+    public FirehoseClient firehose() { return firehose; }
     public S3Client s3() { return s3; }
     public DynamoDbClient dynamodb() { return dynamodb; }
     public SecretsManagerClient secretsmanager() { return secretsmanager; }
@@ -645,6 +648,17 @@ public final class FakeCloud {
 
         public Types.CloudWatchMetricsResponse getMetrics() {
             return http.get("/_fakecloud/cloudwatch/metrics", Types.CloudWatchMetricsResponse.class);
+        }
+    }
+
+    public static final class FirehoseClient {
+        private final HttpTransport http;
+        FirehoseClient(HttpTransport http) { this.http = http; }
+
+        public Types.FirehoseDeliveryStreamsResponse getDeliveryStreams() {
+            return http.get(
+                "/_fakecloud/firehose/delivery-streams",
+                Types.FirehoseDeliveryStreamsResponse.class);
         }
     }
 
@@ -1243,6 +1257,18 @@ public final class FakeCloud {
             return http.get(
                     "/_fakecloud/organizations/accounts",
                     Types.OrganizationsAccountsResponse.class);
+        }
+
+        /**
+         * List every billing responsibility transfer in the org, with
+         * direction (INBOUND/OUTBOUND), lifecycle status, and the active
+         * handshake. Returns an empty list when no organization has been
+         * created.
+         */
+        public Types.OrganizationsResponsibilityTransfersResponse getResponsibilityTransfers() {
+            return http.get(
+                    "/_fakecloud/organizations/responsibility-transfers",
+                    Types.OrganizationsResponsibilityTransfersResponse.class);
         }
     }
 

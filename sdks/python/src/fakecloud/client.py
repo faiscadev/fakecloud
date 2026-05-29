@@ -61,6 +61,7 @@ from fakecloud.types import (
     ExpireTokensResponse,
     FailSsmCommandRequest,
     FailSsmCommandResponse,
+    FirehoseDeliveryStreamsResponse,
     FireRuleRequest,
     FireRuleResponse,
     FireScheduleResponse,
@@ -83,6 +84,7 @@ from fakecloud.types import (
     MintAuthorizationCodeRequest,
     MintAuthorizationCodeResponse,
     OrganizationsAccountsResponse,
+    OrganizationsResponsibilityTransfersResponse,
     PendingConfirmationsResponse,
     PreTokenGenInvocationsResponse,
     RdsInstancesResponse,
@@ -1072,6 +1074,18 @@ class OrganizationsClient:
         _check(resp)
         return OrganizationsAccountsResponse.from_dict(resp.json())
 
+    async def get_responsibility_transfers(
+        self,
+    ) -> OrganizationsResponsibilityTransfersResponse:
+        """List every billing responsibility transfer in the org, with
+        direction (INBOUND/OUTBOUND), lifecycle status, and the active
+        handshake. Returns an empty list when no org has been created."""
+        resp = await self._client.get(
+            f"{self._base}/_fakecloud/organizations/responsibility-transfers"
+        )
+        _check(resp)
+        return OrganizationsResponsibilityTransfersResponse.from_dict(resp.json())
+
 
 class SesClient:
     """Async SES introspection client."""
@@ -1337,6 +1351,24 @@ class CloudWatchClient:
         resp = await self._client.get(f"{self._base}/_fakecloud/cloudwatch/metrics")
         _check(resp)
         return CloudWatchMetricsResponse.from_dict(resp.json())
+
+
+class FirehoseClient:
+    """Async Firehose delivery-streams introspection client."""
+
+    def __init__(self, client: httpx.AsyncClient, base_url: str) -> None:
+        self._client = client
+        self._base = base_url
+
+    async def get_delivery_streams(self) -> FirehoseDeliveryStreamsResponse:
+        """List every delivery stream across accounts and regions, with
+        stream type, lifecycle status, encryption summary, and
+        destination count. Sorted by account, then name."""
+        resp = await self._client.get(
+            f"{self._base}/_fakecloud/firehose/delivery-streams"
+        )
+        _check(resp)
+        return FirehoseDeliveryStreamsResponse.from_dict(resp.json())
 
 
 class S3Client:
@@ -1838,6 +1870,15 @@ class _SyncOrganizationsClient:
         _check(resp)
         return OrganizationsAccountsResponse.from_dict(resp.json())
 
+    def get_responsibility_transfers(
+        self,
+    ) -> OrganizationsResponsibilityTransfersResponse:
+        resp = self._client.get(
+            f"{self._base}/_fakecloud/organizations/responsibility-transfers"
+        )
+        _check(resp)
+        return OrganizationsResponsibilityTransfersResponse.from_dict(resp.json())
+
 
 class _SyncSesClient:
     def __init__(self, client: httpx.Client, base_url: str) -> None:
@@ -2064,6 +2105,17 @@ class _SyncCloudWatchClient:
         resp = self._client.get(f"{self._base}/_fakecloud/cloudwatch/metrics")
         _check(resp)
         return CloudWatchMetricsResponse.from_dict(resp.json())
+
+
+class _SyncFirehoseClient:
+    def __init__(self, client: httpx.Client, base_url: str) -> None:
+        self._client = client
+        self._base = base_url
+
+    def get_delivery_streams(self) -> FirehoseDeliveryStreamsResponse:
+        resp = self._client.get(f"{self._base}/_fakecloud/firehose/delivery-streams")
+        _check(resp)
+        return FirehoseDeliveryStreamsResponse.from_dict(resp.json())
 
 
 class _SyncS3Client:
@@ -2454,6 +2506,10 @@ class FakeCloud:
         return CloudWatchClient(self._client, self._base)
 
     @property
+    def firehose(self) -> FirehoseClient:
+        return FirehoseClient(self._client, self._base)
+
+    @property
     def s3(self) -> S3Client:
         return S3Client(self._client, self._base)
 
@@ -2629,6 +2685,10 @@ class FakeCloudSync:
     @property
     def cloudwatch(self) -> _SyncCloudWatchClient:
         return _SyncCloudWatchClient(self._client, self._base)
+
+    @property
+    def firehose(self) -> _SyncFirehoseClient:
+        return _SyncFirehoseClient(self._client, self._base)
 
     @property
     def s3(self) -> _SyncS3Client:

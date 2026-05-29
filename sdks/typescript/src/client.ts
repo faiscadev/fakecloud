@@ -70,6 +70,7 @@ import type {
   GlueCrawlersResponse,
   CloudWatchAlarmsResponse,
   CloudWatchMetricsResponse,
+  FirehoseDeliveryStreamsResponse,
   SchedulerSchedulesResponse,
   S3AccessPointsResponse,
   S3NotificationsResponse,
@@ -108,6 +109,7 @@ import type {
   Elbv2ListenersResponse,
   Elbv2RulesResponse,
   OrganizationsAccountsResponse,
+  OrganizationsResponsibilityTransfersResponse,
   SetSsmCommandStatusRequest,
   SetSsmCommandStatusResponse,
   FailSsmCommandRequest,
@@ -596,6 +598,17 @@ export class CloudWatchClient {
 
   async getMetrics(): Promise<CloudWatchMetricsResponse> {
     const resp = await fetch(`${this.baseUrl}/_fakecloud/cloudwatch/metrics`);
+    return parse(resp);
+  }
+}
+
+export class FirehoseClient {
+  constructor(private baseUrl: string) {}
+
+  async getDeliveryStreams(): Promise<FirehoseDeliveryStreamsResponse> {
+    const resp = await fetch(
+      `${this.baseUrl}/_fakecloud/firehose/delivery-streams`,
+    );
     return parse(resp);
   }
 }
@@ -1113,6 +1126,7 @@ export class FakeCloud {
   private readonly _scheduler: SchedulerClient;
   private readonly _glue: GlueClient;
   private readonly _cloudwatch: CloudWatchClient;
+  private readonly _firehose: FirehoseClient;
   private readonly _s3: S3Client;
   private readonly _dynamodb: DynamoDbClient;
   private readonly _secretsmanager: SecretsManagerClient;
@@ -1149,6 +1163,7 @@ export class FakeCloud {
     this._scheduler = new SchedulerClient(this.baseUrl);
     this._glue = new GlueClient(this.baseUrl);
     this._cloudwatch = new CloudWatchClient(this.baseUrl);
+    this._firehose = new FirehoseClient(this.baseUrl);
     this._s3 = new S3Client(this.baseUrl);
     this._dynamodb = new DynamoDbClient(this.baseUrl);
     this._secretsmanager = new SecretsManagerClient(this.baseUrl);
@@ -1255,6 +1270,10 @@ export class FakeCloud {
 
   get cloudwatch(): CloudWatchClient {
     return this._cloudwatch;
+  }
+
+  get firehose(): FirehoseClient {
+    return this._firehose;
   }
 
   get s3(): S3Client {
@@ -1369,6 +1388,19 @@ export class OrganizationsClient {
   async getAccounts(): Promise<OrganizationsAccountsResponse> {
     const resp = await fetch(
       `${this.baseUrl}/_fakecloud/organizations/accounts`,
+    );
+    return parse(resp);
+  }
+
+  /**
+   * List every billing responsibility transfer in the org, with
+   * direction (INBOUND/OUTBOUND), lifecycle status, and the active
+   * handshake. Returns an empty list when no organization has been
+   * created.
+   */
+  async getResponsibilityTransfers(): Promise<OrganizationsResponsibilityTransfersResponse> {
+    const resp = await fetch(
+      `${this.baseUrl}/_fakecloud/organizations/responsibility-transfers`,
     );
     return parse(resp);
   }

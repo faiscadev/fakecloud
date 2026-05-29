@@ -189,6 +189,10 @@ impl FakeCloud {
         CloudWatchClient { fc: self }
     }
 
+    pub fn firehose(&self) -> FirehoseClient<'_> {
+        FirehoseClient { fc: self }
+    }
+
     pub fn logs(&self) -> LogsClient<'_> {
         LogsClient { fc: self }
     }
@@ -1745,6 +1749,24 @@ impl OrganizationsClient<'_> {
             .await?;
         FakeCloud::parse(resp).await
     }
+
+    /// List every billing-responsibility transfer in the org, with
+    /// direction, lifecycle status, and the active handshake. Returns an
+    /// empty list when no organization has been created.
+    pub async fn get_responsibility_transfers(
+        &self,
+    ) -> Result<OrganizationsResponsibilityTransfersResponse, Error> {
+        let resp = self
+            .fc
+            .client
+            .get(format!(
+                "{}/_fakecloud/organizations/responsibility-transfers",
+                self.fc.base_url
+            ))
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
 }
 
 // ── ACM ─────────────────────────────────────────────────────────────
@@ -2031,6 +2053,30 @@ impl CloudWatchClient<'_> {
             .client
             .get(format!(
                 "{}/_fakecloud/cloudwatch/metrics",
+                self.fc.base_url
+            ))
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
+}
+
+// ── Firehose ────────────────────────────────────────────────────────
+
+pub struct FirehoseClient<'a> {
+    fc: &'a FakeCloud,
+}
+
+impl FirehoseClient<'_> {
+    /// List every Firehose delivery stream across all accounts and
+    /// regions, with stream type, lifecycle status, encryption summary,
+    /// and destination count.
+    pub async fn get_delivery_streams(&self) -> Result<FirehoseDeliveryStreamsResponse, Error> {
+        let resp = self
+            .fc
+            .client
+            .get(format!(
+                "{}/_fakecloud/firehose/delivery-streams",
                 self.fc.base_url
             ))
             .send()

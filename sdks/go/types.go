@@ -1385,6 +1385,34 @@ type CloudWatchMetricsResponse struct {
 	Metrics []CloudWatchMetric `json:"metrics"`
 }
 
+// FirehoseEncryption is the server-side encryption summary of a Firehose
+// delivery stream. Status is ENABLED/DISABLED; KeyType/KeyArn are present
+// only when a customer-managed key is configured.
+type FirehoseEncryption struct {
+	Status  string  `json:"status"`
+	KeyType *string `json:"keyType,omitempty"`
+	KeyArn  *string `json:"keyArn,omitempty"`
+}
+
+// FirehoseDeliveryStream describes one delivery stream returned by the
+// /_fakecloud/firehose/delivery-streams endpoint.
+type FirehoseDeliveryStream struct {
+	AccountID           string             `json:"accountId"`
+	Name                string             `json:"name"`
+	ARN                 string             `json:"arn"`
+	StreamType          string             `json:"streamType"`
+	Status              string             `json:"status"`
+	Encryption          FirehoseEncryption `json:"encryption"`
+	DestinationCount    int                `json:"destinationCount"`
+	CreateTimestamp     string             `json:"createTimestamp"`
+	LastUpdateTimestamp *string            `json:"lastUpdateTimestamp,omitempty"`
+}
+
+// FirehoseDeliveryStreamsResponse contains every Firehose delivery stream.
+type FirehoseDeliveryStreamsResponse struct {
+	DeliveryStreams []FirehoseDeliveryStream `json:"deliveryStreams"`
+}
+
 // OrganizationsTag is a single key/value tag attached to an
 // Organizations resource (account, OU, root, or policy).
 type OrganizationsTag struct {
@@ -1417,6 +1445,33 @@ type OrganizationsAccountsResponse struct {
 	Accounts            []OrganizationsAccount `json:"accounts"`
 	ManagementAccountID *string                `json:"managementAccountId,omitempty"`
 	MasterAccountID     *string                `json:"masterAccountId,omitempty"`
+}
+
+// OrganizationsResponsibilityTransfer mirrors the AWS Organizations
+// ResponsibilityTransfer shape. Direction is INBOUND/OUTBOUND; Status
+// walks the transfer lifecycle; ActiveHandshakeID points at the handshake
+// the invited org accepts/declines (nil when none).
+type OrganizationsResponsibilityTransfer struct {
+	ID                           string  `json:"id"`
+	ARN                          string  `json:"arn"`
+	Name                         string  `json:"name"`
+	Type                         string  `json:"type"`
+	Status                       string  `json:"status"`
+	Direction                    string  `json:"direction"`
+	SourceManagementAccountID    string  `json:"sourceManagementAccountId"`
+	SourceManagementAccountEmail string  `json:"sourceManagementAccountEmail"`
+	TargetManagementAccountID    string  `json:"targetManagementAccountId"`
+	TargetManagementAccountEmail string  `json:"targetManagementAccountEmail"`
+	StartTimestamp               string  `json:"startTimestamp"`
+	EndTimestamp                 *string `json:"endTimestamp,omitempty"`
+	ActiveHandshakeID            *string `json:"activeHandshakeId,omitempty"`
+}
+
+// OrganizationsResponsibilityTransfersResponse is the payload for
+// GET /_fakecloud/organizations/responsibility-transfers. Empty when no
+// org exists.
+type OrganizationsResponsibilityTransfersResponse struct {
+	ResponsibilityTransfers []OrganizationsResponsibilityTransfer `json:"responsibilityTransfers"`
 }
 
 // AthenaNamedQuery is one row in the Athena named-query introspection

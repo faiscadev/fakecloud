@@ -30,6 +30,7 @@ final class FakeCloud
     private SchedulerClient $scheduler;
     private GlueClient $glue;
     private CloudWatchClient $cloudwatch;
+    private FirehoseClient $firehose;
     private S3Client $s3;
     private DynamoDbClient $dynamodb;
     private SecretsManagerClient $secretsmanager;
@@ -66,6 +67,7 @@ final class FakeCloud
         $this->scheduler = new SchedulerClient($this->http);
         $this->glue = new GlueClient($this->http);
         $this->cloudwatch = new CloudWatchClient($this->http);
+        $this->firehose = new FirehoseClient($this->http);
         $this->s3 = new S3Client($this->http);
         $this->dynamodb = new DynamoDbClient($this->http);
         $this->secretsmanager = new SecretsManagerClient($this->http);
@@ -139,6 +141,7 @@ final class FakeCloud
     public function scheduler(): SchedulerClient { return $this->scheduler; }
     public function glue(): GlueClient { return $this->glue; }
     public function cloudwatch(): CloudWatchClient { return $this->cloudwatch; }
+    public function firehose(): FirehoseClient { return $this->firehose; }
     public function s3(): S3Client { return $this->s3; }
     public function dynamodb(): DynamoDbClient { return $this->dynamodb; }
     public function secretsmanager(): SecretsManagerClient { return $this->secretsmanager; }
@@ -631,6 +634,18 @@ final class CloudWatchClient
     {
         return CloudWatchMetricsResponse::fromArray(
             $this->http->get('/_fakecloud/cloudwatch/metrics')
+        );
+    }
+}
+
+final class FirehoseClient
+{
+    public function __construct(private readonly HttpTransport $http) {}
+
+    public function getDeliveryStreams(): FirehoseDeliveryStreamsResponse
+    {
+        return FirehoseDeliveryStreamsResponse::fromArray(
+            $this->http->get('/_fakecloud/firehose/delivery-streams')
         );
     }
 }
@@ -1329,6 +1344,19 @@ final class OrganizationsClient
     {
         return OrganizationsAccountsResponse::fromArray(
             $this->http->get('/_fakecloud/organizations/accounts')
+        );
+    }
+
+    /**
+     * List every billing responsibility transfer in the org, with
+     * direction (INBOUND/OUTBOUND), lifecycle status, and the active
+     * handshake. Returns an empty list when no organization has been
+     * created.
+     */
+    public function getResponsibilityTransfers(): OrganizationsResponsibilityTransfersResponse
+    {
+        return OrganizationsResponsibilityTransfersResponse::fromArray(
+            $this->http->get('/_fakecloud/organizations/responsibility-transfers')
         );
     }
 }

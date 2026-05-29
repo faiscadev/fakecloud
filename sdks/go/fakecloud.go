@@ -146,6 +146,9 @@ func (fc *FakeCloud) Logs() *LogsClient { return &LogsClient{fc: fc} }
 // CloudWatch returns the CloudWatch metrics/alarms introspection sub-client.
 func (fc *FakeCloud) CloudWatch() *CloudWatchClient { return &CloudWatchClient{fc: fc} }
 
+// Firehose returns the Firehose delivery-streams introspection sub-client.
+func (fc *FakeCloud) Firehose() *FirehoseClient { return &FirehoseClient{fc: fc} }
+
 // ApplicationAutoScaling returns the Application Auto Scaling watcher sub-client.
 func (fc *FakeCloud) ApplicationAutoScaling() *ApplicationAutoScalingClient {
 	return &ApplicationAutoScalingClient{fc: fc}
