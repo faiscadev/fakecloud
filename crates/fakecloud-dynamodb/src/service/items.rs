@@ -404,7 +404,7 @@ impl DynamoDbService {
         // - UPDATED_OLD: only attributes that changed, with OLD values
         // - NONE      : nothing
         let response_attributes: Option<HashMap<String, AttributeValue>> =
-            match return_values.as_str() {
+            match return_values {
                 "ALL_NEW" => Some(table.items[idx].clone()),
                 "ALL_OLD" => pre_update_item.clone(),
                 "UPDATED_NEW" => Some(diff_updated_attributes(
