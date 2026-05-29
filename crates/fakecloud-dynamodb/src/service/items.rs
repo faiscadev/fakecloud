@@ -10,7 +10,7 @@ use super::{
     evaluate_condition, extract_key, get_table, get_table_mut, parse_expression_attribute_names,
     parse_expression_attribute_values, project_item, require_object, require_str,
     return_consumed_mode, return_icm_mode, validate_key_attributes_in_key, validate_key_in_item,
-    DynamoDbService,
+    AttributeValue, DynamoDbService,
 };
 
 impl DynamoDbService {
@@ -381,10 +381,8 @@ impl DynamoDbService {
         // ONLY the changed attributes (bug-audit 2026-05-28, 1.8 — we used
         // to return the whole item for UPDATED_NEW and nothing for
         // UPDATED_OLD).
-        let pre_update_item = if matches!(
-            return_values.as_str(),
-            "ALL_OLD" | "UPDATED_OLD" | "UPDATED_NEW"
-        ) {
+        let pre_update_item = if matches!(return_values, "ALL_OLD" | "UPDATED_OLD" | "UPDATED_NEW")
+        {
             Some(table.items[idx].clone())
         } else {
             None
