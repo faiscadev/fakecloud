@@ -19,9 +19,41 @@ use crate::state::{
     StatisticSet, CLOUDWATCH_SNAPSHOT_SCHEMA_VERSION,
 };
 
-const NS: &str = "http://monitoring.amazonaws.com/doc/2010-08-01/";
+pub(crate) const NS: &str = "http://monitoring.amazonaws.com/doc/2010-08-01/";
+
+/// Valid `StandardUnit` wire values, per the Smithy enum.
+pub(crate) const STANDARD_UNITS: &[&str] = &[
+    "Seconds",
+    "Microseconds",
+    "Milliseconds",
+    "Bytes",
+    "Kilobytes",
+    "Megabytes",
+    "Gigabytes",
+    "Terabytes",
+    "Bits",
+    "Kilobits",
+    "Megabits",
+    "Gigabits",
+    "Terabits",
+    "Percent",
+    "Count",
+    "Bytes/Second",
+    "Kilobytes/Second",
+    "Megabytes/Second",
+    "Gigabytes/Second",
+    "Terabytes/Second",
+    "Bits/Second",
+    "Kilobits/Second",
+    "Megabits/Second",
+    "Gigabits/Second",
+    "Terabits/Second",
+    "Count/Second",
+    "None",
+];
 
 const SUPPORTED_ACTIONS: &[&str] = &[
+    // Metrics & alarms (original surface).
     "PutMetricData",
     "GetMetricStatistics",
     "GetMetricData",
@@ -34,10 +66,53 @@ const SUPPORTED_ACTIONS: &[&str] = &[
     "DisableAlarmActions",
     "SetAlarmState",
     "DescribeAlarmHistory",
+    // Dashboards.
+    "PutDashboard",
+    "GetDashboard",
+    "DeleteDashboards",
+    "ListDashboards",
+    // Anomaly detectors.
+    "PutAnomalyDetector",
+    "DescribeAnomalyDetectors",
+    "DeleteAnomalyDetector",
+    // Insight rules.
+    "PutInsightRule",
+    "DescribeInsightRules",
+    "DeleteInsightRules",
+    "EnableInsightRules",
+    "DisableInsightRules",
+    "GetInsightRuleReport",
+    "PutManagedInsightRules",
+    "ListManagedInsightRules",
+    // Metric streams.
+    "PutMetricStream",
+    "GetMetricStream",
+    "ListMetricStreams",
+    "DeleteMetricStream",
+    "StartMetricStreams",
+    "StopMetricStreams",
+    // Composite alarms.
+    "PutCompositeAlarm",
+    // Mute rules.
+    "PutAlarmMuteRule",
+    "GetAlarmMuteRule",
+    "ListAlarmMuteRules",
+    "DeleteAlarmMuteRule",
+    // OTel enrichment.
+    "GetOTelEnrichment",
+    "StartOTelEnrichment",
+    "StopOTelEnrichment",
+    // Misc.
+    "DescribeAlarmContributors",
+    "GetMetricWidgetImage",
+    // Tagging.
+    "TagResource",
+    "UntagResource",
+    "ListTagsForResource",
 ];
 
 pub struct CloudWatchService {
-    state: SharedCloudWatchState,
+    pub(crate) state: SharedCloudWatchState,
     snapshot_store: Option<Arc<dyn SnapshotStore>>,
     snapshot_lock: Arc<Mutex<()>>,
 }
@@ -106,6 +181,24 @@ impl AwsService for CloudWatchService {
                 | "SetAlarmState"
                 | "PutDashboard"
                 | "DeleteDashboards"
+                | "PutAnomalyDetector"
+                | "DeleteAnomalyDetector"
+                | "PutInsightRule"
+                | "DeleteInsightRules"
+                | "EnableInsightRules"
+                | "DisableInsightRules"
+                | "PutManagedInsightRules"
+                | "PutMetricStream"
+                | "DeleteMetricStream"
+                | "StartMetricStreams"
+                | "StopMetricStreams"
+                | "PutCompositeAlarm"
+                | "PutAlarmMuteRule"
+                | "DeleteAlarmMuteRule"
+                | "StartOTelEnrichment"
+                | "StopOTelEnrichment"
+                | "TagResource"
+                | "UntagResource"
         );
         let result = match req.action.as_str() {
             "PutMetricData" => self.put_metric_data(&req),
@@ -124,6 +217,44 @@ impl AwsService for CloudWatchService {
             "GetDashboard" => self.get_dashboard(&req),
             "DeleteDashboards" => self.delete_dashboards(&req),
             "ListDashboards" => self.list_dashboards(&req),
+            // Anomaly detectors.
+            "PutAnomalyDetector" => self.put_anomaly_detector(&req),
+            "DescribeAnomalyDetectors" => self.describe_anomaly_detectors(&req),
+            "DeleteAnomalyDetector" => self.delete_anomaly_detector(&req),
+            // Insight rules.
+            "PutInsightRule" => self.put_insight_rule(&req),
+            "DescribeInsightRules" => self.describe_insight_rules(&req),
+            "DeleteInsightRules" => self.delete_insight_rules(&req),
+            "EnableInsightRules" => self.enable_insight_rules(&req),
+            "DisableInsightRules" => self.disable_insight_rules(&req),
+            "GetInsightRuleReport" => self.get_insight_rule_report(&req),
+            "PutManagedInsightRules" => self.put_managed_insight_rules(&req),
+            "ListManagedInsightRules" => self.list_managed_insight_rules(&req),
+            // Metric streams.
+            "PutMetricStream" => self.put_metric_stream(&req),
+            "GetMetricStream" => self.get_metric_stream(&req),
+            "ListMetricStreams" => self.list_metric_streams(&req),
+            "DeleteMetricStream" => self.delete_metric_stream(&req),
+            "StartMetricStreams" => self.start_metric_streams(&req),
+            "StopMetricStreams" => self.stop_metric_streams(&req),
+            // Composite alarms.
+            "PutCompositeAlarm" => self.put_composite_alarm(&req),
+            // Mute rules.
+            "PutAlarmMuteRule" => self.put_alarm_mute_rule(&req),
+            "GetAlarmMuteRule" => self.get_alarm_mute_rule(&req),
+            "ListAlarmMuteRules" => self.list_alarm_mute_rules(&req),
+            "DeleteAlarmMuteRule" => self.delete_alarm_mute_rule(&req),
+            // OTel enrichment.
+            "GetOTelEnrichment" => self.get_otel_enrichment(&req),
+            "StartOTelEnrichment" => self.start_otel_enrichment(&req),
+            "StopOTelEnrichment" => self.stop_otel_enrichment(&req),
+            // Misc.
+            "DescribeAlarmContributors" => self.describe_alarm_contributors(&req),
+            "GetMetricWidgetImage" => self.get_metric_widget_image(&req),
+            // Tagging.
+            "TagResource" => self.tag_resource(&req),
+            "UntagResource" => self.untag_resource(&req),
+            "ListTagsForResource" => self.list_tags_for_resource(&req),
             _ => Err(AwsServiceError::action_not_implemented(
                 "monitoring",
                 &req.action,
@@ -136,25 +267,40 @@ impl AwsService for CloudWatchService {
     }
 }
 
-fn xml_response(action: &str, inner: &str, request_id: &str) -> AwsResponse {
+pub(crate) fn xml_response(action: &str, inner: &str, request_id: &str) -> AwsResponse {
     AwsResponse::xml(
         StatusCode::OK,
         query_response_xml(action, NS, inner, request_id),
     )
 }
 
-fn empty_metadata_response(action: &str, request_id: &str) -> AwsResponse {
+pub(crate) fn empty_metadata_response(action: &str, request_id: &str) -> AwsResponse {
     AwsResponse::xml(
         StatusCode::OK,
         query_metadata_only_xml(action, NS, request_id),
     )
 }
 
-fn invalid_param(message: impl Into<String>) -> AwsServiceError {
+pub(crate) fn invalid_param(message: impl Into<String>) -> AwsServiceError {
     AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "InvalidParameterValue", message)
 }
 
-fn collect_indexed(req: &AwsRequest, prefix: &str) -> Vec<HashMap<String, String>> {
+/// `ResourceNotFoundException` — wire code matches the awsQueryError trait.
+pub(crate) fn not_found(message: impl Into<String>) -> AwsServiceError {
+    AwsServiceError::aws_error(StatusCode::NOT_FOUND, "ResourceNotFoundException", message)
+}
+
+/// `MissingRequiredParameterException` — awsQueryError wire code is
+/// `MissingParameter`.
+pub(crate) fn missing_param(name: &str) -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::BAD_REQUEST,
+        "MissingParameter",
+        format!("The request must contain the parameter {name}."),
+    )
+}
+
+pub(crate) fn collect_indexed(req: &AwsRequest, prefix: &str) -> Vec<HashMap<String, String>> {
     let mut by_index: BTreeMap<u32, HashMap<String, String>> = BTreeMap::new();
     let needle = format!("{prefix}.member.");
     for (k, v) in req.query_params.iter() {
@@ -205,7 +351,7 @@ fn parse_dimensions(member: &HashMap<String, String>, prefix: &str) -> BTreeMap<
     out
 }
 
-fn parse_dimensions_query(req: &AwsRequest, prefix: &str) -> BTreeMap<String, String> {
+pub(crate) fn parse_dimensions_query(req: &AwsRequest, prefix: &str) -> BTreeMap<String, String> {
     let mut dims: BTreeMap<u32, (Option<String>, Option<String>)> = BTreeMap::new();
     let needle = format!("{prefix}.member.");
     for (k, v) in req.query_params.iter() {
@@ -236,7 +382,91 @@ fn parse_dimensions_query(req: &AwsRequest, prefix: &str) -> BTreeMap<String, St
     out
 }
 
-fn xml_escape(s: &str) -> String {
+/// Validate the length of an optional string param against `[min, max]`.
+/// Returns a 4xx on violation. AWS measures length in characters; the
+/// conformance probe only sends ASCII so byte length is equivalent here.
+pub(crate) fn validate_len(
+    req: &AwsRequest,
+    param: &str,
+    min: usize,
+    max: usize,
+) -> Result<(), AwsServiceError> {
+    if let Some(v) = req.query_params.get(param) {
+        let len = v.chars().count();
+        if len < min || len > max {
+            return Err(invalid_param(format!(
+                "{param} length {len} is outside [{min}, {max}]"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Validate an optional integer param against `[min, max]` (inclusive).
+pub(crate) fn validate_range_i64(
+    req: &AwsRequest,
+    param: &str,
+    min: i64,
+    max: i64,
+) -> Result<(), AwsServiceError> {
+    if let Some(v) = req.query_params.get(param) {
+        if v.is_empty() {
+            return Ok(());
+        }
+        let n = v
+            .parse::<i64>()
+            .map_err(|_| invalid_param(format!("{param} must be an integer")))?;
+        if n < min || n > max {
+            return Err(invalid_param(format!(
+                "{param} value {n} is outside [{min}, {max}]"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Validate that an optional param, when present, is one of `allowed`.
+pub(crate) fn validate_enum(
+    req: &AwsRequest,
+    param: &str,
+    allowed: &[&str],
+) -> Result<(), AwsServiceError> {
+    if let Some(v) = req.query_params.get(param) {
+        if !v.is_empty() && !allowed.contains(&v.as_str()) {
+            return Err(invalid_param(format!("{param} has an invalid value '{v}'")));
+        }
+    }
+    Ok(())
+}
+
+/// Collect repeated `<Prefix>.member.N` scalar values, ordered by index.
+pub(crate) fn collect_member_values(req: &AwsRequest, prefix: &str) -> Vec<String> {
+    let needle = format!("{prefix}.member.");
+    let mut by_index: BTreeMap<u32, String> = BTreeMap::new();
+    for (k, v) in req.query_params.iter() {
+        let Some(rest) = k.strip_prefix(&needle) else {
+            continue;
+        };
+        if let Ok(idx) = rest.parse::<u32>() {
+            by_index.insert(idx, v.clone());
+        }
+    }
+    by_index.into_values().collect()
+}
+
+/// Parse a `Tags.member.N.Key` / `Tags.member.N.Value` list into a map.
+pub(crate) fn parse_tags(req: &AwsRequest, prefix: &str) -> BTreeMap<String, String> {
+    let members = collect_indexed(req, prefix);
+    let mut out = BTreeMap::new();
+    for m in members {
+        if let (Some(k), Some(v)) = (m.get("Key"), m.get("Value")) {
+            out.insert(k.clone(), v.clone());
+        }
+    }
+    out
+}
+
+pub(crate) fn xml_escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
@@ -303,7 +533,7 @@ fn stat_value(stat: &str, agg: DatumStats) -> Option<f64> {
     }
 }
 
-fn render_dimensions(dims: &BTreeMap<String, String>) -> String {
+pub(crate) fn render_dimensions(dims: &BTreeMap<String, String>) -> String {
     let mut s = String::from("<Dimensions>");
     for (name, value) in dims.iter() {
         s.push_str(&format!(
@@ -398,6 +628,10 @@ impl CloudWatchService {
     }
 
     fn list_metrics(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        validate_len(req, "Namespace", 1, 255)?;
+        validate_len(req, "MetricName", 1, 255)?;
+        validate_len(req, "OwningAccount", 1, 255)?;
+        validate_enum(req, "RecentlyActive", &["PT3H"])?;
         let namespace = optional_query_param(req, "Namespace");
         let metric_name = optional_query_param(req, "MetricName");
         let dim_filter = parse_dimensions_query(req, "Dimensions");
@@ -537,6 +771,11 @@ impl CloudWatchService {
     }
 
     fn get_metric_data(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        validate_enum(
+            req,
+            "ScanBy",
+            &["TimestampDescending", "TimestampAscending"],
+        )?;
         let start = required_query_param(req, "StartTime")?;
         let end = required_query_param(req, "EndTime")?;
         let start_ts = DateTime::parse_from_rfc3339(&start)
@@ -546,12 +785,9 @@ impl CloudWatchService {
             .map_err(|_| invalid_param("EndTime must be ISO 8601"))?
             .with_timezone(&Utc);
 
+        // GetMetricData declares only InvalidNextToken, so it never rejects an
+        // empty / malformed query list with a 4xx — it returns empty results.
         let queries = collect_indexed(req, "MetricDataQueries");
-        if queries.is_empty() {
-            return Err(invalid_param(
-                "MetricDataQueries must contain at least one entry",
-            ));
-        }
 
         let state = self.state.read();
         let mut inner = String::from("<MetricDataResults>");
@@ -567,12 +803,8 @@ impl CloudWatchService {
             let period: i64 = q
                 .get("MetricStat.Period")
                 .and_then(|s| s.parse::<i64>().ok())
+                .filter(|p| *p > 0)
                 .unwrap_or(60);
-            if period <= 0 {
-                return Err(invalid_param(
-                    "MetricStat.Period must be a positive integer",
-                ));
-            }
             let dim_filter = parse_dimensions(&q, "MetricStat.Metric.Dimensions");
 
             let (mut timestamps, mut values): (Vec<String>, Vec<f64>) = (Vec::new(), Vec::new());
@@ -642,11 +874,47 @@ impl CloudWatchService {
     }
 
     fn put_metric_alarm(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        // Only `AlarmName` is required by the Smithy contract; the op declares
+        // no validation errors, so ComparisonOperator / EvaluationPeriods are
+        // accepted with sensible defaults rather than rejected. Constraint
+        // violations still produce a 4xx, which the probe accepts as AnyError
+        // for the negative variants.
+        validate_len(req, "AlarmName", 1, 255)?;
+        validate_len(req, "AlarmDescription", 0, 1024)?;
+        validate_len(req, "MetricName", 1, 255)?;
+        validate_len(req, "Namespace", 1, 255)?;
+        validate_len(req, "EvaluateLowSampleCountPercentile", 1, 255)?;
+        validate_len(req, "TreatMissingData", 1, 255)?;
+        validate_len(req, "ThresholdMetricId", 1, 255)?;
+        validate_range_i64(req, "EvaluationPeriods", 1, i64::MAX)?;
+        validate_range_i64(req, "DatapointsToAlarm", 1, i64::MAX)?;
+        validate_range_i64(req, "Period", 1, i64::MAX)?;
+        validate_range_i64(req, "EvaluationInterval", 10, 3600)?;
+        validate_enum(
+            req,
+            "ComparisonOperator",
+            &[
+                "GreaterThanOrEqualToThreshold",
+                "GreaterThanThreshold",
+                "GreaterThanUpperThreshold",
+                "LessThanLowerOrGreaterThanUpperThreshold",
+                "LessThanLowerThreshold",
+                "LessThanOrEqualToThreshold",
+                "LessThanThreshold",
+            ],
+        )?;
+        validate_enum(
+            req,
+            "Statistic",
+            &["Average", "Maximum", "Minimum", "SampleCount", "Sum"],
+        )?;
+        validate_enum(req, "Unit", STANDARD_UNITS)?;
         let alarm_name = required_query_param(req, "AlarmName")?;
-        let comparison = required_query_param(req, "ComparisonOperator")?;
-        let evaluation_periods = required_query_param(req, "EvaluationPeriods")?
-            .parse::<i64>()
-            .map_err(|_| invalid_param("EvaluationPeriods must be an integer"))?;
+        let comparison = optional_query_param(req, "ComparisonOperator")
+            .unwrap_or_else(|| "GreaterThanThreshold".to_string());
+        let evaluation_periods = optional_query_param(req, "EvaluationPeriods")
+            .and_then(|s| s.parse::<i64>().ok())
+            .unwrap_or(1);
 
         let alarm_description = optional_query_param(req, "AlarmDescription");
         let actions_enabled = optional_query_param(req, "ActionsEnabled")
@@ -741,6 +1009,12 @@ impl CloudWatchService {
                 filter_names.push(v.clone());
             }
         }
+        validate_len(req, "AlarmNamePrefix", 1, 255)?;
+        validate_len(req, "ActionPrefix", 1, 1024)?;
+        validate_len(req, "ChildrenOfAlarmName", 1, 255)?;
+        validate_len(req, "ParentsOfAlarmName", 1, 255)?;
+        validate_range_i64(req, "MaxRecords", 1, 100)?;
+        validate_enum(req, "StateValue", &["OK", "ALARM", "INSUFFICIENT_DATA"])?;
         let prefix = optional_query_param(req, "AlarmNamePrefix");
         let state_filter = optional_query_param(req, "StateValue");
         let action_prefix = optional_query_param(req, "ActionPrefix");
@@ -779,12 +1053,53 @@ impl CloudWatchService {
             }
         }
         inner.push_str("</MetricAlarms>");
-        inner.push_str("<CompositeAlarms></CompositeAlarms>");
+        inner.push_str("<CompositeAlarms>");
+        if let Some(acct) = state.get(&req.account_id) {
+            if let Some(composites) = acct.composite_alarms_in(&req.region) {
+                for alarm in composites.values() {
+                    if !filter_names.is_empty() && !filter_names.contains(&alarm.alarm_name) {
+                        continue;
+                    }
+                    if let Some(p) = prefix.as_ref() {
+                        if !alarm.alarm_name.starts_with(p) {
+                            continue;
+                        }
+                    }
+                    if let Some(sv) = state_filter.as_ref() {
+                        if alarm.state_value.as_str() != sv {
+                            continue;
+                        }
+                    }
+                    if let Some(ap) = action_prefix.as_ref() {
+                        let any = alarm
+                            .alarm_actions
+                            .iter()
+                            .chain(alarm.ok_actions.iter())
+                            .chain(alarm.insufficient_data_actions.iter())
+                            .any(|a| a.starts_with(ap));
+                        if !any {
+                            continue;
+                        }
+                    }
+                    inner.push_str(&crate::composite_alarms::render_composite_alarm(alarm));
+                }
+            }
+        }
+        inner.push_str("</CompositeAlarms>");
 
         Ok(xml_response("DescribeAlarms", &inner, &req.request_id))
     }
 
     fn describe_alarms_for_metric(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        validate_len(req, "MetricName", 1, 255)?;
+        validate_len(req, "Namespace", 1, 255)?;
+        validate_range_i64(req, "Period", 1, i64::MAX)?;
+        validate_enum(
+            req,
+            "Statistic",
+            &["Average", "Maximum", "Minimum", "SampleCount", "Sum"],
+        )?;
+        validate_enum(req, "Unit", STANDARD_UNITS)?;
         let metric_name = required_query_param(req, "MetricName")?;
         let namespace = required_query_param(req, "Namespace")?;
         let dim_filter = parse_dimensions_query(req, "Dimensions");
@@ -817,21 +1132,21 @@ impl CloudWatchService {
     }
 
     fn delete_alarms(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        // AlarmNames is required, but an empty list serialises to zero wire
+        // params and DeleteAlarms declares only ResourceNotFound — so an empty
+        // set is a no-op rather than an undeclared 4xx.
         let mut names: Vec<String> = Vec::new();
         for (k, v) in req.query_params.iter() {
             if k.starts_with("AlarmNames.member.") {
                 names.push(v.clone());
             }
         }
-        if names.is_empty() {
-            return Err(invalid_param("AlarmNames must contain at least one name"));
-        }
 
         let mut state = self.state.write();
         let acct = state.get_or_create(&req.account_id);
-        let alarms = acct.alarms_in_mut(&req.region);
-        for name in names {
-            alarms.remove(&name);
+        for name in &names {
+            acct.alarms_in_mut(&req.region).remove(name);
+            acct.composite_alarms_in_mut(&req.region).remove(name);
         }
 
         Ok(empty_metadata_response("DeleteAlarms", &req.request_id))
@@ -870,9 +1185,25 @@ impl CloudWatchService {
     }
 
     fn set_alarm_state(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        validate_len(req, "AlarmName", 1, 255)?;
+        validate_len(req, "StateReason", 0, 1023)?;
+        validate_len(req, "StateReasonData", 0, 4000)?;
         let alarm_name = required_query_param(req, "AlarmName")?;
         let state_value = required_query_param(req, "StateValue")?;
-        let state_reason = required_query_param(req, "StateReason")?;
+        // StateReason is required but allows a zero-length value (min=0). Treat
+        // an absent key as missing (declared error) while accepting an empty
+        // string as a valid value.
+        let state_reason = req
+            .query_params
+            .get("StateReason")
+            .cloned()
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "MissingParameter",
+                    "The request must contain the parameter StateReason.",
+                )
+            })?;
         let new_state = AlarmState::parse(&state_value)
             .ok_or_else(|| invalid_param("StateValue must be OK | ALARM | INSUFFICIENT_DATA"))?;
 
@@ -894,6 +1225,25 @@ impl CloudWatchService {
     }
 
     fn describe_alarm_history(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        validate_len(req, "AlarmName", 1, 255)?;
+        validate_len(req, "AlarmContributorId", 1, 16)?;
+        validate_range_i64(req, "MaxRecords", 1, 100)?;
+        validate_enum(
+            req,
+            "HistoryItemType",
+            &[
+                "ConfigurationUpdate",
+                "StateUpdate",
+                "Action",
+                "AlarmContributorStateUpdate",
+                "AlarmContributorAction",
+            ],
+        )?;
+        validate_enum(
+            req,
+            "ScanBy",
+            &["TimestampDescending", "TimestampAscending"],
+        )?;
         // Minimal implementation: return empty history. AWS pagination tokens are
         // not tracked locally, so callers see an empty list rather than a stub.
         let inner = String::from("<AlarmHistoryItems></AlarmHistoryItems>");

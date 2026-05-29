@@ -12,6 +12,7 @@ fakecloud-aws = { workspace = true }
 fakecloud-core = { workspace = true }
 fakecloud-persistence = { workspace = true }
 async-trait = { workspace = true }
+base64 = { workspace = true }
 chrono = { workspace = true }
 http = { workspace = true }
 parking_lot = { workspace = true }
@@ -25,3 +26,4 @@ quick-xml = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+bytes = { workspace = true }
