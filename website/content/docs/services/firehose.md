@@ -51,6 +51,47 @@ aws --endpoint-url http://localhost:4566 firehose update-destination \
 # -> InvalidArgumentException
 ```
 
+## Introspection
+
+`GET /_fakecloud/firehose/delivery-streams` is an IAM-bypass admin endpoint that returns every delivery stream across all accounts and regions, so tests can assert stream state without round-tripping through `DescribeDeliveryStream` (and without credentials):
+
+```sh
+curl -fsS http://localhost:4566/_fakecloud/firehose/delivery-streams | jq
+```
+
+Response shape:
+
+```json
+{
+  "deliveryStreams": [
+    {
+      "accountId": "123456789012",
+      "name": "fh-intro",
+      "arn": "arn:aws:firehose:us-east-1:123456789012:deliverystream/fh-intro",
+      "streamType": "DirectPut",
+      "status": "ACTIVE",
+      "encryption": { "status": "ENABLED", "keyType": "AWS_OWNED_CMK" },
+      "destinationCount": 1,
+      "createTimestamp": "2026-05-29T00:00:00+00:00",
+      "lastUpdateTimestamp": "2026-05-29T00:00:00+00:00"
+    }
+  ]
+}
+```
+
+`encryption` is derived from the persisted SSE config: `{ "status": "DISABLED" }` when no encryption is configured, or `{ "status": "ENABLED", "keyType": ..., "keyArn": ... }` after `StartDeliveryStreamEncryption` (the `keyArn` is present only for customer-managed keys). Streams are sorted by account, then name.
+
+All first-party SDKs ship a `firehose` sub-client wrapping this endpoint (`getDeliveryStreams()`):
+
+- Rust: `fakecloud_sdk::FakeCloud::new(url).firehose().get_delivery_streams()`
+- Go: `fakecloud.New(url).Firehose().GetDeliveryStreams(ctx)`
+- Python: `await fc.firehose.get_delivery_streams()` (async) or `fc.firehose.get_delivery_streams()` (sync)
+- TypeScript: `await fc.firehose.getDeliveryStreams()`
+- Java: `fc.firehose().getDeliveryStreams()`
+- PHP: `$fc->firehose()->getDeliveryStreams()`
+
+See [`reference/introspection`](/docs/reference/introspection/) for the full endpoint catalog.
+
 ## Caveats
 
 Data delivery is not implemented. `PutRecord` returns a `RecordId` but the bytes are dropped — no S3 object is written, no Redshift COPY is issued, no OpenSearch document is indexed, no HTTP endpoint is hit. Buffering, format conversion (Parquet/ORC), and dynamic partitioning are all configuration-only.

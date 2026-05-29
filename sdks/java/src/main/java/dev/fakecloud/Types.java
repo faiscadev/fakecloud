@@ -455,6 +455,25 @@ public final class Types {
     @JsonIgnoreProperties(ignoreUnknown = true)
     public record CloudWatchMetricsResponse(List<CloudWatchMetric> metrics) {}
 
+    // ── Firehose ───────────────────────────────────────────────────
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record FirehoseEncryption(String status, String keyType, String keyArn) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record FirehoseDeliveryStream(
+            String accountId,
+            String name,
+            String arn,
+            String streamType,
+            String status,
+            FirehoseEncryption encryption,
+            int destinationCount,
+            String createTimestamp,
+            String lastUpdateTimestamp) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record FirehoseDeliveryStreamsResponse(List<FirehoseDeliveryStream> deliveryStreams) {}
+
     // ── Scheduler (EventBridge Scheduler) ──────────────────────────
     @JsonIgnoreProperties(ignoreUnknown = true)
     public record SchedulerSchedule(
@@ -1237,6 +1256,26 @@ public final class Types {
             List<OrganizationsAccount> accounts,
             String managementAccountId,
             String masterAccountId) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record OrganizationsResponsibilityTransfer(
+            String id,
+            String arn,
+            String name,
+            String type,
+            String status,
+            String direction,
+            String sourceManagementAccountId,
+            String sourceManagementAccountEmail,
+            String targetManagementAccountId,
+            String targetManagementAccountEmail,
+            String startTimestamp,
+            String endTimestamp,
+            String activeHandshakeId) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record OrganizationsResponsibilityTransfersResponse(
+            List<OrganizationsResponsibilityTransfer> responsibilityTransfers) {}
 
     // ── API Gateway v2 WebSocket connections ────────────────────────
 

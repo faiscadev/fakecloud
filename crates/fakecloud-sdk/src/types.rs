@@ -1952,6 +1952,50 @@ pub struct CloudWatchMetricsResponse {
     pub metrics: Vec<CloudWatchMetric>,
 }
 
+// ── Firehose ────────────────────────────────────────────────────────
+
+/// Server-side encryption summary for a Firehose delivery stream as
+/// exposed by `GET /_fakecloud/firehose/delivery-streams`. `status` is
+/// `ENABLED`/`DISABLED`; `keyType`/`keyArn` are present only when a
+/// customer-managed key is configured.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FirehoseEncryption {
+    /// ENABLED / DISABLED.
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key_arn: Option<String>,
+}
+
+/// One delivery stream as exposed by
+/// `GET /_fakecloud/firehose/delivery-streams`. One entry per stream
+/// across every account, mirroring what `CreateDeliveryStream` recorded
+/// plus its lifecycle and encryption state.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FirehoseDeliveryStream {
+    pub account_id: String,
+    pub name: String,
+    pub arn: String,
+    /// DirectPut / KinesisStreamAsSource.
+    pub stream_type: String,
+    /// CREATING / ACTIVE / ...
+    pub status: String,
+    pub encryption: FirehoseEncryption,
+    pub destination_count: usize,
+    pub create_timestamp: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_update_timestamp: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FirehoseDeliveryStreamsResponse {
+    pub delivery_streams: Vec<FirehoseDeliveryStream>,
+}
+
 // ── Athena ──────────────────────────────────────────────────────────
 
 /// One row in the Athena named-query introspection list returned by
@@ -2071,6 +2115,41 @@ pub struct OrganizationsAccountsResponse {
     pub management_account_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub master_account_id: Option<String>,
+}
+
+/// One billing-responsibility transfer as exposed by
+/// `GET /_fakecloud/organizations/responsibility-transfers`. Mirrors the
+/// AWS `ResponsibilityTransfer` shape: `direction` is `INBOUND`/`OUTBOUND`,
+/// `status` walks the transfer lifecycle, and `activeHandshakeId` points
+/// at the handshake the invited org accepts/declines (or `null`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrganizationsResponsibilityTransfer {
+    pub id: String,
+    pub arn: String,
+    pub name: String,
+    #[serde(rename = "type")]
+    pub transfer_type: String,
+    pub status: String,
+    /// INBOUND / OUTBOUND.
+    pub direction: String,
+    pub source_management_account_id: String,
+    pub source_management_account_email: String,
+    pub target_management_account_id: String,
+    pub target_management_account_email: String,
+    /// RFC3339 timestamp the transfer was initiated.
+    pub start_timestamp: String,
+    /// RFC3339 timestamp the transfer concluded, or `null` while open.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_timestamp: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_handshake_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrganizationsResponsibilityTransfersResponse {
+    pub responsibility_transfers: Vec<OrganizationsResponsibilityTransfer>,
 }
 
 /// Body for `POST /_fakecloud/cloudfront/distributions/{id}/status`. The

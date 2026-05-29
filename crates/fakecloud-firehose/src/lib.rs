@@ -1,4 +1,5 @@
 pub mod delivery;
+pub mod introspection;
 pub(crate) mod service;
 pub(crate) mod state;
 

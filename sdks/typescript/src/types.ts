@@ -946,6 +946,30 @@ export interface CloudWatchMetricsResponse {
   metrics: CloudWatchMetric[];
 }
 
+// ── Firehose ────────────────────────────────────────────────────────
+
+export interface FirehoseEncryption {
+  status: string;
+  keyType?: string | null;
+  keyArn?: string | null;
+}
+
+export interface FirehoseDeliveryStream {
+  accountId: string;
+  name: string;
+  arn: string;
+  streamType: string;
+  status: string;
+  encryption: FirehoseEncryption;
+  destinationCount: number;
+  createTimestamp: string;
+  lastUpdateTimestamp?: string | null;
+}
+
+export interface FirehoseDeliveryStreamsResponse {
+  deliveryStreams: FirehoseDeliveryStream[];
+}
+
 // ── Scheduler (EventBridge Scheduler) ───────────────────────────────
 
 export interface SchedulerSchedule {
@@ -1324,6 +1348,29 @@ export interface OrganizationsAccountsResponse {
   /** Duplicate of `managementAccountId`. AWS renamed Master to
    *  Management in 2020 but kept the old field for back-compat. */
   masterAccountId?: string;
+}
+
+export interface OrganizationsResponsibilityTransfer {
+  id: string;
+  arn: string;
+  name: string;
+  type: string;
+  status: string;
+  /** INBOUND | OUTBOUND. */
+  direction: string;
+  sourceManagementAccountId: string;
+  sourceManagementAccountEmail: string;
+  targetManagementAccountId: string;
+  targetManagementAccountEmail: string;
+  /** RFC3339. */
+  startTimestamp: string;
+  /** RFC3339, or `null`/undefined while the transfer is still open. */
+  endTimestamp?: string | null;
+  activeHandshakeId?: string | null;
+}
+
+export interface OrganizationsResponsibilityTransfersResponse {
+  responsibilityTransfers: OrganizationsResponsibilityTransfer[];
 }
 
 // ── Athena ─────────────────────────────────────────────────────────

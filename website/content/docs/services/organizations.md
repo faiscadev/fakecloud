@@ -115,6 +115,47 @@ The first-party SDKs wrap this:
 - Java: `fc.organizations().getAccounts()`
 - PHP: `$fc->organizations()->getAccounts()`
 
+`GET /_fakecloud/organizations/responsibility-transfers` returns every billing responsibility transfer in the org with direction (INBOUND/OUTBOUND), lifecycle status, source/target management accounts, and the active handshake id.
+
+```sh
+curl -fsS http://localhost:4566/_fakecloud/organizations/responsibility-transfers | jq
+```
+
+Response shape:
+
+```json
+{
+  "responsibilityTransfers": [
+    {
+      "id": "rt-0123456789abcdef0123456789abcdef",
+      "arn": "arn:aws:organizations::111111111111:responsibilitytransfer/o-abc/rt-0123456789abcdef0123456789abcdef",
+      "name": "my-billing-transfer",
+      "type": "BILLING",
+      "status": "REQUESTED",
+      "direction": "OUTBOUND",
+      "sourceManagementAccountId": "111111111111",
+      "sourceManagementAccountEmail": "admin@example.com",
+      "targetManagementAccountId": "222222222222",
+      "targetManagementAccountEmail": "222222222222@example.com",
+      "startTimestamp": "2026-05-29T00:00:00+00:00",
+      "endTimestamp": null,
+      "activeHandshakeId": "h-0123456789abcdef0123456789abcdef"
+    }
+  ]
+}
+```
+
+`endTimestamp` and `activeHandshakeId` are `null` when not set; the list is empty when no organization exists. Transfers are sorted by id.
+
+The first-party SDKs wrap this:
+
+- Rust: `fakecloud_sdk::FakeCloud::new(url).organizations().get_responsibility_transfers()`
+- Go: `fakecloud.New(url).Organizations().GetResponsibilityTransfers(ctx)`
+- Python: `await fc.organizations.get_responsibility_transfers()` (async) or `fc.organizations.get_responsibility_transfers()` (sync)
+- TypeScript: `await fc.organizations.getResponsibilityTransfers()`
+- Java: `fc.organizations().getResponsibilityTransfers()`
+- PHP: `$fc->organizations()->getResponsibilityTransfers()`
+
 ## Gotchas
 
 - **Management account only.** Mutating calls (`CreateAccount`, `AttachPolicy`, `EnableAWSServiceAccess`, etc.) must originate from the management account. Calls from member accounts return `AccessDeniedException`, matching AWS.

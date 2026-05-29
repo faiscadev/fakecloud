@@ -148,6 +148,12 @@ FakeCloud fc = new FakeCloud("http://localhost:4566"); // explicit base URL
 | `getAlarms()`            | List metric and composite alarms             |
 | `getMetrics()`           | List unique metric series with latest value  |
 
+### `fc.firehose()`
+
+| Method                   | Description                                                       |
+| ------------------------ | ----------------------------------------------------------------- |
+| `getDeliveryStreams()`   | List delivery streams with type, status, encryption, dest count   |
+
 ### `fc.s3()`
 
 | Method                          | Description                                  |
@@ -320,9 +326,10 @@ FakeCloud fc = new FakeCloud("http://localhost:4566"); // explicit base URL
 
 ### `fc.organizations()`
 
-| Method            | Description                                                                                  |
-| ----------------- | -------------------------------------------------------------------------------------------- |
-| `getAccounts()`   | List every member account in the org (state, parent OU, tags, directly-attached SCPs)        |
+| Method                            | Description                                                                                  |
+| --------------------------------- | -------------------------------------------------------------------------------------------- |
+| `getAccounts()`                   | List every member account in the org (state, parent OU, tags, directly-attached SCPs)        |
+| `getResponsibilityTransfers()`    | List every billing responsibility transfer (direction, status, active handshake)             |
 
 ### `fc.ssm()`
 

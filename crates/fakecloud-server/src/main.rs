@@ -4303,6 +4303,40 @@ async fn main() {
             }),
         )
         .route(
+            "/_fakecloud/firehose/delivery-streams",
+            axum::routing::get({
+                let state = firehose_state.clone();
+                move || {
+                    let state = state.clone();
+                    async move {
+                        let rows =
+                            fakecloud_firehose::introspection::list_all_delivery_streams(&state);
+                        let delivery_streams = rows
+                            .into_iter()
+                            .map(|r| types::FirehoseDeliveryStream {
+                                account_id: r.account_id,
+                                name: r.name,
+                                arn: r.arn,
+                                stream_type: r.stream_type,
+                                status: r.status,
+                                encryption: types::FirehoseEncryption {
+                                    status: r.encryption.status,
+                                    key_type: r.encryption.key_type,
+                                    key_arn: r.encryption.key_arn,
+                                },
+                                destination_count: r.destination_count,
+                                create_timestamp: r.create_timestamp.to_rfc3339(),
+                                last_update_timestamp: r
+                                    .last_update_timestamp
+                                    .map(|t| t.to_rfc3339()),
+                            })
+                            .collect();
+                        axum::Json(types::FirehoseDeliveryStreamsResponse { delivery_streams })
+                    }
+                }
+            }),
+        )
+        .route(
             "/_fakecloud/scheduler/fire/{group}/{name}",
             axum::routing::post({
                 let state = scheduler_state_for_fire;
@@ -6874,6 +6908,45 @@ async fn main() {
                 move || {
                     let orgs = orgs.clone();
                     async move { axum::Json(organizations_accounts_snapshot(&orgs)) }
+                }
+            }),
+        )
+        // Organizations introspection: list every billing-responsibility
+        // transfer in the org with direction, lifecycle status, and the
+        // active handshake. IAM-bypass admin route.
+        .route(
+            "/_fakecloud/organizations/responsibility-transfers",
+            axum::routing::get({
+                let orgs = organizations_state.clone();
+                move || {
+                    let orgs = orgs.clone();
+                    async move {
+                        let rows =
+                            fakecloud_organizations::introspection::list_all_responsibility_transfers(
+                                &orgs,
+                            );
+                        let responsibility_transfers = rows
+                            .into_iter()
+                            .map(|r| types::OrganizationsResponsibilityTransfer {
+                                id: r.id,
+                                arn: r.arn,
+                                name: r.name,
+                                transfer_type: r.transfer_type,
+                                status: r.status,
+                                direction: r.direction,
+                                source_management_account_id: r.source_management_account_id,
+                                source_management_account_email: r.source_management_account_email,
+                                target_management_account_id: r.target_management_account_id,
+                                target_management_account_email: r.target_management_account_email,
+                                start_timestamp: r.start_timestamp.to_rfc3339(),
+                                end_timestamp: r.end_timestamp.map(|t| t.to_rfc3339()),
+                                active_handshake_id: r.active_handshake_id,
+                            })
+                            .collect();
+                        axum::Json(types::OrganizationsResponsibilityTransfersResponse {
+                            responsibility_transfers,
+                        })
+                    }
                 }
             }),
         )

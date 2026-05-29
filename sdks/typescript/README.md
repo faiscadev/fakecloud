@@ -205,6 +205,12 @@ Top-level client. Defaults to `http://localhost:4566`.
 | `getAlarms()`  | List metric and composite alarms across accounts      |
 | `getMetrics()` | List unique metric series with datapoint count/latest |
 
+### `fc.firehose`
+
+| Method                 | Description                                                                      |
+| ---------------------- | -------------------------------------------------------------------------------- |
+| `getDeliveryStreams()` | List every delivery stream with type, status, encryption summary, and dest count |
+
 ### `fc.kms`
 
 | Method       | Description                                                             |
@@ -231,9 +237,10 @@ Top-level client. Defaults to `http://localhost:4566`.
 
 ### `fc.organizations`
 
-| Method          | Description                                                                                 |
-| --------------- | ------------------------------------------------------------------------------------------- |
-| `getAccounts()` | List every member account with lifecycle state, parent OU, tags, and directly-attached SCPs |
+| Method                         | Description                                                                                 |
+| ------------------------------ | ------------------------------------------------------------------------------------------- |
+| `getAccounts()`                | List every member account with lifecycle state, parent OU, tags, and directly-attached SCPs |
+| `getResponsibilityTransfers()` | List every billing responsibility transfer with direction, status, and the active handshake |
 
 ### `fc.rds`
 
