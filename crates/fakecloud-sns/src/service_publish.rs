@@ -95,13 +95,28 @@ impl SnsService {
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
-        let topic = state
-            .topics
-            .get(&topic_arn)
-            .ok_or_else(|| not_found("Topic"))?;
+        // Read topic fields in a tight scope so the immutable borrow ends
+        // before the mutable counter re-borrow below (bug-audit 2026-05-28, 1.6).
+        let (is_fifo, content_dedup, kms_key_id) = {
+            let topic = state
+                .topics
+                .get(&topic_arn)
+                .ok_or_else(|| not_found("Topic"))?;
+            let content_dedup = topic
+                .attributes
+                .get("ContentBasedDeduplication")
+                .map(|v| v == "true")
+                .unwrap_or(false);
+            let kms_key_id = topic
+                .attributes
+                .get("KmsMasterKeyId")
+                .cloned()
+                .filter(|s| !s.is_empty());
+            (topic.is_fifo, content_dedup, kms_key_id)
+        };
 
         // FIFO topic enforcement
-        if topic.is_fifo {
+        if is_fifo {
             if message_group_id.is_none() {
                 return Err(AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
@@ -109,12 +124,6 @@ impl SnsService {
                     "Invalid parameter: The request must contain the parameter MessageGroupId.",
                 ));
             }
-            // FIFO topics require deduplication: either ContentBasedDeduplication or explicit ID
-            let content_dedup = topic
-                .attributes
-                .get("ContentBasedDeduplication")
-                .map(|v| v == "true")
-                .unwrap_or(false);
             if !content_dedup && message_dedup_id.is_none() {
                 return Err(AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
@@ -123,8 +132,7 @@ impl SnsService {
                 ));
             }
         } else {
-            // Non-FIFO: MessageGroupId is allowed (forwarded to SQS for fair queuing)
-            // But DeduplicationId is NOT allowed on non-FIFO topics
+            // Non-FIFO: DeduplicationId is not allowed.
             if message_dedup_id.is_some() {
                 return Err(AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
@@ -134,12 +142,17 @@ impl SnsService {
             }
         }
 
-        let kms_key_id = topic
-            .attributes
-            .get("KmsMasterKeyId")
-            .cloned()
-            .filter(|s| !s.is_empty());
         self.record_topic_kms_usage(&req.account_id, &topic_arn, kms_key_id.as_deref(), &message)?;
+
+        // Mint a strictly-increasing FIFO SequenceNumber (1.6). None for standard topics.
+        let sequence_number = if is_fifo {
+            state.topics.get_mut(&topic_arn).map(|t| {
+                t.fifo_sequence += 1;
+                format!("{:020}", t.fifo_sequence)
+            })
+        } else {
+            None
+        };
 
         let msg_id = uuid::Uuid::new_v4().to_string();
         state.published.push(PublishedMessage {
@@ -214,11 +227,15 @@ impl SnsService {
         deliver_to_email_subscribers(&self.state, &subscribers.email, &ctx);
         deliver_to_sms_subscribers(&self.state, &subscribers.sms, &ctx);
 
+        let sequence_xml = sequence_number
+            .as_deref()
+            .map(|s| format!("\n    <SequenceNumber>{s}</SequenceNumber>"))
+            .unwrap_or_default();
         Ok(xml_resp(
             &format!(
                 r#"<PublishResponse xmlns="http://sns.amazonaws.com/doc/2010-03-31/">
   <PublishResult>
-    <MessageId>{msg_id}</MessageId>
+    <MessageId>{msg_id}</MessageId>{sequence_xml}
   </PublishResult>
   <ResponseMetadata>
     <RequestId>{}</RequestId>
@@ -305,6 +322,23 @@ impl SnsService {
 
         let mut successful = Vec::new();
         let failed: Vec<String> = Vec::new();
+
+        // Pre-mint one FIFO SequenceNumber per entry in a single mutable
+        // burst before the per-entry fanout re-borrows state (1.6).
+        let sequence_numbers: Vec<String> = if is_fifo {
+            let mut accounts = self.state.write();
+            let state = accounts.get_or_create(&req.account_id);
+            let mut out = Vec::with_capacity(entries.len());
+            if let Some(t) = state.topics.get_mut(&topic_arn) {
+                for _ in &entries {
+                    t.fifo_sequence += 1;
+                    out.push(format!("{:020}", t.fifo_sequence));
+                }
+            }
+            out
+        } else {
+            Vec::new()
+        };
 
         for (idx, (id, message, subject, group_id, dedup_id, structure)) in
             entries.iter().enumerate()
@@ -422,10 +456,14 @@ impl SnsService {
                 }
             }
 
+            let sequence_xml = sequence_numbers
+                .get(idx)
+                .map(|seq| format!("\n      <SequenceNumber>{seq}</SequenceNumber>"))
+                .unwrap_or_default();
             successful.push(format!(
                 r#"    <member>
       <Id>{id}</Id>
-      <MessageId>{msg_id}</MessageId>
+      <MessageId>{msg_id}</MessageId>{sequence_xml}
     </member>"#
             ));
         }
