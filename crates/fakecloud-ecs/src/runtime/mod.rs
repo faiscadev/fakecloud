@@ -2330,10 +2330,9 @@ mod tests {
             "containerPath": "/mnt/efs"
         });
         let resolved = resolve_mount_point(&mp, &volumes).expect("resolved");
-        assert_eq!(
-            resolved.source,
-            "/tmp/fakecloud/efs/fs-12345678/exports/app"
-        );
+        // EFS resolves to a docker named volume (container-safe), with the
+        // rootDirectory folded into the name (bug-audit 2026-05-28, 0.6).
+        assert_eq!(resolved.source, "fakecloud-efs-fs-12345678-exports-app");
         assert_eq!(resolved.container_path, "/mnt/efs");
     }
 
