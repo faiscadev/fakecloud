@@ -335,12 +335,64 @@ impl ApiGatewayService {
 
     pub(super) fn test_invoke_authorizer(
         &self,
-        _req: &AwsRequest,
-        _params: &BTreeMap<String, String>,
+        req: &AwsRequest,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
-        // Authorizer execution would need a Lambda/Cognito hook;
-        // fakecloud emits an Allow stub so callers can prove the
-        // surface is wired without modeling the real policy.
+        // Authorizer execution would need a real Lambda/Cognito hook, so the
+        // returned policy is still a canned Allow. But we DO evaluate the
+        // authorizer's identity source against the supplied request headers:
+        // AWS returns clientStatus 401 (no policy) when a required
+        // identity-source header is absent, rather than always allowing
+        // (bug-audit 2026-05-28, 1.18 — this op was a blanket Allow stub).
+        let rest_api_id = params.get("restApiId").cloned().unwrap_or_default();
+        let authorizer_id = params.get("authorizerId").cloned().unwrap_or_default();
+        let body = req.json_body();
+
+        let identity_source = {
+            let accounts = self.state.read();
+            let state = accounts
+                .get(&request_account(req))
+                .ok_or_else(|| not_found("Authorizer not found"))?;
+            let authorizer = state
+                .authorizers
+                .get(&rest_api_id)
+                .and_then(|m| m.get(&authorizer_id))
+                .ok_or_else(|| not_found("Authorizer not found"))?;
+            authorizer.identity_source.clone()
+        };
+
+        let req_headers = body.get("headers").and_then(Value::as_object);
+        let identity_present = match identity_source.as_deref() {
+            // No identity source configured: nothing to require -> allow.
+            None | Some("") => true,
+            Some(src) => src
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                // Each entry looks like `method.request.header.Authorization`;
+                // the header name is the final dotted segment.
+                .all(|entry| {
+                    let header = entry.rsplit('.').next().unwrap_or(entry);
+                    req_headers
+                        .and_then(|h| h.iter().find(|(k, _)| k.eq_ignore_ascii_case(header)))
+                        .and_then(|(_, v)| v.as_str())
+                        .map(|v| !v.is_empty())
+                        .unwrap_or(false)
+                }),
+        };
+
+        if !identity_present {
+            // Missing identity source -> Unauthorized, no policy.
+            return ok(json!({
+                "clientStatus": 401,
+                "log": "TestInvokeAuthorizer: identity source not found",
+                "latency": 0,
+                "principalId": "",
+                "authorization": {},
+                "claims": {},
+            }));
+        }
+
         ok(json!({
             "clientStatus": 200,
             "log": "TestInvokeAuthorizer ok",
