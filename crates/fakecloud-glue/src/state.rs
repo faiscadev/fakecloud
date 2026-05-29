@@ -4,6 +4,13 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+/// A generic JSON-backed named-resource store. Each resource is the raw
+/// create/update input plus generated metadata, persisted verbatim so reads
+/// echo what the caller sent. Used for all control-plane families that don't
+/// need bespoke typed state.
+pub type JsonStore = BTreeMap<String, Value>;
 
 pub type SharedGlueState = Arc<RwLock<GlueAccounts>>;
 
@@ -28,16 +35,115 @@ impl GlueAccounts {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct GlueState {
+    #[serde(default)]
     pub account_id: String,
+    #[serde(default)]
     pub region: String,
     /// region -> database_name -> Database
+    #[serde(default)]
     pub databases: BTreeMap<String, BTreeMap<String, Database>>,
     #[serde(default)]
     pub jobs: BTreeMap<String, Job>,
     #[serde(default)]
     pub job_runs: BTreeMap<String, JobRun>,
+
+    // --- generic JSON-backed control-plane resource families ---
+    #[serde(default)]
+    pub crawlers: JsonStore,
+    #[serde(default)]
+    pub classifiers: JsonStore,
+    #[serde(default)]
+    pub connections: JsonStore,
+    #[serde(default)]
+    pub connection_types: JsonStore,
+    #[serde(default)]
+    pub security_configs: JsonStore,
+    #[serde(default)]
+    pub triggers: JsonStore,
+    #[serde(default)]
+    pub workflows: JsonStore,
+    #[serde(default)]
+    pub workflow_runs: JsonStore,
+    #[serde(default)]
+    pub blueprints: JsonStore,
+    #[serde(default)]
+    pub blueprint_runs: JsonStore,
+    #[serde(default)]
+    pub dev_endpoints: JsonStore,
+    #[serde(default)]
+    pub registries: JsonStore,
+    #[serde(default)]
+    pub schemas: JsonStore,
+    #[serde(default)]
+    pub schema_versions: JsonStore,
+    #[serde(default)]
+    pub sessions: JsonStore,
+    #[serde(default)]
+    pub statements: JsonStore,
+    #[serde(default)]
+    pub ml_transforms: JsonStore,
+    #[serde(default)]
+    pub ml_task_runs: JsonStore,
+    #[serde(default)]
+    pub dq_rulesets: JsonStore,
+    #[serde(default)]
+    pub dq_ruleset_runs: JsonStore,
+    #[serde(default)]
+    pub dq_recommendation_runs: JsonStore,
+    #[serde(default)]
+    pub dq_results: JsonStore,
+    #[serde(default)]
+    pub usage_profiles: JsonStore,
+    #[serde(default)]
+    pub catalogs: JsonStore,
+    #[serde(default)]
+    pub custom_entity_types: JsonStore,
+    #[serde(default)]
+    pub udfs: JsonStore,
+    #[serde(default)]
+    pub table_optimizers: JsonStore,
+    #[serde(default)]
+    pub integrations: JsonStore,
+    #[serde(default)]
+    pub integration_resource_props: JsonStore,
+    #[serde(default)]
+    pub integration_table_props: JsonStore,
+    #[serde(default)]
+    pub column_stats_task_runs: JsonStore,
+    #[serde(default)]
+    pub column_stats_task_settings: JsonStore,
+    /// Per-table column statistics, keyed by "db\u{1f}table\u{1f}column".
+    #[serde(default)]
+    pub column_stats: JsonStore,
+    /// Per-table-version archive, keyed by "db\u{1f}table\u{1f}version".
+    #[serde(default)]
+    pub table_versions: JsonStore,
+    /// Partition indexes, keyed by "db\u{1f}table\u{1f}index".
+    #[serde(default)]
+    pub partition_indexes: JsonStore,
+    /// Job bookmarks, keyed by job name.
+    #[serde(default)]
+    pub job_bookmarks: JsonStore,
+    /// Resource policies, keyed by resource ARN ("" for the account policy).
+    #[serde(default)]
+    pub resource_policies: JsonStore,
+    /// Tags by resource ARN.
+    #[serde(default)]
+    pub tags: BTreeMap<String, BTreeMap<String, String>>,
+    /// Data-catalog encryption settings (single per account/region).
+    #[serde(default)]
+    pub encryption_settings: Option<Value>,
+    /// Glue Identity Center configuration (single per account/region).
+    #[serde(default)]
+    pub identity_center: Option<Value>,
+    /// Materialized-view refresh task runs.
+    #[serde(default)]
+    pub mv_refresh_runs: JsonStore,
+    /// Schema-version metadata, keyed by "versionId\u{1f}key\u{1f}value".
+    #[serde(default)]
+    pub schema_version_metadata: JsonStore,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -79,6 +185,7 @@ impl GlueState {
             databases: BTreeMap::new(),
             jobs: BTreeMap::new(),
             job_runs: BTreeMap::new(),
+            ..Default::default()
         }
     }
 

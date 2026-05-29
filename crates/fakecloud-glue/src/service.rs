@@ -14,32 +14,271 @@ use crate::state::{
 };
 
 const SUPPORTED_ACTIONS: &[&str] = &[
+    "BatchCreatePartition",
+    "BatchDeleteConnection",
+    "BatchDeletePartition",
+    "BatchDeleteTable",
+    "BatchDeleteTableVersion",
+    "BatchGetBlueprints",
+    "BatchGetCrawlers",
+    "BatchGetCustomEntityTypes",
+    "BatchGetDataQualityResult",
+    "BatchGetDevEndpoints",
+    "BatchGetJobs",
+    "BatchGetPartition",
+    "BatchGetTableOptimizer",
+    "BatchGetTriggers",
+    "BatchGetWorkflows",
+    "BatchPutDataQualityStatisticAnnotation",
+    "BatchStopJobRun",
+    "BatchUpdatePartition",
+    "CancelDataQualityRuleRecommendationRun",
+    "CancelDataQualityRulesetEvaluationRun",
+    "CancelMLTaskRun",
+    "CancelStatement",
+    "CheckSchemaVersionValidity",
+    "CreateBlueprint",
+    "CreateCatalog",
+    "CreateClassifier",
+    "CreateColumnStatisticsTaskSettings",
+    "CreateConnection",
+    "CreateCrawler",
+    "CreateCustomEntityType",
     "CreateDatabase",
+    "CreateDataQualityRuleset",
+    "CreateDevEndpoint",
+    "CreateGlueIdentityCenterConfiguration",
+    "CreateIntegration",
+    "CreateIntegrationResourceProperty",
+    "CreateIntegrationTableProperties",
+    "CreateJob",
+    "CreateMLTransform",
+    "CreatePartition",
+    "CreatePartitionIndex",
+    "CreateRegistry",
+    "CreateSchema",
+    "CreateScript",
+    "CreateSecurityConfiguration",
+    "CreateSession",
+    "CreateTable",
+    "CreateTableOptimizer",
+    "CreateTrigger",
+    "CreateUsageProfile",
+    "CreateUserDefinedFunction",
+    "CreateWorkflow",
+    "DeleteBlueprint",
+    "DeleteCatalog",
+    "DeleteClassifier",
+    "DeleteColumnStatisticsForPartition",
+    "DeleteColumnStatisticsForTable",
+    "DeleteColumnStatisticsTaskSettings",
+    "DeleteConnection",
+    "DeleteConnectionType",
+    "DeleteCrawler",
+    "DeleteCustomEntityType",
+    "DeleteDatabase",
+    "DeleteDataQualityRuleset",
+    "DeleteDevEndpoint",
+    "DeleteGlueIdentityCenterConfiguration",
+    "DeleteIntegration",
+    "DeleteIntegrationResourceProperty",
+    "DeleteIntegrationTableProperties",
+    "DeleteJob",
+    "DeleteMLTransform",
+    "DeletePartition",
+    "DeletePartitionIndex",
+    "DeleteRegistry",
+    "DeleteResourcePolicy",
+    "DeleteSchema",
+    "DeleteSchemaVersions",
+    "DeleteSecurityConfiguration",
+    "DeleteSession",
+    "DeleteTable",
+    "DeleteTableOptimizer",
+    "DeleteTableVersion",
+    "DeleteTrigger",
+    "DeleteUsageProfile",
+    "DeleteUserDefinedFunction",
+    "DeleteWorkflow",
+    "DescribeConnectionType",
+    "DescribeEntity",
+    "DescribeInboundIntegrations",
+    "DescribeIntegrations",
+    "GetBlueprint",
+    "GetBlueprintRun",
+    "GetBlueprintRuns",
+    "GetCatalog",
+    "GetCatalogImportStatus",
+    "GetCatalogs",
+    "GetClassifier",
+    "GetClassifiers",
+    "GetColumnStatisticsForPartition",
+    "GetColumnStatisticsForTable",
+    "GetColumnStatisticsTaskRun",
+    "GetColumnStatisticsTaskRuns",
+    "GetColumnStatisticsTaskSettings",
+    "GetConnection",
+    "GetConnections",
+    "GetCrawler",
+    "GetCrawlerMetrics",
+    "GetCrawlers",
+    "GetCustomEntityType",
     "GetDatabase",
     "GetDatabases",
-    "UpdateDatabase",
-    "DeleteDatabase",
-    "CreateTable",
-    "GetTable",
-    "GetTables",
-    "UpdateTable",
-    "DeleteTable",
-    "CreatePartition",
-    "GetPartition",
-    "GetPartitions",
-    "UpdatePartition",
-    "DeletePartition",
-    "BatchGetPartition",
-    "BatchCreatePartition",
-    "CreateJob",
+    "GetDataCatalogEncryptionSettings",
+    "GetDataflowGraph",
+    "GetDataQualityModel",
+    "GetDataQualityModelResult",
+    "GetDataQualityResult",
+    "GetDataQualityRuleRecommendationRun",
+    "GetDataQualityRuleset",
+    "GetDataQualityRulesetEvaluationRun",
+    "GetDevEndpoint",
+    "GetDevEndpoints",
+    "GetEntityRecords",
+    "GetGlueIdentityCenterConfiguration",
+    "GetIntegrationResourceProperty",
+    "GetIntegrationTableProperties",
     "GetJob",
-    "GetJobs",
-    "ListJobs",
-    "UpdateJob",
-    "DeleteJob",
-    "StartJobRun",
+    "GetJobBookmark",
     "GetJobRun",
     "GetJobRuns",
+    "GetJobs",
+    "GetMapping",
+    "GetMaterializedViewRefreshTaskRun",
+    "GetMLTaskRun",
+    "GetMLTaskRuns",
+    "GetMLTransform",
+    "GetMLTransforms",
+    "GetPartition",
+    "GetPartitionIndexes",
+    "GetPartitions",
+    "GetPlan",
+    "GetRegistry",
+    "GetResourcePolicies",
+    "GetResourcePolicy",
+    "GetSchema",
+    "GetSchemaByDefinition",
+    "GetSchemaVersion",
+    "GetSchemaVersionsDiff",
+    "GetSecurityConfiguration",
+    "GetSecurityConfigurations",
+    "GetSession",
+    "GetStatement",
+    "GetTable",
+    "GetTableOptimizer",
+    "GetTables",
+    "GetTableVersion",
+    "GetTableVersions",
+    "GetTags",
+    "GetTrigger",
+    "GetTriggers",
+    "GetUnfilteredPartitionMetadata",
+    "GetUnfilteredPartitionsMetadata",
+    "GetUnfilteredTableMetadata",
+    "GetUsageProfile",
+    "GetUserDefinedFunction",
+    "GetUserDefinedFunctions",
+    "GetWorkflow",
+    "GetWorkflowRun",
+    "GetWorkflowRunProperties",
+    "GetWorkflowRuns",
+    "ImportCatalogToGlue",
+    "ListBlueprints",
+    "ListColumnStatisticsTaskRuns",
+    "ListConnectionTypes",
+    "ListCrawlers",
+    "ListCrawls",
+    "ListCustomEntityTypes",
+    "ListDataQualityResults",
+    "ListDataQualityRuleRecommendationRuns",
+    "ListDataQualityRulesetEvaluationRuns",
+    "ListDataQualityRulesets",
+    "ListDataQualityStatisticAnnotations",
+    "ListDataQualityStatistics",
+    "ListDevEndpoints",
+    "ListEntities",
+    "ListIntegrationResourceProperties",
+    "ListJobs",
+    "ListMaterializedViewRefreshTaskRuns",
+    "ListMLTransforms",
+    "ListRegistries",
+    "ListSchemas",
+    "ListSchemaVersions",
+    "ListSessions",
+    "ListStatements",
+    "ListTableOptimizerRuns",
+    "ListTriggers",
+    "ListUsageProfiles",
+    "ListWorkflows",
+    "ModifyIntegration",
+    "PutDataCatalogEncryptionSettings",
+    "PutDataQualityProfileAnnotation",
+    "PutResourcePolicy",
+    "PutSchemaVersionMetadata",
+    "PutWorkflowRunProperties",
+    "QuerySchemaVersionMetadata",
+    "RegisterConnectionType",
+    "RegisterSchemaVersion",
+    "RemoveSchemaVersionMetadata",
+    "ResetJobBookmark",
+    "ResumeWorkflowRun",
+    "RunStatement",
+    "SearchTables",
+    "StartBlueprintRun",
+    "StartColumnStatisticsTaskRun",
+    "StartColumnStatisticsTaskRunSchedule",
+    "StartCrawler",
+    "StartCrawlerSchedule",
+    "StartDataQualityRuleRecommendationRun",
+    "StartDataQualityRulesetEvaluationRun",
+    "StartExportLabelsTaskRun",
+    "StartImportLabelsTaskRun",
+    "StartJobRun",
+    "StartMaterializedViewRefreshTaskRun",
+    "StartMLEvaluationTaskRun",
+    "StartMLLabelingSetGenerationTaskRun",
+    "StartTrigger",
+    "StartWorkflowRun",
+    "StopColumnStatisticsTaskRun",
+    "StopColumnStatisticsTaskRunSchedule",
+    "StopCrawler",
+    "StopCrawlerSchedule",
+    "StopMaterializedViewRefreshTaskRun",
+    "StopSession",
+    "StopTrigger",
+    "StopWorkflowRun",
+    "TagResource",
+    "TestConnection",
+    "UntagResource",
+    "UpdateBlueprint",
+    "UpdateCatalog",
+    "UpdateClassifier",
+    "UpdateColumnStatisticsForPartition",
+    "UpdateColumnStatisticsForTable",
+    "UpdateColumnStatisticsTaskSettings",
+    "UpdateConnection",
+    "UpdateCrawler",
+    "UpdateCrawlerSchedule",
+    "UpdateDatabase",
+    "UpdateDataQualityRuleset",
+    "UpdateDevEndpoint",
+    "UpdateGlueIdentityCenterConfiguration",
+    "UpdateIntegrationResourceProperty",
+    "UpdateIntegrationTableProperties",
+    "UpdateJob",
+    "UpdateJobFromSourceControl",
+    "UpdateMLTransform",
+    "UpdatePartition",
+    "UpdateRegistry",
+    "UpdateSchema",
+    "UpdateSourceControlFromJob",
+    "UpdateTable",
+    "UpdateTableOptimizer",
+    "UpdateTrigger",
+    "UpdateUsageProfile",
+    "UpdateUserDefinedFunction",
+    "UpdateWorkflow",
 ];
 
 pub struct GlueService {
@@ -73,33 +312,327 @@ impl AwsService for GlueService {
     }
 
     async fn handle(&self, req: AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        // Server-side input validation (lengths/ranges/enums) runs before any
+        // handler, mirroring AWS's request-validation phase.
+        crate::common::validate_constraints(&req.action, &req.json_body())?;
         match req.action.as_str() {
+            "BatchCreatePartition" => self.batch_create_partition(&req),
+            "BatchDeleteConnection" => self.batch_delete_connection(&req),
+            "BatchDeletePartition" => self.batch_delete_partition(&req),
+            "BatchDeleteTable" => self.batch_delete_table(&req),
+            "BatchDeleteTableVersion" => self.batch_delete_table_version(&req),
+            "BatchGetBlueprints" => self.batch_get_blueprints(&req),
+            "BatchGetCrawlers" => self.batch_get_crawlers(&req),
+            "BatchGetCustomEntityTypes" => self.batch_get_custom_entity_types(&req),
+            "BatchGetDataQualityResult" => self.batch_get_data_quality_result(&req),
+            "BatchGetDevEndpoints" => self.batch_get_dev_endpoints(&req),
+            "BatchGetJobs" => self.batch_get_jobs(&req),
+            "BatchGetPartition" => self.batch_get_partition(&req),
+            "BatchGetTableOptimizer" => self.batch_get_table_optimizer(&req),
+            "BatchGetTriggers" => self.batch_get_triggers(&req),
+            "BatchGetWorkflows" => self.batch_get_workflows(&req),
+            "BatchPutDataQualityStatisticAnnotation" => {
+                self.batch_put_data_quality_statistic_annotation(&req)
+            }
+            "BatchStopJobRun" => self.batch_stop_job_run(&req),
+            "BatchUpdatePartition" => self.batch_update_partition(&req),
+            "CancelDataQualityRuleRecommendationRun" => {
+                self.cancel_data_quality_rule_recommendation_run(&req)
+            }
+            "CancelDataQualityRulesetEvaluationRun" => {
+                self.cancel_data_quality_ruleset_evaluation_run(&req)
+            }
+            "CancelMLTaskRun" => self.cancel_ml_task_run(&req),
+            "CancelStatement" => self.cancel_statement(&req),
+            "CheckSchemaVersionValidity" => self.check_schema_version_validity(&req),
+            "CreateBlueprint" => self.create_blueprint(&req),
+            "CreateCatalog" => self.create_catalog(&req),
+            "CreateClassifier" => self.create_classifier(&req),
+            "CreateColumnStatisticsTaskSettings" => {
+                self.create_column_statistics_task_settings(&req)
+            }
+            "CreateConnection" => self.create_connection(&req),
+            "CreateCrawler" => self.create_crawler(&req),
+            "CreateCustomEntityType" => self.create_custom_entity_type(&req),
             "CreateDatabase" => self.create_database(&req),
+            "CreateDataQualityRuleset" => self.create_data_quality_ruleset(&req),
+            "CreateDevEndpoint" => self.create_dev_endpoint(&req),
+            "CreateGlueIdentityCenterConfiguration" => {
+                self.create_glue_identity_center_configuration(&req)
+            }
+            "CreateIntegration" => self.create_integration(&req),
+            "CreateIntegrationResourceProperty" => self.create_integration_resource_property(&req),
+            "CreateIntegrationTableProperties" => self.create_integration_table_properties(&req),
+            "CreateJob" => self.create_job(&req),
+            "CreateMLTransform" => self.create_ml_transform(&req),
+            "CreatePartition" => self.create_partition(&req),
+            "CreatePartitionIndex" => self.create_partition_index(&req),
+            "CreateRegistry" => self.create_registry(&req),
+            "CreateSchema" => self.create_schema(&req),
+            "CreateScript" => self.create_script(&req),
+            "CreateSecurityConfiguration" => self.create_security_configuration(&req),
+            "CreateSession" => self.create_session(&req),
+            "CreateTable" => self.create_table(&req),
+            "CreateTableOptimizer" => self.create_table_optimizer(&req),
+            "CreateTrigger" => self.create_trigger(&req),
+            "CreateUsageProfile" => self.create_usage_profile(&req),
+            "CreateUserDefinedFunction" => self.create_user_defined_function(&req),
+            "CreateWorkflow" => self.create_workflow(&req),
+            "DeleteBlueprint" => self.delete_blueprint(&req),
+            "DeleteCatalog" => self.delete_catalog(&req),
+            "DeleteClassifier" => self.delete_classifier(&req),
+            "DeleteColumnStatisticsForPartition" => {
+                self.delete_column_statistics_for_partition(&req)
+            }
+            "DeleteColumnStatisticsForTable" => self.delete_column_statistics_for_table(&req),
+            "DeleteColumnStatisticsTaskSettings" => {
+                self.delete_column_statistics_task_settings(&req)
+            }
+            "DeleteConnection" => self.delete_connection(&req),
+            "DeleteConnectionType" => self.delete_connection_type(&req),
+            "DeleteCrawler" => self.delete_crawler(&req),
+            "DeleteCustomEntityType" => self.delete_custom_entity_type(&req),
+            "DeleteDatabase" => self.delete_database(&req),
+            "DeleteDataQualityRuleset" => self.delete_data_quality_ruleset(&req),
+            "DeleteDevEndpoint" => self.delete_dev_endpoint(&req),
+            "DeleteGlueIdentityCenterConfiguration" => {
+                self.delete_glue_identity_center_configuration(&req)
+            }
+            "DeleteIntegration" => self.delete_integration(&req),
+            "DeleteIntegrationResourceProperty" => self.delete_integration_resource_property(&req),
+            "DeleteIntegrationTableProperties" => self.delete_integration_table_properties(&req),
+            "DeleteJob" => self.delete_job(&req),
+            "DeleteMLTransform" => self.delete_ml_transform(&req),
+            "DeletePartition" => self.delete_partition(&req),
+            "DeletePartitionIndex" => self.delete_partition_index(&req),
+            "DeleteRegistry" => self.delete_registry(&req),
+            "DeleteResourcePolicy" => self.delete_resource_policy(&req),
+            "DeleteSchema" => self.delete_schema(&req),
+            "DeleteSchemaVersions" => self.delete_schema_versions(&req),
+            "DeleteSecurityConfiguration" => self.delete_security_configuration(&req),
+            "DeleteSession" => self.delete_session(&req),
+            "DeleteTable" => self.delete_table(&req),
+            "DeleteTableOptimizer" => self.delete_table_optimizer(&req),
+            "DeleteTableVersion" => self.delete_table_version(&req),
+            "DeleteTrigger" => self.delete_trigger(&req),
+            "DeleteUsageProfile" => self.delete_usage_profile(&req),
+            "DeleteUserDefinedFunction" => self.delete_user_defined_function(&req),
+            "DeleteWorkflow" => self.delete_workflow(&req),
+            "DescribeConnectionType" => self.describe_connection_type(&req),
+            "DescribeEntity" => self.describe_entity(&req),
+            "DescribeInboundIntegrations" => self.describe_inbound_integrations(&req),
+            "DescribeIntegrations" => self.describe_integrations(&req),
+            "GetBlueprint" => self.get_blueprint(&req),
+            "GetBlueprintRun" => self.get_blueprint_run(&req),
+            "GetBlueprintRuns" => self.get_blueprint_runs(&req),
+            "GetCatalog" => self.get_catalog(&req),
+            "GetCatalogImportStatus" => self.get_catalog_import_status(&req),
+            "GetCatalogs" => self.get_catalogs(&req),
+            "GetClassifier" => self.get_classifier(&req),
+            "GetClassifiers" => self.get_classifiers(&req),
+            "GetColumnStatisticsForPartition" => self.get_column_statistics_for_partition(&req),
+            "GetColumnStatisticsForTable" => self.get_column_statistics_for_table(&req),
+            "GetColumnStatisticsTaskRun" => self.get_column_statistics_task_run(&req),
+            "GetColumnStatisticsTaskRuns" => self.get_column_statistics_task_runs(&req),
+            "GetColumnStatisticsTaskSettings" => self.get_column_statistics_task_settings(&req),
+            "GetConnection" => self.get_connection(&req),
+            "GetConnections" => self.get_connections(&req),
+            "GetCrawler" => self.get_crawler(&req),
+            "GetCrawlerMetrics" => self.get_crawler_metrics(&req),
+            "GetCrawlers" => self.get_crawlers(&req),
+            "GetCustomEntityType" => self.get_custom_entity_type(&req),
             "GetDatabase" => self.get_database(&req),
             "GetDatabases" => self.get_databases(&req),
-            "UpdateDatabase" => self.update_database(&req),
-            "DeleteDatabase" => self.delete_database(&req),
-            "CreateTable" => self.create_table(&req),
-            "GetTable" => self.get_table(&req),
-            "GetTables" => self.get_tables(&req),
-            "UpdateTable" => self.update_table(&req),
-            "DeleteTable" => self.delete_table(&req),
-            "CreatePartition" => self.create_partition(&req),
-            "GetPartition" => self.get_partition(&req),
-            "GetPartitions" => self.get_partitions(&req),
-            "UpdatePartition" => self.update_partition(&req),
-            "DeletePartition" => self.delete_partition(&req),
-            "BatchGetPartition" => self.batch_get_partition(&req),
-            "BatchCreatePartition" => self.batch_create_partition(&req),
-            "CreateJob" => self.create_job(&req),
+            "GetDataCatalogEncryptionSettings" => self.get_data_catalog_encryption_settings(&req),
+            "GetDataflowGraph" => self.get_dataflow_graph(&req),
+            "GetDataQualityModel" => self.get_data_quality_model(&req),
+            "GetDataQualityModelResult" => self.get_data_quality_model_result(&req),
+            "GetDataQualityResult" => self.get_data_quality_result(&req),
+            "GetDataQualityRuleRecommendationRun" => {
+                self.get_data_quality_rule_recommendation_run(&req)
+            }
+            "GetDataQualityRuleset" => self.get_data_quality_ruleset(&req),
+            "GetDataQualityRulesetEvaluationRun" => {
+                self.get_data_quality_ruleset_evaluation_run(&req)
+            }
+            "GetDevEndpoint" => self.get_dev_endpoint(&req),
+            "GetDevEndpoints" => self.get_dev_endpoints(&req),
+            "GetEntityRecords" => self.get_entity_records(&req),
+            "GetGlueIdentityCenterConfiguration" => {
+                self.get_glue_identity_center_configuration(&req)
+            }
+            "GetIntegrationResourceProperty" => self.get_integration_resource_property(&req),
+            "GetIntegrationTableProperties" => self.get_integration_table_properties(&req),
             "GetJob" => self.get_job(&req),
-            "GetJobs" => self.get_jobs(&req),
-            "ListJobs" => self.list_jobs(&req),
-            "UpdateJob" => self.update_job(&req),
-            "DeleteJob" => self.delete_job(&req),
-            "StartJobRun" => self.start_job_run(&req),
+            "GetJobBookmark" => self.get_job_bookmark(&req),
             "GetJobRun" => self.get_job_run(&req),
             "GetJobRuns" => self.get_job_runs(&req),
+            "GetJobs" => self.get_jobs(&req),
+            "GetMapping" => self.get_mapping(&req),
+            "GetMaterializedViewRefreshTaskRun" => {
+                self.get_materialized_view_refresh_task_run(&req)
+            }
+            "GetMLTaskRun" => self.get_ml_task_run(&req),
+            "GetMLTaskRuns" => self.get_ml_task_runs(&req),
+            "GetMLTransform" => self.get_ml_transform(&req),
+            "GetMLTransforms" => self.get_ml_transforms(&req),
+            "GetPartition" => self.get_partition(&req),
+            "GetPartitionIndexes" => self.get_partition_indexes(&req),
+            "GetPartitions" => self.get_partitions(&req),
+            "GetPlan" => self.get_plan(&req),
+            "GetRegistry" => self.get_registry(&req),
+            "GetResourcePolicies" => self.get_resource_policies(&req),
+            "GetResourcePolicy" => self.get_resource_policy(&req),
+            "GetSchema" => self.get_schema(&req),
+            "GetSchemaByDefinition" => self.get_schema_by_definition(&req),
+            "GetSchemaVersion" => self.get_schema_version(&req),
+            "GetSchemaVersionsDiff" => self.get_schema_versions_diff(&req),
+            "GetSecurityConfiguration" => self.get_security_configuration(&req),
+            "GetSecurityConfigurations" => self.get_security_configurations(&req),
+            "GetSession" => self.get_session(&req),
+            "GetStatement" => self.get_statement(&req),
+            "GetTable" => self.get_table(&req),
+            "GetTableOptimizer" => self.get_table_optimizer(&req),
+            "GetTables" => self.get_tables(&req),
+            "GetTableVersion" => self.get_table_version(&req),
+            "GetTableVersions" => self.get_table_versions(&req),
+            "GetTags" => self.get_tags(&req),
+            "GetTrigger" => self.get_trigger(&req),
+            "GetTriggers" => self.get_triggers(&req),
+            "GetUnfilteredPartitionMetadata" => self.get_unfiltered_partition_metadata(&req),
+            "GetUnfilteredPartitionsMetadata" => self.get_unfiltered_partitions_metadata(&req),
+            "GetUnfilteredTableMetadata" => self.get_unfiltered_table_metadata(&req),
+            "GetUsageProfile" => self.get_usage_profile(&req),
+            "GetUserDefinedFunction" => self.get_user_defined_function(&req),
+            "GetUserDefinedFunctions" => self.get_user_defined_functions(&req),
+            "GetWorkflow" => self.get_workflow(&req),
+            "GetWorkflowRun" => self.get_workflow_run(&req),
+            "GetWorkflowRunProperties" => self.get_workflow_run_properties(&req),
+            "GetWorkflowRuns" => self.get_workflow_runs(&req),
+            "ImportCatalogToGlue" => self.import_catalog_to_glue(&req),
+            "ListBlueprints" => self.list_blueprints(&req),
+            "ListColumnStatisticsTaskRuns" => self.list_column_statistics_task_runs(&req),
+            "ListConnectionTypes" => self.list_connection_types(&req),
+            "ListCrawlers" => self.list_crawlers(&req),
+            "ListCrawls" => self.list_crawls(&req),
+            "ListCustomEntityTypes" => self.list_custom_entity_types(&req),
+            "ListDataQualityResults" => self.list_data_quality_results(&req),
+            "ListDataQualityRuleRecommendationRuns" => {
+                self.list_data_quality_rule_recommendation_runs(&req)
+            }
+            "ListDataQualityRulesetEvaluationRuns" => {
+                self.list_data_quality_ruleset_evaluation_runs(&req)
+            }
+            "ListDataQualityRulesets" => self.list_data_quality_rulesets(&req),
+            "ListDataQualityStatisticAnnotations" => {
+                self.list_data_quality_statistic_annotations(&req)
+            }
+            "ListDataQualityStatistics" => self.list_data_quality_statistics(&req),
+            "ListDevEndpoints" => self.list_dev_endpoints(&req),
+            "ListEntities" => self.list_entities(&req),
+            "ListIntegrationResourceProperties" => self.list_integration_resource_properties(&req),
+            "ListJobs" => self.list_jobs(&req),
+            "ListMaterializedViewRefreshTaskRuns" => {
+                self.list_materialized_view_refresh_task_runs(&req)
+            }
+            "ListMLTransforms" => self.list_ml_transforms(&req),
+            "ListRegistries" => self.list_registries(&req),
+            "ListSchemas" => self.list_schemas(&req),
+            "ListSchemaVersions" => self.list_schema_versions(&req),
+            "ListSessions" => self.list_sessions(&req),
+            "ListStatements" => self.list_statements(&req),
+            "ListTableOptimizerRuns" => self.list_table_optimizer_runs(&req),
+            "ListTriggers" => self.list_triggers(&req),
+            "ListUsageProfiles" => self.list_usage_profiles(&req),
+            "ListWorkflows" => self.list_workflows(&req),
+            "ModifyIntegration" => self.modify_integration(&req),
+            "PutDataCatalogEncryptionSettings" => self.put_data_catalog_encryption_settings(&req),
+            "PutDataQualityProfileAnnotation" => self.put_data_quality_profile_annotation(&req),
+            "PutResourcePolicy" => self.put_resource_policy(&req),
+            "PutSchemaVersionMetadata" => self.put_schema_version_metadata(&req),
+            "PutWorkflowRunProperties" => self.put_workflow_run_properties(&req),
+            "QuerySchemaVersionMetadata" => self.query_schema_version_metadata(&req),
+            "RegisterConnectionType" => self.register_connection_type(&req),
+            "RegisterSchemaVersion" => self.register_schema_version(&req),
+            "RemoveSchemaVersionMetadata" => self.remove_schema_version_metadata(&req),
+            "ResetJobBookmark" => self.reset_job_bookmark(&req),
+            "ResumeWorkflowRun" => self.resume_workflow_run(&req),
+            "RunStatement" => self.run_statement(&req),
+            "SearchTables" => self.search_tables(&req),
+            "StartBlueprintRun" => self.start_blueprint_run(&req),
+            "StartColumnStatisticsTaskRun" => self.start_column_statistics_task_run(&req),
+            "StartColumnStatisticsTaskRunSchedule" => {
+                self.start_column_statistics_task_run_schedule(&req)
+            }
+            "StartCrawler" => self.start_crawler(&req),
+            "StartCrawlerSchedule" => self.start_crawler_schedule(&req),
+            "StartDataQualityRuleRecommendationRun" => {
+                self.start_data_quality_rule_recommendation_run(&req)
+            }
+            "StartDataQualityRulesetEvaluationRun" => {
+                self.start_data_quality_ruleset_evaluation_run(&req)
+            }
+            "StartExportLabelsTaskRun" => self.start_export_labels_task_run(&req),
+            "StartImportLabelsTaskRun" => self.start_import_labels_task_run(&req),
+            "StartJobRun" => self.start_job_run(&req),
+            "StartMaterializedViewRefreshTaskRun" => {
+                self.start_materialized_view_refresh_task_run(&req)
+            }
+            "StartMLEvaluationTaskRun" => self.start_ml_evaluation_task_run(&req),
+            "StartMLLabelingSetGenerationTaskRun" => {
+                self.start_ml_labeling_set_generation_task_run(&req)
+            }
+            "StartTrigger" => self.start_trigger(&req),
+            "StartWorkflowRun" => self.start_workflow_run(&req),
+            "StopColumnStatisticsTaskRun" => self.stop_column_statistics_task_run(&req),
+            "StopColumnStatisticsTaskRunSchedule" => {
+                self.stop_column_statistics_task_run_schedule(&req)
+            }
+            "StopCrawler" => self.stop_crawler(&req),
+            "StopCrawlerSchedule" => self.stop_crawler_schedule(&req),
+            "StopMaterializedViewRefreshTaskRun" => {
+                self.stop_materialized_view_refresh_task_run(&req)
+            }
+            "StopSession" => self.stop_session(&req),
+            "StopTrigger" => self.stop_trigger(&req),
+            "StopWorkflowRun" => self.stop_workflow_run(&req),
+            "TagResource" => self.tag_resource(&req),
+            "TestConnection" => self.test_connection(&req),
+            "UntagResource" => self.untag_resource(&req),
+            "UpdateBlueprint" => self.update_blueprint(&req),
+            "UpdateCatalog" => self.update_catalog(&req),
+            "UpdateClassifier" => self.update_classifier(&req),
+            "UpdateColumnStatisticsForPartition" => {
+                self.update_column_statistics_for_partition(&req)
+            }
+            "UpdateColumnStatisticsForTable" => self.update_column_statistics_for_table(&req),
+            "UpdateColumnStatisticsTaskSettings" => {
+                self.update_column_statistics_task_settings(&req)
+            }
+            "UpdateConnection" => self.update_connection(&req),
+            "UpdateCrawler" => self.update_crawler(&req),
+            "UpdateCrawlerSchedule" => self.update_crawler_schedule(&req),
+            "UpdateDatabase" => self.update_database(&req),
+            "UpdateDataQualityRuleset" => self.update_data_quality_ruleset(&req),
+            "UpdateDevEndpoint" => self.update_dev_endpoint(&req),
+            "UpdateGlueIdentityCenterConfiguration" => {
+                self.update_glue_identity_center_configuration(&req)
+            }
+            "UpdateIntegrationResourceProperty" => self.update_integration_resource_property(&req),
+            "UpdateIntegrationTableProperties" => self.update_integration_table_properties(&req),
+            "UpdateJob" => self.update_job(&req),
+            "UpdateJobFromSourceControl" => self.update_job_from_source_control(&req),
+            "UpdateMLTransform" => self.update_ml_transform(&req),
+            "UpdatePartition" => self.update_partition(&req),
+            "UpdateRegistry" => self.update_registry(&req),
+            "UpdateSchema" => self.update_schema(&req),
+            "UpdateSourceControlFromJob" => self.update_source_control_from_job(&req),
+            "UpdateTable" => self.update_table(&req),
+            "UpdateTableOptimizer" => self.update_table_optimizer(&req),
+            "UpdateTrigger" => self.update_trigger(&req),
+            "UpdateUsageProfile" => self.update_usage_profile(&req),
+            "UpdateUserDefinedFunction" => self.update_user_defined_function(&req),
+            "UpdateWorkflow" => self.update_workflow(&req),
             other => Err(AwsServiceError::action_not_implemented("glue", other)),
         }
     }
@@ -240,7 +773,7 @@ fn database_json(db: &Database) -> Value {
     o
 }
 
-fn table_json(t: &Table) -> Value {
+pub(crate) fn table_json(t: &Table) -> Value {
     let mut o = json!({
         "Name": t.name,
         "DatabaseName": t.database_name,
@@ -274,7 +807,7 @@ fn table_json(t: &Table) -> Value {
     o
 }
 
-fn partition_json(p: &Partition) -> Value {
+pub(crate) fn partition_json(p: &Partition) -> Value {
     let mut o = json!({
         "Values": p.values,
         "DatabaseName": p.database_name,
@@ -291,7 +824,7 @@ fn partition_json(p: &Partition) -> Value {
     o
 }
 
-fn partition_key(values: &[String]) -> String {
+pub(crate) fn partition_key(values: &[String]) -> String {
     // Length-prefix each value so partitions whose values contain `/` (or any
     // separator) cannot collide with neighbouring partitions.
     let mut s = String::new();
@@ -319,7 +852,7 @@ fn parse_partition_values(json: &Value, field: &str) -> Result<Vec<String>, AwsS
 }
 
 impl GlueService {
-    fn create_database(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+    pub(crate) fn create_database(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         let input = &body["DatabaseInput"];
         let name = input["Name"]
@@ -348,7 +881,7 @@ impl GlueService {
         Ok(AwsResponse::ok_json(json!({})))
     }
 
-    fn get_database(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+    pub(crate) fn get_database(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         let name = body["Name"].as_str().ok_or_else(|| missing("Name"))?;
         let accounts = self.state.read();
@@ -366,7 +899,7 @@ impl GlueService {
         })))
     }
 
-    fn get_databases(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+    pub(crate) fn get_databases(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let accounts = self.state.read();
         let dbs: Vec<Value> = accounts
             .get(&req.account_id)
@@ -376,7 +909,7 @@ impl GlueService {
         Ok(AwsResponse::ok_json(json!({"DatabaseList": dbs})))
     }
 
-    fn update_database(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+    pub(crate) fn update_database(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         let name = body["Name"].as_str().ok_or_else(|| missing("Name"))?;
         let input = &body["DatabaseInput"];
@@ -398,7 +931,7 @@ impl GlueService {
         Ok(AwsResponse::ok_json(json!({})))
     }
 
-    fn delete_database(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+    pub(crate) fn delete_database(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         let name = body["Name"].as_str().ok_or_else(|| missing("Name"))?;
         let mut accounts = self.state.write();
@@ -409,7 +942,7 @@ impl GlueService {
         Ok(AwsResponse::ok_json(json!({})))
     }
 
-    fn create_table(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+    pub(crate) fn create_table(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         let db_name = body["DatabaseName"]
             .as_str()
@@ -453,7 +986,7 @@ impl GlueService {
         Ok(AwsResponse::ok_json(json!({})))
     }
 
-    fn get_table(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+    pub(crate) fn get_table(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         let db_name = body["DatabaseName"]
             .as_str()
@@ -476,7 +1009,7 @@ impl GlueService {
         Ok(AwsResponse::ok_json(json!({"Table": table_json(t)})))
     }
 
-    fn get_tables(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+    pub(crate) fn get_tables(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         let db_name = body["DatabaseName"]
             .as_str()
@@ -491,7 +1024,7 @@ impl GlueService {
         Ok(AwsResponse::ok_json(json!({"TableList": tables})))
     }
 
-    fn update_table(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+    pub(crate) fn update_table(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         let db_name = body["DatabaseName"]
             .as_str()
@@ -532,7 +1065,7 @@ impl GlueService {
         Ok(AwsResponse::ok_json(json!({})))
     }
 
-    fn delete_table(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+    pub(crate) fn delete_table(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         let db_name = body["DatabaseName"]
             .as_str()
@@ -550,7 +1083,10 @@ impl GlueService {
         Ok(AwsResponse::ok_json(json!({})))
     }
 
-    fn create_partition(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+    pub(crate) fn create_partition(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         let db_name = body["DatabaseName"]
             .as_str()
@@ -591,7 +1127,7 @@ impl GlueService {
         Ok(AwsResponse::ok_json(json!({})))
     }
 
-    fn get_partition(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+    pub(crate) fn get_partition(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         let db_name = body["DatabaseName"]
             .as_str()
@@ -624,7 +1160,7 @@ impl GlueService {
         ))
     }
 
-    fn get_partitions(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+    pub(crate) fn get_partitions(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         let db_name = body["DatabaseName"]
             .as_str()
@@ -657,7 +1193,10 @@ impl GlueService {
         Ok(AwsResponse::ok_json(json!({"Partitions": parts})))
     }
 
-    fn update_partition(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+    pub(crate) fn update_partition(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         let db_name = body["DatabaseName"]
             .as_str()
@@ -691,7 +1230,10 @@ impl GlueService {
         Ok(AwsResponse::ok_json(json!({})))
     }
 
-    fn delete_partition(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+    pub(crate) fn delete_partition(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         let db_name = body["DatabaseName"]
             .as_str()
@@ -717,7 +1259,10 @@ impl GlueService {
         Ok(AwsResponse::ok_json(json!({})))
     }
 
-    fn batch_get_partition(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+    pub(crate) fn batch_get_partition(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         let db_name = body["DatabaseName"]
             .as_str()
@@ -751,7 +1296,10 @@ impl GlueService {
         })))
     }
 
-    fn batch_create_partition(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+    pub(crate) fn batch_create_partition(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         let db_name = body["DatabaseName"]
             .as_str()
