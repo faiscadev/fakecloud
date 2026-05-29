@@ -833,3 +833,61 @@ async fn data_plane_request_validator_rejects_missing_body_field() {
         .expect("send");
     assert_eq!(good.status(), 200);
 }
+
+// bug-audit 2026-05-28, 1.18: TestInvokeAuthorizer must deny (clientStatus
+// 401) when the authorizer's identity-source header is absent, not always
+// return a canned Allow.
+#[tokio::test]
+async fn test_invoke_authorizer_honors_identity_source() {
+    let server = TestServer::start().await;
+    let client = server.apigateway_client().await;
+
+    let api = client
+        .create_rest_api()
+        .name("testinvoke-authz")
+        .send()
+        .await
+        .expect("create_rest_api");
+    let api_id = api.id().unwrap().to_string();
+
+    let authorizer = client
+        .create_authorizer()
+        .rest_api_id(&api_id)
+        .name("tok-authz")
+        .r#type(aws_sdk_apigateway::types::AuthorizerType::Token)
+        .identity_source("method.request.header.Authorization")
+        .send()
+        .await
+        .expect("create_authorizer");
+    let authorizer_id = authorizer.id().unwrap().to_string();
+
+    // Identity source configured but no matching request header -> 401.
+    let denied = client
+        .test_invoke_authorizer()
+        .rest_api_id(&api_id)
+        .authorizer_id(&authorizer_id)
+        .send()
+        .await
+        .expect("test_invoke_authorizer denied");
+    assert_eq!(denied.client_status(), 401);
+
+    // An authorizer with no identity source requires nothing -> 200.
+    let open_authorizer = client
+        .create_authorizer()
+        .rest_api_id(&api_id)
+        .name("open-authz")
+        .r#type(aws_sdk_apigateway::types::AuthorizerType::Token)
+        .send()
+        .await
+        .expect("create open authorizer");
+    let open_id = open_authorizer.id().unwrap().to_string();
+
+    let allowed = client
+        .test_invoke_authorizer()
+        .rest_api_id(&api_id)
+        .authorizer_id(&open_id)
+        .send()
+        .await
+        .expect("test_invoke_authorizer allowed");
+    assert_eq!(allowed.client_status(), 200);
+}
