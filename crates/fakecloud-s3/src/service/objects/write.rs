@@ -767,6 +767,39 @@ impl S3Service {
                 ));
             }
         }
+        // Date-based copy-source preconditions (bug-audit 2026-05-28,
+        // 1.10 — these were ignored, so a copy always succeeded). A
+        // malformed date header is ignored, matching AWS.
+        if let Some(since) = req
+            .headers
+            .get("x-amz-copy-source-if-unmodified-since")
+            .and_then(|v| v.to_str().ok())
+            .and_then(parse_http_date)
+        {
+            // Fail if the source WAS modified after the given instant.
+            if src_obj.last_modified > since {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::PRECONDITION_FAILED,
+                    "PreconditionFailed",
+                    "At least one of the pre-conditions you specified did not hold",
+                ));
+            }
+        }
+        if let Some(since) = req
+            .headers
+            .get("x-amz-copy-source-if-modified-since")
+            .and_then(|v| v.to_str().ok())
+            .and_then(parse_http_date)
+        {
+            // Fail if the source was NOT modified after the given instant.
+            if src_obj.last_modified <= since {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::PRECONDITION_FAILED,
+                    "PreconditionFailed",
+                    "At least one of the pre-conditions you specified did not hold",
+                ));
+            }
+        }
 
         // Check copy-in-place validity
         let has_version_id = src_version_id.is_some();
