@@ -774,7 +774,7 @@ impl S3Service {
             .headers
             .get("x-amz-copy-source-if-unmodified-since")
             .and_then(|v| v.to_str().ok())
-            .and_then(parse_http_date)
+            .and_then(crate::service::parse_http_date)
         {
             // Fail if the source WAS modified after the given instant.
             if src_obj.last_modified > since {
@@ -789,7 +789,7 @@ impl S3Service {
             .headers
             .get("x-amz-copy-source-if-modified-since")
             .and_then(|v| v.to_str().ok())
-            .and_then(parse_http_date)
+            .and_then(crate::service::parse_http_date)
         {
             // Fail if the source was NOT modified after the given instant.
             if src_obj.last_modified <= since {
