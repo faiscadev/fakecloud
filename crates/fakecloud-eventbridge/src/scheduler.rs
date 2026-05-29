@@ -20,20 +20,84 @@ enum Schedule {
     Cron(CronExpr),
 }
 
-/// A simplified cron expression with 6 fields: min hour dom month dow year.
-/// Each field is either `Any` (wildcard) or a specific numeric value.
+/// A cron expression with 6 fields: min hour dom month dow year.
 struct CronExpr {
     minute: CronField,
     hour: CronField,
     day_of_month: CronField,
     month: CronField,
     day_of_week: CronField,
-    // year is parsed but not checked (always matches)
+    year: CronField,
 }
 
+#[derive(Debug, Clone, PartialEq)]
 enum CronField {
+    /// `*` or `?` — matches any value.
     Any,
-    Value(u32),
+    /// Comma-separated list of terms; matches when ANY term matches.
+    Terms(Vec<CronTerm>),
+}
+
+/// One comma-separated element of a cron field.
+#[derive(Debug, Clone, PartialEq)]
+enum CronTerm {
+    Single(u32),
+    Range(u32, u32),
+    Step { start: u32, end: u32, step: u32 },
+}
+
+/// Field bounds + name aliases used to parse and validate one cron field.
+struct FieldSpec {
+    min: u32,
+    max: u32,
+    names: &'static [(&'static str, u32)],
+}
+
+const MONTH_NAMES: &[(&str, u32)] = &[
+    ("JAN", 1),
+    ("FEB", 2),
+    ("MAR", 3),
+    ("APR", 4),
+    ("MAY", 5),
+    ("JUN", 6),
+    ("JUL", 7),
+    ("AUG", 8),
+    ("SEP", 9),
+    ("OCT", 10),
+    ("NOV", 11),
+    ("DEC", 12),
+];
+
+// Day-of-week names normalized to 0=Sunday..6=Saturday (chrono's
+// num_days_from_sunday space).
+const DOW_NAMES: &[(&str, u32)] = &[
+    ("SUN", 0),
+    ("MON", 1),
+    ("TUE", 2),
+    ("WED", 3),
+    ("THU", 4),
+    ("FRI", 5),
+    ("SAT", 6),
+];
+
+fn resolve_token(tok: &str, spec: &FieldSpec, is_dow: bool) -> Option<u32> {
+    let tok = tok.trim();
+    if let Ok(n) = tok.parse::<u32>() {
+        if is_dow {
+            // AWS EventBridge day-of-week: 1=SUN..7=SAT -> 0=SUN..6=SAT.
+            return match n {
+                0 => Some(0),
+                1..=7 => Some(n - 1),
+                _ => None,
+            };
+        }
+        return Some(n);
+    }
+    let upper = tok.to_ascii_uppercase();
+    spec.names
+        .iter()
+        .find(|(name, _)| upper.starts_with(name))
+        .map(|&(_, v)| v)
 }
 
 fn parse_schedule(expr: &str) -> Option<Schedule> {
@@ -69,39 +133,154 @@ fn parse_cron(inner: &str) -> Option<Schedule> {
     if parts.len() != 6 {
         return None;
     }
+    // AWS EventBridge field bounds. Any field failing to parse rejects the
+    // whole expression so PutRule surfaces a validation error rather than
+    // silently accepting a rule that fires at the wrong times (bug-audit
+    // 2026-05-28, 1.2).
     Some(Schedule::Cron(CronExpr {
-        minute: parse_cron_field(parts[0]),
-        hour: parse_cron_field(parts[1]),
-        day_of_month: parse_cron_field(parts[2]),
-        month: parse_cron_field(parts[3]),
-        day_of_week: parse_cron_field(parts[4]),
-        // year field parsed but not stored (always matches)
+        minute: parse_cron_field(
+            parts[0],
+            &FieldSpec {
+                min: 0,
+                max: 59,
+                names: &[],
+            },
+            false,
+        )?,
+        hour: parse_cron_field(
+            parts[1],
+            &FieldSpec {
+                min: 0,
+                max: 23,
+                names: &[],
+            },
+            false,
+        )?,
+        day_of_month: parse_cron_field(
+            parts[2],
+            &FieldSpec {
+                min: 1,
+                max: 31,
+                names: &[],
+            },
+            false,
+        )?,
+        month: parse_cron_field(
+            parts[3],
+            &FieldSpec {
+                min: 1,
+                max: 12,
+                names: MONTH_NAMES,
+            },
+            false,
+        )?,
+        // Day-of-week normalized to 0=SUN..6=SAT during parsing.
+        day_of_week: parse_cron_field(
+            parts[4],
+            &FieldSpec {
+                min: 0,
+                max: 6,
+                names: DOW_NAMES,
+            },
+            true,
+        )?,
+        year: parse_cron_field(
+            parts[5],
+            &FieldSpec {
+                min: 1970,
+                max: 2199,
+                names: &[],
+            },
+            false,
+        )?,
     }))
 }
 
-fn parse_cron_field(s: &str) -> CronField {
+/// Parse one cron field: `*`/`?`, single values, ranges (`9-17`), lists
+/// (`0,30`), steps (`*/5`, `9-17/2`), and name aliases. Returns `None`
+/// (rejecting the whole expression) for any malformed or out-of-range
+/// field — previously ranges/lists/steps/names were coerced to wildcard,
+/// so a rule would fire at the wrong times (bug-audit 2026-05-28, 1.2).
+fn parse_cron_field(s: &str, spec: &FieldSpec, is_dow: bool) -> Option<CronField> {
+    let s = s.trim();
     if s == "*" || s == "?" {
-        return CronField::Any;
+        return Some(CronField::Any);
     }
-    match s.parse::<u32>() {
-        Ok(v) => CronField::Value(v),
-        Err(_) => CronField::Any,
+    let mut terms = Vec::new();
+    for part in s.split(',') {
+        terms.push(parse_cron_term(part.trim(), spec, is_dow)?);
+    }
+    if terms.is_empty() {
+        return None;
+    }
+    Some(CronField::Terms(terms))
+}
+
+fn parse_cron_term(part: &str, spec: &FieldSpec, is_dow: bool) -> Option<CronTerm> {
+    let in_bounds = |v: u32| v >= spec.min && v <= spec.max;
+    if let Some((base, step_s)) = part.split_once('/') {
+        let step: u32 = step_s.trim().parse().ok()?;
+        if step == 0 {
+            return None;
+        }
+        let (start, end) = if base == "*" {
+            (spec.min, spec.max)
+        } else if let Some((a, b)) = base.split_once('-') {
+            (
+                resolve_token(a, spec, is_dow)?,
+                resolve_token(b, spec, is_dow)?,
+            )
+        } else {
+            (resolve_token(base, spec, is_dow)?, spec.max)
+        };
+        if !in_bounds(start) || !in_bounds(end) || start > end {
+            return None;
+        }
+        return Some(CronTerm::Step { start, end, step });
+    }
+    if let Some((a, b)) = part.split_once('-') {
+        let start = resolve_token(a, spec, is_dow)?;
+        let end = resolve_token(b, spec, is_dow)?;
+        if !in_bounds(start) || !in_bounds(end) || start > end {
+            return None;
+        }
+        return Some(CronTerm::Range(start, end));
+    }
+    let v = resolve_token(part, spec, is_dow)?;
+    if !in_bounds(v) {
+        return None;
+    }
+    Some(CronTerm::Single(v))
+}
+
+fn term_matches(term: &CronTerm, value: u32) -> bool {
+    match term {
+        CronTerm::Single(v) => *v == value,
+        CronTerm::Range(a, b) => value >= *a && value <= *b,
+        CronTerm::Step { start, end, step } => {
+            value >= *start && value <= *end && (value - start) % step == 0
+        }
+    }
+}
+
+fn matches_field(field: &CronField, value: u32) -> bool {
+    match field {
+        CronField::Any => true,
+        CronField::Terms(terms) => terms.iter().any(|t| term_matches(t, value)),
     }
 }
 
 fn cron_matches_now(cron: &CronExpr) -> bool {
-    let now = Utc::now();
-    let matches_field = |field: &CronField, actual: u32| -> bool {
-        match field {
-            CronField::Any => true,
-            CronField::Value(v) => *v == actual,
-        }
-    };
+    cron_matches_at(cron, Utc::now())
+}
+
+fn cron_matches_at(cron: &CronExpr, now: chrono::DateTime<Utc>) -> bool {
     matches_field(&cron.minute, now.minute())
         && matches_field(&cron.hour, now.hour())
         && matches_field(&cron.day_of_month, now.day())
         && matches_field(&cron.month, now.month())
         && matches_field(&cron.day_of_week, now.weekday().num_days_from_sunday())
+        && matches_field(&cron.year, now.year() as u32)
 }
 
 /// Background scheduler that fires scheduled EventBridge rules.
@@ -381,11 +560,11 @@ mod tests {
         let s = parse_schedule("cron(0 12 * * ? *)");
         match s {
             Some(Schedule::Cron(c)) => {
-                assert!(matches!(c.minute, CronField::Value(0)));
-                assert!(matches!(c.hour, CronField::Value(12)));
-                assert!(matches!(c.day_of_month, CronField::Any));
-                assert!(matches!(c.month, CronField::Any));
-                assert!(matches!(c.day_of_week, CronField::Any));
+                assert_eq!(c.minute, CronField::Terms(vec![CronTerm::Single(0)]));
+                assert_eq!(c.hour, CronField::Terms(vec![CronTerm::Single(12)]));
+                assert_eq!(c.day_of_month, CronField::Any);
+                assert_eq!(c.month, CronField::Any);
+                assert_eq!(c.day_of_week, CronField::Any);
             }
             _ => panic!("expected cron"),
         }
@@ -417,12 +596,10 @@ mod tests {
     }
 
     #[test]
-    fn parse_cron_non_numeric_field_is_any() {
-        let s = parse_schedule("cron(xyz 12 * * ? *)");
-        match s {
-            Some(Schedule::Cron(c)) => assert!(matches!(c.minute, CronField::Any)),
-            _ => panic!("expected cron"),
-        }
+    fn parse_cron_non_numeric_field_is_rejected() {
+        // bug-audit 2026-05-28, 1.2: unknown tokens must reject the whole
+        // expression, not coerce to wildcard (which fired every minute).
+        assert!(parse_schedule("cron(xyz 12 * * ? *)").is_none());
     }
 
     #[test]
@@ -433,6 +610,7 @@ mod tests {
             day_of_month: CronField::Any,
             month: CronField::Any,
             day_of_week: CronField::Any,
+            year: CronField::Any,
         };
         assert!(cron_matches_now(&cron));
     }
@@ -440,13 +618,73 @@ mod tests {
     #[test]
     fn cron_impossible_minute_never_matches() {
         let cron = CronExpr {
-            minute: CronField::Value(99),
+            minute: CronField::Terms(vec![CronTerm::Single(99)]),
             hour: CronField::Any,
             day_of_month: CronField::Any,
             month: CronField::Any,
             day_of_week: CronField::Any,
+            year: CronField::Any,
         };
         assert!(!cron_matches_now(&cron));
+    }
+
+    // bug-audit 2026-05-28, 1.2: ranges/lists/steps/names fire only at the
+    // right times; numeric DOW is AWS one-based-Sunday; year is enforced.
+    fn at(min: u32, hour: u32, dom: u32, month: u32, year: i32) -> chrono::DateTime<Utc> {
+        use chrono::TimeZone;
+        Utc.with_ymd_and_hms(year, month, dom, hour, min, 0)
+            .unwrap()
+    }
+
+    #[test]
+    fn cron_step_minute_fires_only_on_multiples() {
+        let Some(Schedule::Cron(c)) = parse_schedule("cron(*/5 * * * ? *)") else {
+            panic!("expected cron");
+        };
+        assert!(cron_matches_at(&c, at(0, 9, 1, 6, 2026)));
+        assert!(cron_matches_at(&c, at(5, 9, 1, 6, 2026)));
+        assert!(!cron_matches_at(&c, at(3, 9, 1, 6, 2026)));
+    }
+
+    #[test]
+    fn cron_hour_range_and_dow_names() {
+        // 2026-06-01 = Monday, 2026-06-06 = Saturday.
+        let Some(Schedule::Cron(c)) = parse_schedule("cron(0 9-17 ? * MON-FRI *)") else {
+            panic!("expected cron");
+        };
+        assert!(cron_matches_at(&c, at(0, 9, 1, 6, 2026)));
+        assert!(cron_matches_at(&c, at(0, 17, 1, 6, 2026)));
+        assert!(!cron_matches_at(&c, at(0, 8, 1, 6, 2026)));
+        assert!(!cron_matches_at(&c, at(0, 9, 6, 6, 2026)));
+    }
+
+    #[test]
+    fn cron_list_and_month_name_and_year() {
+        let Some(Schedule::Cron(c)) = parse_schedule("cron(0,30 0 1 JAN ? 2027)") else {
+            panic!("expected cron");
+        };
+        assert!(cron_matches_at(&c, at(0, 0, 1, 1, 2027)));
+        assert!(cron_matches_at(&c, at(30, 0, 1, 1, 2027)));
+        assert!(!cron_matches_at(&c, at(15, 0, 1, 1, 2027))); // not in list
+        assert!(!cron_matches_at(&c, at(0, 0, 1, 1, 2026))); // wrong year
+    }
+
+    #[test]
+    fn cron_numeric_dow_is_one_based_sunday() {
+        // AWS: 2 = Monday. 2026-06-01 is a Monday.
+        let Some(Schedule::Cron(c)) = parse_schedule("cron(0 0 ? * 2 *)") else {
+            panic!("expected cron");
+        };
+        assert!(cron_matches_at(&c, at(0, 0, 1, 6, 2026)));
+        assert!(!cron_matches_at(&c, at(0, 0, 2, 6, 2026)));
+    }
+
+    #[test]
+    fn cron_invalid_fields_rejected() {
+        assert!(parse_schedule("cron(99 * * * ? *)").is_none());
+        assert!(parse_schedule("cron(0 25 * * ? *)").is_none());
+        assert!(parse_schedule("cron(0 0 1 13 ? *)").is_none());
+        assert!(parse_schedule("cron(0 0 ? * BADDAY *)").is_none());
     }
 
     mod tick_tests {

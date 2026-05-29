@@ -445,6 +445,26 @@ pub(crate) fn matches_single(pattern_elem: &Value, event_value: &Value) -> bool 
                     Value::String(s) => event_value.as_str() != Some(s.as_str()),
                     Value::Array(arr) => !arr.iter().any(|v| values_equal(v, event_value)),
                     Value::Number(_) => event_value != anything_but_val,
+                    // Nested-matcher negation, e.g.
+                    // {"anything-but": {"prefix": "x"}} matches when the
+                    // field does NOT start with "x". Previously the object
+                    // form always matched, so excluded events were still
+                    // delivered (bug-audit 2026-05-28, 1.14).
+                    Value::Object(nested) => {
+                        let fv = event_value.as_str();
+                        if let Some(p) = nested.get("prefix").and_then(|v| v.as_str()) {
+                            !fv.is_some_and(|s| s.starts_with(p))
+                        } else if let Some(suf) = nested.get("suffix").and_then(|v| v.as_str()) {
+                            !fv.is_some_and(|s| s.ends_with(suf))
+                        } else if let Some(eic) =
+                            nested.get("equals-ignore-case").and_then(|v| v.as_str())
+                        {
+                            !fv.is_some_and(|s| s.eq_ignore_ascii_case(eic))
+                        } else {
+                            // Unknown nested matcher: default to matching.
+                            true
+                        }
+                    }
                     _ => true,
                 };
             }
