@@ -153,6 +153,7 @@ fn add_permission_with_invalid_policy_returns_error_not_panic() {
                 tags: vec![],
                 created_at: Utc::now(),
                 subscriptions_deleted: 0,
+                fifo_sequence: 0,
             },
         );
     }

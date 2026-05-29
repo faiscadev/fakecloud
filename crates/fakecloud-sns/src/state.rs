@@ -18,6 +18,11 @@ pub struct SnsTopic {
     /// reset along with the topic itself, so we don't bump there.
     #[serde(default)]
     pub subscriptions_deleted: u64,
+    /// Monotonic per-topic counter for FIFO `SequenceNumber`s. AWS returns
+    /// a strictly-increasing opaque decimal on every Publish/PublishBatch
+    /// to a FIFO topic; non-FIFO topics emit none. (bug-audit 2026-05-28, 1.6)
+    #[serde(default)]
+    pub fifo_sequence: u64,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

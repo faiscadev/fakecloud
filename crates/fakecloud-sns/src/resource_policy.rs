@@ -108,6 +108,7 @@ mod tests {
                 is_fifo: false,
                 created_at: Utc::now(),
                 subscriptions_deleted: 0,
+                fifo_sequence: 0,
             },
         );
         state
