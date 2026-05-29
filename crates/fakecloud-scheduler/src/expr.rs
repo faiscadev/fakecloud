@@ -436,16 +436,15 @@ mod tests {
         let Some(Expr::Cron(c)) = parse("cron(*/15 9-17 ? * MON-FRI *)") else {
             panic!("expected cron");
         };
-        let at = |min, hour, dom, dow_ok: bool| {
-            // pick a Monday (1st) or Saturday (6th) of June 2026
-            let day = if dow_ok { 1 } else { 6 };
+        // 2026-06-01 is a Monday, 2026-06-06 is a Saturday.
+        let at = |min: u32, hour: u32, day: u32| {
             Utc.with_ymd_and_hms(2026, 6, day, hour, min, 0).unwrap()
         };
-        assert!(matches_cron(&c, at(0, 9, 1, true)));
-        assert!(matches_cron(&c, at(15, 17, 1, true)));
-        assert!(!matches_cron(&c, at(10, 9, 1, true))); // not /15
-        assert!(!matches_cron(&c, at(0, 8, 1, true))); // before hour range
-        assert!(!matches_cron(&c, at(0, 9, 6, false))); // Saturday
+        assert!(matches_cron(&c, at(0, 9, 1))); // Mon 09:00, /15 ok
+        assert!(matches_cron(&c, at(15, 17, 1))); // Mon 17:15
+        assert!(!matches_cron(&c, at(10, 9, 1))); // minute not a /15 multiple
+        assert!(!matches_cron(&c, at(0, 8, 1))); // before hour range
+        assert!(!matches_cron(&c, at(0, 9, 6))); // Saturday, outside MON-FRI
     }
 
     #[test]
