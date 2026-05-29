@@ -33,29 +33,26 @@ pub enum RuntimeError {
 
 impl ElastiCacheRuntime {
     pub fn new() -> Option<Self> {
-        let cli = if let Ok(cli) = std::env::var("FAKECLOUD_CONTAINER_CLI") {
-            if cli_available(&cli) {
-                cli
-            } else {
-                return None;
-            }
-        } else if cli_available("docker") {
-            "docker".to_string()
-        } else if cli_available("podman") {
-            "podman".to_string()
-        } else {
-            return None;
-        };
-
+        let cli = fakecloud_core::container_net::detect_container_cli()?;
+        let net = fakecloud_core::container_net::HostNetworking::detect(&cli);
         Some(Self {
             cli,
             containers: Arc::new(RwLock::new(HashMap::new())),
             instance_id: format!("fakecloud-{}", std::process::id()),
+            net,
         })
     }
 
     pub fn cli_name(&self) -> &str {
         &self.cli
+    }
+
+    /// Address fakecloud advertises for clients to reach a spawned cache
+    /// container, and uses for readiness probes. `127.0.0.1` on the host;
+    /// `host.docker.internal` when fakecloud is containerized
+    /// (`FAKECLOUD_IN_CONTAINER=1`) (issue #1539, bug 0.4).
+    pub fn endpoint_host(&self) -> &str {
+        &self.net.sibling_host
     }
 
     pub async fn ensure_redis(

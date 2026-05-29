@@ -1216,12 +1216,14 @@ pub(crate) fn build_run_argv(
     if let Some(ref hc) = plan.health_check {
         argv.extend(render_health_flags(hc));
     }
+    let http_alias_prefix = format!("http://{host_alias}:");
+    let https_alias_prefix = format!("https://{host_alias}:");
     for (k, v) in env {
         let transformed = v
-            .replace("http://127.0.0.1:", &format!("http://{host_alias}:"))
-            .replace("https://127.0.0.1:", &format!("https://{host_alias}:"))
-            .replace("http://localhost:", &format!("http://{host_alias}:"))
-            .replace("https://localhost:", &format!("https://{host_alias}:"));
+            .replace("http://127.0.0.1:", http_alias_prefix.as_str())
+            .replace("https://127.0.0.1:", https_alias_prefix.as_str())
+            .replace("http://localhost:", http_alias_prefix.as_str())
+            .replace("https://localhost:", https_alias_prefix.as_str());
         argv.push("-e".into());
         argv.push(format!("{}={}", k, transformed));
     }

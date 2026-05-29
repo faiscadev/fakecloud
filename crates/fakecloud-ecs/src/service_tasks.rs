@@ -809,7 +809,15 @@ mod port_mapping_tests {
     }
 
     fn argv_string(plan: &ContainerPlan) -> Vec<String> {
-        build_run_argv(plan, &[], "task-1", "host-gateway", "alpine:latest", true)
+        build_run_argv(
+            plan,
+            &[],
+            "task-1",
+            "host.docker.internal",
+            None,
+            "alpine:latest",
+            true,
+        )
     }
 
     /// Helper for asserting a `--publish <spec>` pair is present in argv.
