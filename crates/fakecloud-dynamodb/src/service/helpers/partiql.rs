@@ -2,6 +2,95 @@
 
 use super::*;
 
+/// Compare two DynamoDB numeric attribute strings with full precision.
+///
+/// DynamoDB numbers are arbitrary-precision decimals; parsing to `f64`
+/// rounds past 2^53. This compares the decimal representations directly:
+/// sign, then integer magnitude (by length, then lexically), then the
+/// fractional part. Falls back to `Equal` only if both sides are
+/// unparseable. Handles exponent notation and negative zero.
+fn compare_number_strings(x: &str, y: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let (xn, xd) = match normalize_decimal(x) {
+        Some(v) => v,
+        None => return Ordering::Equal,
+    };
+    let (yn, yd) = match normalize_decimal(y) {
+        Some(v) => v,
+        None => return Ordering::Equal,
+    };
+    match (xn, yn) {
+        (false, true) => return Ordering::Less,
+        (true, false) => return Ordering::Greater,
+        _ => {}
+    }
+    let mag = compare_magnitude(&xd, &yd);
+    if xn {
+        mag.reverse()
+    } else {
+        mag
+    }
+}
+
+/// Decompose a decimal string into `(is_negative, (int_digits, frac_digits))`
+/// with insignificant zeros stripped so the magnitude compare is purely
+/// lexical. Returns `None` for non-numeric input; negative zero normalizes
+/// to positive.
+#[allow(clippy::type_complexity)]
+fn normalize_decimal(s: &str) -> Option<(bool, (String, String))> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let (neg, rest) = match s.strip_prefix('-') {
+        Some(r) => (true, r),
+        None => (false, s.strip_prefix('+').unwrap_or(s)),
+    };
+    let (mantissa, exp) = match rest.split_once(['e', 'E']) {
+        Some((m, e)) => (m, e.parse::<i64>().ok()?),
+        None => (rest, 0),
+    };
+    let (int_part, frac_part) = match mantissa.split_once('.') {
+        Some((i, f)) => (i, f),
+        None => (mantissa, ""),
+    };
+    if int_part.is_empty() && frac_part.is_empty() {
+        return None;
+    }
+    if !int_part.chars().all(|c| c.is_ascii_digit())
+        || !frac_part.chars().all(|c| c.is_ascii_digit())
+    {
+        return None;
+    }
+    let mut digits = format!("{int_part}{frac_part}");
+    let point = int_part.len() as i64 + exp;
+    let (int_str, frac_str) = if point <= 0 {
+        let pad = "0".repeat((-point) as usize);
+        digits = format!("{pad}{digits}");
+        (String::new(), digits)
+    } else if (point as usize) >= digits.len() {
+        let pad = "0".repeat(point as usize - digits.len());
+        digits.push_str(&pad);
+        (digits, String::new())
+    } else {
+        let (i, f) = digits.split_at(point as usize);
+        (i.to_string(), f.to_string())
+    };
+    let int_norm = int_str.trim_start_matches('0').to_string();
+    let frac_norm = frac_str.trim_end_matches('0').to_string();
+    let is_zero = int_norm.is_empty() && frac_norm.is_empty();
+    Some((neg && !is_zero, (int_norm, frac_norm)))
+}
+
+/// Lexically compare two normalized non-negative magnitudes
+/// `(int_digits, frac_digits)`.
+fn compare_magnitude(a: &(String, String), b: &(String, String)) -> std::cmp::Ordering {
+    a.0.len()
+        .cmp(&b.0.len())
+        .then_with(|| a.0.cmp(&b.0))
+        .then_with(|| a.1.cmp(&b.1))
+}
+
 pub(crate) fn compare_attribute_values(a: Option<&Value>, b: Option<&Value>) -> std::cmp::Ordering {
     match (a, b) {
         (None, None) => std::cmp::Ordering::Equal,
@@ -17,11 +106,14 @@ pub(crate) fn compare_attribute_values(a: Option<&Value>, b: Option<&Value>) -> 
                     a_str.cmp(b_str)
                 }
                 (Some(("N", a_val)), Some(("N", b_val))) => {
-                    let a_num: f64 = a_val.as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
-                    let b_num: f64 = b_val.as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
-                    a_num
-                        .partial_cmp(&b_num)
-                        .unwrap_or(std::cmp::Ordering::Equal)
+                    // DynamoDB numbers are arbitrary-precision decimals (up
+                    // to 38 significant digits). Parsing to f64 silently
+                    // rounds past 2^53, so two distinct large integers
+                    // compare Equal and sort wrong (bug-audit 2026-05-28,
+                    // 1.11). Compare the decimal strings directly.
+                    let a_str = a_val.as_str().unwrap_or("0");
+                    let b_str = b_val.as_str().unwrap_or("0");
+                    compare_number_strings(a_str, b_str)
                 }
                 (Some(("B", a_val)), Some(("B", b_val))) => {
                     let a_str = a_val.as_str().unwrap_or("");
@@ -999,4 +1091,40 @@ pub(crate) fn split_partiql_pairs(s: &str) -> Vec<&str> {
     }
     parts.push(&s[start..]);
     parts
+}
+
+#[cfg(test)]
+mod number_compare_tests {
+    use super::*;
+    use std::cmp::Ordering;
+
+    // bug-audit 2026-05-28, 1.11: integers past 2^53 must compare exactly,
+    // not get rounded to the same f64.
+    #[test]
+    fn large_integers_compare_exactly() {
+        assert_eq!(
+            compare_number_strings("9007199254740993", "9007199254740992"),
+            Ordering::Greater
+        );
+        assert_eq!(
+            compare_number_strings("9007199254740992", "9007199254740993"),
+            Ordering::Less
+        );
+        assert_eq!(
+            compare_number_strings("12345678901234567890", "12345678901234567890"),
+            Ordering::Equal
+        );
+    }
+
+    #[test]
+    fn signs_decimals_and_exponents() {
+        assert_eq!(compare_number_strings("-5", "3"), Ordering::Less);
+        assert_eq!(compare_number_strings("-5", "-3"), Ordering::Less);
+        assert_eq!(compare_number_strings("3.14", "3.2"), Ordering::Less);
+        assert_eq!(compare_number_strings("3.10", "3.1"), Ordering::Equal);
+        assert_eq!(compare_number_strings("0", "-0"), Ordering::Equal);
+        assert_eq!(compare_number_strings("10", "9"), Ordering::Greater);
+        assert_eq!(compare_number_strings("1e3", "1000"), Ordering::Equal);
+        assert_eq!(compare_number_strings("1e-2", "0.01"), Ordering::Equal);
+    }
 }

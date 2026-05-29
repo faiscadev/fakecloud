@@ -10,7 +10,7 @@ use super::{
     evaluate_condition, extract_key, get_table, get_table_mut, parse_expression_attribute_names,
     parse_expression_attribute_values, project_item, require_object, require_str,
     return_consumed_mode, return_icm_mode, validate_key_attributes_in_key, validate_key_in_item,
-    DynamoDbService,
+    AttributeValue, DynamoDbService,
 };
 
 impl DynamoDbService {
@@ -375,7 +375,14 @@ impl DynamoDbService {
             None
         };
 
-        let old_item = if return_values == "ALL_OLD" {
+        // Snapshot the pre-update item when the requested ReturnValues
+        // needs it: ALL_OLD returns it whole, and UPDATED_NEW/UPDATED_OLD
+        // need it to diff against the post-update item so they can return
+        // ONLY the changed attributes (bug-audit 2026-05-28, 1.8 — we used
+        // to return the whole item for UPDATED_NEW and nothing for
+        // UPDATED_OLD).
+        let pre_update_item = if matches!(return_values, "ALL_OLD" | "UPDATED_OLD" | "UPDATED_NEW")
+        {
             Some(table.items[idx].clone())
         } else {
             None
@@ -390,10 +397,26 @@ impl DynamoDbService {
             )?;
         }
 
-        let new_item = if return_values == "ALL_NEW" || return_values == "UPDATED_NEW" {
-            Some(table.items[idx].clone())
-        } else {
-            None
+        // Compute the ReturnValues payload per AWS semantics:
+        // - ALL_NEW   : the whole post-update item
+        // - ALL_OLD   : the whole pre-update item
+        // - UPDATED_NEW: only attributes that changed, with NEW values
+        // - UPDATED_OLD: only attributes that changed, with OLD values
+        // - NONE      : nothing
+        let response_attributes: Option<HashMap<String, AttributeValue>> = match return_values {
+            "ALL_NEW" => Some(table.items[idx].clone()),
+            "ALL_OLD" => pre_update_item.clone(),
+            "UPDATED_NEW" => Some(diff_updated_attributes(
+                pre_update_item.as_ref(),
+                &table.items[idx],
+                UpdatedSide::New,
+            )),
+            "UPDATED_OLD" => Some(diff_updated_attributes(
+                pre_update_item.as_ref(),
+                &table.items[idx],
+                UpdatedSide::Old,
+            )),
+            _ => None,
         };
 
         let event_name = if is_insert { "INSERT" } else { "MODIFY" };
@@ -443,10 +466,12 @@ impl DynamoDbService {
         }
 
         let mut result = json!({});
-        if let Some(old) = old_item {
-            result["Attributes"] = json!(old);
-        } else if let Some(new) = new_item {
-            result["Attributes"] = json!(new);
+        if let Some(attrs) = response_attributes {
+            // UPDATED_NEW/UPDATED_OLD with no changed attributes still
+            // omit `Attributes` entirely, matching AWS.
+            if !attrs.is_empty() {
+                result["Attributes"] = json!(attrs);
+            }
         }
         let cc = build_consumed_capacity(&return_consumed, table_name, 0.0, 1.0);
         if !cc.is_null() {
@@ -457,5 +482,120 @@ impl DynamoDbService {
         }
 
         Self::ok_json(result)
+    }
+}
+
+/// Which side of an UpdateItem diff to return for the `UPDATED_*`
+/// `ReturnValues` modes.
+enum UpdatedSide {
+    /// `UPDATED_NEW`: the post-update value of each changed attribute.
+    New,
+    /// `UPDATED_OLD`: the pre-update value of each changed attribute.
+    Old,
+}
+
+/// Compute the `UPDATED_NEW` / `UPDATED_OLD` ReturnValues payload: the set
+/// of attributes whose value differs between the pre- and post-update item,
+/// projected to the requested side. AWS returns only the attributes the
+/// update touched — added, removed, or modified — not the whole item.
+///
+/// - An attribute present after but not before (or with a changed value) is
+///   "changed". For `New` we emit its post value; for `Old` its pre value
+///   (absent on the old side -> omitted).
+/// - An attribute removed by the update is "changed". For `Old` we emit its
+///   pre value; for `New` it's gone, so it's omitted.
+///
+/// `pre` is `None` only when the item didn't exist before (pure insert), in
+/// which case every post attribute is "new".
+fn diff_updated_attributes(
+    pre: Option<&HashMap<String, AttributeValue>>,
+    post: &HashMap<String, AttributeValue>,
+    side: UpdatedSide,
+) -> HashMap<String, AttributeValue> {
+    let empty = HashMap::new();
+    let pre = pre.unwrap_or(&empty);
+    let mut out = HashMap::new();
+
+    // Attributes present (or changed) in the post item.
+    for (k, new_v) in post {
+        let changed = match pre.get(k) {
+            Some(old_v) => old_v != new_v,
+            None => true,
+        };
+        if changed {
+            match side {
+                UpdatedSide::New => {
+                    out.insert(k.clone(), new_v.clone());
+                }
+                UpdatedSide::Old => {
+                    if let Some(old_v) = pre.get(k) {
+                        out.insert(k.clone(), old_v.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    // Attributes removed by the update (present before, gone after). Only
+    // the OLD side can surface their value; the NEW side has nothing.
+    if let UpdatedSide::Old = side {
+        for (k, old_v) in pre {
+            if !post.contains_key(k) {
+                out.insert(k.clone(), old_v.clone());
+            }
+        }
+    }
+
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // AttributeValue is `serde_json::Value`; a DynamoDB number attribute
+    // is the JSON object `{"N": "<digits>"}`.
+    fn n(v: &str) -> AttributeValue {
+        json!({ "N": v })
+    }
+
+    fn map(pairs: &[(&str, &str)]) -> HashMap<String, AttributeValue> {
+        pairs.iter().map(|(k, v)| (k.to_string(), n(v))).collect()
+    }
+
+    // bug-audit 2026-05-28, 1.8: UPDATED_NEW returns only changed
+    // attributes (new values), not the whole item.
+    #[test]
+    fn updated_new_returns_only_changed_new_values() {
+        let pre = map(&[("a", "1"), ("b", "2"), ("c", "3")]);
+        let post = map(&[("a", "1"), ("b", "20"), ("c", "3"), ("d", "4")]);
+        let got = diff_updated_attributes(Some(&pre), &post, UpdatedSide::New);
+        // b changed, d added; a and c unchanged so omitted.
+        assert_eq!(got, map(&[("b", "20"), ("d", "4")]));
+    }
+
+    // bug-audit 2026-05-28, 1.8: UPDATED_OLD returns the OLD value of each
+    // changed attribute (was previously empty).
+    #[test]
+    fn updated_old_returns_only_changed_old_values() {
+        let pre = map(&[("a", "1"), ("b", "2"), ("e", "9")]);
+        let post = map(&[("a", "1"), ("b", "20")]); // b changed, e removed
+        let got = diff_updated_attributes(Some(&pre), &post, UpdatedSide::Old);
+        assert_eq!(got, map(&[("b", "2"), ("e", "9")]));
+    }
+
+    #[test]
+    fn updated_new_on_insert_returns_all_attributes() {
+        let post = map(&[("a", "1"), ("b", "2")]);
+        let got = diff_updated_attributes(None, &post, UpdatedSide::New);
+        assert_eq!(got, post);
+    }
+
+    #[test]
+    fn no_changes_yields_empty() {
+        let pre = map(&[("a", "1")]);
+        let post = map(&[("a", "1")]);
+        assert!(diff_updated_attributes(Some(&pre), &post, UpdatedSide::New).is_empty());
+        assert!(diff_updated_attributes(Some(&pre), &post, UpdatedSide::Old).is_empty());
     }
 }

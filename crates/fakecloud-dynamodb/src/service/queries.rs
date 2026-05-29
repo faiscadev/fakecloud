@@ -29,6 +29,19 @@ impl DynamoDbService {
         let expr_attr_values = parse_expression_attribute_values(&body);
 
         let key_condition = body["KeyConditionExpression"].as_str();
+        // Query REQUIRES a key condition. Without one, AWS rejects the
+        // request rather than scanning the whole table — returning every
+        // item on a missing KeyConditionExpression is a silent
+        // wrong-result bug (bug-audit 2026-05-28, 1.1). The legacy
+        // `KeyConditions`/`QueryFilter` parameters are not supported here,
+        // so an absent KeyConditionExpression is always invalid.
+        if key_condition.map(str::trim).unwrap_or("").is_empty() {
+            return Err(AwsServiceError::aws_error(
+                http::StatusCode::BAD_REQUEST,
+                "ValidationException",
+                "Either the KeyConditions or KeyConditionExpression parameter must be specified in the request.",
+            ));
+        }
         let filter_expression = body["FilterExpression"].as_str();
         let scan_forward = body["ScanIndexForward"].as_bool().unwrap_or(true);
         let limit = body["Limit"].as_i64().map(|l| l as usize);
