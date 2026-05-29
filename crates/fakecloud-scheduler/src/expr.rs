@@ -37,8 +37,71 @@ pub struct CronExpr {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CronField {
+    /// `*` or `?` — matches any value.
     Any,
-    Value(u32),
+    /// Comma-separated list of terms; matches when ANY term matches.
+    Terms(Vec<CronTerm>),
+}
+
+/// One comma-separated element of a cron field.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CronTerm {
+    Single(u32),
+    Range(u32, u32),
+    Step { start: u32, end: u32, step: u32 },
+}
+
+/// Field bounds + name aliases used to parse and validate one cron field.
+struct FieldSpec {
+    min: u32,
+    max: u32,
+    names: &'static [(&'static str, u32)],
+}
+
+const MONTH_NAMES: &[(&str, u32)] = &[
+    ("JAN", 1),
+    ("FEB", 2),
+    ("MAR", 3),
+    ("APR", 4),
+    ("MAY", 5),
+    ("JUN", 6),
+    ("JUL", 7),
+    ("AUG", 8),
+    ("SEP", 9),
+    ("OCT", 10),
+    ("NOV", 11),
+    ("DEC", 12),
+];
+
+// Day-of-week names normalized to 0=Sunday..6=Saturday.
+const DOW_NAMES: &[(&str, u32)] = &[
+    ("SUN", 0),
+    ("MON", 1),
+    ("TUE", 2),
+    ("WED", 3),
+    ("THU", 4),
+    ("FRI", 5),
+    ("SAT", 6),
+];
+
+fn resolve_token(tok: &str, spec: &FieldSpec, is_dow: bool) -> Option<u32> {
+    let tok = tok.trim();
+    if let Ok(n) = tok.parse::<u32>() {
+        if is_dow {
+            // AWS Scheduler day-of-week: 1=SUN..7=SAT -> 0=SUN..6=SAT.
+            return match n {
+                0 => Some(0),
+                1..=7 => Some(n - 1),
+                _ => None,
+            };
+        }
+        return Some(n);
+    }
+    let upper = tok.to_ascii_uppercase();
+    spec.names
+        .iter()
+        .find(|(name, _)| upper.starts_with(name))
+        .map(|&(_, v)| v)
 }
 
 /// Parse a schedule expression. Returns `None` on any shape we don't
@@ -85,25 +148,138 @@ fn parse_cron(inner: &str) -> Option<Expr> {
     if parts.len() != 6 {
         return None;
     }
-    // Reject tokens we don't understand (ranges, lists, step values,
-    // month/weekday name shorthands). Falling back to wildcard would
-    // cause unsupported schedules to fire every minute instead of
-    // being silently disabled. `year` (parts[5]) is accepted but not
-    // enforced at fire time — matches existing eventbridge behavior.
-    Some(Expr::Cron(CronExpr {
-        minute: parse_cron_field(parts[0])?,
-        hour: parse_cron_field(parts[1])?,
-        day_of_month: parse_cron_field(parts[2])?,
-        month: parse_cron_field(parts[3])?,
-        day_of_week: parse_cron_field(parts[4])?,
-    }))
+    // Support single values, ranges (9-17), lists (0,30), steps (*/5,
+    // 9-17/2), and JAN/MON-style names; reject malformed/out-of-range
+    // fields. Previously ranges/lists/steps were rejected entirely, so
+    // valid AWS schedules were silently disabled (bug-audit 2026-05-28,
+    // 1.3). `year` (parts[5]) is parsed/validated but not enforced at
+    // fire time — matches the eventbridge ticker contract.
+    let cron = CronExpr {
+        minute: parse_cron_field(
+            parts[0],
+            &FieldSpec {
+                min: 0,
+                max: 59,
+                names: &[],
+            },
+            false,
+        )?,
+        hour: parse_cron_field(
+            parts[1],
+            &FieldSpec {
+                min: 0,
+                max: 23,
+                names: &[],
+            },
+            false,
+        )?,
+        day_of_month: parse_cron_field(
+            parts[2],
+            &FieldSpec {
+                min: 1,
+                max: 31,
+                names: &[],
+            },
+            false,
+        )?,
+        month: parse_cron_field(
+            parts[3],
+            &FieldSpec {
+                min: 1,
+                max: 12,
+                names: MONTH_NAMES,
+            },
+            false,
+        )?,
+        day_of_week: parse_cron_field(
+            parts[4],
+            &FieldSpec {
+                min: 0,
+                max: 6,
+                names: DOW_NAMES,
+            },
+            true,
+        )?,
+    };
+    // Validate the year field (parsed for correctness, not stored — the
+    // ticker contract doesn't enforce year at fire time). A malformed year
+    // still rejects the expression so CreateSchedule surfaces an error.
+    parse_cron_field(
+        parts[5],
+        &FieldSpec {
+            min: 1970,
+            max: 2199,
+            names: &[],
+        },
+        false,
+    )?;
+    Some(Expr::Cron(cron))
 }
 
-fn parse_cron_field(s: &str) -> Option<CronField> {
+/// Parse one cron field, supporting `*`/`?`, single values, ranges,
+/// steps, comma lists, and name aliases. `None` rejects the whole
+/// expression for any malformed/out-of-range field.
+fn parse_cron_field(s: &str, spec: &FieldSpec, is_dow: bool) -> Option<CronField> {
+    let s = s.trim();
     if s == "*" || s == "?" {
         return Some(CronField::Any);
     }
-    s.parse::<u32>().ok().map(CronField::Value)
+    let mut terms = Vec::new();
+    for part in s.split(',') {
+        terms.push(parse_cron_term(part.trim(), spec, is_dow)?);
+    }
+    if terms.is_empty() {
+        return None;
+    }
+    Some(CronField::Terms(terms))
+}
+
+fn parse_cron_term(part: &str, spec: &FieldSpec, is_dow: bool) -> Option<CronTerm> {
+    let in_bounds = |v: u32| v >= spec.min && v <= spec.max;
+    if let Some((base, step_s)) = part.split_once('/') {
+        let step: u32 = step_s.trim().parse().ok()?;
+        if step == 0 {
+            return None;
+        }
+        let (start, end) = if base == "*" {
+            (spec.min, spec.max)
+        } else if let Some((a, b)) = base.split_once('-') {
+            (
+                resolve_token(a, spec, is_dow)?,
+                resolve_token(b, spec, is_dow)?,
+            )
+        } else {
+            (resolve_token(base, spec, is_dow)?, spec.max)
+        };
+        if !in_bounds(start) || !in_bounds(end) || start > end {
+            return None;
+        }
+        return Some(CronTerm::Step { start, end, step });
+    }
+    if let Some((a, b)) = part.split_once('-') {
+        let start = resolve_token(a, spec, is_dow)?;
+        let end = resolve_token(b, spec, is_dow)?;
+        if !in_bounds(start) || !in_bounds(end) || start > end {
+            return None;
+        }
+        return Some(CronTerm::Range(start, end));
+    }
+    let v = resolve_token(part, spec, is_dow)?;
+    if !in_bounds(v) {
+        return None;
+    }
+    Some(CronTerm::Single(v))
+}
+
+#[allow(clippy::manual_is_multiple_of)] // keep `% step == 0` for MSRV
+fn term_matches(term: &CronTerm, value: u32) -> bool {
+    match term {
+        CronTerm::Single(v) => *v == value,
+        CronTerm::Range(a, b) => value >= *a && value <= *b,
+        CronTerm::Step { start, end, step } => {
+            value >= *start && value <= *end && (value - start).is_multiple_of(*step)
+        }
+    }
 }
 
 /// Decide whether `expr` is due to fire, given its `last_fired` time
@@ -178,7 +354,10 @@ fn matches_cron_fields(
     day_of_week: u32,
 ) -> bool {
     let match_field = |f: &CronField, actual: u32| -> bool {
-        matches!(f, CronField::Any) || matches!(f, CronField::Value(v) if *v == actual)
+        match f {
+            CronField::Any => true,
+            CronField::Terms(terms) => terms.iter().any(|t| term_matches(t, actual)),
+        }
     };
     match_field(&c.minute, minute)
         && match_field(&c.hour, hour)
@@ -231,14 +410,41 @@ mod tests {
     }
 
     #[test]
-    fn parse_cron_rejects_unsupported_tokens() {
-        // Non-numeric, non-wildcard tokens are now rejected instead
-        // of being silently converted to wildcards (which would make
-        // every unsupported schedule fire every minute).
-        assert!(parse("cron(*/5 * * * ? *)").is_none());
-        assert!(parse("cron(1,3,5 * * * ? *)").is_none());
-        assert!(parse("cron(1-3 * * * ? *)").is_none());
+    fn parse_cron_supports_ranges_lists_steps() {
+        // bug-audit 2026-05-28, 1.3: ranges/lists/steps are now real cron
+        // syntax that parses and fires, instead of being rejected (so the
+        // schedule silently never fired).
+        assert!(matches!(parse("cron(*/5 * * * ? *)"), Some(Expr::Cron(_))));
+        assert!(matches!(
+            parse("cron(1,3,5 * * * ? *)"),
+            Some(Expr::Cron(_))
+        ));
+        assert!(matches!(parse("cron(1-3 * * * ? *)"), Some(Expr::Cron(_))));
+        assert!(matches!(
+            parse("cron(0 9-17 ? * MON-FRI *)"),
+            Some(Expr::Cron(_))
+        ));
+        // Malformed / out-of-range still rejected.
         assert!(parse("cron(xyz 12 * * ? *)").is_none());
+        assert!(parse("cron(99 * * * ? *)").is_none());
+        assert!(parse("cron(0 0 1 13 ? *)").is_none());
+    }
+
+    #[test]
+    fn cron_ranges_and_steps_fire_correctly() {
+        // 2026-06-01 = Monday.
+        let Some(Expr::Cron(c)) = parse("cron(*/15 9-17 ? * MON-FRI *)") else {
+            panic!("expected cron");
+        };
+        // 2026-06-01 is a Monday, 2026-06-06 is a Saturday.
+        let at = |min: u32, hour: u32, day: u32| {
+            Utc.with_ymd_and_hms(2026, 6, day, hour, min, 0).unwrap()
+        };
+        assert!(matches_cron(&c, at(0, 9, 1))); // Mon 09:00, /15 ok
+        assert!(matches_cron(&c, at(15, 17, 1))); // Mon 17:15
+        assert!(!matches_cron(&c, at(10, 9, 1))); // minute not a /15 multiple
+        assert!(!matches_cron(&c, at(0, 8, 1))); // before hour range
+        assert!(!matches_cron(&c, at(0, 9, 6))); // Saturday, outside MON-FRI
     }
 
     #[test]
@@ -322,7 +528,7 @@ mod tests {
     #[test]
     fn is_due_cron_specific_minute_mismatch() {
         let c = CronExpr {
-            minute: CronField::Value(45),
+            minute: CronField::Terms(vec![CronTerm::Single(45)]),
             hour: CronField::Any,
             day_of_month: CronField::Any,
             month: CronField::Any,
