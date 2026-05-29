@@ -154,56 +154,66 @@ fn parse_cron(inner: &str) -> Option<Expr> {
     // valid AWS schedules were silently disabled (bug-audit 2026-05-28,
     // 1.3). `year` (parts[5]) is parsed/validated but not enforced at
     // fire time — matches the eventbridge ticker contract.
-    Some(
-        Expr::Cron(CronExpr {
-            minute: parse_cron_field(
-                parts[0],
-                &FieldSpec {
-                    min: 0,
-                    max: 59,
-                    names: &[],
-                },
-                false,
-            )?,
-            hour: parse_cron_field(
-                parts[1],
-                &FieldSpec {
-                    min: 0,
-                    max: 23,
-                    names: &[],
-                },
-                false,
-            )?,
-            day_of_month: parse_cron_field(
-                parts[2],
-                &FieldSpec {
-                    min: 1,
-                    max: 31,
-                    names: &[],
-                },
-                false,
-            )?,
-            month: parse_cron_field(
-                parts[3],
-                &FieldSpec {
-                    min: 1,
-                    max: 12,
-                    names: MONTH_NAMES,
-                },
-                false,
-            )?,
-            day_of_week: parse_cron_field(
-                parts[4],
-                &FieldSpec {
-                    min: 0,
-                    max: 6,
-                    names: DOW_NAMES,
-                },
-                true,
-            )?,
-        })
-        .validated(parts[5])?,
-    )
+    let cron = CronExpr {
+        minute: parse_cron_field(
+            parts[0],
+            &FieldSpec {
+                min: 0,
+                max: 59,
+                names: &[],
+            },
+            false,
+        )?,
+        hour: parse_cron_field(
+            parts[1],
+            &FieldSpec {
+                min: 0,
+                max: 23,
+                names: &[],
+            },
+            false,
+        )?,
+        day_of_month: parse_cron_field(
+            parts[2],
+            &FieldSpec {
+                min: 1,
+                max: 31,
+                names: &[],
+            },
+            false,
+        )?,
+        month: parse_cron_field(
+            parts[3],
+            &FieldSpec {
+                min: 1,
+                max: 12,
+                names: MONTH_NAMES,
+            },
+            false,
+        )?,
+        day_of_week: parse_cron_field(
+            parts[4],
+            &FieldSpec {
+                min: 0,
+                max: 6,
+                names: DOW_NAMES,
+            },
+            true,
+        )?,
+    };
+    // Validate the year field (parsed for correctness, not stored — the
+    // ticker contract doesn't enforce year at fire time). A malformed year
+    // still rejects the expression so CreateSchedule surfaces an error.
+    parse_cron_field(
+        parts[5],
+        &FieldSpec {
+            min: 1970,
+            max: 2199,
+            names: &[],
+        },
+        false,
+    )?;
+    Some(Expr::Cron(cron))
 }
 
 /// Parse one cron field, supporting `*`/`?`, single values, ranges,
@@ -261,6 +271,7 @@ fn parse_cron_term(part: &str, spec: &FieldSpec, is_dow: bool) -> Option<CronTer
     Some(CronTerm::Single(v))
 }
 
+#[allow(clippy::manual_is_multiple_of)] // keep `% step == 0` for MSRV
 fn term_matches(term: &CronTerm, value: u32) -> bool {
     match term {
         CronTerm::Single(v) => *v == value,
@@ -268,25 +279,6 @@ fn term_matches(term: &CronTerm, value: u32) -> bool {
         CronTerm::Step { start, end, step } => {
             value >= *start && value <= *end && (value - start) % step == 0
         }
-    }
-}
-
-impl CronExpr {
-    /// Validate the year field (parsed for correctness but not stored,
-    /// since the ticker contract doesn't enforce year at fire time) and
-    /// return self. Rejects a malformed year so CreateSchedule surfaces a
-    /// validation error.
-    fn validated(self, year_field: &str) -> Option<Self> {
-        parse_cron_field(
-            year_field,
-            &FieldSpec {
-                min: 1970,
-                max: 2199,
-                names: &[],
-            },
-            false,
-        )?;
-        Some(self)
     }
 }
 

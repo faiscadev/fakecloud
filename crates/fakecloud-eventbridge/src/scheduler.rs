@@ -253,6 +253,7 @@ fn parse_cron_term(part: &str, spec: &FieldSpec, is_dow: bool) -> Option<CronTer
     Some(CronTerm::Single(v))
 }
 
+#[allow(clippy::manual_is_multiple_of)] // keep `% step == 0` for MSRV
 fn term_matches(term: &CronTerm, value: u32) -> bool {
     match term {
         CronTerm::Single(v) => *v == value,
