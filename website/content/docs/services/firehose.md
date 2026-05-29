@@ -19,6 +19,7 @@ fakecloud implements Amazon Data Firehose's JSON 1.1 control plane: delivery str
   Out-of-range values return `InvalidArgumentException` with the AWS-shaped message, matching real Firehose.
 - **Records** — `PutRecord` / `PutRecordBatch` accept records, assign per-record `RecordId`s, and update `DeliveryStreamStatus` / `LastUpdateTimestamp`. Batches up to 500 records / 4 MB are honoured; over-limit batches return `ServiceUnavailableException`.
 - **Tags** — `ListTagsForDeliveryStream` / `TagDeliveryStream` / `UntagDeliveryStream`. Keyed by stream ARN.
+- **Server-side encryption** — `StartDeliveryStreamEncryption` / `StopDeliveryStreamEncryption`. Start sets the stream's `DeliveryStreamEncryptionConfiguration` to `Status=ENABLED` with the requested `KeyType` (defaults `AWS_OWNED_CMK`; stores the `KeyARN` for `CUSTOMER_MANAGED_CMK`); Stop flips it to `DISABLED`. The config is surfaced on `DescribeDeliveryStream`. Unknown streams return `ResourceNotFoundException`.
 
 ## Smoke test
 
