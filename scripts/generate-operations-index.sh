@@ -70,7 +70,7 @@ SERVICES=(
     "application-autoscaling|Application Auto Scaling|application-autoscaling"
     "athena|Athena|athena"
     "acm|ACM|acm"
-    "cloudwatch|CloudWatch (Metrics & Alarms)|"
+    "cloudwatch|CloudWatch (Metrics & Alarms)|cloudwatch"
     "firehose|Firehose|firehose"
     "glue|Glue|glue"
     "organizations|Organizations|organizations"
