@@ -2395,7 +2395,8 @@ mod tests {
             "containerPath": "C:\\data"
         });
         let resolved = resolve_mount_point(&mp, &volumes).expect("resolved");
-        assert_eq!(resolved.source, "/tmp/fakecloud/fsx/fs-xyz/share");
+        // FSx resolves to a docker named volume (bug-audit 2026-05-28, 0.6).
+        assert_eq!(resolved.source, "fakecloud-fsx-fs-xyz-share");
     }
 
     /// Mount points that reference an undeclared `sourceVolume` resolve
