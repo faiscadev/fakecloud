@@ -277,7 +277,7 @@ fn term_matches(term: &CronTerm, value: u32) -> bool {
         CronTerm::Single(v) => *v == value,
         CronTerm::Range(a, b) => value >= *a && value <= *b,
         CronTerm::Step { start, end, step } => {
-            value >= *start && value <= *end && (value - start) % step == 0
+            value >= *start && value <= *end && (value - start).is_multiple_of(*step)
         }
     }
 }
