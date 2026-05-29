@@ -193,16 +193,18 @@ impl SqsService {
             if queue.is_fifo {
                 if let Some(ref dedup_id) = effective_dedup_id {
                     let now = Utc::now();
-                    queue.dedup_cache.retain(|_, expiry| *expiry > now);
-                    if queue.dedup_cache.contains_key(dedup_id) {
-                        let msg_id = uuid::Uuid::new_v4().to_string();
-                        let seq = queue.next_sequence_number;
-                        queue.next_sequence_number += 1;
+                    queue.dedup_cache.retain(|_, e| e.expiry > now);
+                    if let Some(entry) = queue.dedup_cache.get(dedup_id) {
+                        // Duplicate within the dedup window: AWS replays the
+                        // ORIGINAL MessageId + SequenceNumber, does not enqueue
+                        // again, and does not advance the counter (1.13).
                         let mut resp = json!({
-                            "MessageId": msg_id,
+                            "MessageId": entry.message_id,
                             "MD5OfMessageBody": &md5_of_body,
-                            "SequenceNumber": seq.to_string(),
                         });
+                        if let Some(ref seq) = entry.sequence_number {
+                            resp["SequenceNumber"] = json!(seq);
+                        }
                         if let Some(ref md5) = md5_of_attrs {
                             resp["MD5OfMessageAttributes"] = json!(md5);
                         }
@@ -295,9 +297,14 @@ impl SqsService {
             // the dedup_id un-cached so the caller's retry can succeed.
             if queue.is_fifo {
                 if let Some(ref dedup_id) = effective_dedup_id {
-                    queue
-                        .dedup_cache
-                        .insert(dedup_id.clone(), now + chrono::Duration::minutes(5));
+                    queue.dedup_cache.insert(
+                        dedup_id.clone(),
+                        crate::state::DedupEntry {
+                            message_id: message_id.clone(),
+                            sequence_number: sequence_number.clone(),
+                            expiry: Utc::now() + chrono::Duration::minutes(5),
+                        },
+                    );
                 }
             }
 

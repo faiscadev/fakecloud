@@ -12,6 +12,16 @@ pub struct MessageAttribute {
     pub binary_value: Option<Vec<u8>>,
 }
 
+/// One FIFO dedup-cache entry: the original (non-duplicate) send result,
+/// kept until `expiry`; a duplicate within the window replays it verbatim
+/// (bug-audit 2026-05-28, 1.13).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct DedupEntry {
+    pub message_id: String,
+    pub sequence_number: Option<String>,
+    pub expiry: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SqsMessage {
     pub message_id: String,
@@ -50,8 +60,11 @@ pub struct SqsQueue {
     pub inflight: Vec<SqsMessage>,
     pub attributes: BTreeMap<String, String>,
     pub is_fifo: bool,
-    /// For FIFO dedup: dedup_id -> expiry
-    pub dedup_cache: BTreeMap<String, DateTime<Utc>>,
+    /// For FIFO dedup: dedup_id -> the original send's result + expiry,
+    /// so a duplicate within the window replays the ORIGINAL MessageId +
+    /// SequenceNumber without re-enqueuing or advancing the counter
+    /// (bug-audit 2026-05-28, 1.13).
+    pub dedup_cache: BTreeMap<String, DedupEntry>,
     /// DLQ redrive policy
     pub redrive_policy: Option<RedrivePolicy>,
     /// Queue tags (key -> value)
