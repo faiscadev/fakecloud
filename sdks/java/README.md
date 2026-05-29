@@ -139,6 +139,14 @@ FakeCloud fc = new FakeCloud("http://localhost:4566"); // explicit base URL
 | `getJobs()`              | List registered Glue jobs                    |
 | `getJobRuns()`           | List all Glue job runs                       |
 | `getJobRuns(jobName)`    | Filter job runs by job name                  |
+| `getCrawlers()`          | List Glue crawlers with state and targets    |
+
+### `fc.cloudwatch()`
+
+| Method                   | Description                                  |
+| ------------------------ | -------------------------------------------- |
+| `getAlarms()`            | List metric and composite alarms             |
+| `getMetrics()`           | List unique metric series with latest value  |
 
 ### `fc.s3()`
 

@@ -67,6 +67,9 @@ import type {
   FireScheduleResponse,
   GlueJobRunsResponse,
   GlueJobsResponse,
+  GlueCrawlersResponse,
+  CloudWatchAlarmsResponse,
+  CloudWatchMetricsResponse,
   SchedulerSchedulesResponse,
   S3AccessPointsResponse,
   S3NotificationsResponse,
@@ -574,6 +577,25 @@ export class GlueClient {
       ? `${this.baseUrl}/_fakecloud/glue/job-runs?job_name=${encodeURIComponent(jobName)}`
       : `${this.baseUrl}/_fakecloud/glue/job-runs`;
     const resp = await fetch(url);
+    return parse(resp);
+  }
+
+  async getCrawlers(): Promise<GlueCrawlersResponse> {
+    const resp = await fetch(`${this.baseUrl}/_fakecloud/glue/crawlers`);
+    return parse(resp);
+  }
+}
+
+export class CloudWatchClient {
+  constructor(private baseUrl: string) {}
+
+  async getAlarms(): Promise<CloudWatchAlarmsResponse> {
+    const resp = await fetch(`${this.baseUrl}/_fakecloud/cloudwatch/alarms`);
+    return parse(resp);
+  }
+
+  async getMetrics(): Promise<CloudWatchMetricsResponse> {
+    const resp = await fetch(`${this.baseUrl}/_fakecloud/cloudwatch/metrics`);
     return parse(resp);
   }
 }
@@ -1090,6 +1112,7 @@ export class FakeCloud {
   private readonly _events: EventsClient;
   private readonly _scheduler: SchedulerClient;
   private readonly _glue: GlueClient;
+  private readonly _cloudwatch: CloudWatchClient;
   private readonly _s3: S3Client;
   private readonly _dynamodb: DynamoDbClient;
   private readonly _secretsmanager: SecretsManagerClient;
@@ -1125,6 +1148,7 @@ export class FakeCloud {
     this._events = new EventsClient(this.baseUrl);
     this._scheduler = new SchedulerClient(this.baseUrl);
     this._glue = new GlueClient(this.baseUrl);
+    this._cloudwatch = new CloudWatchClient(this.baseUrl);
     this._s3 = new S3Client(this.baseUrl);
     this._dynamodb = new DynamoDbClient(this.baseUrl);
     this._secretsmanager = new SecretsManagerClient(this.baseUrl);
@@ -1227,6 +1251,10 @@ export class FakeCloud {
 
   get glue(): GlueClient {
     return this._glue;
+  }
+
+  get cloudwatch(): CloudWatchClient {
+    return this._cloudwatch;
   }
 
   get s3(): S3Client {

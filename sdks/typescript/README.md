@@ -196,6 +196,14 @@ Top-level client. Defaults to `http://localhost:4566`.
 | ------------------- | ---------------------------------------------- |
 | `getJobs()`         | List every Glue job                            |
 | `getJobRuns(name?)` | List job runs, optionally filtered by job name |
+| `getCrawlers()`     | List every Glue crawler with state and targets |
+
+### `fc.cloudwatch`
+
+| Method         | Description                                           |
+| -------------- | ----------------------------------------------------- |
+| `getAlarms()`  | List metric and composite alarms across accounts      |
+| `getMetrics()` | List unique metric series with datapoint count/latest |
 
 ### `fc.kms`
 

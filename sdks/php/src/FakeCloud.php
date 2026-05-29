@@ -29,6 +29,7 @@ final class FakeCloud
     private EventsClient $events;
     private SchedulerClient $scheduler;
     private GlueClient $glue;
+    private CloudWatchClient $cloudwatch;
     private S3Client $s3;
     private DynamoDbClient $dynamodb;
     private SecretsManagerClient $secretsmanager;
@@ -64,6 +65,7 @@ final class FakeCloud
         $this->events = new EventsClient($this->http);
         $this->scheduler = new SchedulerClient($this->http);
         $this->glue = new GlueClient($this->http);
+        $this->cloudwatch = new CloudWatchClient($this->http);
         $this->s3 = new S3Client($this->http);
         $this->dynamodb = new DynamoDbClient($this->http);
         $this->secretsmanager = new SecretsManagerClient($this->http);
@@ -136,6 +138,7 @@ final class FakeCloud
 
     public function scheduler(): SchedulerClient { return $this->scheduler; }
     public function glue(): GlueClient { return $this->glue; }
+    public function cloudwatch(): CloudWatchClient { return $this->cloudwatch; }
     public function s3(): S3Client { return $this->s3; }
     public function dynamodb(): DynamoDbClient { return $this->dynamodb; }
     public function secretsmanager(): SecretsManagerClient { return $this->secretsmanager; }
@@ -603,6 +606,32 @@ final class GlueClient
             $path .= '?job_name=' . rawurlencode($jobName);
         }
         return GlueJobRunsResponse::fromArray($this->http->get($path));
+    }
+
+    public function getCrawlers(): GlueCrawlersResponse
+    {
+        return GlueCrawlersResponse::fromArray(
+            $this->http->get('/_fakecloud/glue/crawlers')
+        );
+    }
+}
+
+final class CloudWatchClient
+{
+    public function __construct(private readonly HttpTransport $http) {}
+
+    public function getAlarms(): CloudWatchAlarmsResponse
+    {
+        return CloudWatchAlarmsResponse::fromArray(
+            $this->http->get('/_fakecloud/cloudwatch/alarms')
+        );
+    }
+
+    public function getMetrics(): CloudWatchMetricsResponse
+    {
+        return CloudWatchMetricsResponse::fromArray(
+            $this->http->get('/_fakecloud/cloudwatch/metrics')
+        );
     }
 }
 

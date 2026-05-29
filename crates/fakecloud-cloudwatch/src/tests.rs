@@ -342,3 +342,94 @@ async fn list_tags_missing_arn_errors() {
     let err = call_err(&svc, "ListTagsForResource", &[]).await;
     assert_eq!(err.code(), "MissingParameter");
 }
+
+#[tokio::test]
+async fn introspection_lists_metric_and_composite_alarms() {
+    use crate::introspection::list_all_alarms;
+    let svc = service();
+    call(
+        &svc,
+        "PutMetricAlarm",
+        &[
+            ("AlarmName", "cpu-high"),
+            ("Namespace", "AWS/EC2"),
+            ("MetricName", "CPUUtilization"),
+            ("ComparisonOperator", "GreaterThanThreshold"),
+            ("Threshold", "80"),
+            ("EvaluationPeriods", "1"),
+            (
+                "AlarmActions.member.1",
+                "arn:aws:sns:us-east-1:123456789012:topic",
+            ),
+        ],
+    )
+    .await;
+    call(
+        &svc,
+        "PutCompositeAlarm",
+        &[("AlarmName", "comp"), ("AlarmRule", "ALARM(cpu-high)")],
+    )
+    .await;
+
+    let rows = list_all_alarms(&svc.state);
+    assert_eq!(rows.len(), 2);
+    // Sorted by name within account/region: "comp" < "cpu-high".
+    assert_eq!(rows[0].name, "comp");
+    assert_eq!(rows[0].kind, "composite");
+    assert_eq!(rows[0].alarm_rule.as_deref(), Some("ALARM(cpu-high)"));
+    assert!(rows[0].namespace.is_none());
+
+    assert_eq!(rows[1].name, "cpu-high");
+    assert_eq!(rows[1].kind, "metric");
+    assert_eq!(rows[1].namespace.as_deref(), Some("AWS/EC2"));
+    assert_eq!(rows[1].metric_name.as_deref(), Some("CPUUtilization"));
+    assert_eq!(rows[1].threshold, Some(80.0));
+    assert_eq!(
+        rows[1].comparison_operator.as_deref(),
+        Some("GreaterThanThreshold")
+    );
+    assert_eq!(rows[1].state, "INSUFFICIENT_DATA");
+    assert_eq!(
+        rows[1].alarm_actions,
+        vec!["arn:aws:sns:us-east-1:123456789012:topic".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn introspection_collapses_metric_series() {
+    use crate::introspection::list_all_metrics;
+    let svc = service();
+    // Two datapoints for the same series.
+    call(
+        &svc,
+        "PutMetricData",
+        &[
+            ("Namespace", "MyApp"),
+            ("MetricData.member.1.MetricName", "Requests"),
+            ("MetricData.member.1.Value", "1"),
+            ("MetricData.member.1.Unit", "Count"),
+        ],
+    )
+    .await;
+    call(
+        &svc,
+        "PutMetricData",
+        &[
+            ("Namespace", "MyApp"),
+            ("MetricData.member.1.MetricName", "Requests"),
+            ("MetricData.member.1.Value", "5"),
+            ("MetricData.member.1.Unit", "Count"),
+        ],
+    )
+    .await;
+
+    let rows = list_all_metrics(&svc.state);
+    assert_eq!(rows.len(), 1);
+    let r = &rows[0];
+    assert_eq!(r.namespace, "MyApp");
+    assert_eq!(r.metric_name, "Requests");
+    assert_eq!(r.datapoint_count, 2);
+    let latest = r.latest.as_ref().expect("latest present");
+    assert_eq!(latest.value, Some(5.0));
+    assert_eq!(latest.unit.as_deref(), Some("Count"));
+}

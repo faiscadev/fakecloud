@@ -1186,6 +1186,199 @@ final class GlueJobRunsResponse
     }
 }
 
+final class GlueCrawler
+{
+    public function __construct(
+        public readonly string $accountId,
+        public readonly string $name,
+        public readonly string $role,
+        public readonly ?string $databaseName,
+        public readonly string $state,
+        public readonly string $targetSummary,
+        public readonly ?string $schedule,
+        public readonly string $creationTime,
+        public readonly string $lastUpdated,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            $data['accountId'] ?? '',
+            $data['name'] ?? '',
+            $data['role'] ?? '',
+            $data['databaseName'] ?? null,
+            $data['state'] ?? '',
+            $data['targetSummary'] ?? '',
+            $data['schedule'] ?? null,
+            $data['creationTime'] ?? '',
+            $data['lastUpdated'] ?? '',
+        );
+    }
+}
+
+final class GlueCrawlersResponse
+{
+    public function __construct(
+        /** @var GlueCrawler[] */
+        public readonly array $crawlers,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(array_map(
+            GlueCrawler::fromArray(...),
+            $data['crawlers'] ?? [],
+        ));
+    }
+}
+
+// ── CloudWatch ──────────────────────────────────────────────────
+
+final class CloudWatchDimension
+{
+    public function __construct(
+        public readonly string $name,
+        public readonly string $value,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            $data['name'] ?? '',
+            $data['value'] ?? '',
+        );
+    }
+}
+
+final class CloudWatchAlarm
+{
+    public function __construct(
+        public readonly string $accountId,
+        public readonly string $region,
+        public readonly string $name,
+        public readonly string $type,
+        public readonly string $state,
+        public readonly string $stateReason,
+        public readonly ?string $stateUpdatedTimestamp,
+        public readonly bool $actionsEnabled,
+        /** @var string[] */
+        public readonly array $alarmActions,
+        /** @var string[] */
+        public readonly array $okActions,
+        /** @var string[] */
+        public readonly array $insufficientDataActions,
+        public readonly ?string $namespace,
+        public readonly ?string $metricName,
+        public readonly ?float $threshold,
+        public readonly ?string $comparisonOperator,
+        public readonly ?string $alarmRule,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            $data['accountId'] ?? '',
+            $data['region'] ?? '',
+            $data['name'] ?? '',
+            $data['type'] ?? '',
+            $data['state'] ?? '',
+            $data['stateReason'] ?? '',
+            $data['stateUpdatedTimestamp'] ?? null,
+            (bool) ($data['actionsEnabled'] ?? false),
+            $data['alarmActions'] ?? [],
+            $data['okActions'] ?? [],
+            $data['insufficientDataActions'] ?? [],
+            $data['namespace'] ?? null,
+            $data['metricName'] ?? null,
+            isset($data['threshold']) ? (float) $data['threshold'] : null,
+            $data['comparisonOperator'] ?? null,
+            $data['alarmRule'] ?? null,
+        );
+    }
+}
+
+final class CloudWatchAlarmsResponse
+{
+    public function __construct(
+        /** @var CloudWatchAlarm[] */
+        public readonly array $alarms,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(array_map(
+            CloudWatchAlarm::fromArray(...),
+            $data['alarms'] ?? [],
+        ));
+    }
+}
+
+final class CloudWatchLatestDatapoint
+{
+    public function __construct(
+        public readonly string $timestamp,
+        public readonly ?float $value,
+        public readonly ?string $unit,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            $data['timestamp'] ?? '',
+            isset($data['value']) ? (float) $data['value'] : null,
+            $data['unit'] ?? null,
+        );
+    }
+}
+
+final class CloudWatchMetric
+{
+    public function __construct(
+        public readonly string $accountId,
+        public readonly string $region,
+        public readonly string $namespace,
+        public readonly string $metricName,
+        /** @var CloudWatchDimension[] */
+        public readonly array $dimensions,
+        public readonly int $datapointCount,
+        public readonly ?CloudWatchLatestDatapoint $latest,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            $data['accountId'] ?? '',
+            $data['region'] ?? '',
+            $data['namespace'] ?? '',
+            $data['metricName'] ?? '',
+            array_map(
+                CloudWatchDimension::fromArray(...),
+                $data['dimensions'] ?? [],
+            ),
+            (int) ($data['datapointCount'] ?? 0),
+            isset($data['latest']) && $data['latest'] !== null
+                ? CloudWatchLatestDatapoint::fromArray($data['latest'])
+                : null,
+        );
+    }
+}
+
+final class CloudWatchMetricsResponse
+{
+    public function __construct(
+        /** @var CloudWatchMetric[] */
+        public readonly array $metrics,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(array_map(
+            CloudWatchMetric::fromArray(...),
+            $data['metrics'] ?? [],
+        ));
+    }
+}
+
 // ── Scheduler (EventBridge Scheduler) ───────────────────────────
 
 final class SchedulerSchedule

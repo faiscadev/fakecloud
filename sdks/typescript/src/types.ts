@@ -880,6 +880,72 @@ export interface GlueJobRunsResponse {
   runs: GlueJobRun[];
 }
 
+export interface GlueCrawler {
+  accountId: string;
+  name: string;
+  role: string;
+  databaseName?: string | null;
+  state: string;
+  targetSummary: string;
+  schedule?: string | null;
+  creationTime: string;
+  lastUpdated: string;
+}
+
+export interface GlueCrawlersResponse {
+  crawlers: GlueCrawler[];
+}
+
+// ── CloudWatch ──────────────────────────────────────────────────────
+
+export interface CloudWatchDimension {
+  name: string;
+  value: string;
+}
+
+export interface CloudWatchAlarm {
+  accountId: string;
+  region: string;
+  name: string;
+  type: string;
+  state: string;
+  stateReason: string;
+  stateUpdatedTimestamp?: string | null;
+  actionsEnabled: boolean;
+  alarmActions: string[];
+  okActions: string[];
+  insufficientDataActions: string[];
+  namespace?: string | null;
+  metricName?: string | null;
+  threshold?: number | null;
+  comparisonOperator?: string | null;
+  alarmRule?: string | null;
+}
+
+export interface CloudWatchAlarmsResponse {
+  alarms: CloudWatchAlarm[];
+}
+
+export interface CloudWatchLatestDatapoint {
+  timestamp: string;
+  value?: number | null;
+  unit?: string | null;
+}
+
+export interface CloudWatchMetric {
+  accountId: string;
+  region: string;
+  namespace: string;
+  metricName: string;
+  dimensions: CloudWatchDimension[];
+  datapointCount: number;
+  latest: CloudWatchLatestDatapoint | null;
+}
+
+export interface CloudWatchMetricsResponse {
+  metrics: CloudWatchMetric[];
+}
+
 // ── Scheduler (EventBridge Scheduler) ───────────────────────────────
 
 export interface SchedulerSchedule {

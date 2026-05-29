@@ -76,12 +76,13 @@ aws --endpoint-url http://localhost:4566 glue get-partitions \
 
 ## Introspection
 
-Two IAM-bypass admin endpoints expose Glue job state so test assertions don't have to round-trip through the AWS SDK:
+Three IAM-bypass admin endpoints expose Glue state so test assertions don't have to round-trip through the AWS SDK:
 
 - `GET /_fakecloud/glue/jobs` — every Glue Job recorded by `CreateJob`, across every account.
 - `GET /_fakecloud/glue/job-runs` — every `JobRun` recorded by `StartJobRun`. Accepts `?job_name=foo` to filter to a single job.
+- `GET /_fakecloud/glue/crawlers` — every crawler recorded by `CreateCrawler`, across every account. Returns `name`, `role`, `databaseName`, `state`, a `targetSummary` (e.g. `"2 S3, 1 JDBC"`), `schedule`, `creationTime`, `lastUpdated`. Sorted by account, then name.
 
-All first-party SDKs ship a `glue` sub-client wrapping these endpoints (`getJobs()`, `getJobRuns(jobName?)`). See [`reference/introspection`](/docs/reference/introspection/) for the full endpoint catalog.
+All first-party SDKs ship a `glue` sub-client wrapping these endpoints (`getJobs()`, `getJobRuns(jobName?)`, `getCrawlers()`). See [`reference/introspection`](/docs/reference/introspection/) for the full endpoint catalog.
 
 ## Caveats
 

@@ -170,6 +170,14 @@ $fc = new FakeCloud('http://localhost:4566'); // explicit base URL
 | ---------------------------- | ------------------------------------------ |
 | `getJobs()`                  | List all Glue jobs                         |
 | `getJobRuns($jobName = null)` | List Glue job runs (optionally per job)    |
+| `getCrawlers()`              | List Glue crawlers with state and targets  |
+
+### `$fc->cloudwatch()`
+
+| Method                       | Description                                |
+| ---------------------------- | ------------------------------------------ |
+| `getAlarms()`                | List metric and composite alarms           |
+| `getMetrics()`               | List unique metric series with latest value |
 
 ### `$fc->s3()`
 

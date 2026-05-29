@@ -20,6 +20,15 @@ fakecloud implements Amazon CloudWatch's metrics-and-alarms surface (the `monito
 - **OTel enrichment** — `GetOTelEnrichment`, `StartOTelEnrichment`, `StopOTelEnrichment`.
 - **Tagging** — `TagResource`, `UntagResource`, `ListTagsForResource`.
 
+## Introspection
+
+Two IAM-bypass admin endpoints expose CloudWatch state so test assertions don't have to round-trip through the AWS SDK:
+
+- `GET /_fakecloud/cloudwatch/alarms` — every metric **and** composite alarm across all accounts and regions. Each entry carries `accountId`, `region`, `name`, `type` (`metric` or `composite`), `state`, `stateReason`, `stateUpdatedTimestamp`, `actionsEnabled`, and the `alarmActions` / `okActions` / `insufficientDataActions` lists. Metric alarms add `namespace`, `metricName`, `threshold`, `comparisonOperator`; composite alarms add `alarmRule`. Sorted by account, region, name.
+- `GET /_fakecloud/cloudwatch/metrics` — every unique metric series keyed by (account, region, namespace, metric, dimensions). Each entry carries `dimensions` (`[{name, value}]`), `datapointCount`, and `latest` (`{timestamp, value, unit}` or `null`). Sorted by account, region, namespace, metric.
+
+All first-party SDKs ship a `cloudwatch` sub-client wrapping these endpoints (`getAlarms()`, `getMetrics()`). See [`reference/introspection`](/docs/reference/introspection/) for the full endpoint catalog.
+
 ## Not implemented
 
 - No background metric sampling — alarms evaluate against the data points you publish via `PutMetricData` / `SetAlarmState`.

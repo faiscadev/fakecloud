@@ -11,6 +11,7 @@ export {
   EventsClient,
   SchedulerClient,
   GlueClient,
+  CloudWatchClient,
   S3Client,
   DynamoDbClient,
   SecretsManagerClient,

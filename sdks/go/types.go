@@ -1308,6 +1308,83 @@ type GlueJobRunsResponse struct {
 	Runs []GlueJobRun `json:"runs"`
 }
 
+// GlueCrawler describes one Glue crawler recorded by CreateCrawler.
+// Returned by the /_fakecloud/glue/crawlers endpoint.
+type GlueCrawler struct {
+	AccountID     string  `json:"accountId"`
+	Name          string  `json:"name"`
+	Role          string  `json:"role"`
+	DatabaseName  *string `json:"databaseName,omitempty"`
+	State         string  `json:"state"`
+	TargetSummary string  `json:"targetSummary"`
+	Schedule      *string `json:"schedule,omitempty"`
+	CreationTime  string  `json:"creationTime"`
+	LastUpdated   string  `json:"lastUpdated"`
+}
+
+// GlueCrawlersResponse contains every Glue crawler registered on the server.
+type GlueCrawlersResponse struct {
+	Crawlers []GlueCrawler `json:"crawlers"`
+}
+
+// CloudWatchDimension is a single metric dimension (name/value pair).
+type CloudWatchDimension struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}
+
+// CloudWatchAlarm describes one alarm (metric or composite) returned by
+// the /_fakecloud/cloudwatch/alarms endpoint. Metric-only fields are
+// omitted for composite alarms; AlarmRule is present only for composite
+// alarms.
+type CloudWatchAlarm struct {
+	AccountID               string   `json:"accountId"`
+	Region                  string   `json:"region"`
+	Name                    string   `json:"name"`
+	Type                    string   `json:"type"`
+	State                   string   `json:"state"`
+	StateReason             string   `json:"stateReason"`
+	StateUpdatedTimestamp   *string  `json:"stateUpdatedTimestamp,omitempty"`
+	ActionsEnabled          bool     `json:"actionsEnabled"`
+	AlarmActions            []string `json:"alarmActions"`
+	OkActions               []string `json:"okActions"`
+	InsufficientDataActions []string `json:"insufficientDataActions"`
+	Namespace               *string  `json:"namespace,omitempty"`
+	MetricName              *string  `json:"metricName,omitempty"`
+	Threshold               *float64 `json:"threshold,omitempty"`
+	ComparisonOperator      *string  `json:"comparisonOperator,omitempty"`
+	AlarmRule               *string  `json:"alarmRule,omitempty"`
+}
+
+// CloudWatchAlarmsResponse contains every metric and composite alarm.
+type CloudWatchAlarmsResponse struct {
+	Alarms []CloudWatchAlarm `json:"alarms"`
+}
+
+// CloudWatchLatestDatapoint is the most-recent datapoint of a metric series.
+type CloudWatchLatestDatapoint struct {
+	Timestamp string   `json:"timestamp"`
+	Value     *float64 `json:"value,omitempty"`
+	Unit      *string  `json:"unit,omitempty"`
+}
+
+// CloudWatchMetric describes one unique metric series returned by the
+// /_fakecloud/cloudwatch/metrics endpoint.
+type CloudWatchMetric struct {
+	AccountID      string                     `json:"accountId"`
+	Region         string                     `json:"region"`
+	Namespace      string                     `json:"namespace"`
+	MetricName     string                     `json:"metricName"`
+	Dimensions     []CloudWatchDimension      `json:"dimensions"`
+	DatapointCount int                        `json:"datapointCount"`
+	Latest         *CloudWatchLatestDatapoint `json:"latest"`
+}
+
+// CloudWatchMetricsResponse contains every unique metric series.
+type CloudWatchMetricsResponse struct {
+	Metrics []CloudWatchMetric `json:"metrics"`
+}
+
 // OrganizationsTag is a single key/value tag attached to an
 // Organizations resource (account, OU, root, or policy).
 type OrganizationsTag struct {

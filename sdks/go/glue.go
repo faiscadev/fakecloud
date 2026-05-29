@@ -33,3 +33,13 @@ func (c *GlueClient) GetJobRuns(ctx context.Context, jobName string) (*GlueJobRu
 	}
 	return &out, nil
 }
+
+// GetCrawlers returns every Glue crawler the server knows about, across
+// every account. Order is stable: by account, then crawler name.
+func (c *GlueClient) GetCrawlers(ctx context.Context) (*GlueCrawlersResponse, error) {
+	var out GlueCrawlersResponse
+	if err := c.fc.doGet(ctx, "/_fakecloud/glue/crawlers", &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}

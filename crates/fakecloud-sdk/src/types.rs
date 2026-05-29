@@ -1841,6 +1841,117 @@ pub struct GlueJob {
     pub last_modified_on: String,
 }
 
+/// Curated row for `GET /_fakecloud/glue/crawlers`. One entry per
+/// crawler across every account, mirroring what `CreateCrawler`
+/// recorded plus its lifecycle state.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GlueCrawler {
+    pub account_id: String,
+    pub name: String,
+    pub role: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub database_name: Option<String>,
+    /// READY / RUNNING / STOPPING.
+    pub state: String,
+    /// Short summary of configured targets, e.g. "2 S3, 1 JDBC".
+    pub target_summary: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schedule: Option<String>,
+    pub creation_time: String,
+    pub last_updated: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GlueCrawlersResponse {
+    pub crawlers: Vec<GlueCrawler>,
+}
+
+// ── CloudWatch ──────────────────────────────────────────────────────
+
+/// A single metric dimension (name/value pair).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudWatchDimension {
+    pub name: String,
+    pub value: String,
+}
+
+/// One alarm (metric or composite) as exposed by
+/// `GET /_fakecloud/cloudwatch/alarms`. Metric-only fields
+/// (`namespace`/`metricName`/`threshold`/`comparisonOperator`) are
+/// omitted for composite alarms; `alarmRule` is present only for
+/// composite alarms.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudWatchAlarm {
+    pub account_id: String,
+    pub region: String,
+    pub name: String,
+    /// "metric" or "composite".
+    #[serde(rename = "type")]
+    pub alarm_type: String,
+    /// OK / ALARM / INSUFFICIENT_DATA.
+    pub state: String,
+    pub state_reason: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state_updated_timestamp: Option<String>,
+    pub actions_enabled: bool,
+    pub alarm_actions: Vec<String>,
+    pub ok_actions: Vec<String>,
+    pub insufficient_data_actions: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metric_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub threshold: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub comparison_operator: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alarm_rule: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudWatchAlarmsResponse {
+    pub alarms: Vec<CloudWatchAlarm>,
+}
+
+/// Latest datapoint summary for a metric series.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudWatchLatestDatapoint {
+    pub timestamp: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
+}
+
+/// One unique metric series as exposed by
+/// `GET /_fakecloud/cloudwatch/metrics`, keyed by
+/// (account, region, namespace, metricName, dimensions).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudWatchMetric {
+    pub account_id: String,
+    pub region: String,
+    pub namespace: String,
+    pub metric_name: String,
+    pub dimensions: Vec<CloudWatchDimension>,
+    pub datapoint_count: usize,
+    /// Most-recent datapoint, or `null` if the series has none.
+    pub latest: Option<CloudWatchLatestDatapoint>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudWatchMetricsResponse {
+    pub metrics: Vec<CloudWatchMetric>,
+}
+
 // ── Athena ──────────────────────────────────────────────────────────
 
 /// One row in the Athena named-query introspection list returned by
