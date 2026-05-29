@@ -97,7 +97,7 @@ impl ElastiCacheRuntime {
     ) -> Result<RunningCacheContainer, RuntimeError> {
         self.stop_container(resource_id).await;
 
-        let mut args: Vec<String> = vec![
+        let args: Vec<String> = vec![
             "create".to_string(),
             "-p".to_string(),
             format!(":{container_port}"),
@@ -105,12 +105,8 @@ impl ElastiCacheRuntime {
             format!("fakecloud-elasticache={resource_id}"),
             "--label".to_string(),
             format!("fakecloud-instance={}", self.instance_id),
+            image.to_string(),
         ];
-        if let Some(path) = rdb_path {
-            args.push("-v".to_string());
-            args.push(format!("{path}:/data/dump.rdb:ro"));
-        }
-        args.push(image.to_string());
 
         let output = tokio::process::Command::new(&self.cli)
             .args(&args)
@@ -125,6 +121,31 @@ impl ElastiCacheRuntime {
         }
 
         let container_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+        // Stage the snapshot RDB into the created (not yet started)
+        // container via `docker cp` rather than a `-v` bind mount. A bind
+        // mount of a host path breaks when fakecloud runs in a container
+        // (`FAKECLOUD_IN_CONTAINER=1`): the rdb is written inside
+        // fakecloud's own filesystem, but the host daemon resolves the bind
+        // source against the *host* filesystem, silently yielding an empty
+        // cache. `docker cp` copies the bytes across the daemon, so it works
+        // on host and in-container alike (issue #1539, bug 0.7). Redis loads
+        // /data/dump.rdb at startup, so the copy must precede `start`.
+        if let Some(path) = rdb_path {
+            let cp_result = tokio::process::Command::new(&self.cli)
+                .args(["cp", path, &format!("{container_id}:/data/dump.rdb")])
+                .output()
+                .await
+                .map_err(|e| RuntimeError::ContainerStartFailed(e.to_string()))?;
+            if !cp_result.status.success() {
+                self.remove_container(&container_id).await;
+                return Err(RuntimeError::ContainerStartFailed(format!(
+                    "failed to stage snapshot rdb into container: {}",
+                    String::from_utf8_lossy(&cp_result.stderr).trim()
+                )));
+            }
+        }
+
         let start_result = tokio::process::Command::new(&self.cli)
             .args(["start", &container_id])
             .output()
@@ -354,14 +375,4 @@ impl ElastiCacheRuntime {
             .output()
             .await;
     }
-}
-
-fn cli_available(cli: &str) -> bool {
-    std::process::Command::new(cli)
-        .arg("info")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
 }

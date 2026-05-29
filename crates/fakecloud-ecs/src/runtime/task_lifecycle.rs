@@ -59,11 +59,16 @@ impl EcsRuntime {
                     }
                 }
             }
+            // The agent/metadata endpoints live on fakecloud (the host);
+            // the container reaches them via the platform host alias —
+            // `host.docker.internal` for docker, `host.containers.internal`
+            // for podman (issue #1539).
+            let host_alias = &self.net.host_alias;
             if plan.has_task_role {
                 env.push((
                     "AWS_CONTAINER_CREDENTIALS_FULL_URI".into(),
                     format!(
-                        "http://host.docker.internal:{}/_fakecloud/ecs/creds/{}",
+                        "http://{host_alias}:{}/_fakecloud/ecs/creds/{}",
                         self.server_port, task_id
                     ),
                 ));
@@ -71,14 +76,14 @@ impl EcsRuntime {
             env.push((
                 "ECS_CONTAINER_METADATA_URI".into(),
                 format!(
-                    "http://host.docker.internal:{}/_fakecloud/ecs/v3/{}",
+                    "http://{host_alias}:{}/_fakecloud/ecs/v3/{}",
                     self.server_port, task_id
                 ),
             ));
             env.push((
                 "ECS_CONTAINER_METADATA_URI_V4".into(),
                 format!(
-                    "http://host.docker.internal:{}/_fakecloud/ecs/v4/{}",
+                    "http://{host_alias}:{}/_fakecloud/ecs/v4/{}",
                     self.server_port, task_id
                 ),
             ));
@@ -91,8 +96,15 @@ impl EcsRuntime {
         let mut run_images: Vec<String> = Vec::with_capacity(resolved_plans.len());
         let mut image_digests: Vec<Option<String>> = Vec::with_capacity(resolved_plans.len());
         for rp in &resolved_plans {
-            let local_pull_uri =
-                fakecloud_core::ecr_uri::translate_to_local(&rp.plan.image, self.server_port);
+            // Rewrite ECR URIs to fakecloud's local registry at the sibling
+            // host (`127.0.0.1` on the host, `host.docker.internal` when
+            // fakecloud is containerized) so the daemon/sibling can reach
+            // fakecloud's published registry port (issue #1539, bug 0.8).
+            let local_pull_uri = fakecloud_core::ecr_uri::translate_to_local_at(
+                &rp.plan.image,
+                &self.net.sibling_host,
+                self.server_port,
+            );
             let pull_uri = local_pull_uri.as_deref().unwrap_or(&rp.plan.image);
             let pull_out = self
                 .cli_command()
@@ -276,7 +288,8 @@ impl EcsRuntime {
                 &rp.plan,
                 &rp.env,
                 task_id,
-                &self.host_ip,
+                &self.net.host_alias,
+                self.net.add_host_arg.as_deref(),
                 run_image,
                 network_created,
             );
