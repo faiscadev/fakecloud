@@ -39,7 +39,11 @@ pub enum RuntimeError {
 /// Docker/Podman executor for ECS tasks.
 pub struct EcsRuntime {
     cli: String,
-    host_ip: String,
+    /// Container-to-host networking resolution (host alias, `--add-host`
+    /// arg, sibling-container address) shared with the other runtimes via
+    /// [`fakecloud_core::container_net`]. Carries the issue #1539 podman +
+    /// in-container fixes.
+    net: fakecloud_core::container_net::HostNetworking,
     /// Port the main fakecloud server bound to. Used to translate AWS
     /// ECR URIs (`<acct>.dkr.ecr.<region>.amazonaws.com/<repo>:<tag>`) to
     /// the local OCI v2 endpoint (`127.0.0.1:<port>/<repo>:<tag>`) so
@@ -83,28 +87,12 @@ impl EcsRuntime {
     /// `server_port` is the port the main fakecloud server bound to;
     /// needed to resolve AWS ECR URIs against the local OCI v2 registry.
     pub fn new(server_port: u16) -> Option<Self> {
-        let cli = if let Ok(cli) = std::env::var("FAKECLOUD_CONTAINER_CLI") {
-            if cli_works(&cli) {
-                cli
-            } else {
-                return None;
-            }
-        } else if cli_works("docker") {
-            "docker".to_string()
-        } else if cli_works("podman") {
-            "podman".to_string()
-        } else {
-            return None;
-        };
-        let host_ip = if cfg!(target_os = "linux") {
-            "172.17.0.1".to_string()
-        } else {
-            "host-gateway".to_string()
-        };
+        let cli = fakecloud_core::container_net::detect_container_cli()?;
+        let net = fakecloud_core::container_net::HostNetworking::detect(&cli);
         let docker_config = build_local_registry_docker_config(server_port).map(Arc::new);
         Some(Self {
             cli,
-            host_ip,
+            net,
             server_port,
             docker_config,
             containers: RwLock::new(std::collections::HashMap::new()),
@@ -649,9 +637,7 @@ fn resolve_volume_source(name: &str, volume: &serde_json::Value) -> Option<Strin
             .get("rootDirectory")
             .and_then(|v| v.as_str())
             .unwrap_or("/");
-        let path = stub_dir_for("efs", fs_id, root);
-        ensure_dir_exists(&path);
-        return Some(path);
+        return Some(shared_volume_name("efs", fs_id, root));
     }
     if let Some(fsx) = volume.get("fsxWindowsFileServerVolumeConfiguration") {
         let fs_id = fsx.get("fileSystemId").and_then(|v| v.as_str())?;
@@ -659,9 +645,7 @@ fn resolve_volume_source(name: &str, volume: &serde_json::Value) -> Option<Strin
             .get("rootDirectory")
             .and_then(|v| v.as_str())
             .unwrap_or("/");
-        let path = stub_dir_for("fsx", fs_id, root);
-        ensure_dir_exists(&path);
-        return Some(path);
+        return Some(shared_volume_name("fsx", fs_id, root));
     }
     if volume.get("dockerVolumeConfiguration").is_some() {
         // Named docker volume — docker auto-creates it on first
@@ -672,17 +656,41 @@ fn resolve_volume_source(name: &str, volume: &serde_json::Value) -> Option<Strin
     Some(name.to_string())
 }
 
-/// Compose the host stub directory path for an EFS/FSx volume. Falls
-/// back to a single shared directory per filesystem id when
-/// `rootDirectory` is unset or `/`, matching the EFS convention where
-/// the root of the filesystem is the default mount target.
-fn stub_dir_for(kind: &str, fs_id: &str, root: &str) -> String {
-    let trimmed = root.trim_start_matches('/');
+/// Compose the docker **named-volume** name for an EFS/FSx volume. A
+/// single shared volume per filesystem id when `rootDirectory` is unset
+/// or `/` (the EFS default mount target); otherwise the rootDirectory is
+/// folded into the name so distinct mount targets within one filesystem
+/// stay isolated. A docker named volume lives on the daemon rather than a
+/// host path, so tasks share state correctly *and* it works when
+/// fakecloud itself runs in a container (`FAKECLOUD_IN_CONTAINER=1`),
+/// where a host-path stub created inside fakecloud's own filesystem would
+/// resolve to an empty dir against the host daemon (issue #1539, bug 0.6).
+/// The segments are sanitized to docker's volume-name charset.
+fn shared_volume_name(kind: &str, fs_id: &str, root: &str) -> String {
+    let trimmed = root.trim_start_matches('/').trim_end_matches('/');
+    let fs_id = sanitize_volume_segment(fs_id);
     if trimmed.is_empty() {
-        format!("/tmp/fakecloud/{kind}/{fs_id}")
+        format!("fakecloud-{kind}-{fs_id}")
     } else {
-        format!("/tmp/fakecloud/{kind}/{fs_id}/{trimmed}")
+        format!(
+            "fakecloud-{kind}-{fs_id}-{}",
+            sanitize_volume_segment(trimmed)
+        )
     }
+}
+
+/// Map an arbitrary string to docker's volume-name charset by replacing
+/// every character outside `[A-Za-z0-9_.-]` with `-`.
+fn sanitize_volume_segment(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect()
 }
 
 /// Best-effort `mkdir -p` so the EFS/FSx stub path exists before the
@@ -1164,7 +1172,8 @@ pub(crate) fn build_run_argv(
     plan: &ContainerPlan,
     env: &[(String, String)],
     task_id: &str,
-    host_ip: &str,
+    host_alias: &str,
+    add_host_arg: Option<&str>,
     run_image: &str,
     awsvpc_network_ready: bool,
 ) -> Vec<String> {
@@ -1177,8 +1186,13 @@ pub(crate) fn build_run_argv(
     argv.push(format!("fakecloud-ecs-task={}", task_id));
     argv.push("--label".into());
     argv.push(format!("fakecloud-ecs-container={}", plan.container_name));
-    argv.push("--add-host".into());
-    argv.push(format!("host.docker.internal:{}", host_ip));
+    // Inject `--add-host host.docker.internal:<ip>` only for docker;
+    // podman provides `host.containers.internal` natively and rejects
+    // the host-gateway mapping (issue #1539).
+    if let Some(arg) = add_host_arg {
+        argv.push("--add-host".into());
+        argv.push(arg.to_string());
+    }
     let use_awsvpc_network = plan.network_mode.as_deref() == Some("awsvpc") && awsvpc_network_ready;
     if use_awsvpc_network {
         argv.push("--network".into());
@@ -1202,12 +1216,14 @@ pub(crate) fn build_run_argv(
     if let Some(ref hc) = plan.health_check {
         argv.extend(render_health_flags(hc));
     }
+    let http_alias_prefix = format!("http://{host_alias}:");
+    let https_alias_prefix = format!("https://{host_alias}:");
     for (k, v) in env {
         let transformed = v
-            .replace("http://127.0.0.1:", "http://host.docker.internal:")
-            .replace("https://127.0.0.1:", "https://host.docker.internal:")
-            .replace("http://localhost:", "http://host.docker.internal:")
-            .replace("https://localhost:", "https://host.docker.internal:");
+            .replace("http://127.0.0.1:", http_alias_prefix.as_str())
+            .replace("https://127.0.0.1:", https_alias_prefix.as_str())
+            .replace("http://localhost:", http_alias_prefix.as_str())
+            .replace("https://localhost:", https_alias_prefix.as_str());
         argv.push("-e".into());
         argv.push(format!("{}={}", k, transformed));
     }
@@ -1429,26 +1445,20 @@ fn snapshot_task(state: &SharedEcsState, account_id: &str, task_id: &str) -> Opt
     })
 }
 
-fn cli_works(cli: &str) -> bool {
-    std::process::Command::new(cli)
-        .arg("info")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
-
 /// Build an isolated docker config directory with Basic auth for
-/// fakecloud ECR at `127.0.0.1:<port>`. Lets `docker pull/push/tag`
-/// work against the local OCI v2 registry without requiring the user
-/// to run `aws ecr get-login-password | docker login` first.
+/// fakecloud ECR. Lets `docker pull/push/tag` work against the local OCI
+/// v2 registry without requiring the user to run
+/// `aws ecr get-login-password | docker login` first. Authorizes both
+/// `127.0.0.1` (fakecloud on the host) and `host.docker.internal`
+/// (fakecloud in a container, pull URIs rewritten to the sibling host —
+/// issue #1539, bug 0.8).
 fn build_local_registry_docker_config(server_port: u16) -> Option<TempDir> {
     let dir = TempDir::new().ok()?;
     let auth = base64::engine::general_purpose::STANDARD.encode("AWS:fakecloud-ecs-runtime");
     let config = serde_json::json!({
         "auths": {
             format!("127.0.0.1:{server_port}"): { "auth": auth },
+            format!("host.docker.internal:{server_port}"): { "auth": auth },
         }
     });
     std::fs::write(dir.path().join("config.json"), config.to_string()).ok()?;
@@ -1711,8 +1721,10 @@ mod tests {
     use std::sync::Arc;
 
     #[test]
-    fn cli_works_for_known_missing_binary_is_false() {
-        assert!(!cli_works("definitely-not-a-real-cli-binary-xyz"));
+    fn cli_available_for_known_missing_binary_is_false() {
+        assert!(!fakecloud_core::container_net::cli_available(
+            "definitely-not-a-real-cli-binary-xyz"
+        ));
     }
 
     #[test]
@@ -2163,7 +2175,15 @@ mod tests {
             interactive: false,
             readonly_rootfs: false,
         };
-        let argv = build_run_argv(&plan, &[], "task-1", "host-gateway", "alpine", true);
+        let argv = build_run_argv(
+            &plan,
+            &[],
+            "task-1",
+            "host.docker.internal",
+            None,
+            "alpine",
+            true,
+        );
         let joined = argv.join(" ");
         assert!(joined.contains("--health-cmd true"), "argv: {joined}");
         assert!(joined.contains("--health-interval=5s"), "argv: {joined}");
@@ -2200,7 +2220,15 @@ mod tests {
             interactive: false,
             readonly_rootfs: false,
         };
-        let argv = build_run_argv(&plan, &[], "task-1", "host-gateway", "alpine", true);
+        let argv = build_run_argv(
+            &plan,
+            &[],
+            "task-1",
+            "host.docker.internal",
+            None,
+            "alpine",
+            true,
+        );
         assert!(!argv.iter().any(|s| s.starts_with("--health")));
     }
 
@@ -2266,7 +2294,15 @@ mod tests {
             interactive: false,
             readonly_rootfs: false,
         };
-        let argv = build_run_argv(&plan, &[], "task-1", "host-gateway", "alpine", true);
+        let argv = build_run_argv(
+            &plan,
+            &[],
+            "task-1",
+            "host.docker.internal",
+            None,
+            "alpine",
+            true,
+        );
         let pair = argv
             .windows(2)
             .find(|w| w[0] == "-v")
@@ -2294,10 +2330,9 @@ mod tests {
             "containerPath": "/mnt/efs"
         });
         let resolved = resolve_mount_point(&mp, &volumes).expect("resolved");
-        assert_eq!(
-            resolved.source,
-            "/tmp/fakecloud/efs/fs-12345678/exports/app"
-        );
+        // EFS resolves to a docker named volume (container-safe), with the
+        // rootDirectory folded into the name (bug-audit 2026-05-28, 0.6).
+        assert_eq!(resolved.source, "fakecloud-efs-fs-12345678-exports-app");
         assert_eq!(resolved.container_path, "/mnt/efs");
     }
 
@@ -2306,13 +2341,15 @@ mod tests {
     /// share state.
     #[test]
     fn efs_without_root_directory_uses_filesystem_root() {
+        // No rootDirectory (or "/") -> a single shared named volume per
+        // filesystem id.
         assert_eq!(
-            stub_dir_for("efs", "fs-abc", "/"),
-            "/tmp/fakecloud/efs/fs-abc"
+            shared_volume_name("efs", "fs-abc", "/"),
+            "fakecloud-efs-fs-abc"
         );
         assert_eq!(
-            stub_dir_for("efs", "fs-abc", ""),
-            "/tmp/fakecloud/efs/fs-abc"
+            shared_volume_name("efs", "fs-abc", ""),
+            "fakecloud-efs-fs-abc"
         );
     }
 
@@ -2357,7 +2394,8 @@ mod tests {
             "containerPath": "C:\\data"
         });
         let resolved = resolve_mount_point(&mp, &volumes).expect("resolved");
-        assert_eq!(resolved.source, "/tmp/fakecloud/fsx/fs-xyz/share");
+        // FSx resolves to a docker named volume (bug-audit 2026-05-28, 0.6).
+        assert_eq!(resolved.source, "fakecloud-fsx-fs-xyz-share");
     }
 
     /// Mount points that reference an undeclared `sourceVolume` resolve
@@ -2537,7 +2575,7 @@ mod tests {
             interactive: false,
             readonly_rootfs: false,
         };
-        let argv = build_run_argv(&plan, &[], "t", "host", "img", true);
+        let argv = build_run_argv(&plan, &[], "t", "host.docker.internal", None, "img", true);
         assert!(argv.contains(&"--ulimit".to_string()));
         assert!(argv.contains(&"nofile=1024:2048".to_string()));
     }
@@ -2587,7 +2625,7 @@ mod tests {
             interactive: true,
             readonly_rootfs: true,
         };
-        let argv = build_run_argv(&plan, &[], "t", "host", "img", true);
+        let argv = build_run_argv(&plan, &[], "t", "host.docker.internal", None, "img", true);
         assert!(argv.contains(&"--cap-add".to_string()));
         assert!(argv.contains(&"NET_ADMIN".to_string()));
         assert!(argv.contains(&"--cap-drop".to_string()));

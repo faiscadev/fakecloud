@@ -146,7 +146,17 @@ impl DockerBackend {
             RuntimeError::ContainerStartFailed("PackageType=Image function has no ImageUri".into())
         })?;
 
-        let local_pull_uri = fakecloud_core::ecr_uri::translate_to_local(image, self.server_port);
+        // Point the registry host at `sibling_host` (not a bare
+        // `127.0.0.1`): when fakecloud runs in a container the daemon and
+        // the spawned sibling reach fakecloud's published registry port via
+        // `host.docker.internal`, since `127.0.0.1` is the host loopback
+        // from the daemon's view (issue #1539, bug 0.8). On the host,
+        // `sibling_host` is `127.0.0.1`, unchanged.
+        let local_pull_uri = fakecloud_core::ecr_uri::translate_to_local_at(
+            image,
+            &self.sibling_host,
+            self.server_port,
+        );
         let pull_uri = local_pull_uri.as_deref().unwrap_or(image);
 
         let mut pull_cmd = tokio::process::Command::new(&self.cli);
@@ -500,7 +510,11 @@ impl LambdaBackend for DockerBackend {
         // Translate AWS-flavored ECR URIs to fakecloud's local registry so
         // private-ECR `Image` package functions can be warmed too. Falls
         // back to the URI as-is for public-ECR / Docker Hub / Quay images.
-        let local_uri = fakecloud_core::ecr_uri::translate_to_local(image, self.server_port);
+        let local_uri = fakecloud_core::ecr_uri::translate_to_local_at(
+            image,
+            &self.sibling_host,
+            self.server_port,
+        );
         let pull_uri = local_uri.as_deref().unwrap_or(image);
 
         let mut cmd = tokio::process::Command::new(&self.cli);
@@ -681,9 +695,14 @@ fn is_podman_binary(cli: &str) -> bool {
 fn build_local_registry_docker_config(server_port: u16) -> Option<TempDir> {
     let dir = TempDir::new().ok()?;
     let auth = base64::engine::general_purpose::STANDARD.encode("AWS:fakecloud-lambda-runtime");
+    // Authorize both hostnames fakecloud's ECR can be addressed by:
+    // `127.0.0.1` on the host, and `host.docker.internal` when fakecloud
+    // runs in a container and the pull URI is rewritten to the sibling
+    // host (issue #1539, bug 0.8).
     let config = serde_json::json!({
         "auths": {
             format!("127.0.0.1:{server_port}"): { "auth": auth },
+            format!("host.docker.internal:{server_port}"): { "auth": auth },
         }
     });
     std::fs::write(dir.path().join("config.json"), config.to_string()).ok()?;

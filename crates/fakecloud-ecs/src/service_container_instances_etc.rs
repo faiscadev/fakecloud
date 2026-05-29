@@ -861,12 +861,14 @@ impl EcsService {
         };
 
         let session_id = format!("ecs-execute-command-{}", uuid::Uuid::new_v4());
-        if let (Some(id), Some(_rt)) = (container_id.clone(), self.runtime.as_ref()) {
-            // Best-effort proxy: shell the command through docker exec. We
+        if let (Some(id), Some(rt)) = (container_id.clone(), self.runtime.as_ref()) {
+            // Best-effort proxy: shell the command through `<cli> exec`. We
             // don't stream back stdout/stderr in this ExecuteCommand response
             // (real AWS returns a Session token for the SSM sidecar), so log
-            // the result server-side for visibility.
-            let out = tokio::process::Command::new("docker")
+            // the result server-side for visibility. Use the runtime's
+            // detected CLI (docker or podman) rather than hardcoding docker
+            // so podman-only hosts work too (issue #1539 family, bug 0.5).
+            let out = tokio::process::Command::new(rt.cli_name())
                 .args(["exec", &id, "sh", "-c", &command])
                 .output()
                 .await
