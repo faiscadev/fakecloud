@@ -215,7 +215,12 @@ pub(crate) fn append_record(
     partition_key: &str,
     data: Vec<u8>,
 ) -> String {
-    let sequence_number = format!("{:056}", shard.next_sequence_number);
+    // Stream-unique sequence number: pack a per-shard discriminator into
+    // the low 5 digits so two shards can never mint the same value, while
+    // the high digits keep per-shard monotonic ordering (bug-audit
+    // 2026-05-28, 1.12 — values were only per-shard unique).
+    let disc = shard_discriminator(&shard.shard_id);
+    let sequence_number = format!("{:05}{:051}", disc, shard.next_sequence_number);
     shard.next_sequence_number += 1;
     shard.records.push(KinesisRecord {
         sequence_number: sequence_number.clone(),
@@ -331,4 +336,44 @@ pub(crate) fn expired_iterator() -> AwsServiceError {
         "ExpiredIteratorException",
         "Shard iterator is expired or invalid.",
     )
+}
+
+/// Numeric discriminator from a shard id like `shardId-000000000003` -> 3,
+/// clamped to 5 digits; 0 when there is no numeric suffix. Packed into the
+/// low digits of each sequence number so they are unique stream-wide.
+pub(crate) fn shard_discriminator(shard_id: &str) -> u32 {
+    let digits: String = shard_id
+        .rsplit('-')
+        .next()
+        .unwrap_or("")
+        .chars()
+        .filter(|c| c.is_ascii_digit())
+        .collect();
+    digits.parse::<u64>().unwrap_or(0).min(99_999) as u32
+}
+
+#[cfg(test)]
+mod sequence_discriminator_tests {
+    use super::shard_discriminator;
+
+    #[test]
+    fn parses_numeric_suffix() {
+        assert_eq!(shard_discriminator("shardId-000000000000"), 0);
+        assert_eq!(shard_discriminator("shardId-000000000003"), 3);
+        assert_eq!(shard_discriminator("shardId-000000000042"), 42);
+    }
+
+    #[test]
+    fn distinct_shards_differ() {
+        assert_ne!(
+            shard_discriminator("shardId-000000000001"),
+            shard_discriminator("shardId-000000000002")
+        );
+    }
+
+    #[test]
+    fn handles_missing_suffix() {
+        assert_eq!(shard_discriminator("weird"), 0);
+        assert_eq!(shard_discriminator(""), 0);
+    }
 }
